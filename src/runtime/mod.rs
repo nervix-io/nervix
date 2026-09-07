@@ -46,23 +46,22 @@ use nervix_models::{
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
     CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainPace, DomainSchedule,
-    DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode,
-    EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath, GeneralErrorPolicy,
-    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace,
+    DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName,
+    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
     InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
     IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
     KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
     MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName,
     MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, OtelAggregationTemporality, OtelMetric, OtelMetricKind,
-    OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PlacementRuntimeNode,
-    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
-    RouteConstruction, ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
-    WireSchemaDefinition,
+    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
+    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
+    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
+    ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -120,7 +119,7 @@ use crate::{
         NodeLatencyObservation, NodeWithoutRelayObservation, RelayBatchObservation,
         RelayBufferObservation, RuntimeMetrics,
     },
-    registry::{ActiveGraph, RegistryEntity, RuntimeChange, RuntimeChanges},
+    registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
     runtime_ack::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
@@ -327,38 +326,6 @@ pub enum RuntimeError {
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     Error(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RuntimeKey {
-    domain: DomainName,
-    identifier: ModelName,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RuntimeStateSchemaKey {
-    domain: DomainName,
-    kind: ModelKind,
-    identifier: ModelName,
-}
-
-impl RuntimeStateSchemaKey {
-    fn new(domain: DomainName, kind: ModelKind, identifier: ModelName) -> Self {
-        Self {
-            domain,
-            kind,
-            identifier,
-        }
-    }
-}
-
-impl RuntimeKey {
-    fn new(domain: DomainName, identifier: impl Into<ModelName>) -> Self {
-        Self {
-            domain,
-            identifier: identifier.into(),
-        }
-    }
 }
 
 /// One resource as a domain owns it, which is how installed resource versions are tracked.
@@ -1072,13 +1039,13 @@ struct DomainExecution {
     codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
     endpoint_routes: HashMap<EndpointName, EndpointRoute>,
-    node_tasks: HashMap<RegistryEntity, ScheduledNodeTask>,
-    emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
-    generator_tasks: HashMap<RegistryEntity, JoinHandle<()>>,
-    reingestor_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
+    node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
+    emitter_tasks: HashMap<NodeRef, ScheduledEmitterTask>,
+    generator_tasks: HashMap<NodeRef, JoinHandle<()>>,
+    reingestor_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
     /// Placement-derived tasks grouped by the scheduled node whose assignment owns them, so a
     /// reassignment can replace one node's replication runtime without disturbing its siblings.
-    placement_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
+    placement_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
     /// The task maintaining each locally owned materialized relay, keyed by that relay.
     relay_state_tasks: HashMap<RelayName, RelayStateTask>,
     /// The single buffer-and-fan-out task for every relay owned by this cluster node.
@@ -1696,7 +1663,7 @@ type RoutedEndpointsByDomain = HashMap<DomainName, RoutedEndpoint>;
 
 #[derive(Clone)]
 struct EndpointIngestBinding {
-    runtime_key: RuntimeKey,
+    runtime_key: DomainNodeRef,
     quiesce: Arc<IngestorQuiesceControl>,
     domain: DomainName,
     ingestor: IngestorName,
@@ -2268,7 +2235,7 @@ fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
 
 struct MessageErrorContext<'a> {
     domain: &'a DomainName,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     node: &'a ModelName,
     source_route: Option<&'a RelayName>,
     message: &'a RelayMessage,
@@ -2280,7 +2247,7 @@ struct MessageErrorContext<'a> {
 
 struct MessageErrorHandling<'a> {
     domain: &'a DomainName,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     node: &'a ModelName,
     source_route: Option<&'a RelayName>,
     policy: &'a MessageErrorPolicy,
@@ -2833,7 +2800,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     }
 }
 
-type RelayBoundaryFanoutMap = DashMap<RuntimeKey, RelayBoundaryFanout, RandomState>;
+type RelayBoundaryFanoutMap = DashMap<DomainNodeRef, RelayBoundaryFanout, RandomState>;
 type RelayRuntimeConsumerReceiver = RelaySubscriptionReceiver<RelayRecordBatch>;
 
 struct RelayRuntimeFanIn {
@@ -4254,16 +4221,16 @@ pub struct Runtime {
 struct RuntimeInner {
     /// Also held by the entity gate's deadline task, which releases an expired lease long after
     /// the call that engaged it returned.
-    ingestors: Arc<DashMap<RuntimeKey, IngestorRuntime, RandomState>>,
+    ingestors: Arc<DashMap<DomainNodeRef, IngestorRuntime, RandomState>>,
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
-    ingestor_quiescence: Arc<DashMap<RuntimeKey, Arc<IngestorQuiesceControl>, RandomState>>,
+    ingestor_quiescence: Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
     ingestors_paused_for_memory_pressure: AtomicBool,
-    ingestor_transient_errors: DashMap<RuntimeKey, String, RandomState>,
-    ingestor_reconnect_backoffs: DashMap<RuntimeKey, RuntimeReconnectStatus, RandomState>,
-    ingestor_readiness: DashMap<RuntimeKey, IngestorReadiness, RandomState>,
-    emitter_transient_errors: DashMap<RuntimeKey, String, RandomState>,
-    emitter_retry_statuses: DashMap<RuntimeKey, EmitterRetryStatus, RandomState>,
-    emitter_confirmation_waits: DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>,
+    ingestor_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
+    ingestor_reconnect_backoffs: DashMap<DomainNodeRef, RuntimeReconnectStatus, RandomState>,
+    ingestor_readiness: DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
+    emitter_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
+    emitter_retry_statuses: DashMap<DomainNodeRef, EmitterRetryStatus, RandomState>,
+    emitter_confirmation_waits: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
     executions: DashMap<DomainName, DomainExecution, RandomState>,
     message_error_routes: DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
     compiled_domain_udfs: DashMap<DomainName, CompiledDomainUdfs, RandomState>,
@@ -4273,16 +4240,16 @@ struct RuntimeInner {
     domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
     domain_status_changed: watch::Sender<u64>,
     in_flight_by_domain: DashMap<DomainName, Arc<AckRootTracker>, RandomState>,
-    in_flight_by_ingestor: DashMap<RuntimeKey, Arc<AckRootTracker>, RandomState>,
+    in_flight_by_ingestor: DashMap<DomainNodeRef, Arc<AckRootTracker>, RandomState>,
     generator_activity_by_domain: DashMap<DomainName, Arc<AtomicUsize>, RandomState>,
-    emitter_buffers: DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>,
+    emitter_buffers: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
     force_flush_by_domain: DashMap<DomainName, Arc<DomainForceFlush>, RandomState>,
-    node_quiesce_counters: DashMap<RuntimeKey, Arc<NodeQuiesceCounters>, RandomState>,
+    node_quiesce_counters: DashMap<DomainNodeRef, Arc<NodeQuiesceCounters>, RandomState>,
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
     entity_gate_holds: Arc<DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>>,
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     active_domain_alters: Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
-    state_schema_fingerprints: DashMap<RuntimeStateSchemaKey, [u8; 32], RandomState>,
+    state_schema_fingerprints: DashMap<DomainNodeRef, [u8; 32], RandomState>,
     domain_graphs: DashMap<DomainName, SharedActiveGraph, RandomState>,
     endpoint_bindings: DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
     /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so
@@ -5533,7 +5500,7 @@ impl RelayProcessorNode {
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
                     &branch.domain,
-                    self.kind.as_str(),
+                    self.kind,
                     &self.processor,
                     &self.error_policies,
                     acks.iter(),
@@ -5673,7 +5640,7 @@ impl RelayProcessorNode {
                     Err(error) => {
                         branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
@@ -5749,7 +5716,7 @@ impl RelayProcessorNode {
                 Err(error) => {
                     branch.runtime.handle_internal_processor_error_for_acks(
                         &branch.domain,
-                        self.kind.as_str(),
+                        self.kind,
                         &self.processor,
                         &self.error_policies,
                         batch.acks.iter(),
@@ -5788,7 +5755,7 @@ impl RelayProcessorNode {
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
                     &branch.domain,
-                    self.kind.as_str(),
+                    self.kind,
                     &self.processor,
                     &self.error_policies,
                     error.acks.iter(),
@@ -5801,7 +5768,7 @@ impl RelayProcessorNode {
             .runtime
             .handle_planned_message_errors(
                 &branch.domain,
-                self.kind.as_str(),
+                self.kind,
                 &self.processor,
                 &self.error_policies,
                 plan.message_errors,
@@ -5840,7 +5807,7 @@ impl RelayProcessorNode {
                 Err(error) => {
                     branch.runtime.handle_internal_processor_error_for_acks(
                         &branch.domain,
-                        self.kind.as_str(),
+                        self.kind,
                         &self.processor,
                         &self.error_policies,
                         batch.acks.iter(),
@@ -5890,7 +5857,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
@@ -5922,7 +5889,7 @@ impl RelayProcessorNode {
                         Err(error) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -5950,7 +5917,7 @@ impl RelayProcessorNode {
                         Err(error) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -6007,7 +5974,7 @@ impl RelayProcessorNode {
                         Err((error, acks)) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 acks.iter(),
@@ -6025,7 +5992,7 @@ impl RelayProcessorNode {
                         ProcessorOutputDispatchContext {
                             graph,
                             branch,
-                            node_kind: self.kind.as_str(),
+                            node_kind: self.kind,
                             source_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
@@ -6065,7 +6032,7 @@ impl RelayProcessorNode {
                             let (error, batch) = *error_and_batch;
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -6146,7 +6113,7 @@ impl RelayProcessorNode {
                                     .runtime
                                     .handle_message_error(
                                         &branch.domain,
-                                        self.kind.as_str(),
+                                        self.kind,
                                         &self.processor,
                                         &self.error_policies,
                                         message,
@@ -6171,7 +6138,7 @@ impl RelayProcessorNode {
                                 .runtime
                                 .handle_message_error(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     message,
@@ -6187,7 +6154,7 @@ impl RelayProcessorNode {
                                 .await;
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 state.entries.iter().map(|entry| &entry.message.acks),
@@ -6207,7 +6174,7 @@ impl RelayProcessorNode {
                         let changed = flush_ready_window_processor(
                             WindowFlushContext {
                                 graph,
-                                node_kind: self.kind.as_str(),
+                                node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 branch,
@@ -6235,7 +6202,7 @@ impl RelayProcessorNode {
                             ) {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     state.entries.iter().map(|entry| &entry.message.acks),
@@ -6268,7 +6235,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
@@ -6306,7 +6273,7 @@ impl RelayProcessorNode {
                         Err(error) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -6333,7 +6300,7 @@ impl RelayProcessorNode {
                         Err(error) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -6349,7 +6316,7 @@ impl RelayProcessorNode {
                     if output_buffers.len() != output_routes.routes.len() {
                         branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
@@ -6398,7 +6365,7 @@ impl RelayProcessorNode {
                             None => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     output_buffer.acks(),
@@ -6417,7 +6384,7 @@ impl RelayProcessorNode {
                             ReordererFlushContext {
                                 graph,
                                 branch,
-                                node_kind: self.kind.as_str(),
+                                node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
@@ -6449,7 +6416,7 @@ impl RelayProcessorNode {
                     } else {
                         branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
@@ -6471,7 +6438,7 @@ impl RelayProcessorNode {
                         let Some(left_relay) = left_relays.first() else {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -6485,7 +6452,7 @@ impl RelayProcessorNode {
                         let Some(right_relay) = right_relays.first() else {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -6505,7 +6472,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
@@ -6523,7 +6490,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
@@ -6545,7 +6512,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     batch.acks.iter(),
@@ -6564,7 +6531,7 @@ impl RelayProcessorNode {
                             let (error, batch) = *error_and_batch;
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
@@ -6604,7 +6571,7 @@ impl RelayProcessorNode {
                             Err((reason, acks)) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     acks.iter(),
@@ -6622,7 +6589,7 @@ impl RelayProcessorNode {
                     {
                         branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             correlations.iter().flat_map(|(left, right)| {
@@ -6648,7 +6615,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     correlations.iter().flat_map(|(left, right)| {
@@ -6668,7 +6635,7 @@ impl RelayProcessorNode {
                         Err(error) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 correlations.iter().flat_map(|(left, right)| {
@@ -6718,7 +6685,7 @@ impl RelayProcessorNode {
                         if output.construction.assignments.is_empty() {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 correlations.iter().flat_map(|(left, right)| {
@@ -6741,7 +6708,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     correlations.iter().flat_map(|(left, right)| {
@@ -6779,7 +6746,7 @@ impl RelayProcessorNode {
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     correlations.iter().flat_map(|(left, right)| {
@@ -6800,7 +6767,7 @@ impl RelayProcessorNode {
                     else {
                         branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             correlations.iter().flat_map(|(left, right)| {
@@ -6821,7 +6788,7 @@ impl RelayProcessorNode {
                         Err(error) => {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 correlations.iter().flat_map(|(left, right)| {
@@ -6865,7 +6832,7 @@ impl RelayProcessorNode {
                             Err((error, acks)) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     acks.iter(),
@@ -6893,7 +6860,7 @@ impl RelayProcessorNode {
                                         .runtime
                                         .handle_structured_message_error(MessageErrorHandling {
                                             domain: &branch.domain,
-                                            node_kind: self.kind.as_str(),
+                                            node_kind: self.kind,
                                             node: &self.processor,
                                             source_route: Some(&output_relay),
                                             policy: &policy,
@@ -6911,7 +6878,7 @@ impl RelayProcessorNode {
                             CorrelatorOutputContext {
                                 graph,
                                 branch,
-                                node_kind: self.kind.as_str(),
+                                node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
@@ -6928,7 +6895,7 @@ impl RelayProcessorNode {
                         JunctionFlushContext {
                             graph,
                             branch,
-                            node_kind: self.kind.as_str(),
+                            node_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
                             input_relays: &self.input_relays,
@@ -6953,7 +6920,7 @@ impl RelayProcessorNode {
                     if output_buffers.len() != output_routes.routes.len() {
                         branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
@@ -6985,7 +6952,7 @@ impl RelayProcessorNode {
                             None => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     output_buffer
@@ -7007,7 +6974,7 @@ impl RelayProcessorNode {
                             InferencerFlushContext {
                                 graph,
                                 branch,
-                                node_kind: self.kind.as_str(),
+                                node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
@@ -7045,7 +7012,7 @@ impl RelayProcessorNode {
                         WasmFlushContext {
                             graph,
                             branch,
-                            node_kind: self.kind.as_str(),
+                            node_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
                             input_relays: &self.input_relays,
@@ -7080,7 +7047,7 @@ impl RelayProcessorNode {
                 ProcessorOutputDispatchContext {
                     graph,
                     branch,
-                    node_kind: self.kind.as_str(),
+                    node_kind: self.kind,
                     source_kind: self.kind,
                     processor: &self.processor,
                     error_policies: &self.error_policies,
@@ -7111,7 +7078,7 @@ impl RelayProcessorNode {
                     let changed = flush_ready_window_processor(
                         WindowFlushContext {
                             graph,
-                            node_kind: self.kind.as_str(),
+                            node_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
                             branch,
@@ -7139,7 +7106,7 @@ impl RelayProcessorNode {
                         ) {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
-                                self.kind.as_str(),
+                                self.kind,
                                 &self.processor,
                                 &self.error_policies,
                                 state.entries.iter().map(|entry| &entry.message.acks),
@@ -7179,7 +7146,7 @@ impl RelayProcessorNode {
                             ReordererFlushContext {
                                 graph,
                                 branch,
-                                node_kind: self.kind.as_str(),
+                                node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
@@ -7231,7 +7198,7 @@ impl RelayProcessorNode {
                         handle_correlator_timeout_action(
                             graph,
                             branch,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             &action,
@@ -7266,7 +7233,7 @@ impl RelayProcessorNode {
                             InferencerFlushContext {
                                 graph,
                                 branch,
-                                node_kind: self.kind.as_str(),
+                                node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
@@ -7338,7 +7305,7 @@ impl RelayProcessorNode {
                                 );
                                 branch.runtime.handle_general_error_for_acks(
                                     &branch.domain,
-                                    self.kind.as_str(),
+                                    self.kind,
                                     &self.processor,
                                     &self.error_policies,
                                     ack_map.values().map(|context| &context.acks),
@@ -7355,7 +7322,7 @@ impl RelayProcessorNode {
                             WasmOutputContext {
                                 graph,
                                 branch,
-                                node_kind: self.kind.as_str(),
+                                node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
@@ -7384,7 +7351,7 @@ impl RelayProcessorNode {
                     {
                         branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            self.kind.as_str(),
+                            self.kind,
                             &self.processor,
                             &self.error_policies,
                             std::iter::empty::<&AckSet>(),
@@ -7448,7 +7415,7 @@ impl RelayProcessorNode {
                     );
                     branch.runtime.handle_general_error_for_acks(
                         &branch.domain,
-                        self.kind.as_str(),
+                        self.kind,
                         &self.processor,
                         &self.error_policies,
                         ack_map.values().map(|context| &context.acks),
@@ -7469,7 +7436,7 @@ impl RelayProcessorNode {
                 WasmOutputContext {
                     graph,
                     branch,
-                    node_kind: self.kind.as_str(),
+                    node_kind: self.kind,
                     processor: &self.processor,
                     error_policies: &self.error_policies,
                     output_routes,
@@ -7504,7 +7471,7 @@ impl RelayProcessorNode {
         {
             branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
-                self.kind.as_str(),
+                self.kind,
                 &self.processor,
                 &self.error_policies,
                 state.entries.iter().map(|entry| &entry.message.acks),
@@ -8239,7 +8206,7 @@ impl BranchRuntime {
             if self.source_kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
-                    self.source_kind.as_str(),
+                    self.source_kind,
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
@@ -8248,7 +8215,7 @@ impl BranchRuntime {
             } else {
                 self.runtime.handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.source_kind.as_str(),
+                    self.source_kind,
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
@@ -8476,7 +8443,7 @@ impl IngestorRouteTask {
         if self.template.branch.source_kind == ModelKind::Ingestor {
             self.runtime_handle.handle_general_error_for_acks(
                 &self.domain,
-                self.template.branch.source_kind.as_str(),
+                self.template.branch.source_kind,
                 &self.ingestor,
                 &self.template.branch.error_policies,
                 acks.iter(),
@@ -8486,7 +8453,7 @@ impl IngestorRouteTask {
             self.runtime_handle
                 .handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.template.branch.source_kind.as_str(),
+                    self.template.branch.source_kind,
                     &self.ingestor,
                     &self.template.branch.error_policies,
                     acks.iter(),
@@ -8877,7 +8844,7 @@ impl BranchExecutionRuntime {
                     if template.source_kind == ModelKind::Ingestor {
                         runtime_handle.handle_general_error_for_acks(
                             domain,
-                            template.source_kind.as_str(),
+                            template.source_kind,
                             ingestor,
                             &template.error_policies,
                             message.acks.iter(),
@@ -8886,7 +8853,7 @@ impl BranchExecutionRuntime {
                     } else {
                         runtime_handle.handle_internal_processor_error_for_acks(
                             domain,
-                            template.source_kind.as_str(),
+                            template.source_kind,
                             ingestor,
                             &template.error_policies,
                             message.acks.iter(),
@@ -8942,7 +8909,7 @@ impl BranchExecutionRuntime {
                 Err(error) => {
                     runtime_handle.handle_internal_processor_error_for_acks(
                         domain,
-                        template.source_kind.as_str(),
+                        template.source_kind,
                         ingestor,
                         &template.error_policies,
                         acks.iter(),
@@ -9810,7 +9777,8 @@ async fn run_processor_node_runtime(
         )
         .await;
     }
-    let quiesce_counters = runtime_handle.node_quiesce_counters(&domain, &processor);
+    let quiesce_counters = runtime_handle
+        .node_quiesce_counters(&domain, NodeRef::new(template.source_kind, &processor));
     let interaction_inputs = inputs
         .into_iter()
         // Processor collection is branch-local and paced by the domain clock. The outer relay
@@ -9885,7 +9853,7 @@ async fn run_processor_node_runtime(
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     &domain,
-                    template.source_kind.as_str(),
+                    template.source_kind,
                     &processor,
                     &template.error_policies,
                     error.acks(),
@@ -10011,7 +9979,7 @@ async fn dispatch_processor_node_input(
         Err(error) => {
             runtime_handle.handle_internal_processor_error_for_acks(
                 domain,
-                template.source_kind.as_str(),
+                template.source_kind,
                 &template.source,
                 &template.error_policies,
                 batch.acks.iter(),
@@ -10052,7 +10020,7 @@ async fn dispatch_processor_node_input(
     if let Err(mpsc::error::SendError(input)) = instance.state.input.send(input).await {
         runtime_handle.handle_internal_processor_error_for_acks(
             domain,
-            template.source_kind.as_str(),
+            template.source_kind,
             &template.source,
             &template.error_policies,
             input.batch.acks.iter(),
@@ -10115,9 +10083,10 @@ fn spawn_processor_branch_task(
         task: spawned.task,
         requests: spawned.requests,
     };
-    let quiesce_counters = context
-        .runtime_handle
-        .node_quiesce_counters(&context.domain, &processor);
+    let quiesce_counters = context.runtime_handle.node_quiesce_counters(
+        &context.domain,
+        NodeRef::new(template.source_kind, &processor),
+    );
     let task = tokio::spawn(run_processor_branch_task(
         context,
         ModelName::from(&processor),
@@ -12743,7 +12712,7 @@ fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPart {
 struct ReordererFlushContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
@@ -13599,7 +13568,7 @@ async fn evaluate_correlator_output_batch(
 struct CorrelatorOutputContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
@@ -13736,7 +13705,7 @@ async fn enqueue_correlator_output(
 async fn handle_correlator_timeout_action(
     graph: &SharedActiveGraph,
     branch: &mut BranchRuntime,
-    node_kind: &str,
+    node_kind: ModelKind,
     processor: &ModelName,
     error_policies: &ErrorPolicies,
     action: &CorrelationTimeoutAction,
@@ -14318,7 +14287,7 @@ impl ProcessorOutputFilterSource<'_> {
 struct ProcessorOutputDispatchContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     source_kind: ModelKind,
     processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
@@ -14351,7 +14320,7 @@ impl ProcessorMaterializedState<'_> {
         &self,
         runtime: &Runtime,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: &ModelName,
         branch_key: &Option<BranchKey>,
     ) -> Result<HashMap<String, RuntimeValue>, String> {
@@ -14364,13 +14333,15 @@ impl ProcessorMaterializedState<'_> {
                 {
                     MaterializedDependencyResolution::Ready(values) => Ok(values),
                     MaterializedDependencyResolution::Skip => Err(format!(
-                        "{node_kind} '{}' requires materialized state that was evicted after the \
-                         batch was admitted",
+                        "{} '{}' requires materialized state that was evicted after the batch was \
+                         admitted",
+                        node_kind.as_str(),
                         node.as_str()
                     )),
                     MaterializedDependencyResolution::Wait => Err(format!(
-                        "{node_kind} '{}' awaits materialized state that was evicted after the \
-                         batch was admitted",
+                        "{} '{}' awaits materialized state that was evicted after the batch was \
+                         admitted",
+                        node_kind.as_str(),
                         node.as_str()
                     )),
                 }
@@ -14594,7 +14565,7 @@ async fn evaluate_processor_output_events(
             acks: batch.acks.clone(),
             reason: format!(
                 "{} '{}' evaluated output route '{}' without preparing its relay schema",
-                context.node_kind,
+                context.node_kind.as_str(),
                 context.processor.as_str(),
                 output.relay.as_str()
             ),
@@ -14608,7 +14579,7 @@ async fn evaluate_processor_output_events(
                 acks: batch.acks.clone(),
                 reason: format!(
                     "{} '{}' failed to project output relay '{}': {}",
-                    context.node_kind,
+                    context.node_kind.as_str(),
                     context.processor.as_str(),
                     output.relay.as_str(),
                     error
@@ -14627,7 +14598,7 @@ async fn evaluate_processor_output_events(
     };
 
     let executed = execute_filter_map_program_on_batch(
-        context.node_kind,
+        context.node_kind.as_str(),
         context.processor,
         program,
         FilterMapBatchInputs {
@@ -14655,7 +14626,7 @@ async fn evaluate_processor_output_events(
                     acks: batch.acks.clone(),
                     reason: format!(
                         "{} '{}' failed to materialize FILTER-MAP error input row: {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         error
                     ),
@@ -14667,7 +14638,7 @@ async fn evaluate_processor_output_events(
                 error: program.structured_side_error(
                     format!(
                         "{} '{}' FILTER-MAP side error {}: {} at {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         side_error.code.as_str(),
                         side_error.message,
@@ -14693,7 +14664,7 @@ async fn evaluate_processor_output_events(
                     acks: batch.acks.clone(),
                     reason: format!(
                         "{} '{}' failed to materialize successful FILTER-MAP rows: {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         error
                     ),
@@ -14703,7 +14674,7 @@ async fn evaluate_processor_output_events(
                 acks: batch.acks.clone(),
                 reason: format!(
                     "{} '{}' FILTER-MAP output schema does not match relay '{}'",
-                    context.node_kind,
+                    context.node_kind.as_str(),
                     context.processor.as_str(),
                     output.relay.as_str()
                 ),
@@ -15024,7 +14995,7 @@ async fn dispatch_selected_processor_outputs(
                         pending_acks.iter(),
                         format!(
                             "{} '{}' failed to concat output batches for relay '{}': {}",
-                            context.node_kind,
+                            context.node_kind.as_str(),
                             context.processor.as_str(),
                             relay.as_str(),
                             error
@@ -15058,7 +15029,7 @@ async fn dispatch_selected_processor_outputs(
                     forwarded.acks.iter(),
                     format!(
                         "{} '{}' failed to forward message to relay '{}'",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         relay.as_str()
                     ),
@@ -15097,7 +15068,7 @@ async fn flush_due_processor_outputs(
                         pending_acks.iter(),
                         format!(
                             "{} '{}' failed to concat buffered output batches for relay '{}': {}",
-                            context.node_kind,
+                            context.node_kind.as_str(),
                             context.processor.as_str(),
                             output.relay.as_str(),
                             error
@@ -15133,7 +15104,7 @@ async fn flush_due_processor_outputs(
                     forwarded.acks.iter(),
                     format!(
                         "{} '{}' failed to forward buffered output to relay '{}'",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         output.relay.as_str()
                     ),
@@ -19145,7 +19116,7 @@ fn wasm_envelope_from_relay_batch(
 struct WasmOutputContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
@@ -19880,7 +19851,7 @@ async fn dispatch_wasm_output_envelopes(
 struct WasmRouteDispatchContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     input_relays: &'a [RelayName],
@@ -20089,7 +20060,7 @@ async fn dispatch_wasm_output_route(
                     decoded.batch.acks.iter(),
                     format!(
                         "{} '{}' failed to load materialized side inputs: {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         error
                     ),
@@ -20133,7 +20104,7 @@ async fn dispatch_wasm_output_route(
                     decoded.batch.acks.iter(),
                     format!(
                         "{} '{}' failed to prepare LOOKUP_HASH_MAP columns: {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         error
                     ),
@@ -20168,7 +20139,7 @@ async fn dispatch_wasm_output_route(
                     decoded.batch.acks.iter(),
                     format!(
                         "{} '{}' failed to project WASM output into FILTER-MAP input: {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         error
                     ),
@@ -20199,7 +20170,7 @@ async fn dispatch_wasm_output_route(
                     decoded.batch.acks.iter(),
                     format!(
                         "{} '{}' FILTER-MAP execution failed: {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         error
                     ),
@@ -20228,7 +20199,7 @@ async fn dispatch_wasm_output_route(
                             decoded.batch.acks.iter(),
                             format!(
                                 "{} '{}' failed to address WASM input row {}: {}",
-                                context.node_kind,
+                                context.node_kind.as_str(),
                                 context.processor.as_str(),
                                 input_row,
                                 error
@@ -20244,7 +20215,7 @@ async fn dispatch_wasm_output_route(
                 error: program.structured_side_error(
                     format!(
                         "{} '{}' FILTER-MAP side error {}: {} at {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         side_error.code.as_str(),
                         side_error.message,
@@ -20331,7 +20302,7 @@ async fn dispatch_wasm_output_route(
                     ack_queues.iter().flatten(),
                     format!(
                         "{} '{}' failed to materialize successful FILTER-MAP rows: {}",
-                        context.node_kind,
+                        context.node_kind.as_str(),
                         context.processor.as_str(),
                         error
                     ),
@@ -20442,7 +20413,7 @@ fn wasm_output_token_use_counts(outputs: &[WasmMaterializedOutput]) -> HashMap<u
 
 struct WasmSidecarTerminalContext<'a> {
     branch: &'a BranchRuntime,
-    node_kind: &'a str,
+    node_kind: ModelKind,
     processor: &'a ModelName,
     error_policies: &'a ErrorPolicies,
     message_error_relay: &'a RelayName,
@@ -20841,10 +20812,7 @@ pub(crate) fn scheduled_relay_owner_nodes(
 ) -> Vec<ClusterNodeName> {
     schedule
         .nodes
-        .get(&PlacementRuntimeNode::new(
-            ModelKind::Relay,
-            ModelName::from(relay),
-        ))
+        .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
         .and_then(ScheduledNode::execution_node)
         .map(|owner| vec![owner.clone()])
         .unwrap_or_default()

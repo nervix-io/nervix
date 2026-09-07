@@ -1,13 +1,12 @@
 use dashmap::mapref::entry::Entry as DashMapEntry;
-use nervix_models::{DomainName, ModelName};
+use nervix_models::{DomainName, NodeRef};
 
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MessageErrorRouteKey {
     pub(super) domain: DomainName,
-    pub(super) node_kind: String,
-    pub(super) node: ModelName,
+    pub(super) node: NodeRef,
     pub(super) source_route: Option<RelayName>,
     pub(super) error_relay: RelayName,
 }
@@ -145,8 +144,8 @@ impl MessageErrorRouteTask {
             .send(RuntimeEvent::Error(reason.clone()));
         warn!(
             domain = self.route.domain.as_str(),
-            node_kind = self.route.node_kind.as_str(),
-            node = self.route.node.as_str(),
+            node_kind = self.route.node.kind.as_str(),
+            node = self.route.node.identifier.as_str(),
             error_relay = self.route.error_relay.as_str(),
             reason = %reason,
             "runtime node failed to flush message errors"
@@ -192,8 +191,8 @@ impl MessageErrorRouteTask {
                     format!(
                         "{} '{}' failed to concatenate buffered message errors for relay '{}' in \
                          domain '{}': {}",
-                        self.route.node_kind,
-                        self.route.node.as_str(),
+                        self.route.node.kind.as_str(),
+                        self.route.node.identifier.as_str(),
                         self.route.error_relay.as_str(),
                         self.route.domain.as_str(),
                         error
@@ -219,8 +218,8 @@ impl MessageErrorRouteTask {
                 &source_acks,
                 format!(
                     "{} '{}' failed to flush message errors to relay '{}' in domain '{}'",
-                    self.route.node_kind,
-                    self.route.node.as_str(),
+                    self.route.node.kind.as_str(),
+                    self.route.node.identifier.as_str(),
                     self.route.error_relay.as_str(),
                     self.route.domain.as_str()
                 ),
@@ -370,8 +369,8 @@ impl Runtime {
             .map_err(|_| {
                 format!(
                     "message-error route for {} '{}' to relay '{}' is stopped",
-                    failure_route.node_kind,
-                    failure_route.node.as_str(),
+                    failure_route.node.kind.as_str(),
+                    failure_route.node.identifier.as_str(),
                     failure_route.error_relay.as_str()
                 )
             })
@@ -430,8 +429,7 @@ mod tests {
             runtime: Runtime::default(),
             route: MessageErrorRouteKey {
                 domain: DomainName::try_from("test").expect("valid domain"),
-                node_kind: "emitter".to_string(),
-                node: named("notifications"),
+                node: NodeRef::new(ModelKind::Emitter, named::<ModelName>("notifications")),
                 source_route: None,
                 error_relay: named("emitter_errors"),
             },

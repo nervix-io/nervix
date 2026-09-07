@@ -623,7 +623,7 @@ impl Runtime {
     pub fn entity_pause_relays(
         &self,
         domain: &DomainName,
-        affected_entities: &[RegistryEntity],
+        affected_entities: &[NodeRef],
     ) -> Vec<RelayName> {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
@@ -633,7 +633,7 @@ impl Runtime {
 
     pub(crate) fn entity_pause_relays_for_schedule(
         schedule: &DomainSchedule,
-        affected_entities: &[RegistryEntity],
+        affected_entities: &[NodeRef],
     ) -> Vec<RelayName> {
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let mut relays = Vec::new();
@@ -646,10 +646,10 @@ impl Runtime {
                 relays.extend(processor.spec.input_relays.clone());
                 continue;
             }
-            let Some(node) = schedule.nodes.get(&PlacementRuntimeNode::new(
-                entity.kind,
-                entity.identifier.clone(),
-            )) else {
+            let Some(node) = schedule
+                .nodes
+                .get(&NodeRef::new(entity.kind, entity.identifier.clone()))
+            else {
                 continue;
             };
             match node.config.as_ref() {
@@ -668,7 +668,7 @@ impl Runtime {
 
     pub(crate) fn ownership_handoff_relays_for_schedule(
         schedule: &DomainSchedule,
-        affected_entities: &[RegistryEntity],
+        affected_entities: &[NodeRef],
     ) -> Vec<RelayName> {
         let mut relays = Self::entity_pause_relays_for_schedule(schedule, affected_entities);
         let affected = affected_entities.iter().cloned().collect::<HashSet<_>>();
@@ -696,11 +696,7 @@ impl Runtime {
                 producer_count = producer_count
                     .checked_add(1)
                     .assured("the producers counted here are graph nodes held in memory");
-                all_move
-                    && affected.contains(&RegistryEntity {
-                        kind: node.kind,
-                        identifier: node.identifier.clone(),
-                    })
+                all_move && affected.contains(&node.identity())
             });
             producer_count == 0 || !all_producers_move
         });
@@ -716,7 +712,7 @@ impl Runtime {
     ) -> EntityGateHold {
         let mut gates = Vec::with_capacity(relays.len());
         for relay in relays {
-            let key = RuntimeKey::new(domain.clone(), relay.clone());
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
             let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key) else {
                 continue;
             };
@@ -731,7 +727,7 @@ impl Runtime {
         operation_id: u64,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[RegistryEntity],
+        affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         lease: EntityGateLease<'_>,
     ) -> Result<(), String> {
@@ -773,7 +769,7 @@ impl Runtime {
         };
         for ingestor in &ingestors {
             tokio::task::consume_budget().await;
-            let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
             if !self.inner.ingestors.contains_key(&key) {
                 continue;
             }
@@ -851,8 +847,8 @@ impl Runtime {
 
     async fn release_entity_gate_operation_from_state(
         entity_gate_holds: &DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>,
-        ingestors: &DashMap<RuntimeKey, IngestorRuntime, RandomState>,
-        ingestor_quiescence: &DashMap<RuntimeKey, Arc<IngestorQuiesceControl>, RandomState>,
+        ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
+        ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
         operation_id: u64,
         domain: &DomainName,
     ) -> Result<(), String> {
@@ -875,7 +871,11 @@ impl Runtime {
                 cause = quiesced.cause.as_str(),
                 "ingestor left quiesce"
             );
-            let key = RuntimeKey::new(domain.clone(), quiesced.ingestor.clone());
+            let key = DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                quiesced.ingestor.clone(),
+            );
             if !ingestors.contains_key(&key)
                 && let Some((_, control)) = ingestor_quiescence.remove(&key)
             {
@@ -904,7 +904,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[RegistryEntity],
+        affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
     ) -> EntityDrainStatus {
         let buffered_relay_batches = relays
@@ -912,7 +912,11 @@ impl Runtime {
             .filter_map(|relay| {
                 self.inner
                     .relay_boundary_fanouts
-                    .get(&RuntimeKey::new(domain.clone(), relay.clone()))
+                    .get(&DomainNodeRef::node_in(
+                        domain.clone(),
+                        ModelKind::Relay,
+                        relay.clone(),
+                    ))
                     .map(|fanout| fanout.outstanding_work_len())
             })
             .sum();
@@ -922,13 +926,13 @@ impl Runtime {
                 let quiesce_work = self
                     .inner
                     .node_quiesce_counters
-                    .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
+                    .get(&entity.in_domain(domain))
                     .map(|counters| counters.outstanding_work_for(purpose))
                     .unwrap_or(0);
                 let emitter_work = if entity.kind == ModelKind::Emitter {
                     self.inner
                         .emitter_buffers
-                        .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
+                        .get(&entity.in_domain(domain))
                         .map(|buffered| buffered.load(Ordering::Acquire))
                         .unwrap_or(0)
                 } else {
@@ -947,7 +951,7 @@ impl Runtime {
             let Some(tracker) = self
                 .inner
                 .in_flight_by_ingestor
-                .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
+                .get(&entity.in_domain(domain))
             else {
                 continue;
             };
@@ -960,12 +964,7 @@ impl Runtime {
         let mut emitter_publishing = affected_entities
             .iter()
             .filter(|entity| entity.kind == ModelKind::Emitter)
-            .filter_map(|entity| {
-                self.emitter_publishing_drain_status(&RuntimeKey::new(
-                    domain.clone(),
-                    entity.identifier.clone(),
-                ))
-            })
+            .filter_map(|entity| self.emitter_publishing_drain_status(&entity.in_domain(domain)))
             .collect::<Vec<_>>();
         emitter_publishing.sort_by(|left, right| left.emitter.cmp(&right.emitter));
         EntityDrainStatus {
@@ -978,7 +977,7 @@ impl Runtime {
 
     fn emitter_publishing_drain_status(
         &self,
-        key: &RuntimeKey,
+        key: &DomainNodeRef,
     ) -> Option<EmitterPublishingDrainStatus> {
         let pending_messages = self
             .inner
@@ -993,7 +992,7 @@ impl Runtime {
             .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
         if awaiting_confirmation {
             return Some(EmitterPublishingDrainStatus {
-                emitter: EmitterName::from(&key.identifier),
+                emitter: EmitterName::from(key.identifier()),
                 state: EmitterPublishingDrainState::AwaitingConfirmation,
                 pending_messages,
                 retry_backoff: None,
@@ -1006,7 +1005,7 @@ impl Runtime {
             EmitterRetryKind::IcebergCommit => EmitterPublishingDrainState::RetryingIcebergCommit,
         };
         Some(EmitterPublishingDrainStatus {
-            emitter: EmitterName::from(&key.identifier),
+            emitter: EmitterName::from(key.identifier()),
             state,
             pending_messages,
             retry_backoff: Some(retry.reconnect.backoff),
@@ -1022,12 +1021,11 @@ impl Runtime {
     pub(super) fn node_quiesce_counters(
         &self,
         domain: &DomainName,
-        node: impl Into<ModelName>,
+        node: NodeRef,
     ) -> Arc<NodeQuiesceCounters> {
-        let node = node.into();
         self.inner
             .node_quiesce_counters
-            .entry(RuntimeKey::new(domain.clone(), node.clone()))
+            .entry(DomainNodeRef::new(domain.clone(), node))
             .or_insert_with(|| Arc::new(NodeQuiesceCounters::default()))
             .clone()
     }
@@ -1176,7 +1174,7 @@ impl Runtime {
         error: impl Into<String>,
     ) {
         self.inner.ingestor_transient_errors.insert(
-            RuntimeKey::new(domain.clone(), ingestor.clone()),
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
             error.into(),
         );
     }
@@ -1188,7 +1186,7 @@ impl Runtime {
         error: impl Into<String>,
         backoff: Duration,
     ) {
-        let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         self.inner
             .ingestor_transient_errors
             .insert(key.clone(), error.into());
@@ -1208,10 +1206,18 @@ impl Runtime {
     ) {
         self.inner
             .ingestor_transient_errors
-            .remove(&RuntimeKey::new(domain.clone(), ingestor.clone()));
+            .remove(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ));
         self.inner
             .ingestor_reconnect_backoffs
-            .remove(&RuntimeKey::new(domain.clone(), ingestor.clone()));
+            .remove(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ));
     }
 
     pub(in crate::runtime) fn prepare_ingestor_readiness(
@@ -1221,7 +1227,7 @@ impl Runtime {
         expected_instances: NonZeroU64,
     ) {
         self.inner.ingestor_readiness.insert(
-            RuntimeKey::new(domain.clone(), ingestor.clone()),
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
             IngestorReadiness::new(expected_instances),
         );
     }
@@ -1231,7 +1237,8 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &CreateIngestor,
     ) -> Arc<IngestorQuiesceControl> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if let Some(control) = self.inner.ingestor_quiescence.get(&key) {
             control.update_declared_source(&ingestor.source);
             return control.clone();
@@ -1260,7 +1267,11 @@ impl Runtime {
     ) -> Option<Arc<IngestorQuiesceControl>> {
         self.inner
             .ingestor_quiescence
-            .get(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
             .map(|control| control.clone())
     }
 
@@ -1308,7 +1319,7 @@ impl Runtime {
             .ingestors
             .iter()
             .filter(|entry| &entry.key().domain == domain)
-            .map(|entry| entry.key().identifier.clone())
+            .map(|entry| entry.key().identifier().clone())
             .collect::<Vec<_>>();
         for ingestor in ingestors {
             self.engage_ingestor_quiesce(
@@ -1325,7 +1336,7 @@ impl Runtime {
             .ingestor_quiescence
             .iter()
             .filter(|entry| &entry.key().domain == domain)
-            .map(|entry| entry.key().identifier.clone())
+            .map(|entry| entry.key().identifier().clone())
             .collect::<Vec<_>>();
         for ingestor in ingestors {
             self.release_ingestor_quiesce(
@@ -1337,7 +1348,7 @@ impl Runtime {
     }
 
     fn remove_ingestor_quiescence(&self, domain: &DomainName, ingestor: &IngestorName) {
-        let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if let Some((_, control)) = self.inner.ingestor_quiescence.remove(&key) {
             control.terminate();
         }
@@ -1349,7 +1360,7 @@ impl Runtime {
             .ingestor_quiescence
             .iter()
             .filter(|entry| &entry.key().domain == domain)
-            .map(|entry| entry.key().identifier.clone())
+            .map(|entry| entry.key().identifier().clone())
             .collect::<Vec<_>>();
         for ingestor in ingestors {
             self.remove_ingestor_quiescence(domain, &IngestorName::from(&ingestor));
@@ -1362,7 +1373,7 @@ impl Runtime {
         ingestor: &IngestorName,
         instance_idx: u64,
     ) {
-        let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if let Some(mut readiness) = self.inner.ingestor_readiness.get_mut(&key) {
             readiness.ready_instances.insert(instance_idx);
         }
@@ -1374,7 +1385,7 @@ impl Runtime {
         ingestor: &IngestorName,
         instance_idx: u64,
     ) {
-        let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if let Some(mut readiness) = self.inner.ingestor_readiness.get_mut(&key) {
             readiness.ready_instances.remove(&instance_idx);
         }
@@ -1387,13 +1398,21 @@ impl Runtime {
     ) {
         self.inner
             .ingestor_readiness
-            .remove(&RuntimeKey::new(domain.clone(), ingestor.clone()));
+            .remove(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ));
     }
 
     fn ingestor_ready(&self, domain: &DomainName, ingestor: &IngestorName) -> bool {
         self.inner
             .ingestor_readiness
-            .get(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
             .is_none_or(|readiness| readiness.is_ready())
     }
 
@@ -1404,7 +1423,11 @@ impl Runtime {
     ) -> Option<String> {
         self.inner
             .ingestor_transient_errors
-            .get(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
             .map(|error| error.value().clone())
     }
 
@@ -1415,7 +1438,11 @@ impl Runtime {
     ) -> Option<String> {
         self.inner
             .ingestor_reconnect_backoffs
-            .get(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
             .map(|status| humantime::format_duration(status.value().backoff).to_string())
     }
 
@@ -1426,7 +1453,11 @@ impl Runtime {
     ) -> Option<u64> {
         self.inner
             .ingestor_reconnect_backoffs
-            .get(&RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
             .map(|status| {
                 u64::try_from(
                     status
@@ -1446,7 +1477,7 @@ impl Runtime {
         error: impl Into<String>,
     ) {
         self.inner.emitter_transient_errors.insert(
-            RuntimeKey::new(domain.clone(), emitter.clone()),
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
             error.into(),
         );
     }
@@ -1491,7 +1522,7 @@ impl Runtime {
         backoff: Duration,
         kind: EmitterRetryKind,
     ) {
-        let key = RuntimeKey::new(domain.clone(), emitter.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         self.inner
             .emitter_transient_errors
             .insert(key.clone(), error.into());
@@ -1515,7 +1546,11 @@ impl Runtime {
         let active_waits = self
             .inner
             .emitter_confirmation_waits
-            .entry(RuntimeKey::new(domain.clone(), emitter.clone()))
+            .entry(DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            ))
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
             .clone();
         active_waits.fetch_add(1, Ordering::AcqRel);
@@ -1529,10 +1564,18 @@ impl Runtime {
     ) {
         self.inner
             .emitter_transient_errors
-            .remove(&RuntimeKey::new(domain.clone(), emitter.clone()));
+            .remove(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            ));
         self.inner
             .emitter_retry_statuses
-            .remove(&RuntimeKey::new(domain.clone(), emitter.clone()));
+            .remove(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            ));
     }
 
     fn emitter_transient_error(
@@ -1542,7 +1585,11 @@ impl Runtime {
     ) -> Option<String> {
         self.inner
             .emitter_transient_errors
-            .get(&RuntimeKey::new(domain.clone(), emitter.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            ))
             .map(|error| error.value().clone())
     }
 
@@ -1553,7 +1600,11 @@ impl Runtime {
     ) -> Option<String> {
         self.inner
             .emitter_retry_statuses
-            .get(&RuntimeKey::new(domain.clone(), emitter.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            ))
             .map(|status| humantime::format_duration(status.value().reconnect.backoff).to_string())
     }
 
@@ -1564,7 +1615,11 @@ impl Runtime {
     ) -> Option<u64> {
         self.inner
             .emitter_retry_statuses
-            .get(&RuntimeKey::new(domain.clone(), emitter.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            ))
             .map(|status| {
                 u64::try_from(
                     status
@@ -2921,7 +2976,11 @@ impl Runtime {
         let ingestor_tracker = self
             .inner
             .in_flight_by_ingestor
-            .entry(RuntimeKey::new(domain.clone(), ingestor.clone()))
+            .entry(DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
             .or_insert_with(|| Arc::new(AckRootTracker::default()))
             .clone();
         AckSet::tracked_roots(vec![domain_tracker, ingestor_tracker])
@@ -3029,7 +3088,7 @@ impl Runtime {
                 .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
             if awaiting_confirmation {
                 emitter_publishing.push(EmitterPublishingDrainStatus {
-                    emitter: EmitterName::from(&key.identifier),
+                    emitter: EmitterName::from(key.identifier()),
                     state: EmitterPublishingDrainState::AwaitingConfirmation,
                     pending_messages,
                     retry_backoff: None,
@@ -3049,7 +3108,7 @@ impl Runtime {
                 }
             };
             emitter_publishing.push(EmitterPublishingDrainStatus {
-                emitter: EmitterName::from(&key.identifier),
+                emitter: EmitterName::from(key.identifier()),
                 state,
                 pending_messages,
                 retry_backoff: Some(retry.reconnect.backoff),
@@ -3847,7 +3906,7 @@ impl Runtime {
     pub(in crate::runtime) async fn handle_message_error(
         &self,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: &ModelName,
         policies: &ErrorPolicies,
         message: RelayMessage,
@@ -3882,7 +3941,7 @@ impl Runtime {
     pub(in crate::runtime) async fn handle_message_error_with_policy(
         &self,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: &ModelName,
         policy: &MessageErrorPolicy,
         message: RelayMessage,
@@ -3937,14 +3996,14 @@ impl Runtime {
             MessageErrorPolicy::Log => {
                 let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                     "{} '{}' message error in domain '{}': {}",
-                    node_kind,
+                    node_kind.as_str(),
                     node.as_str(),
                     domain.as_str(),
                     error.message
                 )));
                 warn!(
                     domain = domain.as_str(),
-                    node_kind,
+                    node_kind = node_kind.as_str(),
                     node = node.as_str(),
                     error_reference = %error.reference,
                     error_code = error.code.as_ref(),
@@ -3973,7 +4032,7 @@ impl Runtime {
                     let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                         "{} '{}' failed to dispatch message error {} to DLQ '{}' in domain '{}': \
                          {}",
-                        node_kind,
+                        node_kind.as_str(),
                         node.as_str(),
                         error.reference,
                         relay.as_str(),
@@ -3982,7 +4041,7 @@ impl Runtime {
                     )));
                     message.acks.no_ack(format!(
                         "{} '{}' failed to dispatch message error {} to DLQ '{}': {}",
-                        node_kind,
+                        node_kind.as_str(),
                         node.as_str(),
                         error.reference,
                         relay.as_str(),
@@ -3996,7 +4055,7 @@ impl Runtime {
     pub(in crate::runtime) fn handle_general_error_for_acks<'a>(
         &self,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: impl Into<ModelName>,
         policies: &ErrorPolicies,
         acks: impl IntoIterator<Item = &'a AckSet>,
@@ -4012,14 +4071,14 @@ impl Runtime {
             GeneralErrorPolicy::Log => {
                 let _ = self.inner.events.send(RuntimeEvent::Error(format!(
                     "{} '{}' general error in domain '{}': {}",
-                    node_kind,
+                    node_kind.as_str(),
                     node.as_str(),
                     domain.as_str(),
                     reason
                 )));
                 warn!(
                     domain = domain.as_str(),
-                    node_kind,
+                    node_kind = node_kind.as_str(),
                     node = node.as_str(),
                     reason = %reason,
                     "runtime node handled general error"
@@ -4034,7 +4093,7 @@ impl Runtime {
     pub(in crate::runtime) fn handle_internal_processor_error_for_acks<'a>(
         &self,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: impl Into<ModelName>,
         _policies: &ErrorPolicies,
         acks: impl IntoIterator<Item = &'a AckSet>,
@@ -4043,14 +4102,14 @@ impl Runtime {
         let node = node.into();
         let _ = self.inner.events.send(RuntimeEvent::Error(format!(
             "{} '{}' internal error in domain '{}': {}",
-            node_kind,
+            node_kind.as_str(),
             node.as_str(),
             domain.as_str(),
             reason
         )));
         warn!(
             domain = domain.as_str(),
-            node_kind,
+            node_kind = node_kind.as_str(),
             node = node.as_str(),
             reason = %reason,
             "runtime processor handled internal error"
@@ -4063,7 +4122,7 @@ impl Runtime {
     pub(in crate::runtime) async fn handle_planned_message_errors(
         &self,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: impl Into<ModelName>,
         policies: &ErrorPolicies,
         errors: Vec<PlannedMessageError>,
@@ -4089,7 +4148,7 @@ impl Runtime {
     pub(in crate::runtime) async fn handle_planned_message_errors_with_policy(
         &self,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: &ModelName,
         source_route: Option<&RelayName>,
         policy: &MessageErrorPolicy,
@@ -4242,8 +4301,7 @@ impl Runtime {
             self.enqueue_message_error_delivery(
                 MessageErrorRouteKey {
                     domain: domain.clone(),
-                    node_kind: node_kind.to_string(),
-                    node: node.clone(),
+                    node: NodeRef::new(node_kind, node.clone()),
                     source_route: source_route.cloned(),
                     error_relay: relay.clone(),
                 },
@@ -4268,7 +4326,7 @@ impl Runtime {
                 format!(
                     "DLQ relay '{}' rejected message error from {} '{}'",
                     relay.as_str(),
-                    node_kind,
+                    node_kind.as_str(),
                     node.as_str()
                 )
             })?;
@@ -4280,23 +4338,24 @@ impl Runtime {
     fn message_error_flush_policy(
         execution: &DomainExecution,
         domain: &DomainName,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: &ModelName,
         source_route: Option<&RelayName>,
         error_relay: &RelayName,
         assignments: &[Assignment],
     ) -> Result<Option<RuntimeFlushPolicy>, String> {
-        let scheduled = ModelKind::from_str(node_kind)
+        let scheduled = ModelKind::from_str(node_kind.as_str())
             .ok()
             .and_then(|kind| {
                 execution
                     .schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(kind, node.clone()))
+                    .get(&NodeRef::new(kind, node.clone()))
             })
             .ok_or_else(|| {
                 format!(
-                    "runtime model for {node_kind} '{}' is unavailable",
+                    "runtime model for {} '{}' is unavailable",
+                    node_kind.as_str(),
                     node.as_str()
                 )
             })?;
@@ -4314,7 +4373,7 @@ impl Runtime {
             Model::Emitter(model) => {
                 return Self::parse_runtime_node_flush_policy(
                     domain,
-                    node_kind,
+                    node_kind.as_str(),
                     node,
                     &model.flush_each,
                     model.max_batch_size.as_deref(),
@@ -4334,7 +4393,7 @@ impl Runtime {
             .ok_or_else(|| {
                 format!(
                     "{} '{}' message-error output route is unavailable",
-                    node_kind,
+                    node_kind.as_str(),
                     node.as_str()
                 )
             })?;
@@ -4343,7 +4402,7 @@ impl Runtime {
         };
         Self::parse_runtime_node_flush_policy(
             domain,
-            node_kind,
+            node_kind.as_str(),
             node,
             &policy.flush_each,
             policy.max_batch_size.as_deref(),
@@ -4354,23 +4413,24 @@ impl Runtime {
 
     fn message_error_compile_schemas(
         execution: &DomainExecution,
-        node_kind: &str,
+        node_kind: ModelKind,
         node: &ModelName,
         source_route: Option<&RelayName>,
         error_relay: &RelayName,
         assignments: &[Assignment],
     ) -> Result<MessageErrorCompileSchemas, String> {
-        let scheduled = ModelKind::from_str(node_kind)
+        let scheduled = ModelKind::from_str(node_kind.as_str())
             .ok()
             .and_then(|kind| {
                 execution
                     .schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(kind, node.clone()))
+                    .get(&NodeRef::new(kind, node.clone()))
             })
             .ok_or_else(|| {
                 format!(
-                    "runtime model for {node_kind} '{}' is unavailable",
+                    "runtime model for {} '{}' is unavailable",
+                    node_kind.as_str(),
                     node.as_str()
                 )
             })?;
@@ -4677,7 +4737,7 @@ impl Runtime {
             for group in &groups {
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor.as_str(),
+                    ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     group.messages.iter().map(|message| &message.acks),
@@ -4704,7 +4764,7 @@ impl Runtime {
                 );
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor.as_str(),
+                    ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     acks.iter(),
@@ -4718,7 +4778,7 @@ impl Runtime {
                 Err(error) => {
                     self.handle_general_error_for_acks(
                         domain,
-                        ModelKind::Ingestor.as_str(),
+                        ModelKind::Ingestor,
                         ingestor,
                         &ErrorPolicies::handled_by_log(),
                         acks.iter(),
@@ -4736,7 +4796,7 @@ impl Runtime {
                 );
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor.as_str(),
+                    ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
@@ -4754,7 +4814,7 @@ impl Runtime {
                 );
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor.as_str(),
+                    ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
@@ -5184,7 +5244,7 @@ impl Runtime {
                 let output = &output_routes.routes[route_error.output_index];
                 self.handle_structured_message_error(MessageErrorHandling {
                     domain,
-                    node_kind: ModelKind::Ingestor.as_str(),
+                    node_kind: ModelKind::Ingestor,
                     node: &ModelName::from(ingestor),
                     source_route: Some(&output.relay),
                     policy: &output.message_error_policy,
@@ -5255,7 +5315,7 @@ impl Runtime {
                 .verified("the queue above was filled with one ACK entry per route");
             self.handle_structured_message_error(MessageErrorHandling {
                 domain,
-                node_kind: ModelKind::Ingestor.as_str(),
+                node_kind: ModelKind::Ingestor,
                 node: &ModelName::from(ingestor),
                 source_route: Some(&output.relay),
                 policy: &output.message_error_policy,
@@ -5405,7 +5465,7 @@ impl Runtime {
         };
         let scheduled_partition_schedule = if let Some(execution) =
             self.inner.executions.get(domain)
-            && let Some(node) = execution.schedule.nodes.get(&PlacementRuntimeNode::new(
+            && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(ingestor),
             )) {
@@ -5485,7 +5545,7 @@ impl Runtime {
         use_branch_collapse: bool,
         capacity: NonZeroUsize,
     ) -> RelayBoundaryFanout {
-        let key = RuntimeKey::new(domain.clone(), relay.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
         if let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key)
             && fanout.uses_branch_collapse() == use_branch_collapse
         {
@@ -5801,8 +5861,8 @@ impl Runtime {
         &self,
         domain: &DomainName,
         desired: &DomainSchedule,
-        reassignments: &[RegistryEntity],
-    ) -> Vec<RegistryEntity> {
+        reassignments: &[NodeRef],
+    ) -> Vec<NodeRef> {
         let Some(local_node_id) = self.inner.remote_dispatch.local_node_id.read().clone() else {
             return Vec::new();
         };
@@ -5827,7 +5887,7 @@ impl Runtime {
 
     fn scheduled_node<'a>(
         schedule: &'a DomainSchedule,
-        entity: &RegistryEntity,
+        entity: &NodeRef,
     ) -> Option<&'a ScheduledNode> {
         schedule
             .nodes
@@ -5842,7 +5902,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         schedule: &DomainSchedule,
-        reassignments: &[RegistryEntity],
+        reassignments: &[NodeRef],
         local_node_id: Option<&ClusterNodeName>,
     ) -> Result<(), RuntimeError> {
         let Some(local_node_id) = local_node_id else {
@@ -6052,8 +6112,8 @@ impl Runtime {
         &self,
         domain: &DomainName,
         schedule: DomainSchedule,
-        entities: &[RegistryEntity],
-        reassignments: &[RegistryEntity],
+        entities: &[NodeRef],
+        reassignments: &[NodeRef],
         dynamic_updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
         let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
@@ -6114,16 +6174,8 @@ impl Runtime {
         graph_handle.store(Some(desired_graph));
         let desired_model_index = schedule
             .nodes
-            .values()
-            .map(|node| {
-                (
-                    RegistryEntity {
-                        kind: node.kind,
-                        identifier: node.identifier.clone(),
-                    },
-                    (*node.config).clone(),
-                )
-            })
+            .iter()
+            .map(|(node_ref, node)| (node_ref.clone(), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
 
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
@@ -6138,10 +6190,7 @@ impl Runtime {
             if entity.kind == ModelKind::Relay {
                 let desired_node = schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(
-                        ModelKind::Relay,
-                        entity.identifier.clone(),
-                    ))
+                    .get(&NodeRef::new(ModelKind::Relay, entity.identifier.clone()))
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!("missing desired relay '{}'", entity.identifier.as_str()),
@@ -6314,7 +6363,7 @@ impl Runtime {
             if entity.kind == ModelKind::Ingestor {
                 let desired_node = schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(
+                    .get(&NodeRef::new(
                         ModelKind::Ingestor,
                         entity.identifier.clone(),
                     ))
@@ -6335,7 +6384,7 @@ impl Runtime {
                     });
                 };
 
-                let key = RuntimeKey::new(domain.clone(), entity.identifier.clone());
+                let key = entity.in_domain(domain);
                 if self.inner.ingestors.contains_key(&key) {
                     self.stop_ingestor(domain, &IngestorName::from(&entity.identifier))
                         .await?;
@@ -6392,10 +6441,7 @@ impl Runtime {
             if entity.kind == ModelKind::Emitter {
                 let desired_node = schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(
-                        ModelKind::Emitter,
-                        entity.identifier.clone(),
-                    ))
+                    .get(&NodeRef::new(ModelKind::Emitter, entity.identifier.clone()))
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!("missing desired emitter '{}'", entity.identifier.as_str()),
@@ -6420,10 +6466,7 @@ impl Runtime {
                     let old_node = execution
                         .schedule
                         .nodes
-                        .get(&PlacementRuntimeNode::new(
-                            ModelKind::Emitter,
-                            entity.identifier.clone(),
-                        ))
+                        .get(&NodeRef::new(ModelKind::Emitter, entity.identifier.clone()))
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
@@ -6561,7 +6604,7 @@ impl Runtime {
             if entity.kind == ModelKind::Reingestor {
                 let desired_node = schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(
+                    .get(&NodeRef::new(
                         ModelKind::Reingestor,
                         entity.identifier.clone(),
                     ))
@@ -6605,7 +6648,7 @@ impl Runtime {
                     let old_node = execution
                         .schedule
                         .nodes
-                        .get(&PlacementRuntimeNode::new(
+                        .get(&NodeRef::new(
                             ModelKind::Reingestor,
                             entity.identifier.clone(),
                         ))
@@ -6778,7 +6821,7 @@ impl Runtime {
             if entity.kind == ModelKind::Generator {
                 let desired_node = schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(
+                    .get(&NodeRef::new(
                         ModelKind::Generator,
                         entity.identifier.clone(),
                     ))
@@ -6927,10 +6970,7 @@ impl Runtime {
             }
             let desired_node = schedule
                 .nodes
-                .get(&PlacementRuntimeNode::new(
-                    entity.kind,
-                    entity.identifier.clone(),
-                ))
+                .get(&NodeRef::new(entity.kind, entity.identifier.clone()))
                 .ok_or_else(|| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!(
@@ -6972,10 +7012,10 @@ impl Runtime {
             // The change aspects own which node-local state a swap invalidates, so the runtime
             // applies that contract rather than re-deriving it per processor kind.
             let state_purges = if let Some(execution) = self.inner.executions.get(domain)
-                && let Some(old_node) = execution.schedule.nodes.get(&PlacementRuntimeNode::new(
-                    entity.kind,
-                    entity.identifier.clone(),
-                ))
+                && let Some(old_node) = execution
+                    .schedule
+                    .nodes
+                    .get(&NodeRef::new(entity.kind, entity.identifier.clone()))
                 && let Some(desired_model) = desired_model_index.get(entity)
             {
                 old_node
@@ -7104,9 +7144,10 @@ impl Runtime {
                 let remote_consumers =
                     Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
                 for (relay, services) in &execution.relay_services {
-                    let owner_node = if let Some(node) = schedule.nodes.get(
-                        &PlacementRuntimeNode::new(ModelKind::Relay, ModelName::from(relay)),
-                    ) && let Some(owner) = node.execution_node()
+                    let owner_node = if let Some(node) = schedule
+                        .nodes
+                        .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
+                        && let Some(owner) = node.execution_node()
                     {
                         Some(owner.clone())
                     } else {
@@ -7138,10 +7179,10 @@ impl Runtime {
             .collect::<HashSet<_>>();
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         for spec in processor_specs.processors {
-            let Some(node) = schedule.nodes.get(&PlacementRuntimeNode::new(
-                spec.spec.kind,
-                spec.spec.processor.clone(),
-            )) else {
+            let Some(node) = schedule
+                .nodes
+                .get(&NodeRef::new(spec.spec.kind, spec.spec.processor.clone()))
+            else {
                 continue;
             };
             let Some(target_node) = node.execution_node() else {
@@ -7232,7 +7273,7 @@ impl Runtime {
                 nervix_models::DynamicModelUpdate::Processor { .. } => {}
                 nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
                     let commands = if let Some(execution) = self.inner.executions.get(domain)
-                        && let Some(task) = execution.emitter_tasks.get(&RegistryEntity {
+                        && let Some(task) = execution.emitter_tasks.get(&NodeRef {
                             kind: ModelKind::Emitter,
                             identifier: ModelName::from(emitter),
                         }) {
@@ -7255,7 +7296,7 @@ impl Runtime {
     }
 
     fn set_relay_capacity(&self, domain: &DomainName, relay: &RelayName, capacity: NonZeroUsize) {
-        let key = RuntimeKey::new(domain.clone(), relay.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
         if let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key) {
             fanout.set_capacity(capacity);
         }
@@ -7592,16 +7633,8 @@ impl Runtime {
         let remote_dispatcher = self.inner.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
-            .values()
-            .map(|node| {
-                (
-                    RegistryEntity {
-                        kind: node.kind,
-                        identifier: node.identifier.clone(),
-                    },
-                    (*node.config).clone(),
-                )
-            })
+            .iter()
+            .map(|(node_ref, node)| (node_ref.clone(), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
         for node in schedule.nodes.values() {
             match node.config.as_ref() {
@@ -7659,10 +7692,7 @@ impl Runtime {
             .filter(|spec| {
                 schedule
                     .nodes
-                    .get(&PlacementRuntimeNode::new(
-                        spec.kind,
-                        spec.identifier.clone(),
-                    ))
+                    .get(&NodeRef::new(spec.kind, spec.identifier.clone()))
                     .is_some_and(|node| node.executes_on(local_node_id))
             })
             .cloned()
@@ -7886,7 +7916,7 @@ impl Runtime {
             }
         }
 
-        let mut placement_tasks = HashMap::<RegistryEntity, Vec<JoinHandle<()>>>::new();
+        let mut placement_tasks = HashMap::<NodeRef, Vec<JoinHandle<()>>>::new();
         let mut kafka_offset_states = HashMap::new();
         let mut materialized_states = HashMap::new();
         for node in schedule.nodes.values() {
@@ -7913,13 +7943,7 @@ impl Runtime {
                 materialized_states.insert(RelayName::from(&node.identifier), state);
             }
             if !placement.tasks.is_empty() {
-                placement_tasks.insert(
-                    RegistryEntity {
-                        kind: node.kind,
-                        identifier: node.identifier.clone(),
-                    },
-                    placement.tasks,
-                );
+                placement_tasks.insert(node.identity(), placement.tasks);
             }
         }
 
@@ -8084,7 +8108,7 @@ impl Runtime {
 
         let mut processor_input_specs = Vec::new();
         for node_spec in &all_branched_specs.processors {
-            let Some(node) = schedule.nodes.get(&PlacementRuntimeNode::new(
+            let Some(node) = schedule.nodes.get(&NodeRef::new(
                 node_spec.spec.kind,
                 node_spec.spec.processor.clone(),
             )) else {
@@ -8134,10 +8158,7 @@ impl Runtime {
         for relay in relay_registries.keys() {
             if !schedule
                 .nodes
-                .get(&PlacementRuntimeNode::new(
-                    ModelKind::Relay,
-                    ModelName::from(relay),
-                ))
+                .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
                 .is_some_and(|node| node.executes_on(local_node_id))
             {
                 continue;
@@ -8162,10 +8183,10 @@ impl Runtime {
             })
             .collect::<HashMap<_, _>>();
         for (relay, services) in &relay_services {
-            let owner_node = if let Some(node) = schedule.nodes.get(&PlacementRuntimeNode::new(
-                ModelKind::Relay,
-                ModelName::from(relay),
-            )) && let Some(owner) = node.execution_node()
+            let owner_node = if let Some(node) = schedule
+                .nodes
+                .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
+                && let Some(owner) = node.execution_node()
             {
                 Some(owner.clone())
             } else {
@@ -8256,7 +8277,7 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason,
                 })?;
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: node_spec.spec.kind,
                 identifier: node_spec.spec.processor.clone(),
             };
@@ -8325,7 +8346,7 @@ impl Runtime {
                     output_services,
                 ));
             }
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: ModelKind::Generator,
                 identifier: ModelName::from(&generator.name),
             };
@@ -8353,7 +8374,7 @@ impl Runtime {
         }
 
         for (emitter, inputs) in emitter_specs {
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: ModelKind::Emitter,
                 identifier: ModelName::from(&emitter.name),
             };
@@ -8374,7 +8395,7 @@ impl Runtime {
         }
 
         for spec in reingestor_specs {
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: ModelKind::Reingestor,
                 identifier: ModelName::from(&spec.reingestor.name),
             };
@@ -8480,11 +8501,7 @@ impl Runtime {
                 node.schema_fingerprint
             };
             self.inner.state_schema_fingerprints.insert(
-                RuntimeStateSchemaKey::new(
-                    schedule.domain.clone(),
-                    node.kind,
-                    node.identifier.clone(),
-                ),
+                DomainNodeRef::node_in(schedule.domain.clone(), node.kind, node.identifier.clone()),
                 schema_fingerprint,
             );
         }
@@ -8498,7 +8515,7 @@ impl Runtime {
         self.clear_state_schema_fingerprints(domain);
         for node in graph.nodes() {
             self.inner.state_schema_fingerprints.insert(
-                RuntimeStateSchemaKey::new(domain.clone(), node.kind, node.identifier.clone()),
+                DomainNodeRef::node_in(domain.clone(), node.kind, node.identifier.clone()),
                 graph
                     .schema_fingerprint(node.kind, &node.identifier)
                     .unwrap_or([0; 32]),
@@ -8533,7 +8550,7 @@ impl Runtime {
             } else {
                 self.inner
                     .state_schema_fingerprints
-                    .get(&RuntimeStateSchemaKey::new(
+                    .get(&DomainNodeRef::node_in(
                         domain.clone(),
                         kind,
                         identifier.clone(),
@@ -8555,7 +8572,7 @@ impl Runtime {
         let Some(current) = self
             .inner
             .state_schema_fingerprints
-            .get(&RuntimeStateSchemaKey::new(
+            .get(&DomainNodeRef::node_in(
                 placement.domain.clone(),
                 placement.kind,
                 placement.identifier.clone(),
@@ -8685,15 +8702,7 @@ impl Runtime {
                 .iter()
                 .filter_map(|entry| {
                     let key = entry.key();
-                    (&key.domain == domain).then(|| {
-                        (
-                            RegistryEntity {
-                                kind: key.kind,
-                                identifier: key.identifier.clone(),
-                            },
-                            *entry.value(),
-                        )
-                    })
+                    (&key.domain == domain).then(|| (key.node.clone(), *entry.value()))
                 })
                 .collect::<HashMap<_, _>>();
             store.purge_stale_schema_fingerprints(domain, &current)?;
@@ -9333,7 +9342,7 @@ impl Runtime {
             });
         }
 
-        let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         let Some(runtime) = self.inner.ingestors.get(&key) else {
             let transient_error =
                 if let Some(error) = self.ingestor_transient_error(domain, ingestor) {
@@ -9372,7 +9381,7 @@ impl Runtime {
         let scheduled_ingestor = execution
             .schedule
             .nodes
-            .get(&PlacementRuntimeNode::new(
+            .get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(ingestor),
             ))
@@ -10305,15 +10314,7 @@ impl Runtime {
         let model_index = graph
             .nodes()
             .into_iter()
-            .map(|node| {
-                (
-                    RegistryEntity {
-                        kind: node.kind,
-                        identifier: node.identifier.clone(),
-                    },
-                    (*node.config).clone(),
-                )
-            })
+            .map(|node| (node.node_ref(), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
         let udf_executor = self
             .compile_domain_udfs(
@@ -10771,7 +10772,7 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason,
                 })?;
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: node_spec.spec.kind,
                 identifier: node_spec.spec.processor.clone(),
             };
@@ -10840,7 +10841,7 @@ impl Runtime {
                     output_services,
                 ));
             }
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: ModelKind::Generator,
                 identifier: ModelName::from(&generator.name),
             };
@@ -10861,7 +10862,7 @@ impl Runtime {
         }
 
         for (emitter, inputs) in emitter_specs {
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: ModelKind::Emitter,
                 identifier: ModelName::from(&emitter.name),
             };
@@ -10882,7 +10883,7 @@ impl Runtime {
         }
 
         for spec in reingestor_specs {
-            let entity = RegistryEntity {
+            let entity = NodeRef {
                 kind: ModelKind::Reingestor,
                 identifier: ModelName::from(&spec.reingestor.name),
             };
@@ -11233,7 +11234,11 @@ impl Runtime {
         let source_gate = self
             .inner
             .relay_boundary_fanouts
-            .get(&RuntimeKey::new(domain.clone(), source_relay.clone()))
+            .get(&DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Relay,
+                source_relay.clone(),
+            ))
             .map(|fanout| fanout.dispatch_gate())
             .ok_or_else(|| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -11242,7 +11247,8 @@ impl Runtime {
                     source_relay.as_str()
                 ),
             })?;
-        let quiesce_counters = self.node_quiesce_counters(domain, &generator.name);
+        let quiesce_counters =
+            self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &generator.name));
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
@@ -11694,7 +11700,7 @@ impl Runtime {
                                                 .handle_structured_message_error(
                                                     MessageErrorHandling {
                                                         domain: &task_domain,
-                                                        node_kind: "generator",
+                                                        node_kind: ModelKind::Generator,
                                                         node: &ModelName::from(&task_generator),
                                                         source_route: Some(&route.output.relay),
                                                         policy: &route.output.message_error_policy,
@@ -12276,7 +12282,7 @@ impl Runtime {
                 Err(error) => {
                     self.handle_internal_processor_error_for_acks(
                         domain,
-                        "reingestor",
+                        ModelKind::Reingestor,
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
@@ -12316,7 +12322,7 @@ impl Runtime {
                 Err(error) => {
                     self.handle_internal_processor_error_for_acks(
                         domain,
-                        "reingestor",
+                        ModelKind::Reingestor,
                         reingestor,
                         error_policies,
                         error.acks.iter(),
@@ -12368,7 +12374,7 @@ impl Runtime {
             if batch_acks.len() != pending_batch.input_rows.len() {
                 self.handle_internal_processor_error_for_acks(
                     domain,
-                    "reingestor",
+                    ModelKind::Reingestor,
                     reingestor,
                     error_policies,
                     batch_acks.iter(),
@@ -12384,7 +12390,7 @@ impl Runtime {
                 Err(error) => {
                     self.handle_internal_processor_error_for_acks(
                         domain,
-                        "reingestor",
+                        ModelKind::Reingestor,
                         reingestor,
                         error_policies,
                         error_acks.iter(),
@@ -12401,7 +12407,7 @@ impl Runtime {
             };
             self.handle_structured_message_error(MessageErrorHandling {
                 domain,
-                node_kind: "reingestor",
+                node_kind: ModelKind::Reingestor,
                 node: &ModelName::from(reingestor),
                 source_route: Some(&output_routes.routes[output_index].relay),
                 policy: &output_routes.routes[output_index].message_error_policy,
@@ -12426,7 +12432,7 @@ impl Runtime {
                 for batch in batches {
                     self.handle_internal_processor_error_for_acks(
                         domain,
-                        "reingestor",
+                        ModelKind::Reingestor,
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
@@ -12482,7 +12488,7 @@ impl Runtime {
             Err(error) => {
                 self.handle_internal_processor_error_for_acks(
                     domain,
-                    "reingestor",
+                    ModelKind::Reingestor,
                     reingestor,
                     error_policies,
                     pending_acks.iter(),
@@ -12500,7 +12506,7 @@ impl Runtime {
         let Some(branched_sender) = branched_senders.get(&output.relay) else {
             self.handle_internal_processor_error_for_acks(
                 domain,
-                "reingestor",
+                ModelKind::Reingestor,
                 reingestor,
                 error_policies,
                 forwarded.acks.iter(),
@@ -12521,7 +12527,7 @@ impl Runtime {
             }
             self.handle_internal_processor_error_for_acks(
                 domain,
-                "reingestor",
+                ModelKind::Reingestor,
                 reingestor,
                 error_policies,
                 batch.acks.iter(),
@@ -12592,7 +12598,7 @@ impl Runtime {
                 let Some(execution) = self.inner.executions.get(domain) else {
                     self.handle_internal_processor_error_for_acks(
                         domain,
-                        "reingestor",
+                        ModelKind::Reingestor,
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
@@ -12605,7 +12611,7 @@ impl Runtime {
                     None => {
                         self.handle_internal_processor_error_for_acks(
                             domain,
-                            "reingestor",
+                            ModelKind::Reingestor,
                             reingestor,
                             error_policies,
                             batch.acks.iter(),
@@ -12660,7 +12666,7 @@ impl Runtime {
                 Err(error) => {
                     self.handle_internal_processor_error_for_acks(
                         domain,
-                        "reingestor",
+                        ModelKind::Reingestor,
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
@@ -12694,7 +12700,7 @@ impl Runtime {
             Err(error) => {
                 self.handle_internal_processor_error_for_acks(
                     domain,
-                    "reingestor",
+                    ModelKind::Reingestor,
                     reingestor,
                     error_policies,
                     error.acks.iter(),
@@ -12705,7 +12711,7 @@ impl Runtime {
         };
         self.handle_planned_message_errors(
             domain,
-            "reingestor",
+            ModelKind::Reingestor,
             reingestor,
             error_policies,
             plan.message_errors,
@@ -12787,7 +12793,10 @@ impl Runtime {
         let task_materialized_state = reingestor.materialized_state.clone();
         let task_mode = reingestor.mode;
         let task_error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
-        let quiesce_counters = self.node_quiesce_counters(domain, &reingestor.name);
+        let quiesce_counters = self.node_quiesce_counters(
+            domain,
+            NodeRef::new(ModelKind::Reingestor, &reingestor.name),
+        );
         let runtime = self.clone();
         let shutdown_rx = shutdown_tx.subscribe();
         let force_flush = self.force_flush_participant(domain, quiesce_counters.clone());
@@ -12833,7 +12842,7 @@ impl Runtime {
                         );
                         runtime.handle_internal_processor_error_for_acks(
                             &task_domain,
-                            "reingestor",
+                            ModelKind::Reingestor,
                             &task_reingestor,
                             &task_error_policies,
                             error.acks(),
@@ -12975,7 +12984,7 @@ impl Runtime {
                             Err(error) => {
                                 runtime.handle_internal_processor_error_for_acks(
                                     &task_domain,
-                                    "reingestor",
+                                    ModelKind::Reingestor,
                                     &task_reingestor,
                                     &task_error_policies,
                                     dependency_error_acks.iter(),
@@ -13147,7 +13156,8 @@ impl Runtime {
         let domain = domain.clone();
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let quiesce_counters = self.node_quiesce_counters(&domain, &relay);
+        let quiesce_counters =
+            self.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay));
         let force_flush = self.force_flush_participant(&domain, quiesce_counters.clone());
         let task = tokio::spawn(async move {
             let interaction_input = RelayInteractionInput::new(relay.clone(), receiver, None);
@@ -13322,7 +13332,7 @@ impl Runtime {
             if self
                 .engage_ingestor_quiesce(
                     &key.domain,
-                    &IngestorName::from(&key.identifier),
+                    &IngestorName::from(key.identifier()),
                     IngestorQuiesceCause::MemoryPressure,
                 )
                 .is_some()
@@ -13343,12 +13353,7 @@ impl Runtime {
                     .then(|| entry.key().clone())
             })
             .collect::<Vec<_>>();
-        keys.sort_by(|left, right| {
-            left.domain
-                .as_str()
-                .cmp(right.domain.as_str())
-                .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
-        });
+        keys.sort();
         let Some(key) = keys.first() else {
             self.inner
                 .ingestors_paused_for_memory_pressure
@@ -13357,12 +13362,12 @@ impl Runtime {
         };
         self.release_ingestor_quiesce(
             &key.domain,
-            &IngestorName::from(&key.identifier),
+            &IngestorName::from(key.identifier()),
             IngestorQuiesceCause::MemoryPressure,
         );
         info!(
             domain = key.domain.as_str(),
-            ingestor = key.identifier.as_str(),
+            ingestor = key.identifier().as_str(),
             "resumed ingestor after memory pressure"
         );
         Ok(true)
@@ -13447,7 +13452,7 @@ impl Runtime {
                     continue;
                 }
 
-                let key = RuntimeKey::new(domain.clone(), node.identifier.clone());
+                let key = node.identity().in_domain(&domain);
                 if self.inner.ingestors.contains_key(&key) {
                     continue;
                 }
@@ -13505,7 +13510,7 @@ impl Runtime {
         };
         schedule
             .nodes
-            .get(&PlacementRuntimeNode::new(source_kind, source_ref))
+            .get(&NodeRef::new(source_kind, source_ref))
             .map(|node| (*node.config).clone())
     }
 
@@ -13755,12 +13760,12 @@ impl Runtime {
 
         for key in ingestors {
             if let Err(error) = self
-                .stop_ingestor(domain, &IngestorName::from(&key.identifier))
+                .stop_ingestor(domain, &IngestorName::from(key.identifier()))
                 .await
             {
                 warn!(
                     domain = domain.as_str(),
-                    ingestor = key.identifier.as_str(),
+                    ingestor = key.identifier().as_str(),
                     error = %error,
                     "failed to stop domain ingestor during schedule rebuild"
                 );
@@ -14056,7 +14061,7 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         let Some((_, runtime)) = self.inner.ingestors.remove(&key) else {
             return Err(RuntimeError::IngestorNotRunning {
                 domain: domain.as_str().to_string(),
@@ -14359,16 +14364,8 @@ impl Runtime {
         let model_index = execution
             .schedule
             .nodes
-            .values()
-            .map(|node| {
-                (
-                    RegistryEntity {
-                        kind: node.kind,
-                        identifier: node.identifier.clone(),
-                    },
-                    (*node.config).clone(),
-                )
-            })
+            .iter()
+            .map(|(node_ref, node)| (node_ref.clone(), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution

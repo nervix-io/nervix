@@ -89,7 +89,7 @@ struct MetricKey {
     domain: String,
     target_kind: String,
     target: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
     relay: String,
     peer_kind: String,
     peer: String,
@@ -109,8 +109,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: "RELAY".to_string(),
             target: relay.as_str().to_string(),
-            physical_node_id: physical_node_id
-                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id.cloned(),
             relay: relay.as_str().to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -132,8 +131,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id
-                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id.cloned(),
             relay: relay.as_str().to_string(),
             peer_kind: "RELAY".to_string(),
             peer: relay.as_str().to_string(),
@@ -154,8 +152,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id
-                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id.cloned(),
             relay: "-".to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -1195,7 +1192,7 @@ impl AsRef<str> for BranchEvictionReason {
 struct BranchInstanceMetricKey {
     domain: String,
     branch: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
     concrete_key: String,
 }
 
@@ -1226,7 +1223,7 @@ struct PrometheusMetrics {
 pub(crate) struct IngestorQuiesceMetricLabels {
     domain: String,
     ingestor: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
 }
 
 impl IngestorQuiesceMetricLabels {
@@ -1234,7 +1231,7 @@ impl IngestorQuiesceMetricLabels {
         [
             self.domain.as_str(),
             self.ingestor.as_str(),
-            self.physical_node_id.as_str(),
+            physical_node_label(self.physical_node_id.as_ref()),
         ]
     }
 }
@@ -1738,7 +1735,7 @@ struct MetricSnapshotKey {
     domain: String,
     target_kind: String,
     target: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
     relay: String,
     peer_kind: String,
     peer: String,
@@ -1835,8 +1832,7 @@ impl RuntimeMetrics {
         let labels = IngestorQuiesceMetricLabels {
             domain: domain.as_str().to_string(),
             ingestor: ingestor.as_str().to_string(),
-            physical_node_id: physical_node_id
-                .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
+            physical_node_id: physical_node_id.cloned(),
         };
         let values = labels.values();
         self.series
@@ -1913,11 +1909,11 @@ impl RuntimeMetrics {
         branch: &BranchName,
         physical_node_id: Option<&ClusterNodeName>,
     ) {
-        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
+        let physical_node = physical_node_label(physical_node_id);
         self.series.prometheus.branch_instances.with_label_values(&[
             domain.as_str(),
             branch.as_str(),
-            physical_node_id,
+            physical_node,
         ]);
         for reason in [BranchEvictionReason::Lru, BranchEvictionReason::Ttl] {
             self.series
@@ -1926,7 +1922,7 @@ impl RuntimeMetrics {
                 .with_label_values(&[
                     domain.as_str(),
                     branch.as_str(),
-                    physical_node_id,
+                    physical_node,
                     reason.as_ref(),
                 ]);
         }
@@ -1939,11 +1935,11 @@ impl RuntimeMetrics {
         physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
     ) {
-        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
+        let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
-            physical_node_id: physical_node_id.to_string(),
+            physical_node_id: physical_node_id.cloned(),
             concrete_key: concrete_key.to_string(),
         };
         match self.series.branch_instance_references.entry(metric_key) {
@@ -1963,7 +1959,7 @@ impl RuntimeMetrics {
                 self.series
                     .prometheus
                     .branch_instances
-                    .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                    .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
                     .inc();
             }
         }
@@ -1977,11 +1973,11 @@ impl RuntimeMetrics {
         concrete_key: &str,
         reason: BranchEvictionReason,
     ) {
-        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
+        let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
-            physical_node_id: physical_node_id.to_string(),
+            physical_node_id: physical_node_id.cloned(),
             concrete_key: concrete_key.to_string(),
         };
         let (removed_key, record_eviction) =
@@ -2005,7 +2001,7 @@ impl RuntimeMetrics {
             self.series
                 .prometheus
                 .branch_instances
-                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
                 .dec();
         }
         if record_eviction {
@@ -2015,7 +2011,7 @@ impl RuntimeMetrics {
                 .with_label_values(&[
                     domain.as_str(),
                     branch.as_str(),
-                    physical_node_id,
+                    physical_node,
                     reason.as_ref(),
                 ])
                 .inc();
@@ -2029,11 +2025,11 @@ impl RuntimeMetrics {
         physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
     ) {
-        let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
+        let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
-            physical_node_id: physical_node_id.to_string(),
+            physical_node_id: physical_node_id.cloned(),
             concrete_key: concrete_key.to_string(),
         };
         let removed_key = match self.series.branch_instance_references.entry(metric_key) {
@@ -2051,7 +2047,7 @@ impl RuntimeMetrics {
             self.series
                 .prometheus
                 .branch_instances
-                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
                 .dec();
         }
     }
@@ -3342,7 +3338,7 @@ fn key_matches_target(
     key.domain == domain.as_str()
         && key.target_kind == target_kind
         && key.target == target.as_str()
-        && key.physical_node_id == physical_node_id.as_str()
+        && key.physical_node_id.as_ref() == Some(physical_node_id)
 }
 
 fn metric_name_to_static(metric: &str) -> Option<&'static str> {
@@ -3569,7 +3565,7 @@ fn format_counter_metric_line(prefix: &str, key: &MetricKey, summary: &CounterSu
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
-        empty_as_dash(&key.physical_node_id),
+        physical_node_label(key.physical_node_id.as_ref()),
         summary.value,
         format_number(summary.wall_rate_per_sec),
         format_optional(summary.domain_rate_per_sec),
@@ -3668,7 +3664,7 @@ fn format_aggregated_counter_metric_line(
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
-        empty_as_dash(&key.physical_node_id),
+        physical_node_label(key.physical_node_id.as_ref()),
         summary.value,
         format_number(summary.wall_rate_per_sec),
         format_optional(summary.domain_rate_per_sec),
@@ -3695,7 +3691,7 @@ fn format_histogram_metric_line(
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
-        empty_as_dash(&key.physical_node_id),
+        physical_node_label(key.physical_node_id.as_ref()),
         capacity,
         format_histogram_optional(summary.rolling_histograms.wall_1m.p50),
         format_histogram_optional(summary.rolling_histograms.wall_1m.p90),
@@ -3753,7 +3749,7 @@ fn prometheus_label_values(key: &MetricKey) -> [&str; 8] {
         key.domain.as_str(),
         key.target_kind.as_str(),
         key.target.as_str(),
-        key.physical_node_id.as_str(),
+        physical_node_label(key.physical_node_id.as_ref()),
         key.direction.as_str(),
         empty_as_dash(&key.relay),
         empty_as_dash(&key.peer_kind),
@@ -3763,6 +3759,13 @@ fn prometheus_label_values(key: &MetricKey) -> [&str; 8] {
 
 fn empty_as_dash(value: &str) -> &str {
     if value.is_empty() { "-" } else { value }
+}
+
+/// How the owning cluster node is spelled as a label value. A metric observed on a node that owns
+/// nothing placed still carries the label, and it uses the same `-` absent marker as the other
+/// optional labels.
+fn physical_node_label(physical_node_id: Option<&ClusterNodeName>) -> &str {
+    physical_node_id.map_or("-", ClusterNodeName::as_str)
 }
 
 fn format_optional(value: Option<f64>) -> String {

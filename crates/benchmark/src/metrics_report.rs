@@ -5,6 +5,7 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
+use nervix_models::ClusterNodeName;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -18,6 +19,8 @@ const MESSAGES_PER_BATCH_BUCKET: &str = "nervix_messages_per_batch_bucket";
 const MESSAGES_PER_BATCH_COUNT: &str = "nervix_messages_per_batch_count";
 const RELAY_BUFFER_LEN_BUCKET: &str = "nervix_relay_buffer_len_bucket";
 const RELAY_BUFFER_LEN_COUNT: &str = "nervix_relay_buffer_len_count";
+/// How an absent optional label is spelled in the Prometheus exposition Nervix writes.
+const ABSENT_LABEL: &str = "-";
 const REQUIRED_LABELS: &[&str] = &[
     "domain",
     "target_kind",
@@ -40,7 +43,7 @@ pub struct BatchTargetMetrics {
     pub domain: String,
     pub target_kind: String,
     pub target: String,
-    pub physical_node_id: String,
+    pub physical_node_id: Option<ClusterNodeName>,
     pub direction: String,
     pub relay: String,
     pub messages_total: u64,
@@ -71,7 +74,7 @@ impl BatchTargetMetrics {
 pub struct RelayBufferMetrics {
     pub domain: String,
     pub relay: String,
-    pub physical_node_id: String,
+    pub physical_node_id: Option<ClusterNodeName>,
     pub direction: String,
     pub observations: u64,
     pub p50: f64,
@@ -165,7 +168,7 @@ struct SeriesKey {
     domain: String,
     target_kind: String,
     target: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
     direction: String,
     relay: String,
     peer_kind: String,
@@ -189,7 +192,19 @@ impl SeriesKey {
             domain: take(REQUIRED_LABELS[0])?,
             target_kind: take(REQUIRED_LABELS[1])?,
             target: take(REQUIRED_LABELS[2])?,
-            physical_node_id: take(REQUIRED_LABELS[3])?,
+            // Nervix writes `-` for a series it observed without a placed owner; any other
+            // value names a cluster node.
+            physical_node_id: match take(REQUIRED_LABELS[3])? {
+                node if node == ABSENT_LABEL => None,
+                node => Some(ClusterNodeName::parse(&node).map_err(|report| {
+                    MetricsReportError::InvalidPrometheusSample {
+                        line,
+                        reason: format!(
+                            "label 'physical_node_id' is not a cluster node name: {report}"
+                        ),
+                    }
+                })?),
+            },
             direction: take(REQUIRED_LABELS[4])?,
             relay: take(REQUIRED_LABELS[5])?,
             peer_kind: take(REQUIRED_LABELS[6])?,
@@ -210,7 +225,13 @@ impl SeriesKey {
     fn description(&self) -> String {
         format!(
             "{} '{}' direction '{}' relay '{}' on '{}'",
-            self.target_kind, self.target, self.direction, self.relay, self.physical_node_id
+            self.target_kind,
+            self.target,
+            self.direction,
+            self.relay,
+            self.physical_node_id
+                .as_ref()
+                .map_or(ABSENT_LABEL, ClusterNodeName::as_str)
         )
     }
 
