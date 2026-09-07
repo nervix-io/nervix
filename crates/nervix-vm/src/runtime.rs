@@ -5,6 +5,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt};
+use arch_into::ArchInto as _;
 use arrow_arith::{
     aggregate::sum as arrow_sum,
     boolean::{and_kleene, is_null, not, or_kleene},
@@ -2229,7 +2230,10 @@ impl<'a> ListColumn<'a> {
 fn execute_list_count(input: &TypedArray) -> Result<Int64Array, RuntimeError> {
     let list = ListColumn::from_typed(input)?;
     let lengths = (0..list.len())
-        .map(|row| i64::try_from(list.value_range(row).len()).unwrap_or(i64::MAX))
+        .map(|row| {
+            i64::try_from(list.value_range(row).len())
+                .assured("an Arrow list range cannot exceed the allocator's isize limit")
+        })
         .collect::<Vec<_>>();
     Ok(Int64Array::new(lengths.into(), list.nulls().cloned()))
 }
@@ -2387,7 +2391,7 @@ fn execute_list_item(
                 (index < range.len()).then_some(index)
             }
         }?;
-        u64::try_from(range.start + relative).ok()
+        Some((range.start + relative).arch_into())
     }));
     let output = take(
         list.values().as_ref(),
@@ -3097,7 +3101,8 @@ fn execute_repeat(input: &StringArray, count: &TypedArray) -> Result<StringArray
             continue;
         }
         let count = integral_value_at(count, row)?.unwrap_or(0);
-        let repeat = usize::try_from(count.max(0)).unwrap_or(usize::MAX);
+        let repeat = usize::try_from(count.max(0))
+            .assured("a non-negative i64 fits usize on every supported host architecture");
         builder.append_value(input.value(row).repeat(repeat));
     }
     Ok(builder.finish())
@@ -3132,7 +3137,8 @@ fn execute_pad(
             builder.append_null();
             continue;
         }
-        let target_len = integral_value_at(length, row)?.unwrap_or(0).max(0) as usize;
+        let target_len = usize::try_from(integral_value_at(length, row)?.unwrap_or(0).max(0))
+            .assured("a non-negative i64 fits usize on every supported host architecture");
         let source = input.value(row);
         let fill = fill.value(row);
         let source_len = source.chars().count();
@@ -3458,7 +3464,10 @@ fn execute_split_part(
         }
         let value = string
             .split(delimiter)
-            .nth((index - 1) as usize)
+            .nth(
+                usize::try_from(index - 1)
+                    .assured("the index was checked to be a positive i64 above"),
+            )
             .unwrap_or("");
         builder.append_value(value);
     }
@@ -3473,7 +3482,9 @@ fn execute_strpos(input: &StringArray, needle: &StringArray) -> Int64Array {
             continue;
         }
         let value = if let Some(byte_idx) = input.value(row).find(needle.value(row)) {
-            (input.value(row)[..byte_idx].chars().count() as i64) + 1
+            i64::try_from(input.value(row)[..byte_idx].chars().count())
+                .assured("a string's character count cannot exceed its isize-bounded byte length")
+                + 1
         } else {
             0
         };
@@ -3507,7 +3518,10 @@ fn execute_substr(
             .checked_sub(1)
             .and_then(|offset| usize::try_from(offset).ok())
             .unwrap_or(0);
-        let length = length.map(|value| usize::try_from(value.max(0)).unwrap_or(usize::MAX));
+        let length = length.map(|value| {
+            usize::try_from(value.max(0))
+                .assured("a non-negative i64 fits usize on every supported host architecture")
+        });
         builder.append_value(string_substr(input.value(row), begin, length));
     }
     Ok(builder.finish())
@@ -3703,9 +3717,12 @@ fn string_substr(value: &str, start: usize, length: Option<usize>) -> &str {
 
 fn string_left(value: &str, count: i64) -> &str {
     if count >= 0 {
-        string_prefix(value, usize::try_from(count).unwrap_or(usize::MAX))
+        string_prefix(
+            value,
+            usize::try_from(count).assured("count is a non-negative i64 on this branch"),
+        )
     } else {
-        let remove = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
+        let remove = count.unsigned_abs().arch_into();
         if remove == 0 {
             return value;
         }
@@ -3720,7 +3737,7 @@ fn string_left(value: &str, count: i64) -> &str {
 
 fn string_right(value: &str, count: i64) -> &str {
     if count >= 0 {
-        let keep = usize::try_from(count).unwrap_or(usize::MAX);
+        let keep = usize::try_from(count).assured("count is a non-negative i64 on this branch");
         if keep == 0 {
             return &value[value.len()..];
         }
@@ -3731,7 +3748,7 @@ fn string_right(value: &str, count: i64) -> &str {
             .map_or(0, |(index, _)| index);
         &value[start..]
     } else {
-        let skip = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
+        let skip = count.unsigned_abs().arch_into();
         let start = value
             .char_indices()
             .nth(skip)

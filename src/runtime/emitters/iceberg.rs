@@ -357,9 +357,9 @@ impl IcebergEmitter {
     ) -> usize {
         let records = pending_rows
             .checked_add(staged_rows)
-            .and_then(|rows| rows.checked_add(u64::try_from(rejected_records).unwrap_or(u64::MAX)))
+            .and_then(|rows| rows.checked_add(rejected_records.arch_into()))
             .assured("every count totals rows this emitter already holds in memory");
-        usize::try_from(records).unwrap_or(usize::MAX)
+        records.arch_into()
     }
 
     fn update_buffered_messages(&self) {
@@ -823,9 +823,7 @@ impl IcebergEmitter {
                 )),
             );
         }
-        let accepted_rows = u64::try_from(actual_accepted_rows).map_err(|error| {
-            Report::new(IcebergEmitterError::MapBatch).attach_printable(error.to_string())
-        })?;
+        let accepted_rows = actual_accepted_rows.arch_into();
         /// The staged file this flush wrote, if any rows survived validation.
         struct StagedFlush {
             path: Option<PathBuf>,
@@ -864,7 +862,7 @@ impl IcebergEmitter {
             .into_iter()
             .flat_map(|batch| batch.acks)
             .collect::<Vec<_>>();
-        let mut accepted_acks = Vec::with_capacity(usize::try_from(accepted_rows).unwrap_or(0));
+        let mut accepted_acks = Vec::with_capacity(accepted_rows.arch_into());
         for (row, (sidecars, acks)) in metadata.into_iter().zip(keys).zip(acks).enumerate() {
             let (metadata, key) = sidecars;
             if let Some(error) = rejected_errors[row].take() {

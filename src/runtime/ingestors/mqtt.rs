@@ -183,7 +183,7 @@ impl MqttIngestor {
             );
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks = Vec::with_capacity(instances.arch_into());
         let subscribe_filter = Self::subscribe_filter(&topic, domain, &ingestor.name);
         let settings = MqttClientSettings {
             session: mode.session(),
@@ -477,7 +477,7 @@ impl MqttIngestor {
                                         "this branch runs only for the parallel ACK mode, which \
                                          parses a batch timeout above",
                                     );
-                                while batch.len() < (*max as usize).max(1) {
+                                while batch.len() < (*max).arch_into().max(1) {
                                     tokio::task::consume_budget().await;
                                     tokio::select! {
                                         _ = sleep_until(deadline) => break,

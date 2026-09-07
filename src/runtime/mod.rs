@@ -10,6 +10,7 @@ use std::{
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use arc_swap::{ArcSwap, ArcSwapOption};
+use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
     UInt64Array,
@@ -909,7 +910,7 @@ impl IngestorQuiesceControl {
         self.buffered_records.store(0, Ordering::Relaxed);
         self.buffered_bytes.store(0, Ordering::Relaxed);
         self.sync_buffered_metrics();
-        self.record_dropped(u64::try_from(dropped).unwrap_or(u64::MAX));
+        self.record_dropped(dropped.arch_into());
     }
 }
 
@@ -917,7 +918,7 @@ fn quiesce_max_size_bytes(value: &str) -> usize {
     let Ok(size) = value.parse::<ubyte::ByteUnit>() else {
         return 0;
     };
-    usize::try_from(size.as_u64()).unwrap_or(0)
+    size.as_u64().arch_into()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1023,7 +1024,7 @@ fn kafka_domain_offset_describe_from_schedule(
     schedule: &KafkaPartitionSchedule,
 ) -> KafkaDomainOffsetDescribe {
     let mut instance_assignments = schedule.instance_assignments.clone();
-    let expected_instances = usize::try_from(instances).unwrap_or_default();
+    let expected_instances = instances.arch_into();
     if instance_assignments.len() < expected_instances {
         instance_assignments.resize(expected_instances, Vec::new());
     }
@@ -2665,9 +2666,7 @@ impl IngestFilterMapMetadata {
                         array.len()
                     ));
                 }
-                u64::try_from(*row).map_err(|_| {
-                    format!("ingest metadata row {row} cannot be represented as an Arrow index")
-                })
+                Ok::<u64, String>((*row).arch_into())
             })
             .collect::<Result<UInt64Array, _>>()?;
         take_arrow_array(array.as_ref(), &indices, None).map_err(|error| error.to_string())
@@ -3269,7 +3268,8 @@ impl IngestorReadiness {
     }
 
     fn is_ready(&self) -> bool {
-        self.expected_instances > 0 && self.ready_instances.len() as u64 >= self.expected_instances
+        let ready_instances: u64 = self.ready_instances.len().arch_into();
+        self.expected_instances > 0 && ready_instances >= self.expected_instances
     }
 }
 
@@ -3705,20 +3705,7 @@ impl RelayRetention {
         let branch_capacity = branch_model
             .eviction
             .as_ref()
-            .map(|eviction| {
-                usize::try_from(eviction.max_instances()).map_err(|_| {
-                    RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "branch '{}' max instances {} does not fit usize for relay '{}'",
-                            branch.as_str(),
-                            eviction.max_instances(),
-                            relay.as_str()
-                        ),
-                    }
-                })
-            })
-            .transpose()?;
+            .map(|eviction| eviction.max_instances().arch_into());
         Ok(Self {
             branch_ttl: Some(branch_ttl),
             branch_capacity,
@@ -8541,10 +8528,10 @@ impl IngestorRouteTask {
                     let Ok(bytes) = column.to_data().get_slice_memory_size() else {
                         return u64::MAX;
                     };
-                    u64::try_from(bytes).unwrap_or(u64::MAX)
+                    bytes.arch_into()
                 })
                 .fold(0_u64, u64::saturating_add)
-                .checked_div(u64::try_from(row_count).unwrap_or(u64::MAX))
+                .checked_div(row_count.arch_into())
                 .unwrap_or_default();
             for (key, row) in &branch_plan.valid_rows {
                 let Some(metadata) = input_batch.metadata.get(*row) else {
@@ -16624,7 +16611,9 @@ impl WindowAggregateAccumulator {
     ) -> Result<RuntimeValue, String> {
         match (function, self) {
             (WindowAggregateFunction::Count, Self::Counter { count }) => {
-                Ok(RuntimeValue::I64(*count as i64))
+                Ok(RuntimeValue::I64(i64::try_from(*count).assured(
+                    "a window counter cannot exceed the allocation limit of its retained entries",
+                )))
             }
             (WindowAggregateFunction::First, Self::Sequence { values }) => values
                 .iter()
@@ -19502,15 +19491,7 @@ impl WasmOutputValidator<'_> {
                 WasmOutputColumnRef::Generated { column_index } => {
                     let generated_column_count =
                         generated_batch.map_or(0, RecordBatch::num_columns);
-                    let generated_index = usize::try_from(column_index).map_err(|_| {
-                        WasmOutputError::GeneratedColumnOutOfRange {
-                            output_relay: output_relay.clone(),
-                            field_index,
-                            field_name: destination_field.name().to_string(),
-                            column_index,
-                            generated_column_count,
-                        }
-                    })?;
+                    let generated_index = column_index.arch_into();
                     let Some(generated_batch) = generated_batch else {
                         return Err(WasmOutputError::GeneratedColumnOutOfRange {
                             output_relay: output_relay.clone(),
@@ -19607,7 +19588,7 @@ impl WasmOutputValidator<'_> {
                 .map_err(|error| invalid(error.to_string()))?;
             (actual_schema, batches)
         };
-        let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+        let consumed = cursor.position().arch_into();
         if consumed != ipc.len() {
             return Err(invalid(format!(
                 "IPC stream has {} trailing bytes",
@@ -19683,13 +19664,7 @@ impl WasmOutputValidator<'_> {
         column_index: u32,
         rows: &[WasmOutputRow],
     ) -> Result<ArrayRef, WasmOutputError> {
-        let input_index =
-            usize::try_from(column_index).map_err(|_| WasmOutputError::InputColumnOutOfRange {
-                output_relay: output_relay.to_string(),
-                field_index,
-                column_index,
-                input_column_count: self.input_schema.arrow_schema().fields().len(),
-            })?;
+        let input_index = column_index.arch_into();
         let input_schema = self.input_schema.arrow_schema();
         let Some(source_field) = input_schema.fields().get(input_index) else {
             return Err(WasmOutputError::InputColumnOutOfRange {
@@ -19755,9 +19730,7 @@ impl WasmOutputValidator<'_> {
                 return Ok(array.slice(start, sources.len()));
             }
             let indices = UInt64Array::from_iter_values(
-                sources
-                    .iter()
-                    .map(|source| u64::try_from(source.input_row).unwrap_or(u64::MAX)),
+                sources.iter().map(|source| source.input_row.arch_into()),
             );
             return take_arrow_array(array.as_ref(), &indices, None).map_err(|error| {
                 WasmOutputError::OutputBatchBuild {

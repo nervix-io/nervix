@@ -4943,10 +4943,11 @@ impl Runtime {
             .collect();
         let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         let estimated_bytes = rows.batch.estimated_bytes();
-        let row_count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let row_count: u64 = rows.len().arch_into();
         let bytes_per_row = estimated_bytes.checked_div(row_count).unwrap_or_default();
         let extra_bytes = estimated_bytes.checked_rem(row_count).unwrap_or_default();
         for (row, event_timestamp) in event_timestamps.iter().enumerate() {
+            let row: u64 = row.arch_into();
             self.inner
                 .metrics
                 .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
@@ -4956,9 +4957,7 @@ impl Runtime {
                     physical_node_id: physical_node_id.as_ref(),
                     messages: 1,
                     bytes: bytes_per_row
-                        .checked_add(u64::from(
-                            u64::try_from(row).unwrap_or(u64::MAX) < extra_bytes,
-                        ))
+                        .checked_add(u64::from(row < extra_bytes))
                         .assured("a per-row byte share plus one remainder byte fits in u64"),
                     domain_timestamp: Some(*event_timestamp),
                 });
@@ -10215,7 +10214,7 @@ impl Runtime {
                 node: &ModelName::from(name),
                 physical_node_id: self.inner.remote_dispatch.local_node_id.read().as_ref(),
                 messages: 1,
-                bytes: u64::try_from(key.len()).unwrap_or(u64::MAX),
+                bytes: key.len().arch_into(),
                 domain_timestamp: Some(current_timestamp()),
             });
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Lookup, name);

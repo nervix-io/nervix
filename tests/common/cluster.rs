@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use arch_into::ArchInto as _;
 use async_nats::Client as NatsClient;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
@@ -21,6 +22,7 @@ use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
+use meticulous::ResultExt as _;
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
 use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
@@ -3228,7 +3230,7 @@ async fn rabbitmq_queue_consumer_count(
         )
         .await
         .map_err(io::Error::other)?;
-    Ok(declared.consumer_count() as usize)
+    Ok(declared.consumer_count().arch_into())
 }
 
 async fn publish_redis(
@@ -3657,7 +3659,8 @@ async fn ensure_kafka_topic_partitions(
     }
 
     let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
-    let expected = usize::try_from(partitions).expect("partition count must fit usize");
+    let expected = usize::try_from(partitions)
+        .verified("the partition count was checked to be positive above");
     if current > expected {
         return Err(io::Error::other(format!(
             "kafka topic '{topic}' already has {current} partitions, cannot shrink to {expected}"

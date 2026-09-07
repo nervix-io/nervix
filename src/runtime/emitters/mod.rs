@@ -365,13 +365,7 @@ impl EmitterPublishingSettings {
         }
         let max_in_flight = match window {
             EmitterAckWindow::Sequential => 1,
-            EmitterAckWindow::Parallel { max } => usize::try_from(*max).map_err(|_| {
-                Self::invalid_setting(
-                    domain,
-                    emitter,
-                    "parallel acknowledgment window exceeds this node's capacity",
-                )
-            })?,
+            EmitterAckWindow::Parallel { max } => (*max).arch_into(),
         };
         if max_in_flight == 0 {
             return Err(Self::invalid_setting(
@@ -484,10 +478,9 @@ impl EmitterPublishBatch {
                     .flatten()
                     .flatten()
                     .map(|(name, value)| {
-                        u64::try_from(name.len())
-                            .unwrap_or(u64::MAX)
-                            .checked_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
-                            .assured(BYTES_IN_MEMORY)
+                        let name_len: u64 = name.len().arch_into();
+                        let value_len: u64 = value.len().arch_into();
+                        name_len.checked_add(value_len).assured(BYTES_IN_MEMORY)
                     })
                     .try_fold(0_u64, u64::checked_add)
                     .assured(BYTES_IN_MEMORY),
@@ -497,9 +490,7 @@ impl EmitterPublishBatch {
                 self.sqs_message_groups
                     .iter()
                     .map(|group| match group {
-                        Ok(Some(group)) | Err(group) => {
-                            u64::try_from(group.len()).unwrap_or(u64::MAX)
-                        }
+                        Ok(Some(group)) | Err(group) => group.len().arch_into(),
                         Ok(None) => 0,
                     })
                     .try_fold(0_u64, u64::checked_add)
@@ -576,9 +567,7 @@ impl EmitterPublishBatch {
     }
 
     fn pending_record_chunks(&self, max_batch: u64) -> EmitterRuntimeResult<Vec<Vec<usize>>> {
-        let max_batch = usize::try_from(max_batch).map_err(|_| {
-            emitter_config_error("emitter maximum record batch exceeds this node's capacity")
-        })?;
+        let max_batch = max_batch.arch_into();
         if max_batch == 0 {
             return Err(emitter_config_error(
                 "emitter maximum record batch must be at least one",
@@ -901,7 +890,7 @@ impl EmitterBatchBuffer {
 
     fn update_buffered_messages(&self) {
         self.buffered_messages
-            .set_generic(usize::try_from(self.pending_messages).unwrap_or(usize::MAX));
+            .set_generic(self.pending_messages.arch_into());
     }
 
     fn reconfigure(
@@ -1203,10 +1192,7 @@ fn compile_sql_values_program(
         if site.operation != MessageErrorOperation::Values {
             continue;
         }
-        let Some(index) = site
-            .operation_index
-            .and_then(|index| usize::try_from(index).ok())
-        else {
+        let Some(index) = site.operation_index.map(|index| index.arch_into()) else {
             continue;
         };
         let Some(mapping) = values.get(index) else {
@@ -4860,9 +4846,10 @@ mod tests {
         let with_headers = EmitterPublishBatch::new(batch.clone(), Some(headers.clone()))
             .expect("row-aligned headers must build");
         assert_eq!(with_headers.headers.as_ref(), Some(&headers));
+        let header_bytes: u64 = "routefast".len().arch_into();
         assert_eq!(
             with_headers.estimated_bytes(),
-            batch.estimated_bytes() + u64::try_from("routefast".len()).unwrap()
+            batch.estimated_bytes() + header_bytes
         );
 
         let error = match EmitterPublishBatch::new(batch, Some(Vec::new())) {

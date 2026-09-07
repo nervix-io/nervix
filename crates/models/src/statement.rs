@@ -4,7 +4,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -2814,7 +2814,10 @@ impl InferencerTensorSchema {
         self.dimensions
             .iter()
             .filter_map(|dimension| match dimension {
-                InferencerTensorDimension::Fixed(size) => Some(*size as usize),
+                InferencerTensorDimension::Fixed(size) => Some(
+                    usize::try_from(*size)
+                        .assured("u32 fits usize on every architecture supported by the models"),
+                ),
                 InferencerTensorDimension::Dynamic | InferencerTensorDimension::Batch => None,
             })
             .try_fold(1_usize, usize::checked_mul)
