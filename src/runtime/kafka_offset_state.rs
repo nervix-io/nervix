@@ -17,6 +17,8 @@ use tokio::sync::Notify;
 
 #[cfg(test)]
 use super::KafkaDomainOffsetDescribe;
+#[cfg(test)]
+use super::observability::kafka_domain_offset_describe_from_schedule;
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
     StateReplicationRoles, lsm_sequence::LsmSequence,
@@ -240,7 +242,7 @@ impl ReplicatedKafkaOffsetState {
     #[cfg(test)]
     pub(super) fn describe_topic(&self, topic: &str) -> Option<KafkaDomainOffsetDescribe> {
         let schedule = self.schedules.lock().get(topic).cloned()?;
-        Some(super::kafka_domain_offset_describe_from_schedule(
+        Some(kafka_domain_offset_describe_from_schedule(
             topic,
             schedule.instances,
             &KafkaPartitionSchedule::new(
