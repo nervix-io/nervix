@@ -61,7 +61,7 @@ use nervix_consensus::{
     TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
     VoteRequest as RaftVoteRequest,
 };
-use nervix_dataflow_graph::{DataflowGraph, DataflowNodeStatus};
+use nervix_dataflow_graph::{DataflowGraph, DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
     ControlEnvelope, DataflowNodeStatusEnvelope,
     DataflowNodeStatusRequest as RemoteDataflowNodeStatusRequest,
@@ -3067,6 +3067,93 @@ struct KafkaPartitionWatcherKey {
     ingestor: IngestorName,
 }
 
+/// One relay whose subscription interest this node advertises to the cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SubscriptionInterestKey {
+    domain: DomainName,
+    relay: RelayName,
+}
+
+/// One statement of a model-mutation batch that reached the registry: which statement it was,
+/// the model it changed, and the message its own result reports.
+struct AppliedModelMutation {
+    index: usize,
+    model: ModelName,
+    message: String,
+}
+
+/// The last replicated clock state a domain was reconciled against, so a repeated state that
+/// changes neither the start version nor whether the domain runs is not reconciled again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DomainClockReconciliation {
+    start_version: u64,
+    running: bool,
+}
+
+/// A paced domain's clock as one committed transaction starts it: where its logical time begins,
+/// how fast it advances, and the start version that clock belongs to.
+struct StartedDomainClock {
+    domain_id: DomainName,
+    wall_started_at: Timestamp,
+    logical_start: Timestamp,
+    time_rate: String,
+    start_version: u64,
+}
+
+/// A domain schedule computed from a candidate graph, with how many runtime nodes it moves off
+/// the node that owns them today.
+struct PreparedDomainSchedule {
+    schedule: Option<nervix_models::DomainSchedule>,
+    relocations: usize,
+}
+
+/// The schedule change one model mutation makes: what the domain is scheduled as now, what it
+/// would be scheduled as, and how many runtime nodes that move relocates.
+#[derive(Default)]
+struct ScheduleTransition {
+    expected_schedule: Option<nervix_models::DomainSchedule>,
+    prepared_schedule: Option<nervix_models::DomainSchedule>,
+    planned_relocations: usize,
+}
+
+/// The hash map a lookup query reaches, as the cluster schedule describes it: the lookup model,
+/// the scheduled node that owns it, and the declared type of its key field.
+struct LookupTarget {
+    lookup: CreateLookup,
+    node: ScheduledNode,
+    key_ty: ParseAsType,
+}
+
+/// The relay a subscription attaches to, as the cluster schedule describes it: the relay model,
+/// the schema its records carry, and the branch key fields a subscription may bind.
+struct SubscriptionTarget {
+    relay: nervix_models::CreateRelay,
+    schema: nervix_models::CreateSchema,
+    branching: Vec<FieldName>,
+}
+
+/// A running background task and the token that stops it.
+struct BackgroundTask {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl BackgroundTask {
+    /// Stops the task and waits for it to finish, so the caller never drops a task that is still
+    /// touching the state it is about to replace.
+    async fn stop(self) {
+        self.cancel.cancel();
+        let _ = self.handle.await;
+    }
+}
+
+/// One Kafka partition watcher the leader runs: the ingestor it watches for, and the task doing
+/// the watching.
+struct KafkaPartitionWatcherTask {
+    spec: KafkaPartitionWatcherSpec,
+    task: BackgroundTask,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KafkaPartitionWatcherSpec {
     domain: DomainName,
@@ -3134,10 +3221,10 @@ struct SessionServiceImpl {
     scheduler_mode: SchedulerMode,
     shutdown: CancellationToken,
     events: broadcast::Sender<ServerEvent>,
-    subscription_interest_counts: Arc<DashMap<(DomainName, RelayName), usize, RandomState>>,
+    subscription_interest_counts: Arc<DashMap<SubscriptionInterestKey, usize, RandomState>>,
     interconnect: Arc<Transport>,
     domain_clocks: Arc<DashMap<DomainName, DomainClockRuntimeState, RandomState>>,
-    domain_clock_reconciliations: Arc<DashMap<DomainName, (u64, bool), RandomState>>,
+    domain_clock_reconciliations: Arc<DashMap<DomainName, DomainClockReconciliation, RandomState>>,
     domain_clock_events: Arc<Notify>,
     next_cluster_command_correlation_id: Arc<AtomicU64>,
     pending_cluster_commands: PendingClusterCommands,
@@ -4785,7 +4872,10 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<(), String> {
-        let key = (domain.clone(), relay.clone());
+        let key = SubscriptionInterestKey {
+            domain: domain.clone(),
+            relay: relay.clone(),
+        };
         let first_interest = {
             let mut entry = self.subscription_interest_counts.entry(key).or_insert(0);
             *entry += 1;
@@ -4916,7 +5006,10 @@ impl SessionServiceImpl {
     }
 
     async fn unregister_subscription_interest(&self, domain: &DomainName, relay: &RelayName) {
-        let key = (domain.clone(), relay.clone());
+        let key = SubscriptionInterestKey {
+            domain: domain.clone(),
+            relay: relay.clone(),
+        };
         let mut should_clear = false;
         if let Some(mut entry) = self.subscription_interest_counts.get_mut(&key) {
             if *entry <= 1 {
@@ -5045,7 +5138,10 @@ impl SessionServiceImpl {
                 continue;
             }
             let running = !matches!(domain.status, DomainStatus::Stopped);
-            let observed = (domain.start_version, running);
+            let observed = DomainClockReconciliation {
+                start_version: domain.start_version,
+                running,
+            };
             if self
                 .domain_clock_reconciliations
                 .get(&domain_id)
@@ -5171,7 +5267,11 @@ impl SessionServiceImpl {
     }
 
     async fn describe_stream(&self, domain: &DomainName, describe: DescribeRelay) -> CommandResult {
-        let (ack_model, schema, branching) = match self
+        let SubscriptionTarget {
+            relay: ack_model,
+            schema,
+            branching,
+        } = match self
             .subscription_target_from_schedule(domain, &describe.relay)
             .await
         {
@@ -5430,7 +5530,11 @@ impl SessionServiceImpl {
     ) -> Result<bool, String> {
         self.prepare_stream_owner_control_request(&request.domain, &request.relay)
             .await?;
-        let Some((ack_model, schema, branching)) = self
+        let Some(SubscriptionTarget {
+            relay: ack_model,
+            schema,
+            branching,
+        }) = self
             .subscription_target_from_schedule(&request.domain, &request.relay)
             .await?
         else {
@@ -5832,7 +5936,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         kind: &str,
         identifier: &ModelName,
-    ) -> (DataflowNodeStatus, Option<String>, Option<u64>) {
+    ) -> DataflowNodeHealth {
         dataflow_node_status_from_envelope(
             self.dataflow_node_status_envelope_for_graph(domain, kind, identifier)
                 .await,
@@ -5903,18 +6007,20 @@ impl SessionServiceImpl {
         identifier: impl Into<ModelName>,
     ) -> DataflowNodeStatusEnvelope {
         let identifier = identifier.into();
-        let (status, detail, reconnect_wait_millis) =
-            self.runtime
-                .dataflow_node_status(domain, kind, identifier.clone());
-        let (transient_error, reconnect_backoff, transient_wait_millis) = self
+        let health = self
+            .runtime
+            .dataflow_node_status(domain, kind, identifier.clone());
+        let transient = self
             .runtime
             .dataflow_node_transient_state(domain, kind, identifier);
         dataflow_node_status_to_envelope(
-            status,
-            detail,
-            transient_error,
-            reconnect_backoff,
-            reconnect_wait_millis.or(transient_wait_millis),
+            health.status,
+            health.detail,
+            transient.error,
+            transient.reconnect_backoff,
+            health
+                .reconnect_wait_millis
+                .or(transient.reconnect_wait_millis),
         )
     }
 
@@ -5924,20 +6030,24 @@ impl SessionServiceImpl {
     ) -> Result<DataflowNodeStatusEnvelope, String> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
-        let (status, detail, reconnect_wait_millis) = self.runtime.dataflow_node_status(
+        let health = self.runtime.dataflow_node_status(
             &request.domain,
             request.kind.as_str(),
             &request.name,
         );
-        let (transient_error, reconnect_backoff, transient_wait_millis) = self
-            .runtime
-            .dataflow_node_transient_state(&request.domain, request.kind.as_str(), &request.name);
+        let transient = self.runtime.dataflow_node_transient_state(
+            &request.domain,
+            request.kind.as_str(),
+            &request.name,
+        );
         Ok(dataflow_node_status_to_envelope(
-            status,
-            detail,
-            transient_error,
-            reconnect_backoff,
-            reconnect_wait_millis.or(transient_wait_millis),
+            health.status,
+            health.detail,
+            transient.error,
+            transient.reconnect_backoff,
+            health
+                .reconnect_wait_millis
+                .or(transient.reconnect_wait_millis),
         ))
     }
 
@@ -6923,7 +7033,12 @@ impl SessionServiceImpl {
             Ok(target) => target,
             Err(message) => return command_error(message),
         };
-        let Some((lookup, lookup_node, _)) = lookup_target else {
+        let Some(LookupTarget {
+            lookup,
+            node: lookup_node,
+            ..
+        }) = lookup_target
+        else {
             return command_error(format!(
                 "hash map '{}' does not exist in domain '{}'",
                 describe.name.as_str(),
@@ -6934,13 +7049,13 @@ impl SessionServiceImpl {
         let local_node_id = self.consensus.local_node_id();
         let summary = if lookup_node.executes_on(local_node_id) {
             match self.runtime.describe_local_lookup(domain, &describe.name) {
-                Ok((_, resource_version, entry_count)) => Ok(LookupDescribeEnvelope {
+                Ok(description) => Ok(LookupDescribeEnvelope {
                     resource: lookup.resource.clone(),
-                    resource_version,
+                    resource_version: description.resource_version,
                     path: lookup.path.clone(),
                     decode_using_codec: lookup.decode_using_codec.clone(),
                     key_field: lookup.key_field.clone(),
-                    entry_count: entry_count as u64,
+                    entry_count: description.entry_count as u64,
                 }),
                 Err(message) => Err(message),
             }
@@ -7011,16 +7126,16 @@ impl SessionServiceImpl {
     ) -> Result<LookupDescribeEnvelope, String> {
         self.prepare_owner_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
-        let (lookup, resource_version, entry_count) = self
+        let description = self
             .runtime
             .describe_local_lookup(&request.domain, &request.name)?;
         Ok(LookupDescribeEnvelope {
-            resource: lookup.resource,
-            resource_version,
-            path: lookup.path,
-            decode_using_codec: lookup.decode_using_codec,
-            key_field: lookup.key_field,
-            entry_count: entry_count as u64,
+            resource: description.model.resource,
+            resource_version: description.resource_version,
+            path: description.model.path,
+            decode_using_codec: description.model.decode_using_codec,
+            key_field: description.model.key_field,
+            entry_count: description.entry_count as u64,
         })
     }
 
@@ -7643,7 +7758,12 @@ impl SessionServiceImpl {
             Ok(target) => target,
             Err(message) => return command_error(message),
         };
-        let Some((lookup, lookup_node, key_ty)) = lookup_target else {
+        let Some(LookupTarget {
+            lookup,
+            node: lookup_node,
+            key_ty,
+        }) = lookup_target
+        else {
             return command_error(format!(
                 "hash map '{}' does not exist in domain '{}'",
                 query.name.as_str(),
@@ -7850,7 +7970,11 @@ impl SessionServiceImpl {
             .queued_configuration(subscriptions, domain.as_ref())
             .await;
 
-        let (grammar_input, grammar_cursor, prefix) = completion_context(&req.input, cursor);
+        let CompletionContext {
+            grammar_input,
+            grammar_cursor,
+            prefix,
+        } = completion_context(&req.input, cursor);
         let grammar = suggest_client_statement(&grammar_input, grammar_cursor);
 
         let mut suggestions = Vec::new();
@@ -8360,8 +8484,8 @@ impl SessionServiceImpl {
         let mut resource_names = resources
             .next_version_by_resource
             .iter()
-            .filter(|(domain, _, _)| domain == &transaction.domain)
-            .map(|(_, identifier, _)| identifier.clone())
+            .filter(|counter| counter.domain == transaction.domain)
+            .map(|counter| counter.identifier.clone())
             .collect::<BTreeSet<_>>();
         let domain_id = &transaction.domain;
         let mut model_mutations = Vec::<RegistryMutation>::new();
@@ -8950,7 +9074,10 @@ impl SessionServiceImpl {
                         .await
                         .domain(domain_id)
                         .cloned();
-                    let (schedule, relocations) = self
+                    let PreparedDomainSchedule {
+                        schedule,
+                        relocations,
+                    } = self
                         .prepare_domain_schedule(domain_id, graph, alter.policy)
                         .await?;
                     let quiesce_level =
@@ -9080,13 +9207,13 @@ impl SessionServiceImpl {
                                 DomainStartPoint::At { .. } => start.start.clone(),
                             };
                             if let DomainPace::Paced = domain.config.pace {
-                                start_clock = Some((
-                                    domain_id.clone(),
+                                start_clock = Some(StartedDomainClock {
+                                    domain_id: domain_id.clone(),
                                     wall_started_at,
                                     logical_start,
-                                    time_rate.clone(),
-                                    domain.start_version.saturating_add(1),
-                                ));
+                                    time_rate: time_rate.clone(),
+                                    start_version: domain.start_version.saturating_add(1),
+                                });
                             }
                             (
                                 command_ok(format!("starting domain '{}'", domain_id.as_str())),
@@ -9191,8 +9318,13 @@ impl SessionServiceImpl {
                         .await;
                 }
             }
-            if let Some((domain_id, wall_started_at, logical_start, time_rate, start_version)) =
-                start_clock
+            if let Some(StartedDomainClock {
+                domain_id,
+                wall_started_at,
+                logical_start,
+                time_rate,
+                start_version,
+            }) = start_clock
             {
                 self.runtime.handle_domain_clock_start(
                     &domain_id,
@@ -9211,16 +9343,26 @@ impl SessionServiceImpl {
                 {
                     self.broadcast_error(error);
                 } else {
-                    self.domain_clock_reconciliations
-                        .insert(domain_id, (start_version, true));
+                    self.domain_clock_reconciliations.insert(
+                        domain_id,
+                        DomainClockReconciliation {
+                            start_version,
+                            running: true,
+                        },
+                    );
                 }
             }
             if let Some((domain_id, start_version)) = stop_clock {
                 if let Err(error) = self.stop_domain_clock(&domain_id).await {
                     self.broadcast_error(error);
                 } else {
-                    self.domain_clock_reconciliations
-                        .insert(domain_id.clone(), (start_version, false));
+                    self.domain_clock_reconciliations.insert(
+                        domain_id.clone(),
+                        DomainClockReconciliation {
+                            start_version,
+                            running: false,
+                        },
+                    );
                 }
                 self.runtime.handle_domain_clock_stop(&domain_id);
             }
@@ -9446,7 +9588,7 @@ impl SessionServiceImpl {
 
         let mut results = vec![None; statements.len()];
         let mut mutations = Vec::new();
-        let mut applied = Vec::new();
+        let mut applied = Vec::<AppliedModelMutation>::new();
         let mut refresh_http_tls = false;
 
         for (index, statement) in statements.into_iter().enumerate() {
@@ -9468,190 +9610,194 @@ impl SessionServiceImpl {
                     }
 
                     refresh_http_tls |= model_kind == ModelKind::Vhost;
-                    applied.push((index, model_id.clone(), String::new()));
+                    applied.push(AppliedModelMutation {
+                        index,
+                        model: model_id.clone(),
+                        message: String::new(),
+                    });
                     mutations.push(RegistryMutation::Create(model));
                 }
                 Statement::AlterSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterSchema(alter));
                 }
                 Statement::AlterWireJsonSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered JSON wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterWireJsonSchema(alter));
                 }
                 Statement::AlterWireCborSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered CBOR wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterWireCborSchema(alter));
                 }
                 Statement::AlterWireAvroSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered AVRO wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterWireAvroSchema(alter));
                 }
                 Statement::AlterRelay(alter) => {
                     let model_id = alter.relay.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered relay '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
                 Statement::AlterJunction(alter) => {
                     let model_id = alter.junction.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered junction '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterJunction(alter));
                 }
                 Statement::AlterDeduplicator(alter) => {
                     let model_id = alter.deduplicator.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered deduplicator '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterDeduplicator(alter));
                 }
                 Statement::AlterReorderer(alter) => {
                     let model_id = alter.reorderer.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered reorderer '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterReorderer(alter));
                 }
                 Statement::AlterEmitter(alter) => {
                     let model_id = alter.emitter.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered emitter '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterEmitter(alter));
                 }
                 Statement::AlterIngestor(alter) => {
                     let model_id = alter.ingestor.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered ingestor '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterIngestor(alter));
                 }
                 Statement::AlterReingestor(alter) => {
                     let model_id = alter.reingestor.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered reingestor '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterReingestor(alter));
                 }
                 Statement::AlterGenerator(alter) => {
                     let model_id = alter.generator.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered generator '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterGenerator(alter));
                 }
                 Statement::AlterPlacement(alter) => {
                     let model_id = alter.placement.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        ModelName::from(&model_id),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered placement '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str(),
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterPlacement(alter));
                 }
                 Statement::Drop(drop) => {
                     let model_id = drop.name.clone();
                     refresh_http_tls |= drop.kind == ModelKind::Vhost;
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: model_id.clone(),
+                        message: format!(
                             "dropped model '{}' from domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::Drop(drop));
                 }
                 _ => unreachable!("model mutation batch contains a non-mutation statement"),
@@ -9660,9 +9806,12 @@ impl SessionServiceImpl {
 
         let mut completed_result = None;
         if !mutations.is_empty() {
-            let error_target = applied.first().map(|(_, id, _)| id.clone()).verified(
-                "every arm that records a mutation records an applied model in the same step",
-            );
+            let error_target = applied
+                .first()
+                .map(|mutation| mutation.model.clone())
+                .verified(
+                    "every arm that records a mutation records an applied model in the same step",
+                );
             let planned = match self.registry.plan_mutations(&domain, &mutations) {
                 Ok(planned) => planned,
                 Err(err) => {
@@ -9693,7 +9842,11 @@ impl SessionServiceImpl {
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
             let mut ownership_handoff = None;
-            let (expected_schedule, prepared_schedule, planned_relocations) = if !is_noop {
+            let ScheduleTransition {
+                expected_schedule,
+                prepared_schedule,
+                planned_relocations,
+            } = if !is_noop {
                 #[cfg(feature = "testing")]
                 if self.runtime.take_armed_schedule_publication_fault(&domain) {
                     let error = format!(
@@ -9729,11 +9882,15 @@ impl SessionServiceImpl {
                     )
                     .await
                 {
-                    Ok((schedule, relocations)) => (expected_schedule, schedule, relocations),
+                    Ok(prepared) => ScheduleTransition {
+                        expected_schedule,
+                        prepared_schedule: prepared.schedule,
+                        planned_relocations: prepared.relocations,
+                    },
                     Err(error) => return command_error(error),
                 }
             } else {
-                (None, None, 0)
+                ScheduleTransition::default()
             };
             let classified_level = if matches!(domain_state.status, DomainStatus::Running)
                 && planned_relocations > 0
@@ -11245,7 +11402,10 @@ impl SessionServiceImpl {
                 if let DomainPace::Paced = domain.config.pace {
                     self.domain_clock_reconciliations.insert(
                         domain_id.clone(),
-                        (domain.start_version.saturating_add(1), true),
+                        DomainClockReconciliation {
+                            start_version: domain.start_version.saturating_add(1),
+                            running: true,
+                        },
                     );
                 }
                 command_ok(format!("starting domain '{}'", domain_id.as_str()))
@@ -11274,8 +11434,13 @@ impl SessionServiceImpl {
         }
         if let DomainPace::Paced = domain.config.pace {
             self.runtime.handle_domain_clock_stop(domain_id);
-            self.domain_clock_reconciliations
-                .insert(domain_id.clone(), (domain.start_version, false));
+            self.domain_clock_reconciliations.insert(
+                domain_id.clone(),
+                DomainClockReconciliation {
+                    start_version: domain.start_version,
+                    running: false,
+                },
+            );
         }
         match self.consensus.stop_domain(domain_id.clone()).await {
             Ok(()) => {
@@ -11401,11 +11566,11 @@ impl SessionServiceImpl {
             .join(", ");
         let references = if let Some(graph) = self.registry.active_graph(domain) {
             let mut references = Vec::new();
-            for (from, to, edge) in graph.edges() {
-                if edge == crate::registry::EdgeKind::RequiredBy
-                    && from == ModelName::from(&model.name)
+            for edge in graph.edges() {
+                if edge.kind == crate::registry::EdgeKind::RequiredBy
+                    && edge.from == ModelName::from(&model.name)
                 {
-                    references.push(to);
+                    references.push(edge.to);
                 }
             }
             references.sort();
@@ -11753,7 +11918,10 @@ impl SessionServiceImpl {
             .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
             .config
             .placement;
-        let (schedule, relocations) = self
+        let PreparedDomainSchedule {
+            schedule,
+            relocations,
+        } = self
             .prepare_domain_schedule(domain, graph, default_policy)
             .await?;
         self.consensus
@@ -11774,7 +11942,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
-    ) -> Result<(Option<nervix_models::DomainSchedule>, usize), String> {
+    ) -> Result<PreparedDomainSchedule, String> {
         let live_node_ids = self.cluster.live_node_ids().await;
         let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
         let cluster_nodes = self
@@ -11814,7 +11982,10 @@ impl SessionServiceImpl {
             None => None,
         };
         let relocations = planned_relocation_count(current.domain(domain), schedule.as_ref());
-        Ok((schedule, relocations))
+        Ok(PreparedDomainSchedule {
+            schedule,
+            relocations,
+        })
     }
 
     async fn drop_node(&self, node_id: ClusterNodeName) -> CommandResult {
@@ -13083,16 +13254,12 @@ impl SessionServiceImpl {
     async fn reconcile_kafka_partition_watchers(
         &self,
         schedule: &nervix_models::ClusterSchedule,
-        tasks: &mut HashMap<
-            KafkaPartitionWatcherKey,
-            (KafkaPartitionWatcherSpec, CancellationToken, JoinHandle<()>),
-        >,
+        tasks: &mut HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask>,
     ) {
         let leader = self.consensus.current_leader().await;
         if leader.as_ref() != Some(self.consensus.local_node_id()) {
-            for (_, (_, cancel, handle)) in tasks.drain() {
-                cancel.cancel();
-                let _ = handle.await;
+            for (_, watcher) in tasks.drain() {
+                watcher.task.stop().await;
             }
             return;
         }
@@ -13112,23 +13279,19 @@ impl SessionServiceImpl {
             .collect::<HashMap<_, _>>();
 
         let mut stale_keys = Vec::new();
-        for (key, (spec, _, _)) in tasks.iter() {
-            if desired.get(key) != Some(spec) {
+        for (key, watcher) in tasks.iter() {
+            if desired.get(key) != Some(&watcher.spec) {
                 stale_keys.push(key.clone());
             }
         }
         for key in stale_keys {
-            if let Some((_, cancel, handle)) = tasks.remove(&key) {
-                cancel.cancel();
-                let _ = handle.await;
+            if let Some(watcher) = tasks.remove(&key) {
+                watcher.task.stop().await;
             }
         }
 
         for (key, spec) in desired {
-            if tasks
-                .get(&key)
-                .is_some_and(|(existing, _, _)| existing == &spec)
-            {
+            if tasks.get(&key).is_some_and(|watcher| watcher.spec == spec) {
                 continue;
             }
             let cancel = CancellationToken::new();
@@ -13234,7 +13397,13 @@ impl SessionServiceImpl {
                     }
                 }
             });
-            tasks.insert(key, (spec, cancel, handle));
+            tasks.insert(
+                key,
+                KafkaPartitionWatcherTask {
+                    spec,
+                    task: BackgroundTask { cancel, handle },
+                },
+            );
         }
     }
 
@@ -13242,14 +13411,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<
-        Option<(
-            nervix_models::CreateRelay,
-            nervix_models::CreateSchema,
-            Vec<FieldName>,
-        )>,
-        String,
-    > {
+    ) -> Result<Option<SubscriptionTarget>, String> {
         let schedule = self.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
@@ -13276,11 +13438,11 @@ impl SessionServiceImpl {
         let Model::Schema(schema) = schema_node.config.as_ref() else {
             return Err("scheduled schema node has invalid model kind".to_string());
         };
-        Ok(Some((
-            ack_model.clone(),
-            schema.clone(),
-            relay_node.effective_branching.clone().unwrap_or_default(),
-        )))
+        Ok(Some(SubscriptionTarget {
+            relay: ack_model.clone(),
+            schema: schema.clone(),
+            branching: relay_node.effective_branching.clone().unwrap_or_default(),
+        }))
     }
 
     async fn subscription_stream_schema(
@@ -13316,7 +13478,7 @@ impl SessionServiceImpl {
             Ok(None) => self
                 .subscription_target_from_schedule(domain, relay)
                 .await
-                .map(|resolved| resolved.map(|(_, schema, _)| schema)),
+                .map(|resolved| resolved.map(|target| target.schema)),
             Err(err) => Err(format!(
                 "failed to resolve relay '{}' for subscription: {err}",
                 relay.as_str()
@@ -13545,7 +13707,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         name: impl Into<ModelName>,
-    ) -> Result<Option<(CreateLookup, ScheduledNode, ParseAsType)>, String> {
+    ) -> Result<Option<LookupTarget>, String> {
         let name = name.into();
         let schedule = self.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
@@ -13598,11 +13760,11 @@ impl SessionServiceImpl {
                 schema.name.as_str()
             ));
         };
-        Ok(Some((
-            lookup.clone(),
-            lookup_node.clone(),
-            field.ty.clone(),
-        )))
+        Ok(Some(LookupTarget {
+            lookup: lookup.clone(),
+            node: lookup_node.clone(),
+            key_ty: field.ty.clone(),
+        }))
     }
 
     async fn ingestor_target_from_schedule(
@@ -13737,7 +13899,7 @@ impl SessionServiceImpl {
             .await
             .ok()
             .flatten()
-            .map(|(_, _, branching)| branching)
+            .map(|target| target.branching)
             .unwrap_or_default();
         let relay_branch_schema = match self
             .subscription_branch_schema(domain, &subscription.relay)
@@ -14086,15 +14248,16 @@ fn dataflow_node_status_to_envelope(
     }
 }
 
-fn dataflow_node_status_from_envelope(
-    envelope: DataflowNodeStatusEnvelope,
-) -> (DataflowNodeStatus, Option<String>, Option<u64>) {
-    let status = if envelope.status.eq_ignore_ascii_case("ERROR") {
-        DataflowNodeStatus::Error
-    } else {
-        DataflowNodeStatus::Ok
-    };
-    (status, envelope.detail, envelope.reconnect_wait_millis)
+fn dataflow_node_status_from_envelope(envelope: DataflowNodeStatusEnvelope) -> DataflowNodeHealth {
+    DataflowNodeHealth {
+        status: if envelope.status.eq_ignore_ascii_case("ERROR") {
+            DataflowNodeStatus::Error
+        } else {
+            DataflowNodeStatus::Ok
+        },
+        detail: envelope.detail,
+        reconnect_wait_millis: envelope.reconnect_wait_millis,
+    }
 }
 
 fn format_timestamp_source(source: Option<&IngestTimestampSource>) -> &'static str {
@@ -15692,14 +15855,14 @@ fn quiesce_level_message(level: QuiesceLevel) -> String {
 
 fn model_mutation_success_result(
     existing_results: &[Option<CommandResult>],
-    applied: &[(usize, ModelName, String)],
+    applied: &[AppliedModelMutation],
     classified_level: QuiesceLevel,
     planned_relocations: usize,
 ) -> CommandResult {
     let mut results = existing_results.to_vec();
     let mut first_applied = true;
-    for (index, _, base_message) in applied {
-        let mut message = base_message.clone();
+    for mutation in applied {
+        let mut message = mutation.message.clone();
         if first_applied {
             append_command_output(&mut message, &quiesce_level_message(classified_level));
             append_command_output(
@@ -15708,7 +15871,7 @@ fn model_mutation_success_result(
             );
             first_applied = false;
         }
-        results[*index] = Some(CommandResult {
+        results[mutation.index] = Some(CommandResult {
             success: true,
             message,
             diagnostics: Vec::new(),
@@ -15750,21 +15913,51 @@ fn command_error(message: String) -> CommandResult {
 }
 
 fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStatus {
-    let (state, error, failing_step) = match &transaction.state {
-        TransactionState::Open => (ApiTransactionState::Open, String::new(), None),
-        TransactionState::Committing(_) => (ApiTransactionState::Committing, String::new(), None),
+    /// How a transaction ended, as the API reports it. Only a failure carries an error and the
+    /// step it failed on; every other state reports neither.
+    struct ReportedOutcome {
+        state: ApiTransactionState,
+        error: String,
+        failing_step: Option<u64>,
+    }
+
+    impl ReportedOutcome {
+        fn without_error(state: ApiTransactionState) -> Self {
+            Self {
+                state,
+                error: String::new(),
+                failing_step: None,
+            }
+        }
+    }
+
+    let ReportedOutcome {
+        state,
+        error,
+        failing_step,
+    } = match &transaction.state {
+        TransactionState::Open => ReportedOutcome::without_error(ApiTransactionState::Open),
+        TransactionState::Committing(_) => {
+            ReportedOutcome::without_error(ApiTransactionState::Committing)
+        }
         TransactionState::Finished(finished) => match &finished.outcome {
-            TransactionOutcome::Committed => (ApiTransactionState::Committed, String::new(), None),
+            TransactionOutcome::Committed => {
+                ReportedOutcome::without_error(ApiTransactionState::Committed)
+            }
             TransactionOutcome::Failed {
                 failing_step,
                 error,
-            } => (
-                ApiTransactionState::Failed,
-                error.clone(),
-                u64::try_from(failing_step.saturating_add(1)).ok(),
-            ),
-            TransactionOutcome::Reverted => (ApiTransactionState::Reverted, String::new(), None),
-            TransactionOutcome::Expired => (ApiTransactionState::Expired, String::new(), None),
+            } => ReportedOutcome {
+                state: ApiTransactionState::Failed,
+                error: error.clone(),
+                failing_step: u64::try_from(failing_step.saturating_add(1)).ok(),
+            },
+            TransactionOutcome::Reverted => {
+                ReportedOutcome::without_error(ApiTransactionState::Reverted)
+            }
+            TransactionOutcome::Expired => {
+                ReportedOutcome::without_error(ApiTransactionState::Expired)
+            }
         },
     };
     ApiTransactionStatus {
@@ -16072,12 +16265,12 @@ impl SessionServiceImpl {
         let resource_entities = resources
             .next_version_by_resource
             .iter()
-            .filter(|(domain, _, _)| Some(domain) == active_domain)
-            .map(|(_, identifier, next_version)| DomainEntitySnapshot {
+            .filter(|counter| Some(&counter.domain) == active_domain)
+            .map(|counter| DomainEntitySnapshot {
                 kind: "resource".to_string(),
-                identifier: identifier.as_str().to_string(),
-                detail: if *next_version > 1 {
-                    format!("v{}", next_version - 1)
+                identifier: counter.identifier.as_str().to_string(),
+                detail: if counter.next_version > 1 {
+                    format!("v{}", counter.next_version - 1)
                 } else {
                     "catalog".to_string()
                 },
@@ -16140,9 +16333,12 @@ impl SessionServiceImpl {
             let Some((kind, identifier)) = dataflow_metric_target(&node.id) else {
                 continue;
             };
-            (node.status, node.status_detail, node.reconnect_wait_millis) = self
+            let health = self
                 .dataflow_node_status_for_graph(&domain, &kind, &identifier)
                 .await;
+            node.status = health.status;
+            node.status_detail = health.detail;
+            node.reconnect_wait_millis = health.reconnect_wait_millis;
             if kind == "RELAY" {
                 node.statistics = self
                     .runtime
@@ -16410,7 +16606,15 @@ fn current_word_prefix(input: &str, cursor: usize) -> String {
     out
 }
 
-fn completion_context(input: &str, cursor: usize) -> (String, usize, String) {
+/// Completion input split at the cursor: the source the grammar parses with the half-typed word
+/// removed, where that word started, and the word itself for filtering the offers.
+struct CompletionContext {
+    grammar_input: String,
+    grammar_cursor: usize,
+    prefix: String,
+}
+
+fn completion_context(input: &str, cursor: usize) -> CompletionContext {
     let safe_cursor = cursor.min(input.len());
     let start = word_start(input, safe_cursor);
     let prefix = current_word_prefix(input, safe_cursor);
@@ -16419,7 +16623,11 @@ fn completion_context(input: &str, cursor: usize) -> (String, usize, String) {
     grammar_input.push_str(&input[..start]);
     grammar_input.push_str(&input[safe_cursor..]);
 
-    (grammar_input, start, prefix)
+    CompletionContext {
+        grammar_input,
+        grammar_cursor: start,
+        prefix,
+    }
 }
 
 struct VhostTlsMaterials {
@@ -16622,10 +16830,11 @@ fn resource_ref_suggestions(
     prefix: &str,
 ) -> Vec<String> {
     let mut suggestions = Vec::new();
-    for (known_domain, identifier, _) in &resources.next_version_by_resource {
-        if known_domain == domain && (prefix.is_empty() || identifier.as_str().starts_with(prefix))
+    for counter in &resources.next_version_by_resource {
+        if counter.domain == *domain
+            && (prefix.is_empty() || counter.identifier.as_str().starts_with(prefix))
         {
-            suggestions.push(identifier.to_string());
+            suggestions.push(counter.identifier.to_string());
         }
     }
     suggestions
@@ -16860,7 +17069,7 @@ fn format_schedule_status_replicas(node: &ScheduledNode) -> String {
 async fn reconcile_domain_clock_tasks(
     service: &SessionServiceImpl,
     shutdown: &CancellationToken,
-    tasks: &mut HashMap<DomainName, (CancellationToken, JoinHandle<()>)>,
+    tasks: &mut HashMap<DomainName, BackgroundTask>,
 ) {
     let domains = service.consensus.current_domains().await;
     let desired = domains
@@ -16878,10 +17087,9 @@ async fn reconcile_domain_clock_tasks(
     let existing = tasks.keys().cloned().collect::<Vec<_>>();
     for domain_id in existing {
         if !desired.iter().any(|candidate| candidate == &domain_id)
-            && let Some((token, handle)) = tasks.remove(&domain_id)
+            && let Some(task) = tasks.remove(&domain_id)
         {
-            token.cancel();
-            let _ = handle.await;
+            task.stop().await;
         }
     }
 
@@ -16896,7 +17104,13 @@ async fn reconcile_domain_clock_tasks(
         let handle = tokio::spawn(async move {
             run_domain_clock(task_service, task_domain_id, task_token).await;
         });
-        tasks.insert(domain_id, (token, handle));
+        tasks.insert(
+            domain_id,
+            BackgroundTask {
+                cancel: token,
+                handle,
+            },
+        );
     }
 }
 
@@ -18279,7 +18493,7 @@ impl Application {
         let domain_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             let mut domains_rx = domain_service.consensus.subscribe_domains();
-            let mut tasks: HashMap<DomainName, (CancellationToken, JoinHandle<()>)> = HashMap::new();
+            let mut tasks: HashMap<DomainName, BackgroundTask> = HashMap::new();
             if let Err(error) = domain_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
@@ -18302,9 +18516,8 @@ impl Application {
                 }
             }
 
-            for (_, (token, handle)) in tasks {
-                token.cancel();
-                let _ = handle.await;
+            for (_, task) in tasks {
+                task.stop().await;
             }
         }));
 
@@ -18312,10 +18525,8 @@ impl Application {
         let kafka_schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             let mut schedule_rx = kafka_schedule_service.consensus.subscribe_schedule();
-            let mut tasks: HashMap<
-                KafkaPartitionWatcherKey,
-                (KafkaPartitionWatcherSpec, CancellationToken, JoinHandle<()>),
-            > = HashMap::new();
+            let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
+                HashMap::new();
 
             loop {
                 tokio::task::consume_budget().await;
@@ -18334,9 +18545,8 @@ impl Application {
                 }
             }
 
-            for (_, (_, cancel, handle)) in tasks {
-                cancel.cancel();
-                let _ = handle.await;
+            for (_, watcher) in tasks {
+                watcher.task.stop().await;
             }
         }));
 
@@ -19066,7 +19276,8 @@ mod tests {
         AckMode, CreateDomain, CreateResource, CreateSchema, CreateStatement, DomainConfig,
         DomainPace, DomainSchedule, DomainState, DomainStatus, KafkaPartitionSchedule, Model,
         ModelKind, PlacementGroupSchedule, PlacementRuntimeNode, ResourceVersion,
-        ResourceVersionStatus, ScheduledNode, SchemaField, SubscriptionLiteral,
+        ResourceVersionCounter, ResourceVersionStatus, ScheduledNode, SchemaField,
+        SubscriptionLiteral,
     };
     use sorted_vec::SortedVec;
 
@@ -19425,9 +19636,15 @@ mod tests {
         }
     }
 
-    async fn build_test_service(
-        create_default_domain_flag: bool,
-    ) -> (SessionServiceImpl, Arc<Registry>, PathBuf) {
+    /// A session service built on a throwaway database, handed back with the registry that
+    /// service shares and the directory the test must remove when it finishes.
+    struct TestService {
+        service: SessionServiceImpl,
+        registry: Arc<Registry>,
+        path: PathBuf,
+    }
+
+    async fn build_test_service(create_default_domain_flag: bool) -> TestService {
         let path = test_db_path();
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("test db directory should exist");
@@ -19541,12 +19758,20 @@ mod tests {
             transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
             transaction_commit_execution: Arc::new(AsyncMutex::new(())),
         };
-        (service, registry, path)
+        TestService {
+            service,
+            registry,
+            path,
+        }
     }
 
     #[tokio::test]
     async fn dropping_cluster_gate_owner_releases_local_durable_hold() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
         let domain = DomainName::parse("default").expect("valid domain");
         let operation_id = 41;
         service
@@ -19595,7 +19820,11 @@ mod tests {
     #[test]
     fn completion_context_preserves_prefix_for_post_filtering() {
         let input = "CREATE SCHE";
-        let (grammar_input, grammar_cursor, prefix) = completion_context(input, input.len());
+        let CompletionContext {
+            grammar_input,
+            grammar_cursor,
+            prefix,
+        } = completion_context(input, input.len());
 
         assert_eq!(grammar_input, "CREATE ");
         assert_eq!(grammar_cursor, "CREATE ".len());
@@ -19605,7 +19834,11 @@ mod tests {
     #[test]
     fn keyword_completion_is_filtered_by_original_prefix() {
         let input = "CREATE SCHE";
-        let (grammar_input, grammar_cursor, prefix) = completion_context(input, input.len());
+        let CompletionContext {
+            grammar_input,
+            grammar_cursor,
+            prefix,
+        } = completion_context(input, input.len());
         let filtered = suggest_client_statement(&grammar_input, grammar_cursor)
             .into_iter()
             .filter(|item| {
@@ -20698,9 +20931,21 @@ mod tests {
         let other = DomainName::parse("other").expect("valid domain");
         let resources = ResourceVersionStatus {
             next_version_by_resource: SortedVec::from_unsorted(vec![
-                (tenant.clone(), named("fraud_model"), 2),
-                (tenant.clone(), named("proto"), 1),
-                (other.clone(), named("promo_model"), 1),
+                ResourceVersionCounter {
+                    domain: tenant.clone(),
+                    identifier: named("fraud_model"),
+                    next_version: 2,
+                },
+                ResourceVersionCounter {
+                    domain: tenant.clone(),
+                    identifier: named("proto"),
+                    next_version: 1,
+                },
+                ResourceVersionCounter {
+                    domain: other.clone(),
+                    identifier: named("promo_model"),
+                    next_version: 1,
+                },
             ]),
             ..Default::default()
         };
@@ -21247,7 +21492,11 @@ mod tests {
 
     #[tokio::test]
     async fn create_domain_if_not_exists_returns_already_existed() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
 
         let first = service
             .create_domain(CreateStatement::new(
@@ -21289,7 +21538,11 @@ mod tests {
 
     #[tokio::test]
     async fn create_resource_if_not_exists_returns_already_existed() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let default = DomainName::parse("default").expect("valid domain");
         create_test_domain(&service.consensus, "other").await;
         let other = DomainName::parse("other").expect("valid domain");
@@ -21346,7 +21599,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_create_if_not_exists_returns_already_existed_for_models() {
-        let (service, registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21397,7 +21654,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_implicit_semicolon_batch() {
-        let (service, registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21434,7 +21695,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
-        let (service, registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
         create_test_domain(&service.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -21493,7 +21758,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_queues_transaction_across_requests_and_reverts() {
-        let (service, registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21579,7 +21848,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_begin_inside_begin() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21622,7 +21895,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_batch_returns_prior_successes_before_error() {
-        let (service, registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
         create_test_domain(&service.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -21675,7 +21952,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_domain_and_user_creation_inside_a_transaction() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21733,7 +22014,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_begin_without_an_existing_domain() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21771,7 +22056,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_statements_selecting_another_domain() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         create_test_domain(&service.consensus, "other").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -21828,7 +22117,11 @@ mod tests {
 
     #[tokio::test]
     async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
         create_test_domain(&service.consensus, "attach_results").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut owner = SessionSubscriptions::new();
@@ -21882,7 +22175,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_model_create_batch_is_atomic_on_registry_failure() {
-        let (service, registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
         create_test_domain(&service.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
@@ -21933,7 +22230,11 @@ mod tests {
 
     #[tokio::test]
     async fn web_console_command_request_invokes_session_command_processor() {
-        let (service, registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21969,7 +22270,11 @@ mod tests {
 
     #[tokio::test]
     async fn web_console_rejects_upload_and_supports_suggest_requests() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -22027,7 +22332,11 @@ mod tests {
 
     #[tokio::test]
     async fn placement_member_completion_expands_all_schedulable_runtime_names() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let configured = service
@@ -22130,7 +22439,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_offers_models_queued_in_the_open_transaction() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -22153,7 +22466,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_hides_models_dropped_in_the_open_transaction() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -22207,7 +22524,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_keeps_queued_models_out_of_other_sessions() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut writer = SessionSubscriptions::new();
         let mut observer = SessionSubscriptions::new();
@@ -22237,7 +22558,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_drops_queued_models_until_a_detached_transaction_is_attached() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -22292,7 +22617,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_moves_queued_models_to_the_session_that_takes_the_transaction_over() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut first = SessionSubscriptions::new();
         let mut second = SessionSubscriptions::new();
@@ -22336,7 +22665,11 @@ mod tests {
 
     #[tokio::test]
     async fn placement_member_completion_expands_queued_runtime_names() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -22375,7 +22708,11 @@ mod tests {
 
     #[tokio::test]
     async fn show_placements_reports_fully_overridden_effective_coverage() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let configured = service

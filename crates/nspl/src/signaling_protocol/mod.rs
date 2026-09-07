@@ -8,9 +8,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, config_entries_block, duration_lit, if_not_exists_clause,
-        into_parse_error, kw, lex_input, resource_ref, signaling_protocol_name, string_lit,
-        suggest_from, tok, u64_value,
+        LexedInput, ParseError, ParseFromSourceError, config_entries_block, duration_lit,
+        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref,
+        signaling_protocol_name, string_lit, suggest_from, tok, u64_value,
     },
 };
 
@@ -217,7 +217,11 @@ pub fn parse_create_signaling_protocol_tokens(
 pub fn parse_create_signaling_protocol(
     input: &str,
 ) -> Result<CreateStatement<CreateSignalingProtocol>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_signaling_protocol_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

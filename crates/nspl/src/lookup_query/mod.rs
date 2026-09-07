@@ -5,7 +5,7 @@ use nervix_models::LookupQuery;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, lookup_ref,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, lookup_ref,
         suggest_from, tok,
     },
     subscribe::subscription_literal_parser,
@@ -33,7 +33,11 @@ pub fn parse_lookup_query_tokens(tokens: &[Token]) -> Result<LookupQuery, Vec<Pa
 }
 
 pub fn parse_lookup_query(input: &str) -> Result<LookupQuery, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_lookup_query_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

@@ -2450,10 +2450,19 @@ pub fn compile_program_for_bindings_with_sensitivity(
     )
 }
 
+/// One field a program's `SET` list writes, as inferred without compiling the program: the field
+/// the assignment targets and the type that assignment produces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InferredSetField {
+    pub field: String,
+    pub data_type: DataType,
+    pub nullable: bool,
+}
+
 pub fn infer_set_expr_types_for_bindings(
     program: &SpannedNode<Program>,
     bindings: impl IntoIterator<Item = CompileBinding>,
-) -> Result<Vec<(String, DataType, bool)>, CompileError> {
+) -> Result<Vec<InferredSetField>, CompileError> {
     infer_set_expr_types_for_bindings_with_udfs(program, bindings, UdfSignatures::default())
 }
 
@@ -2461,7 +2470,7 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
     program: &SpannedNode<Program>,
     bindings: impl IntoIterator<Item = CompileBinding>,
     udf_signatures: UdfSignatures,
-) -> Result<Vec<(String, DataType, bool)>, CompileError> {
+) -> Result<Vec<InferredSetField>, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, _input_schema) = Compiler::new(&bindings)?;
     compiler.udf_signatures = udf_signatures;
@@ -2485,14 +2494,18 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
                 value: ColumnValue::Unsupported,
             },
         );
-        if let Some((_, output_type, output_nullable)) = output
+        if let Some(existing) = output
             .iter_mut()
-            .find(|(field, _, _)| field == &field_ref.field)
+            .find(|inferred: &&mut InferredSetField| inferred.field == field_ref.field)
         {
-            *output_type = data_type;
-            *output_nullable = nullable;
+            existing.data_type = data_type;
+            existing.nullable = nullable;
         } else {
-            output.push((field_ref.field.clone(), data_type, nullable));
+            output.push(InferredSetField {
+                field: field_ref.field.clone(),
+                data_type,
+                nullable,
+            });
         }
     }
     Ok(output)

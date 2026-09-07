@@ -36,13 +36,29 @@ impl NatsIngestor {
             });
         }
 
-        let (subject, queue_group, instances) = match &ingestor.source {
+        /// The parts of a NATS ingest source this task drives, taken from the model once so the
+        /// rest of startup reads named values rather than re-matching the source.
+        struct NatsSource {
+            subject: nervix_models::SubjectName,
+            queue_group: nervix_models::QueueGroupName,
+            instances: u64,
+        }
+
+        let NatsSource {
+            subject,
+            queue_group,
+            instances,
+        } = match &ingestor.source {
             IngestSource::Nats {
                 subject,
                 queue_group,
                 instances,
                 ..
-            } => (subject.clone(), queue_group.clone(), *instances),
+            } => NatsSource {
+                subject: subject.clone(),
+                queue_group: queue_group.clone(),
+                instances: *instances,
+            },
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),

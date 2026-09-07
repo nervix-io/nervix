@@ -7,7 +7,7 @@ use nervix_models::{
     WireSchemaField, WireSchemaStrictness,
 };
 
-pub use crate::parser_support::{Diagnostic, ParseFromSourceError};
+pub use crate::parser_support::{Diagnostic, LexedInput, ParseFromSourceError};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
@@ -490,7 +490,11 @@ pub fn parse_create_schema_tokens(
 }
 
 pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_wire_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -498,19 +502,31 @@ pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourc
 pub fn parse_create_schema(
     input: &str,
 ) -> Result<CreateStatement<CreateSchema>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_schema(input: &str) -> Result<AlterSchema, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_wire_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

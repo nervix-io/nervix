@@ -5,8 +5,8 @@ use nervix_models::{Model, Statement};
 use crate::{
     lexer::Token,
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, completion_context, filter_by_prefix,
-        into_parse_error, lex_input, suggestions_from_errors,
+        LexedInput, ParseError, ParseFromSourceError, boxed_choice, completion_context,
+        filter_by_prefix, into_parse_error, lex_input, suggestions_from_errors,
     },
 };
 
@@ -202,7 +202,11 @@ pub fn parse_statement_tokens(tokens: &[Token]) -> Result<Statement, Vec<ParseEr
 }
 
 pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_statement_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -210,7 +214,7 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
 pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let (_, _, tokens) = match lex_input(&source) {
+    let LexedInput { tokens, .. } = match lex_input(&source) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };

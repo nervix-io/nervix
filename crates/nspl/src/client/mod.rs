@@ -12,7 +12,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, client_name, if_not_exists_clause, into_parse_error, kw, lex_input,
+        LexedInput, ParseError, client_name, if_not_exists_clause, into_parse_error, kw, lex_input,
         resource_ref, signaling_protocol_clause, string_lit, suggest_from, tok, word_raw,
     },
     schema::ParseFromSourceError,
@@ -371,7 +371,11 @@ pub fn parse_create_client_kafka_tokens(
 pub fn parse_create_client_kafka(
     input: &str,
 ) -> Result<CreateStatement<CreateClientKafka>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_client_kafka_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

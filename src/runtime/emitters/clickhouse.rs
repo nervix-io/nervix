@@ -292,7 +292,10 @@ impl ClickHouseEmitter {
             {
                 Ok(()) => {
                     for row in chunk {
-                        outcome.deliver((batch_index, *row));
+                        outcome.deliver(BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        });
                     }
                 }
                 Err(error) if error.is_record_error() && chunk.len() > 1 => {
@@ -324,9 +327,18 @@ impl ClickHouseEmitter {
                         )
                         .await
                         {
-                            Ok(()) => outcome.deliver((batch_index, *row)),
+                            Ok(()) => outcome.deliver(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            }),
                             Err(error) if error.is_record_error() => {
-                                outcome.reject((batch_index, *row), error.record_reason());
+                                outcome.reject(
+                                    BrokerRecordPosition {
+                                        batch_index,
+                                        row_index: *row,
+                                    },
+                                    error.record_reason(),
+                                );
                             }
                             Err(error) => {
                                 outcome.fail(error.into_report());
@@ -337,7 +349,13 @@ impl ClickHouseEmitter {
                 }
                 Err(error) if error.is_record_error() => {
                     if let Some(row) = chunk.first() {
-                        outcome.reject((batch_index, *row), error.record_reason());
+                        outcome.reject(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.record_reason(),
+                        );
                     }
                 }
                 Err(error) => {

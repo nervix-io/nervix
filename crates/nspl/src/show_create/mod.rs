@@ -5,11 +5,11 @@ use nervix_models::{ModelKind, ShowCreate};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref, correlator_ref,
-        deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref, ingestor_ref,
-        into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, placement_ref,
-        reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref,
-        vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
+        LexedInput, ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref,
+        correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref,
+        ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref,
+        placement_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggest_from, tok,
+        udf_ref, vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
         wire_json_schema_ref,
     },
 };
@@ -175,7 +175,11 @@ pub fn parse_show_create_tokens(tokens: &[Token]) -> Result<ShowCreate, Vec<Pars
 }
 
 pub fn parse_show_create(input: &str) -> Result<ShowCreate, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_show_create_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

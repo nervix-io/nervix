@@ -8,9 +8,10 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2, lex_input,
-        relay_ref, render_vm_program_tokens, session_subscription_name, session_subscription_ref,
-        string_lit, suggest_from, tok, vm_program_error_message, word_raw,
+        LexedInput, ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2,
+        lex_input, relay_ref, render_vm_program_tokens, session_subscription_name,
+        session_subscription_ref, string_lit, suggest_from, tok, vm_program_error_message,
+        word_raw,
     },
 };
 
@@ -178,7 +179,11 @@ pub fn parse_create_subscription_tokens(
 }
 
 pub fn parse_create_subscription(input: &str) -> Result<CreateSubscription, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_subscription_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -361,7 +366,7 @@ mod tests {
     fn delete_after_name_has_no_parameter_suggestions() {
         let input = "DELETE SUBSCRIPTION live_notifications ";
         let prefix = current_word_prefix(input);
-        let (_, _, tokens) = lex_input(input).expect("input should lex");
+        let LexedInput { tokens, .. } = lex_input(input).expect("input should lex");
         let output = delete_subscription_parser()
             .then_ignore(end())
             .parse(tokens.as_slice());
@@ -380,7 +385,7 @@ mod tests {
     fn delete_suggests_a_session_subscription_reference() {
         let input = "DELETE SUBSCRIPTION ";
         let prefix = current_word_prefix(input);
-        let (_, _, tokens) = lex_input(input).expect("input should lex");
+        let LexedInput { tokens, .. } = lex_input(input).expect("input should lex");
         let output = delete_subscription_parser()
             .then_ignore(end())
             .parse(tokens.as_slice());

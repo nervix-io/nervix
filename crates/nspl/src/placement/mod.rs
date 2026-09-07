@@ -8,7 +8,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, alter_op_separator, if_not_exists_clause,
+        LexedInput, ParseError, ParseFromSourceError, alter_op_separator, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, lex_input, placement_name, placement_ref,
         runtime_node_ref, suggest_from, tok, u64_value,
     },
@@ -158,7 +158,11 @@ pub fn show_placements_parser<'src>()
 pub fn parse_create_placement(
     input: &str,
 ) -> Result<CreateStatement<CreatePlacement>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = create_placement_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -177,7 +181,11 @@ pub fn parse_create_placement(
 }
 
 pub fn parse_alter_placement(input: &str) -> Result<AlterPlacement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = alter_placement_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());

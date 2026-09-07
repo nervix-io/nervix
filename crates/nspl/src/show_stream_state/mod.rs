@@ -5,8 +5,8 @@ use nervix_models::ShowRelayMaterializedState;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, relay_ref, suggest_from,
-        tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, relay_ref,
+        suggest_from, tok,
     },
 };
 
@@ -40,7 +40,11 @@ pub fn parse_show_stream_materialized_state_tokens(
 pub fn parse_show_stream_materialized_state(
     input: &str,
 ) -> Result<ShowRelayMaterializedState, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_show_stream_materialized_state_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

@@ -160,7 +160,7 @@ impl PulsarEmitter {
                     .map(|confirmation| confirmation.acks.clone())
                     .chain(std::iter::once(record.acks.clone())),
             );
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let confirmation = match await_emitter_confirmation(
                 &enqueue_acks,
                 producer.send_non_blocking(PulsarProducerMessage {

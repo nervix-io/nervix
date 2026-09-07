@@ -334,7 +334,7 @@ impl Client {
         let (domain_tx, domain_rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let known_servers = current_server.iter().cloned().collect();
-        let request_tx = start_session(
+        let session = start_session(
             channel,
             connect_options.basic_authorization(),
             pending.clone(),
@@ -348,11 +348,11 @@ impl Client {
             current_server: Mutex::new(current_server),
             known_servers: Mutex::new(known_servers),
             grpc_connector: GrpcConnector::new(connect_options),
-            request_tx: Mutex::new(request_tx.0),
+            request_tx: Mutex::new(session.request_tx),
             pending,
             command_lock: Mutex::new(()),
             transaction: Mutex::new(None),
-            response_task: Mutex::new(Some(request_tx.1)),
+            response_task: Mutex::new(Some(session.response_task)),
             subscription_tx,
             subscription_rx: Mutex::new(subscription_rx),
             server_tx,
@@ -852,7 +852,10 @@ impl Client {
 
     async fn reconnect(&self, server: &str) -> Result<(), ClientError> {
         let channel = self.inner.grpc_connector.connect(server).await?;
-        let (request_tx, response_task) = start_session(
+        let StartedSession {
+            request_tx,
+            response_task,
+        } = start_session(
             channel,
             self.inner.grpc_connector.options.basic_authorization(),
             self.inner.pending.clone(),
@@ -918,7 +921,7 @@ async fn start_session(
     subscription_tx: mpsc::Sender<SubscriptionEvent>,
     server_tx: mpsc::Sender<ServerEvent>,
     domain_tx: mpsc::Sender<Vec<DomainInfo>>,
-) -> Result<(mpsc::Sender<SessionRequest>, JoinHandle<()>), ClientError> {
+) -> Result<StartedSession, ClientError> {
     let mut client = SessionServiceClient::new(channel);
     let (request_tx, request_rx) = mpsc::channel(32);
     let mut response = client
@@ -992,7 +995,16 @@ async fn start_session(
         }
         clear_pending_responses(&pending).await;
     });
-    Ok((request_tx, response_task))
+    Ok(StartedSession {
+        request_tx,
+        response_task,
+    })
+}
+
+/// A live session: the channel commands are written to, and the task draining its responses.
+struct StartedSession {
+    request_tx: mpsc::Sender<SessionRequest>,
+    response_task: JoinHandle<()>,
 }
 
 fn request_with_auth<T>(

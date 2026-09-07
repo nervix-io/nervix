@@ -3523,22 +3523,34 @@ fn mongodb_entry_to_nspl(entry: &MongoDbConfigEntry) -> Result<String, Canonical
 /// Only sinks carrying a `VALUES` map have clauses of their own; the rest name themselves fully on
 /// one line. Splitting here is what keeps a wide column mapping from becoming one enormous line.
 fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), CanonicalNsplError> {
-    let (head, values, mut trailing) = match sink {
+    /// A sink that carries a `VALUES` map, split into the text naming it, that map, and the
+    /// clauses written after the map.
+    struct MappedSink<'sink> {
+        head: String,
+        values: &'sink [ClickHouseValueMapping],
+        trailing: Vec<Clause>,
+    }
+
+    let MappedSink {
+        head,
+        values,
+        mut trailing,
+    } = match sink {
         EmitSink::ClickHouse {
             client,
             table,
             values,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "CLICKHOUSE {} INSERT TO TABLE {}",
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            vec![Clause::line(format!("WITH MAX BATCH {max_batch}"))],
-        ),
+            trailing: vec![Clause::line(format!("WITH MAX BATCH {max_batch}"))],
+        },
         EmitSink::Postgres {
             client,
             table,
@@ -3546,18 +3558,18 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             conflict_action,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "POSTGRES {} INSERT TO TABLE {}",
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            conflict_and_batch_clauses(
+            trailing: conflict_and_batch_clauses(
                 postgres_conflict_action_to_nspl(conflict_action),
                 *max_batch,
             ),
-        ),
+        },
         EmitSink::MySql {
             client,
             table,
@@ -3565,15 +3577,18 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             conflict_action,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "MYSQL {} INSERT TO TABLE {}",
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            conflict_and_batch_clauses(mysql_conflict_action_to_nspl(conflict_action), *max_batch),
-        ),
+            trailing: conflict_and_batch_clauses(
+                mysql_conflict_action_to_nspl(conflict_action),
+                *max_batch,
+            ),
+        },
         EmitSink::MongoDb {
             client,
             collection,
@@ -3581,18 +3596,18 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             conflict_action,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "MONGODB {} INSERT TO COLLECTION {}",
                 client.as_str(),
                 collection.as_str()
             ),
             values,
-            conflict_and_batch_clauses(
+            trailing: conflict_and_batch_clauses(
                 mongodb_conflict_action_to_nspl(conflict_action),
                 *max_batch,
             ),
-        ),
+        },
         EmitSink::Iceberg {
             backend,
             client,
@@ -3601,21 +3616,21 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             location,
             catalog,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "ICEBERG ON {} {} TABLE {}",
                 backend.as_ref(),
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            vec![
+            trailing: vec![
                 Clause::line(format!("LOCATION {}", string_literal(location))),
                 Clause::line(match catalog {
                     IcebergCatalog::Rest { client } => format!("CATALOG {}", client.as_str()),
                 }),
             ],
-        ),
+        },
         other => return Ok((emit_sink_to_nspl(other)?, Vec::new())),
     };
 

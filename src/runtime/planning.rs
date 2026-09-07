@@ -1,5 +1,5 @@
 use nervix_models::{
-    BranchName, CreateBranch, ModelName, OutputBranch, ProcessorInputWhere, ProcessorInputs,
+    BranchName, CreateBranch, ModelName, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
 };
 
@@ -61,7 +61,9 @@ fn processor_input_collect_policies(
         .collect()
 }
 
-struct BranchEntrypoint {
+/// The branch a node runs in together with the retention the branch declares. An unbranched node
+/// carries none of the three, which is how absent branch identity is represented.
+struct BranchPolicy {
     branch: Option<BranchName>,
     ttl: Option<String>,
     max_instances: Option<u64>,
@@ -70,32 +72,24 @@ struct BranchEntrypoint {
 fn branch_policy(
     branch_ref: Option<&BranchName>,
     branches: &HashMap<BranchName, CreateBranch>,
-) -> (Option<BranchName>, Option<String>, Option<u64>) {
+) -> BranchPolicy {
     let Some(branch_ref) = branch_ref else {
-        return (None, None, None);
+        return BranchPolicy {
+            branch: None,
+            ttl: None,
+            max_instances: None,
+        };
     };
     let branch = branches.get(branch_ref).verified(
         "the registry resolved every branch reference before the schedule reached planning",
     );
-    (
-        Some(branch_ref.clone()),
-        Some(branch.ttl.clone()),
-        branch
+    BranchPolicy {
+        branch: Some(branch_ref.clone()),
+        ttl: Some(branch.ttl.clone()),
+        max_instances: branch
             .eviction
             .as_ref()
             .map(|eviction| eviction.max_instances()),
-    )
-}
-
-fn branch_entrypoint(
-    branch_action: &OutputBranch,
-    branches: &HashMap<BranchName, CreateBranch>,
-) -> BranchEntrypoint {
-    let (branch, ttl, max_instances) = branch_policy(branch_action.branch(), branches);
-    BranchEntrypoint {
-        branch,
-        ttl,
-        max_instances,
     }
 }
 
@@ -104,44 +98,50 @@ fn processor_node_spec(
     branched_by: &nervix_models::BranchSelection,
     branches: &HashMap<BranchName, CreateBranch>,
 ) -> BranchedProcessorNodeSpec {
-    let (branch, branch_ttl, branch_max_instances) = branch_policy(branched_by.branch(), branches);
+    let policy = branch_policy(branched_by.branch(), branches);
     BranchedProcessorNodeSpec {
         spec,
-        branch,
-        branch_ttl,
-        branch_max_instances,
+        branch: policy.branch,
+        branch_ttl: policy.ttl,
+        branch_max_instances: policy.max_instances,
     }
+}
+
+/// One model the planner turns into node specs, named the way the registry registered it.
+pub(in crate::runtime) struct PlannedModel {
+    pub(in crate::runtime) kind: ModelKind,
+    pub(in crate::runtime) identifier: ModelName,
+    pub(in crate::runtime) model: Model,
 }
 
 pub(in crate::runtime) fn branched_node_specs_from_scheduled_nodes(
     nodes: &ScheduledNodes,
 ) -> BranchedNodeSpecs {
-    branched_node_specs_from_models(
-        nodes
-            .values()
-            .map(|node| (node.kind, node.identifier.clone(), (*node.config).clone())),
-    )
+    branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
+        kind: node.kind,
+        identifier: node.identifier.clone(),
+        model: (*node.config).clone(),
+    }))
 }
 
 pub(in crate::runtime) fn branched_node_specs_from_active_graph(
     graph: &ActiveGraph,
 ) -> BranchedNodeSpecs {
-    branched_node_specs_from_models(
-        graph
-            .nodes()
-            .into_iter()
-            .map(|node| (node.kind, node.identifier, (*node.config).clone())),
-    )
+    branched_node_specs_from_models(graph.nodes().into_iter().map(|node| PlannedModel {
+        kind: node.kind,
+        identifier: node.identifier,
+        model: (*node.config).clone(),
+    }))
 }
 
 pub(in crate::runtime) fn branched_node_specs_from_models(
-    nodes: impl Iterator<Item = (ModelKind, ModelName, Model)>,
+    nodes: impl Iterator<Item = PlannedModel>,
 ) -> BranchedNodeSpecs {
     let nodes = nodes.collect::<Vec<_>>();
     let branches = nodes
         .iter()
-        .filter_map(|(_, _, model)| {
-            if let Model::Branch(branch) = model {
+        .filter_map(|planned| {
+            if let Model::Branch(branch) = &planned.model {
                 Some((branch.name.clone(), branch.clone()))
             } else {
                 None
@@ -149,9 +149,14 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
         })
         .collect::<HashMap<_, _>>();
     let mut processors = Vec::new();
-    let mut ingestors = Vec::new();
+    let mut entrypoints = Vec::new();
 
-    for (kind, identifier, model) in nodes {
+    for PlannedModel {
+        kind,
+        identifier,
+        model,
+    } in nodes
+    {
         match &model {
             Model::Deduplicator(deduplicator) => {
                 if deduplicator.from.first().is_none() {
@@ -346,16 +351,16 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         "the registry requires every route of these nodes to declare its branch \
                          behavior",
                     );
-                    let entrypoint = branch_entrypoint(branch_action, &branches);
-                    ingestors.push((
+                    let policy = branch_policy(branch_action.branch(), &branches);
+                    entrypoints.push(BranchedIngestorSpec {
                         kind,
-                        identifier.clone(),
-                        output.relay.clone(),
-                        entrypoint.branch,
-                        entrypoint.ttl,
-                        entrypoint.max_instances,
-                        BranchInstanceAckBoundary::Preserve,
-                        output
+                        identifier: identifier.clone(),
+                        root_relay: output.relay.clone(),
+                        branch: policy.branch,
+                        branch_ttl: policy.ttl,
+                        branch_max_instances: policy.max_instances,
+                        output_ack_boundary: BranchInstanceAckBoundary::Preserve,
+                        output_flush_each: output
                             .flush_policy
                             .as_ref()
                             .verified(
@@ -364,15 +369,15 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                             )
                             .flush_each
                             .clone(),
-                        output
+                        output_max_batch_size: output
                             .flush_policy
                             .as_ref()
                             .and_then(|policy| policy.max_batch_size.clone()),
-                        output_error_policies(
+                        error_policies: output_error_policies(
                             &output.message_error_policy,
                             ingestor.general_error_policy.clone(),
                         ),
-                    ));
+                    });
                 }
             }
             Model::Reingestor(reingestor) => {
@@ -381,16 +386,16 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         "the registry requires every route of these nodes to declare its branch \
                          behavior",
                     );
-                    let entrypoint = branch_entrypoint(branch_action, &branches);
-                    ingestors.push((
+                    let policy = branch_policy(branch_action.branch(), &branches);
+                    entrypoints.push(BranchedIngestorSpec {
                         kind,
-                        identifier.clone(),
-                        output.relay.clone(),
-                        entrypoint.branch,
-                        entrypoint.ttl,
-                        entrypoint.max_instances,
-                        BranchInstanceAckBoundary::Reingestor(reingestor.mode),
-                        output
+                        identifier: identifier.clone(),
+                        root_relay: output.relay.clone(),
+                        branch: policy.branch,
+                        branch_ttl: policy.ttl,
+                        branch_max_instances: policy.max_instances,
+                        output_ack_boundary: BranchInstanceAckBoundary::Reingestor(reingestor.mode),
+                        output_flush_each: output
                             .flush_policy
                             .as_ref()
                             .verified(
@@ -399,15 +404,15 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                             )
                             .flush_each
                             .clone(),
-                        output
+                        output_max_batch_size: output
                             .flush_policy
                             .as_ref()
                             .and_then(|policy| policy.max_batch_size.clone()),
-                        output_error_policies(
+                        error_policies: output_error_policies(
                             &output.message_error_policy,
                             GeneralErrorPolicy::Log,
                         ),
-                    ));
+                    });
                 }
             }
             _ => {}
@@ -417,36 +422,7 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
     processors.sort_by(|left, right| left.spec.processor.cmp(&right.spec.processor));
 
     BranchedNodeSpecs {
-        entrypoints: ingestors
-            .into_iter()
-            .map(
-                |(
-                    kind,
-                    identifier,
-                    root_relay,
-                    branch,
-                    branch_ttl,
-                    branch_max_instances,
-                    output_ack_boundary,
-                    output_flush_each,
-                    output_max_batch_size,
-                    error_policies,
-                )| {
-                    BranchedIngestorSpec {
-                        kind,
-                        identifier,
-                        root_relay,
-                        branch,
-                        branch_ttl,
-                        branch_max_instances,
-                        output_ack_boundary,
-                        output_flush_each,
-                        output_max_batch_size,
-                        error_policies,
-                    }
-                },
-            )
-            .collect(),
+        entrypoints,
         processors,
     }
 }
@@ -867,7 +843,7 @@ fn parse_branch_max_instances_setting(
 
 fn resolve_branch_relay_templates(
     branch_relay_ids: HashSet<RelayName>,
-    model_index: &HashMap<(ModelKind, ModelName), Model>,
+    model_index: &HashMap<RegistryEntity, Model>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<
@@ -879,19 +855,25 @@ fn resolve_branch_relay_templates(
 > {
     let materialized_streams = branch_relay_ids
         .iter()
-        .filter_map(
-            |relay| match model_index.get(&(ModelKind::Relay, ModelName::from(relay))) {
+        .filter_map(|relay| {
+            match model_index.get(&RegistryEntity {
+                kind: ModelKind::Relay,
+                identifier: ModelName::from(relay),
+            }) {
                 Some(Model::Relay(model)) if model.materialized_state.is_some() => {
                     Some(relay.clone())
                 }
                 _ => None,
-            },
-        )
+            }
+        })
         .collect::<HashSet<_>>();
     let relays = branch_relay_ids
         .into_iter()
         .map(|relay| {
-            match model_index.get(&(ModelKind::Relay, ModelName::from(&relay))) {
+            match model_index.get(&RegistryEntity {
+                kind: ModelKind::Relay,
+                identifier: ModelName::from(&relay),
+            }) {
                 Some(Model::Relay(_)) => {}
                 Some(model) => {
                     return Err(format!(
@@ -920,7 +902,7 @@ fn resolve_branch_relay_templates(
 
 pub(in crate::runtime) fn materialize_ingestor_route_template(
     spec: &BranchedIngestorSpec,
-    model_index: &HashMap<(ModelKind, ModelName), Model>,
+    model_index: &HashMap<RegistryEntity, Model>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<IngestorRouteTemplate, String> {
@@ -965,7 +947,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
 
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
-    model_index: &HashMap<(ModelKind, ModelName), Model>,
+    model_index: &HashMap<RegistryEntity, Model>,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,

@@ -179,7 +179,7 @@ use deduplicator::{
 use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
 use http_client::HttpClientConfig;
 pub(crate) use ingestors::kafka::KafkaIngestor;
-use kafka_offset_state::ReplicatedKafkaOffsetState;
+use kafka_offset_state::{KafkaTopicPartition, ReplicatedKafkaOffsetState};
 use materialized_state::{
     ReplicatedMaterializedRelayState, decode_materialized_stream_snapshot,
     encode_materialized_stream_snapshot_entries,
@@ -189,7 +189,7 @@ use message_error_delivery::{
     matching_message_error_output,
 };
 #[cfg(test)]
-use planning::branched_node_specs_from_models;
+use planning::{PlannedModel, branched_node_specs_from_models};
 use planning::{
     branched_node_specs_from_active_graph, branched_node_specs_from_scheduled_nodes,
     format_branched_by, materialize_ingestor_route_template,
@@ -357,6 +357,21 @@ impl RuntimeKey {
             identifier: identifier.into(),
         }
     }
+}
+
+/// One resource as a domain owns it, which is how installed resource versions are tracked.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DomainResourceKey {
+    domain: DomainName,
+    resource: ResourceName,
+}
+
+/// One in-flight entity-gate hold, identified by the domain it pauses and the operation that took
+/// it, so a retried operation reuses the hold it already owns.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EntityGateHoldKey {
+    domain: DomainName,
+    operation_id: u64,
 }
 
 enum IngestorRuntime {
@@ -1194,6 +1209,15 @@ struct BranchQuiesceGauges {
     output_buffers: usize,
 }
 
+/// The three depths a processor contributes to its node's quiesce accounting, read together so
+/// one observation reports a single consistent view of the processor.
+#[derive(Default)]
+struct BranchQuiesceDepths {
+    collected_inputs: usize,
+    pending_materialized: usize,
+    output_buffers: usize,
+}
+
 impl BranchQuiesceGauges {
     fn new(counters: Arc<NodeQuiesceCounters>) -> Self {
         Self {
@@ -1205,41 +1229,39 @@ impl BranchQuiesceGauges {
     }
 
     fn observe(&mut self, branch: &BranchRuntime, processor: &ModelName) {
-        let (collected_inputs, pending_materialized, output_buffers) = branch
+        let depths = branch
             .processors
             .get(processor)
-            .map(|processor| {
-                (
-                    processor
-                        .input_collectors
-                        .values()
-                        .map(|collector| collector.pending.len())
-                        .sum(),
-                    processor.pending_materialized.len(),
-                    processor
-                        .operation
-                        .output_routes()
-                        .routes
-                        .iter()
-                        .map(|output| output.pending.len())
-                        .sum(),
-                )
+            .map(|processor| BranchQuiesceDepths {
+                collected_inputs: processor
+                    .input_collectors
+                    .values()
+                    .map(|collector| collector.pending.len())
+                    .sum(),
+                pending_materialized: processor.pending_materialized.len(),
+                output_buffers: processor
+                    .operation
+                    .output_routes()
+                    .routes
+                    .iter()
+                    .map(|output| output.pending.len())
+                    .sum(),
             })
             .unwrap_or_default();
         Self::replace_gauge(
             &self.counters.collected_inputs,
             &mut self.collected_inputs,
-            collected_inputs,
+            depths.collected_inputs,
         );
         Self::replace_gauge(
             &self.counters.pending_materialized,
             &mut self.pending_materialized,
-            pending_materialized,
+            depths.pending_materialized,
         );
         Self::replace_gauge(
             &self.counters.output_buffers,
             &mut self.output_buffers,
-            output_buffers,
+            depths.output_buffers,
         );
     }
 
@@ -1975,25 +1997,42 @@ impl IngestRouteCollector {
         self.flush_at
     }
 
-    /// Groups by (relay, branch key) preserving arrival order within each group.
+    /// Groups by relay and branch key, preserving arrival order within each group.
     /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
-    fn drain_groups(&mut self) -> Vec<(RelayName, Vec<RelayMessage>)> {
-        let mut groups: Vec<(RelayName, Option<BranchKey>, Vec<RelayMessage>)> = Vec::new();
-        let mut group_indices: HashMap<(RelayName, Option<BranchKey>), usize> = HashMap::default();
+    fn drain_groups(&mut self) -> Vec<RoutedGroup> {
+        let mut groups: Vec<RoutedGroup> = Vec::new();
+        let mut group_indices: HashMap<RoutedGroupKey, usize> = HashMap::default();
         for (relay, message) in self.routed.drain(..) {
-            let group_key = (relay.clone(), message.key.clone());
+            let group_key = RoutedGroupKey {
+                relay: relay.clone(),
+                key: message.key.clone(),
+            };
             if let Some(index) = group_indices.get(&group_key).copied() {
-                groups[index].2.push(message);
+                groups[index].messages.push(message);
             } else {
                 group_indices.insert(group_key, groups.len());
-                groups.push((relay, message.key.clone(), vec![message]));
+                groups.push(RoutedGroup {
+                    relay,
+                    messages: vec![message],
+                });
             }
         }
         groups
-            .into_iter()
-            .map(|(relay, _, messages)| (relay, messages))
-            .collect()
     }
+}
+
+/// The relay and branch key a routed message is grouped under. Branch identity is part of the key
+/// because a relay batch carries exactly one branch key.
+#[derive(PartialEq, Eq, Hash)]
+struct RoutedGroupKey {
+    relay: RelayName,
+    key: Option<BranchKey>,
+}
+
+/// Messages routed to one relay under one branch key, in arrival order.
+struct RoutedGroup {
+    relay: RelayName,
+    messages: Vec<RelayMessage>,
 }
 
 #[derive(Clone, Default)]
@@ -2036,12 +2075,11 @@ impl BranchedEntrypointBatch {
         let mut acks = Vec::<AckSet>::new();
 
         for input in inputs {
-            let (runtime_batch, batch_metadata, batch_keys, batch_acks) =
-                input.into_unkeyed_parts();
-            batches.push(runtime_batch);
-            metadata.extend(batch_metadata);
-            keys.extend(batch_keys);
-            acks.extend(batch_acks);
+            let parts = input.into_unkeyed_parts();
+            batches.push(parts.batch);
+            metadata.extend(parts.metadata);
+            keys.extend(parts.keys);
+            acks.extend(parts.acks);
         }
         let batch_refs = batches.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let batch = RuntimeRecordBatch::concat(&batch_refs).map_err(|error| {
@@ -2723,8 +2761,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     }
 }
 
-type RelayBoundaryFanoutMap =
-    Arc<DashMap<(DomainName, RelayName), RelayBoundaryFanout, RandomState>>;
+type RelayBoundaryFanoutMap = Arc<DashMap<RuntimeKey, RelayBoundaryFanout, RandomState>>;
 type RelayRuntimeConsumerReceiver = RelaySubscriptionReceiver<RelayRecordBatch>;
 
 struct RelayRuntimeFanIn {
@@ -3873,7 +3910,7 @@ enum WindowAggregateAccumulator {
         count: usize,
     },
     Sequence {
-        values: VecDeque<(Timestamp, u64, RuntimeValue)>,
+        values: VecDeque<WindowSequenceValue>,
     },
     SortedMap {
         counts: BTreeMap<RuntimeValueSortKey, usize>,
@@ -3890,6 +3927,15 @@ enum WindowAggregateAccumulator {
     Sum {
         total: Option<RuntimeValue>,
     },
+}
+
+/// One value held in a sequence accumulator, kept with the window entry it arrived from so
+/// `FIRST` and `LAST` can order by arrival and `remove` can find the entry that left the window.
+#[derive(Debug, Clone)]
+struct WindowSequenceValue {
+    timestamp: Timestamp,
+    sequence: u64,
+    value: RuntimeValue,
 }
 
 #[derive(Debug)]
@@ -4156,7 +4202,7 @@ pub struct Runtime {
     emitter_buffers: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
     force_flush_by_domain: Arc<DashMap<DomainName, Arc<DomainForceFlush>, RandomState>>,
     node_quiesce_counters: Arc<DashMap<RuntimeKey, Arc<NodeQuiesceCounters>, RandomState>>,
-    entity_gate_holds: Arc<DashMap<(DomainName, u64), EntityAlterHold, RandomState>>,
+    entity_gate_holds: Arc<DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>>,
     active_domain_alters: Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     state_schema_fingerprints: Arc<DashMap<RuntimeStateSchemaKey, [u8; 32], RandomState>>,
     domain_graphs: Arc<DashMap<DomainName, SharedActiveGraph, RandomState>>,
@@ -4191,7 +4237,7 @@ pub struct Runtime {
     pending_state_syncs: Arc<DashMap<u64, PendingStateSyncSender, RandomState>>,
     expiring_stream_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>>,
-    latest_resource_versions: Arc<DashMap<(DomainName, ResourceName), u64, RandomState>>,
+    latest_resource_versions: Arc<DashMap<DomainResourceKey, u64, RandomState>>,
     replicated_deduplicator_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>>,
     replicated_kafka_offset_states:
@@ -7377,15 +7423,12 @@ impl RelayProcessorNode {
         &self,
         runtime: &Runtime,
         shutdown_tx: &watch::Sender<bool>,
-    ) -> (
-        Option<JoinHandle<()>>,
-        Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
-    ) {
+    ) -> SpawnedSnapshotTask {
         match &self.operation {
-            RelayProcessorOperationNode::Deduplicator { state, .. } => (
-                runtime.spawn_deduplicator_snapshot_task(shutdown_tx, state.clone()),
-                None,
-            ),
+            RelayProcessorOperationNode::Deduplicator { state, .. } => SpawnedSnapshotTask {
+                task: runtime.spawn_deduplicator_snapshot_task(shutdown_tx, state.clone()),
+                requests: None,
+            },
             RelayProcessorOperationNode::WindowProcessor {
                 replicated_state, ..
             } => {
@@ -7396,13 +7439,16 @@ impl RelayProcessorNode {
                     request_tx,
                 );
                 let requests = task.is_some().then_some(request_rx);
-                (task, requests)
+                SpawnedSnapshotTask { task, requests }
             }
             RelayProcessorOperationNode::Junction { .. }
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
-            | RelayProcessorOperationNode::WasmProcessor { .. } => (None, None),
+            | RelayProcessorOperationNode::WasmProcessor { .. } => SpawnedSnapshotTask {
+                task: None,
+                requests: None,
+            },
         }
     }
 
@@ -9244,6 +9290,13 @@ struct ProcessorSnapshotTask {
     requests: Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
 }
 
+/// What spawning a processor's snapshot task produced. Only the window processor answers snapshot
+/// requests, so a processor without them still reports the task it spawned.
+struct SpawnedSnapshotTask {
+    task: Option<JoinHandle<()>>,
+    requests: Option<mpsc::Receiver<WindowProcessorSnapshotRequest>>,
+}
+
 #[derive(Debug)]
 struct ProcessorBranchHandoff {
     key: Option<BranchKey>,
@@ -9897,17 +9950,20 @@ fn spawn_processor_branch_task(
     let (stop_tx, stop_rx) = mpsc::channel(1);
     let processor = template.source.clone();
     let (snapshot_shutdown_tx, _) = watch::channel(false);
-    let (snapshot_task, snapshot_requests) = branch
+    let spawned = branch
         .processors
         .get(&ModelName::from(&processor))
         .map(|processor| {
             processor.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx)
         })
-        .unwrap_or((None, None));
+        .unwrap_or(SpawnedSnapshotTask {
+            task: None,
+            requests: None,
+        });
     let snapshot_task = ProcessorSnapshotTask {
         shutdown_tx: snapshot_shutdown_tx,
-        task: snapshot_task,
-        requests: snapshot_requests,
+        task: spawned.task,
+        requests: spawned.requests,
     };
     let quiesce_counters = context
         .runtime_handle
@@ -10732,8 +10788,8 @@ fn compile_lookup_hash_map_calls(
         let key_output_schema = StdArc::new(arrow_schema::Schema::new(
             key_types
                 .into_iter()
-                .map(|(name, data_type, nullable)| {
-                    arrow_schema::Field::new(name, data_type, nullable)
+                .map(|inferred| {
+                    arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
                 })
                 .collect::<Vec<_>>(),
         ));
@@ -10943,9 +10999,9 @@ fn compiled_message_error_sites(
         ));
     }
     let mut sites = CompiledMessageErrorSites::new();
-    for (index, ((target, expression), operation)) in
-        program.inner.set.iter().zip(set_operations).enumerate()
+    for (index, (assignment, operation)) in program.inner.set.iter().zip(set_operations).enumerate()
     {
+        let (target, expression) = assignment;
         let mut fields = vec![FieldPath::new(format!("{}.{}", target.relay, target.field))];
         collect_expression_field_paths(expression, &mut fields);
         sites.insert(
@@ -12123,7 +12179,9 @@ pub(super) fn compile_key_projection_program(
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         key_types
             .into_iter()
-            .map(|(name, data_type, nullable)| arrow_schema::Field::new(name, data_type, nullable))
+            .map(|inferred| {
+                arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
+            })
             .collect::<Vec<_>>(),
     ));
     compile_vm_program_with_options_for_bindings_with_sensitivity(
@@ -12190,7 +12248,9 @@ async fn evaluate_constant_expression_vm(
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred
             .into_iter()
-            .map(|(name, data_type, nullable)| arrow_schema::Field::new(name, data_type, nullable))
+            .map(|inferred| {
+                arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
+            })
             .collect::<Vec<_>>(),
     ));
     let bindings = vec![
@@ -13243,7 +13303,15 @@ async fn evaluate_correlator_output_batch(
     }
     let mut pending_acks = acks.into_iter().map(Some).collect::<Vec<_>>();
     let mut outcomes = (0..row_count).map(|_| None).collect::<Vec<_>>();
-    let mut successful = Vec::<(usize, usize, RelayMessage)>::new();
+    /// One correlation that produced output: the row of the VM output batch it landed on, the
+    /// input row it correlates, and the message that carries that input row's ACKs.
+    struct SuccessfulCorrelation {
+        output_row: usize,
+        input_row: usize,
+        source: RelayMessage,
+    }
+
+    let mut successful = Vec::<SuccessfulCorrelation>::new();
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         let acks = pending_acks[input_row]
             .take()
@@ -13289,7 +13357,11 @@ async fn evaluate_correlator_output_batch(
             ))));
             continue;
         }
-        successful.push((output_row, input_row, source));
+        successful.push(SuccessfulCorrelation {
+            output_row,
+            input_row,
+            source,
+        });
     }
     for (input_row, acks) in pending_acks.into_iter().enumerate() {
         if let Some(acks) = acks {
@@ -13301,26 +13373,27 @@ async fn evaluate_correlator_output_batch(
     if !successful.is_empty() {
         let output_rows = successful
             .iter()
-            .map(|(output_row, _, _)| *output_row)
+            .map(|correlation| correlation.output_row)
             .collect::<Vec<_>>();
         match vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &output_rows) {
             Ok(output) => {
                 let output = Arc::new(output);
-                for (output_row, (_, input_row, source)) in successful.into_iter().enumerate() {
+                for (output_row, correlation) in successful.into_iter().enumerate() {
+                    let input_row = correlation.input_row;
                     match RuntimeRow::new(
                         output.clone(),
                         output_row,
                         matched.metadata[input_row].clone(),
                     ) {
                         Ok(record) => {
-                            let RelayMessage { key, acks, .. } = source;
+                            let RelayMessage { key, acks, .. } = correlation.source;
                             outcomes[input_row] =
                                 Some(Ok(Some(RelayMessage { key, record, acks })));
                         }
                         Err(error) => {
                             outcomes[input_row] =
                                 Some(Err(Box::new(planned_structured_message_error(
-                                    source,
+                                    correlation.source,
                                     structured_message_error(
                                         MessageErrorCode::Internal,
                                         error,
@@ -13336,9 +13409,11 @@ async fn evaluate_correlator_output_batch(
                 }
             }
             Err(error) => {
-                for (output_row, input_row, source) in successful {
+                for correlation in successful {
+                    let output_row = correlation.output_row;
+                    let input_row = correlation.input_row;
                     outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
-                        source,
+                        correlation.source,
                         structured_message_error(
                             MessageErrorCode::Validation,
                             format!(
@@ -16088,10 +16163,10 @@ impl WindowAggregateAccumulator {
             Self::Sequence { values } => WindowAggregateAccumulatorSnapshot::Sequence {
                 values: values
                     .iter()
-                    .map(|(timestamp, sequence, value)| WindowSequenceValueSnapshot {
-                        timestamp: *timestamp,
-                        sequence: *sequence,
-                        value: value.to_remote(),
+                    .map(|entry| WindowSequenceValueSnapshot {
+                        timestamp: entry.timestamp,
+                        sequence: entry.sequence,
+                        value: entry.value.to_remote(),
                     })
                     .collect(),
             },
@@ -16139,12 +16214,10 @@ impl WindowAggregateAccumulator {
             WindowAggregateAccumulatorSnapshot::Sequence { values } => Self::Sequence {
                 values: values
                     .into_iter()
-                    .map(|value| {
-                        (
-                            value.timestamp,
-                            value.sequence,
-                            RuntimeValue::from_remote(value.value),
-                        )
+                    .map(|snapshot| WindowSequenceValue {
+                        timestamp: snapshot.timestamp,
+                        sequence: snapshot.sequence,
+                        value: RuntimeValue::from_remote(snapshot.value),
                     })
                     .collect(),
             },
@@ -16245,7 +16318,11 @@ impl WindowAggregateAccumulator {
             Self::Sequence { values } => {
                 let value = value
                     .ok_or_else(|| "sequence aggregate structure requires a value".to_string())?;
-                values.push_back((timestamp, sequence, value));
+                values.push_back(WindowSequenceValue {
+                    timestamp,
+                    sequence,
+                    value,
+                });
                 Ok(())
             }
             Self::SortedMap { counts } => {
@@ -16299,9 +16376,7 @@ impl WindowAggregateAccumulator {
             Self::Sequence { values } => {
                 let Some(index) = values
                     .iter()
-                    .position(|(entry_timestamp, entry_sequence, _)| {
-                        *entry_timestamp == timestamp && *entry_sequence == sequence
-                    })
+                    .position(|entry| entry.timestamp == timestamp && entry.sequence == sequence)
                 else {
                     return Err("sequence accumulator is missing removed window entry".to_string());
                 };
@@ -16367,13 +16442,13 @@ impl WindowAggregateAccumulator {
             }
             (WindowAggregateFunction::First, Self::Sequence { values }) => values
                 .iter()
-                .min_by_key(|(timestamp, sequence, _)| (*timestamp, *sequence))
-                .map(|(_, _, value)| value.clone())
+                .min_by_key(|entry| (entry.timestamp, entry.sequence))
+                .map(|entry| entry.value.clone())
                 .ok_or_else(|| "FIRST requires a non-empty window".to_string()),
             (WindowAggregateFunction::Last, Self::Sequence { values }) => values
                 .iter()
-                .max_by_key(|(timestamp, sequence, _)| (*timestamp, *sequence))
-                .map(|(_, _, value)| value.clone())
+                .max_by_key(|entry| (entry.timestamp, entry.sequence))
+                .map(|entry| entry.value.clone())
                 .ok_or_else(|| "LAST requires a non-empty window".to_string()),
             (WindowAggregateFunction::Max, Self::SortedMap { counts }) => counts
                 .last_key_value()
@@ -16675,11 +16750,11 @@ async fn evaluate_window_aggregate_inputs(
             })?;
             let field = result.batch.schema().field(column_index);
             let array = result.batch.column(column_index).to_array_ref();
-            Ok(Some((
-                field_name.as_str(),
+            Ok(Some(WindowAggregateInputColumn {
+                field_name: field_name.as_str(),
                 array,
-                parse_as_type_from_arrow(field.data_type())?,
-            )))
+                ty: parse_as_type_from_arrow(field.data_type())?,
+            }))
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok((0..row_count)
@@ -16694,15 +16769,29 @@ async fn evaluate_window_aggregate_inputs(
             input_columns
                 .iter()
                 .map(|column| {
-                    let Some((field_name, array, ty)) = column else {
+                    let Some(column) = column else {
                         return Ok(WindowAggregateInput { value: None });
                     };
-                    runtime_value_from_arrow_array(array.as_ref(), ty, true, row, field_name)
-                        .map(|value| WindowAggregateInput { value })
+                    runtime_value_from_arrow_array(
+                        column.array.as_ref(),
+                        &column.ty,
+                        true,
+                        row,
+                        column.field_name,
+                    )
+                    .map(|value| WindowAggregateInput { value })
                 })
                 .collect()
         })
         .collect())
+}
+
+/// One column of a window processor's aggregate input, read once per batch so every row reads the
+/// same array with the same declared type.
+struct WindowAggregateInputColumn<'program> {
+    field_name: &'program str,
+    array: ArrayRef,
+    ty: nervix_models::ParseAsType,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -17410,7 +17499,15 @@ impl<'a> VmInputProjectionSources<'a> {
         &self,
         qualified_name: &'name str,
     ) -> Option<(&'a RuntimeRecordBatch, &'name str)> {
-        let mut best_match = None;
+        /// The longest namespace matched so far, with the batch it names and the field left after
+        /// stripping it. A longer namespace always wins, so its length is compared first.
+        struct NamespaceMatch<'batch, 'field> {
+            namespace_len: usize,
+            batch: &'batch RuntimeRecordBatch,
+            field_name: &'field str,
+        }
+
+        let mut best_match: Option<NamespaceMatch<'a, 'name>> = None;
         for &(namespace, batch) in self.namespace_batches {
             let Some(suffix) = qualified_name.strip_prefix(namespace) else {
                 continue;
@@ -17418,12 +17515,18 @@ impl<'a> VmInputProjectionSources<'a> {
             let Some(field_name) = suffix.strip_prefix('.') else {
                 continue;
             };
-            match best_match {
-                Some((namespace_len, _, _)) if namespace_len >= namespace.len() => {}
-                _ => best_match = Some((namespace.len(), batch, field_name)),
+            match &best_match {
+                Some(best) if best.namespace_len >= namespace.len() => {}
+                _ => {
+                    best_match = Some(NamespaceMatch {
+                        namespace_len: namespace.len(),
+                        batch,
+                        field_name,
+                    });
+                }
             }
         }
-        best_match.map(|(_, batch, field_name)| (batch, field_name))
+        best_match.map(|best| (best.batch, best.field_name))
     }
 
     fn has_strict_namespace(&self, qualified_name: &str) -> bool {
@@ -17442,7 +17545,16 @@ impl<'a> VmInputProjectionSources<'a> {
 /// route. Carrier columns already share their Arrow buffers and need no cache.
 #[derive(Default)]
 struct SharedVmInputColumns {
-    columns: HashMap<(String, ArrowDataType, bool), VmTypedArray>,
+    columns: HashMap<SharedVmInputColumnKey, VmTypedArray>,
+}
+
+/// The identity of a shared input column. Routes may request the same name with a different Arrow
+/// type or nullability, so the resolved field is part of the identity rather than the name alone.
+#[derive(PartialEq, Eq, Hash)]
+struct SharedVmInputColumnKey {
+    name: String,
+    data_type: ArrowDataType,
+    nullable: bool,
 }
 
 /// Per-batch caches shared by every output route's program execution.
@@ -17462,11 +17574,11 @@ impl SharedVmInputColumns {
         field: &arrow_schema::Field,
         build: impl FnOnce() -> Result<VmTypedArray, String>,
     ) -> Result<VmTypedArray, String> {
-        let key = (
-            field.name().clone(),
-            field.data_type().clone(),
-            field.is_nullable(),
-        );
+        let key = SharedVmInputColumnKey {
+            name: field.name().clone(),
+            data_type: field.data_type().clone(),
+            nullable: field.is_nullable(),
+        };
         if let Some(column) = self.columns.get(&key) {
             return Ok(column.clone());
         }

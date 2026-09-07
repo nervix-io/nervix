@@ -5,7 +5,7 @@ use nervix_models::DescribeEmitter;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, emitter_ref, into_parse_error, kw, lex_input,
+        LexedInput, ParseError, ParseFromSourceError, emitter_ref, into_parse_error, kw, lex_input,
         suggest_from, tok,
     },
 };
@@ -33,7 +33,11 @@ pub fn parse_describe_emitter_tokens(
 }
 
 pub fn parse_describe_emitter(input: &str) -> Result<DescribeEmitter, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_emitter_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

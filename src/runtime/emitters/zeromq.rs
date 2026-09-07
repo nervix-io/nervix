@@ -71,8 +71,9 @@ impl ZeroMqEmitter {
         let mut outcome = PerRecordPublishOutcome::empty();
         for record in records {
             tokio::task::consume_budget().await;
+            let position = record.position();
             match await_emitter_confirmation(&record.acks, self.publish(record.payload)).await {
-                Ok(()) => outcome.deliver((record.batch_index, record.row_index)),
+                Ok(()) => outcome.deliver(position),
                 Err(error) => {
                     outcome.fail(error);
                     break;

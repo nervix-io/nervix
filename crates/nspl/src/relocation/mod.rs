@@ -8,8 +8,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, cluster_node_name, correlator_ref,
-        deduplicator_ref, emitter_ref, generator_ref, inferencer_ref, ingestor_ref,
+        LexedInput, ParseError, ParseFromSourceError, boxed_choice, cluster_node_name,
+        correlator_ref, deduplicator_ref, emitter_ref, generator_ref, inferencer_ref, ingestor_ref,
         into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, reingestor_ref,
         relay_ref, reorderer_ref, suggest_from, tok, wasm_processor_ref, window_processor_ref,
     },
@@ -161,7 +161,11 @@ pub fn describe_relocation_parser<'src>()
 }
 
 pub fn parse_relocate(input: &str) -> Result<Relocation, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = relocate_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -180,7 +184,11 @@ pub fn parse_relocate(input: &str) -> Result<Relocation, ParseFromSourceError> {
 }
 
 pub fn parse_describe_relocation(input: &str) -> Result<Relocation, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = describe_relocation_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());

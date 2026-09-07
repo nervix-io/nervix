@@ -5,8 +5,8 @@ use nervix_models::DescribeReorderer;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, reorderer_ref,
-        suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input,
+        reorderer_ref, suggest_from, tok,
     },
 };
 
@@ -33,7 +33,11 @@ pub fn parse_describe_reorderer_tokens(
 }
 
 pub fn parse_describe_reorderer(input: &str) -> Result<DescribeReorderer, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_reorderer_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

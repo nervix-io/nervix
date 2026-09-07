@@ -38,19 +38,33 @@ impl PulsarIngestor {
             });
         }
 
-        let (topic, subscription, instances, ack_mode) = match &ingestor.source {
+        /// The parts of a Pulsar ingest source this task drives, taken from the model once so the
+        /// rest of startup reads named values rather than re-matching the source.
+        struct PulsarSource {
+            topic: nervix_models::TopicName,
+            subscription: nervix_models::PulsarSubscriptionName,
+            instances: u64,
+            ack_mode: PulsarIngestMode,
+        }
+
+        let PulsarSource {
+            topic,
+            subscription,
+            instances,
+            ack_mode,
+        } = match &ingestor.source {
             IngestSource::Pulsar {
                 topic,
                 subscription,
                 instances,
                 mode,
                 ..
-            } => (
-                topic.clone(),
-                subscription.clone(),
-                *instances,
-                mode.clone(),
-            ),
+            } => PulsarSource {
+                topic: topic.clone(),
+                subscription: subscription.clone(),
+                instances: *instances,
+                ack_mode: mode.clone(),
+            },
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),

@@ -165,7 +165,7 @@ impl RabbitMqEmitter {
                     .map(|confirmation| confirmation.acks.clone())
                     .chain(std::iter::once(record.acks.clone())),
             );
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let confirmation = match await_emitter_confirmation(
                 &enqueue_acks,
                 Self::publish_message(channel, queue.as_str(), &record.payload, &record.headers),

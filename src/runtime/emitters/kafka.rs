@@ -70,7 +70,7 @@ impl KafkaEmitter {
                 confirmation.acks.ack_alive();
             }
             record.acks.ack_alive();
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let confirmation = match Self::enqueue(producer, topic, &record) {
                 Ok(confirmation) => confirmation,
                 Err(error) if Self::is_record_rejection(&error) => {
