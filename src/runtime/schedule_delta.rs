@@ -27,11 +27,8 @@ impl ScheduleDelta {
         let mut updates = Vec::new();
         let mut entities = Vec::new();
         let mut reassignments = Vec::new();
-        for desired_node in &desired.nodes {
-            let Some(existing_node) = existing.nodes.iter().find(|existing_node| {
-                existing_node.kind == desired_node.kind
-                    && existing_node.identifier == desired_node.identifier
-            }) else {
+        for (identity, desired_node) in &desired.nodes {
+            let Some(existing_node) = existing.nodes.get(identity) else {
                 return Self::Rebuild;
             };
             if !existing_node.has_same_assignment_as(desired_node) {
@@ -163,10 +160,22 @@ mod tests {
         N::try_from(raw).expect("valid name")
     }
 
+    fn push_scheduled(schedule: &mut DomainSchedule, node: ScheduledNode) {
+        schedule.nodes.insert(node.identity(), node);
+    }
+
+    fn first_scheduled(schedule: DomainSchedule) -> ScheduledNode {
+        schedule
+            .nodes
+            .into_values()
+            .next()
+            .expect("fixture schedule must contain a node")
+    }
+
     fn schedule(capacity: usize) -> DomainSchedule {
-        DomainSchedule {
-            domain: DomainName::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: named("events"),
                 kind: ModelKind::Relay,
                 config: Box::new(Model::Relay(CreateRelay {
@@ -183,14 +192,14 @@ mod tests {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
-            placement_groups: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     fn ingestor_schedule(endpoint: &str) -> DomainSchedule {
-        DomainSchedule {
-            domain: DomainName::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: named("event_source"),
                 kind: ModelKind::Ingestor,
                 config: Box::new(Model::Ingestor(CreateIngestor {
@@ -224,8 +233,8 @@ mod tests {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
-            placement_groups: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -286,9 +295,9 @@ mod tests {
             filter_where: None,
             materialized_state: Vec::new(),
         };
-        let existing = DomainSchedule {
-            domain: DomainName::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        let existing = DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: named("route_events"),
                 kind: ModelKind::Junction,
                 config: Box::new(Model::Junction(junction.clone())),
@@ -299,8 +308,8 @@ mod tests {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
         let mut dynamic_config = junction;
         dynamic_config.filter_where = Some(Expression::Literal(Literal::Bool(true)));
         let mut desired = existing.clone();
@@ -377,9 +386,9 @@ mod tests {
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),
         };
-        let existing = DomainSchedule {
-            domain: DomainName::parse("testing").expect("valid domain"),
-            nodes: vec![ScheduledNode {
+        let existing = DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![ScheduledNode {
                 identifier: ModelName::from(&emitter.name),
                 kind: ModelKind::Emitter,
                 config: Box::new(Model::Emitter(emitter.clone())),
@@ -390,8 +399,8 @@ mod tests {
                 primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
             }],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         let mut dynamic_emitter = emitter.clone();
         dynamic_emitter.flush_each = "IMMEDIATE".to_string();
@@ -492,16 +501,18 @@ mod tests {
             assigned_nodes: Vec::new(),
         };
         let mut existing = ingestor_schedule("ingress_a");
-        existing
-            .nodes
-            .push(placement_node(PlacementPolicy::PreferColocation));
+        push_scheduled(
+            &mut existing,
+            placement_node(PlacementPolicy::PreferColocation),
+        );
         let mut desired = ingestor_schedule("ingress_a");
         desired.nodes[0].primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
         desired.nodes[0].assigned_nodes =
             vec![ClusterNodeName::parse("node-2").expect("valid name")];
-        desired
-            .nodes
-            .push(placement_node(PlacementPolicy::RequireColocation));
+        push_scheduled(
+            &mut desired,
+            placement_node(PlacementPolicy::RequireColocation),
+        );
 
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
@@ -519,14 +530,15 @@ mod tests {
     #[test]
     fn a_model_change_and_an_unrelated_move_apply_together() {
         let mut existing = schedule(1);
-        existing
-            .nodes
-            .push(ingestor_schedule("ingress_a").nodes.remove(0));
+        push_scheduled(
+            &mut existing,
+            first_scheduled(ingestor_schedule("ingress_a")),
+        );
         let mut desired = schedule(5);
-        let mut moved_ingestor = ingestor_schedule("ingress_a").nodes.remove(0);
+        let mut moved_ingestor = first_scheduled(ingestor_schedule("ingress_a"));
         moved_ingestor.primary_node = Some(ClusterNodeName::parse("node-3").expect("valid name"));
         moved_ingestor.assigned_nodes = vec![ClusterNodeName::parse("node-3").expect("valid name")];
-        desired.nodes.push(moved_ingestor);
+        push_scheduled(&mut desired, moved_ingestor);
 
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),

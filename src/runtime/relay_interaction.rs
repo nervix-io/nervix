@@ -22,7 +22,8 @@
 
 use std::{future::pending, task::Poll};
 
-use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use ahash::{HashSet, HashSetExt};
+use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use nervix_models::RelayName;
 use thiserror::Error;
@@ -163,8 +164,10 @@ struct RelayInputCollectionError {
 #[derive(Debug)]
 struct RelayInputCollection {
     policy: Option<RuntimeInputCollectPolicy>,
-    pending: HashMap<Option<BranchKey>, RelayInputBranchCollection>,
-    branch_order: Vec<Option<BranchKey>>,
+    /// Collected batches keyed by branch, in the order the branches first collected. Arrival order
+    /// decides which branch flushes next, and the key resolves the branch a batch belongs to, so
+    /// this is one ordered map instead of a map plus a separate order sequence to scan.
+    pending: IndexMap<Option<BranchKey>, RelayInputBranchCollection>,
     quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
     pending_batches: usize,
 }
@@ -176,8 +179,7 @@ impl RelayInputCollection {
     ) -> Self {
         Self {
             policy,
-            pending: HashMap::new(),
-            branch_order: Vec::new(),
+            pending: IndexMap::new(),
             quiesce_counters,
             pending_batches: 0,
         }
@@ -191,9 +193,6 @@ impl RelayInputCollection {
             return Ok(Some(batch));
         };
         let key = batch.key.clone();
-        if !self.pending.contains_key(&key) {
-            self.branch_order.push(key.clone());
-        }
         let collection = self.pending.entry(key.clone()).or_default();
         collection.bytes = collection
             .bytes
@@ -229,10 +228,9 @@ impl RelayInputCollection {
         &mut self,
         now: Instant,
     ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
-        let key = self.branch_order.iter().find_map(|key| {
-            self.pending
-                .get(key)
-                .and_then(|collection| collection.deadline)
+        let key = self.pending.iter().find_map(|(key, collection)| {
+            collection
+                .deadline
                 .is_some_and(|deadline| deadline <= now)
                 .then_some(key.clone())
         });
@@ -243,9 +241,10 @@ impl RelayInputCollection {
     }
 
     fn take_any(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
-        let Some(key) = self.branch_order.first().cloned() else {
+        let Some((key, _)) = self.pending.first() else {
             return Ok(None);
         };
+        let key = key.clone();
         self.take(&key).map(Some)
     }
 
@@ -255,9 +254,8 @@ impl RelayInputCollection {
     ) -> Result<RelayRecordBatch, RelayInputCollectionError> {
         let collection = self
             .pending
-            .remove(key)
-            .verified("the branch order only names keys the pending map still holds");
-        self.branch_order.retain(|candidate| candidate != key);
+            .shift_remove(key)
+            .verified("take is only called with a key the pending map still holds");
         self.pending_batches = self
             .pending_batches
             .checked_sub(collection.batches.len())

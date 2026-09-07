@@ -121,15 +121,30 @@ pub struct ResourceVersionStatus {
 }
 
 impl ResourceVersionStatus {
+    /// Locates a resource's catalog slot. `Ok` holds the entry's position and `Err` holds the
+    /// position it would be inserted at. The catalog is sorted by domain and then identifier, so
+    /// callers resolve a resource by key instead of scanning the catalog.
+    pub fn resource_slot(
+        &self,
+        domain: &DomainName,
+        identifier: &ResourceName,
+    ) -> Result<usize, usize> {
+        self.next_version_by_resource
+            .binary_search_by(|(known_domain, known_identifier, _)| {
+                known_domain
+                    .cmp(domain)
+                    .then_with(|| known_identifier.cmp(identifier))
+            })
+    }
+
     /// Returns the next version the named resource would receive in `domain`, which is `None`
     /// until the resource is declared there. Resources are domain-owned, so the same name in two
     /// domains is two independent resources with independent version sequences.
     pub fn next_version(&self, domain: &DomainName, identifier: &ResourceName) -> Option<u64> {
-        self.next_version_by_resource.iter().find_map(
-            |(known_domain, known_identifier, next_version)| {
-                (known_domain == domain && known_identifier == identifier).then_some(*next_version)
-            },
-        )
+        let index = self.resource_slot(domain, identifier).ok()?;
+        self.next_version_by_resource
+            .get(index)
+            .map(|(_, _, next_version)| *next_version)
     }
 
     /// Returns the highest installed version of the named resource in `domain`, which is `None`

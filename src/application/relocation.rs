@@ -341,8 +341,8 @@ impl SessionServiceImpl {
                 let assignment = planned
                     .as_ref()
                     .filter(|_| moves)
-                    .and_then(|planned| scheduled_node(planned, &member.runtime_node))
-                    .or_else(|| scheduled_node(current, &member.runtime_node));
+                    .and_then(|planned| planned.nodes.get(&member.runtime_node))
+                    .or_else(|| current.nodes.get(&member.runtime_node));
                 RelocationPlanMember {
                     runtime_node: member.runtime_node.clone(),
                     group: member.group,
@@ -354,7 +354,9 @@ impl SessionServiceImpl {
                         .map(|node| node.replica_nodes().into_iter().cloned().collect())
                         .unwrap_or_default(),
                     promoted_replica: moves
-                        && scheduled_node(current, &member.runtime_node)
+                        && current
+                            .nodes
+                            .get(&member.runtime_node)
                             .is_some_and(|node| node.is_assigned_to(&relocation.destination)),
                 }
             })
@@ -448,11 +450,7 @@ fn planned_relocation_schedule(
 ) -> DomainSchedule {
     let mut planned = current.clone();
     for member in moved {
-        let Some(node) = planned
-            .nodes
-            .iter_mut()
-            .find(|node| node.kind == member.kind && node.identifier == member.identifier)
-        else {
+        let Some(node) = planned.nodes.get_mut(member) else {
             continue;
         };
         let former_owner = node.execution_node().cloned();
@@ -473,9 +471,7 @@ fn planned_relocation_schedule(
                 .filter(|replica| live_nodes.contains(*replica))
                 .cloned(),
         );
-        if let Some(desired_node) = desired.nodes.iter().find(|candidate| {
-            candidate.kind == member.kind && candidate.identifier == member.identifier
-        }) {
+        if let Some(desired_node) = desired.nodes.get(member) {
             candidates.extend(
                 desired_node
                     .assigned_nodes
@@ -534,13 +530,13 @@ fn unsatisfied_preference_lines(
     }
     let mut lines = Vec::new();
     for preference in &unit.preferences {
-        let Some(left_node) = scheduled_node(schedule, &preference.left) else {
+        let Some(left_node) = schedule.nodes.get(&preference.left) else {
             continue;
         };
         let Some(left) = left_node.execution_node() else {
             continue;
         };
-        let Some(right_node) = scheduled_node(schedule, &preference.right) else {
+        let Some(right_node) = schedule.nodes.get(&preference.right) else {
             continue;
         };
         let Some(right) = right_node.execution_node() else {
@@ -575,7 +571,7 @@ fn relocation_member_owner<'a>(
     member: &PlacementRuntimeNode,
     live_nodes: &BTreeSet<ClusterNodeName>,
 ) -> Result<&'a ClusterNodeName, String> {
-    let Some(node) = scheduled_node(schedule, member) else {
+    let Some(node) = schedule.nodes.get(member) else {
         return Err(format!(
             "{} '{}' is not scheduled in domain '{}'",
             member.kind.as_str(),
@@ -600,16 +596,6 @@ fn relocation_member_owner<'a>(
         ));
     }
     Ok(owner)
-}
-
-fn scheduled_node<'a>(
-    schedule: &'a DomainSchedule,
-    member: &PlacementRuntimeNode,
-) -> Option<&'a ScheduledNode> {
-    schedule
-        .nodes
-        .iter()
-        .find(|node| node.kind == member.kind && node.identifier == member.identifier)
 }
 
 fn relay_without_materialized_state(node: &ScheduledNode) -> bool {
@@ -660,11 +646,11 @@ mod tests {
     }
 
     fn schedule(nodes: Vec<ScheduledNode>) -> DomainSchedule {
-        DomainSchedule {
-            domain: DomainName::parse("relocation_test").expect("valid domain"),
+        DomainSchedule::new(
+            DomainName::parse("relocation_test").expect("valid domain"),
             nodes,
-            placement_groups: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     fn member(name: &str) -> PlacementRuntimeNode {
@@ -737,8 +723,10 @@ mod tests {
             &live(&["node-1", "node-2", "node-3"]),
             &live(&["node-1", "node-2", "node-3"]),
         );
-        let node =
-            scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
+        let node = planned
+            .nodes
+            .get(&member("route"))
+            .expect("member must remain scheduled");
         assert_eq!(node.primary_node.as_ref(), Some(&node_name("node-2")));
         assert_eq!(
             node.assigned_nodes,
@@ -759,8 +747,10 @@ mod tests {
             &live(&["node-1", "node-2"]),
             &live(&["node-1", "node-2"]),
         );
-        let node =
-            scheduled_node(&planned, &member("route")).expect("member must remain scheduled");
+        let node = planned
+            .nodes
+            .get(&member("route"))
+            .expect("member must remain scheduled");
         assert_eq!(node.assigned_nodes, vec![node_name("node-2")]);
     }
 }

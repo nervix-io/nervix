@@ -114,11 +114,11 @@ fn processor_node_spec(
 }
 
 pub(in crate::runtime) fn branched_node_specs_from_scheduled_nodes(
-    nodes: &[ScheduledNode],
+    nodes: &ScheduledNodes,
 ) -> BranchedNodeSpecs {
     branched_node_specs_from_models(
         nodes
-            .iter()
+            .values()
             .map(|node| (node.kind, node.identifier.clone(), (*node.config).clone())),
     )
 }
