@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
+use std::{
+    collections::VecDeque,
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc as StdArc,
+    time::Duration,
+};
 
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
@@ -60,7 +65,7 @@ pub(super) struct BranchedIngestorSpec {
     pub(super) root_relay: RelayName,
     pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<String>,
-    pub(super) branch_max_instances: Option<u64>,
+    pub(super) branch_max_instances: Option<NonZeroU64>,
     pub(super) output_ack_boundary: BranchInstanceAckBoundary,
     pub(super) output_flush_each: String,
     pub(super) output_max_batch_size: Option<String>,
@@ -72,7 +77,7 @@ pub(super) struct BranchedProcessorNodeSpec {
     pub(super) spec: BranchedProcessorSpec,
     pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<String>,
-    pub(super) branch_max_instances: Option<u64>,
+    pub(super) branch_max_instances: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +227,7 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) root_relay: RelayName,
     pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<Duration>,
-    pub(super) branch_max_instances: Option<usize>,
+    pub(super) branch_max_instances: Option<NonZeroUsize>,
     pub(super) error_policies: ErrorPolicies,
     pub(super) relays: HashMap<RelayName, RelayProcessorRelayTemplate>,
     pub(super) materialized_streams: HashSet<RelayName>,

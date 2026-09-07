@@ -25,6 +25,7 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 apache-avro = { workspace = true }
 arc-swap = { workspace = true }
+arch-into = { workspace = true }
 argon2 = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
@@ -95,6 +96,7 @@ nervix-proto = { workspace = true, features = ["client", "server"] }
 nervix-roto = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
+nonzero_ext = { workspace = true }
 opendal = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
@@ -248,6 +250,7 @@ ahash-compile-time = { package = "ahash", version = "0.8", default-features = fa
 anyhow = "1"
 apache-avro = "0.21.0"
 arc-swap = "1.9.1"
+arch-into = { version = "0.0.1-alpha.5", features = ["no-arch-32"] }
 argon2 = "0.5"
 ariadne = "0.5"
 arrow-arith = "58"
@@ -359,6 +362,9 @@ nervix-test-environment = { package = "nervix-test-environment", path = "crates/
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
+# Compile-time checked non-zero literals, so a constant that must not be zero is rejected by the
+# compiler rather than by a runtime guard.
+nonzero_ext = "0.3"
 # Match the pinned Iceberg revision to avoid duplicate, incompatible OpenDAL APIs.
 opendal = { version = "0.56.0", features = [
   "services-s3",

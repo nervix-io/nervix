@@ -157,12 +157,13 @@ impl MqttEmitter {
             }));
         }
         let request_capacity = match mode {
-            MqttPublishingMode::Qos0 => 1,
-            MqttPublishingMode::Qos1 { max_in_flight, .. }
-            | MqttPublishingMode::Qos2 { max_in_flight, .. } => max_in_flight,
+            MqttPublishingMode::Qos0 => NonZeroUsize::MIN,
+            MqttPublishingMode::Qos1(confirmation) | MqttPublishingMode::Qos2(confirmation) => {
+                confirmation.max_in_flight
+            }
         };
         AsyncClient::builder(options)
-            .capacity(request_capacity)
+            .capacity(request_capacity.get())
             .try_build()
             .map_err(|error| emitter_config_error(format!("invalid MQTT client config: {error}")))
     }
@@ -251,7 +252,10 @@ impl MqttEmitter {
                     return outcome;
                 }
             };
-            let (max_in_flight, timeout) = self.mode.confirmation_settings().verified(
+            let AckConfirmation {
+                max_in_flight,
+                timeout,
+            } = self.mode.confirmation_settings().verified(
                 "this path only runs for the confirmed publishing mode, which carries the settings",
             );
             pending.push_back(PendingMqttConfirmation {
@@ -260,7 +264,7 @@ impl MqttEmitter {
                 deadline: Instant::now() + timeout,
                 confirmation: Box::pin(notice.wait_completion_async()),
             });
-            if pending.len() >= max_in_flight
+            if pending.len() >= max_in_flight.get()
                 && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
             {
                 outcome.fail(error);
@@ -269,7 +273,7 @@ impl MqttEmitter {
         }
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
-            let (_, timeout) = self.mode.confirmation_settings().verified(
+            let AckConfirmation { timeout, .. } = self.mode.confirmation_settings().verified(
                 "this path only runs for the confirmed publishing mode, which carries the settings",
             );
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
@@ -393,22 +397,15 @@ impl MqttPublishingMode {
     fn publish_options(self) -> PublishOptions {
         match self {
             Self::Qos0 => PublishOptions::at_most_once(),
-            Self::Qos1 { .. } => PublishOptions::at_least_once(),
-            Self::Qos2 { .. } => PublishOptions::exactly_once(),
+            Self::Qos1(_) => PublishOptions::at_least_once(),
+            Self::Qos2(_) => PublishOptions::exactly_once(),
         }
     }
 
-    fn confirmation_settings(self) -> Option<(usize, Duration)> {
+    fn confirmation_settings(self) -> Option<AckConfirmation> {
         match self {
             Self::Qos0 => None,
-            Self::Qos1 {
-                max_in_flight,
-                timeout,
-            }
-            | Self::Qos2 {
-                max_in_flight,
-                timeout,
-            } => Some((max_in_flight, timeout)),
+            Self::Qos1(confirmation) | Self::Qos2(confirmation) => Some(confirmation),
         }
     }
 }

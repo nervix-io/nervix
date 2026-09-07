@@ -1,4 +1,7 @@
-use std::fmt::{Display, Formatter};
+use std::{
+    fmt::{Display, Formatter},
+    num::NonZeroU64,
+};
 
 use meticulous::OptionExt as _;
 
@@ -3080,7 +3083,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             client.as_str(),
             topic.as_str(),
             kafka_offset_mode_to_nspl(offset_mode),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3100,7 +3103,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             client.as_str(),
             topic.as_str(),
             subscription.as_str(),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3115,7 +3118,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             mode,
             quiesce,
         } => {
-            let instances = if *instances > 1 {
+            let instances = if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {instances}")
             } else {
                 String::new()
@@ -3155,7 +3158,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "RABBITMQ {} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             queue.as_str(),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3207,7 +3210,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "SQS {} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             queue.as_str(),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3640,7 +3643,7 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
 }
 
 /// The `ON CONFLICT` and `WITH MAX BATCH` clauses the row-insert sinks share.
-fn conflict_and_batch_clauses(conflict_action: String, max_batch: u64) -> Vec<Clause> {
+fn conflict_and_batch_clauses(conflict_action: String, max_batch: NonZeroU64) -> Vec<Clause> {
     let mut clauses = Vec::new();
     if !conflict_action.trim().is_empty() {
         clauses.push(Clause::line(conflict_action.trim().to_string()));
@@ -3993,7 +3996,8 @@ fn float_literal(value: f64) -> Result<String, CanonicalNsplError> {
 /// Byte sizes elsewhere in NSPL keep the author's spelling, but WASM memory limits are stored as a
 /// count, so `64MiB` would otherwise come back as `67108864B`. Only exact multiples take a prefix,
 /// which keeps the rendering total, deterministic, and lossless.
-fn byte_size_literal(bytes: u64) -> String {
+fn byte_size_literal(bytes: NonZeroU64) -> String {
+    let bytes = bytes.get();
     const UNITS: [(u64, &str); 4] = [
         (1 << 40, "TiB"),
         (1 << 30, "GiB"),
@@ -4096,6 +4100,8 @@ impl NativeTypeToNspl for AvroType {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use crate::{
         AckMode, AvroType, BinaryOperator, BranchSelection, CodecEncoding, CodecEncodingRule,
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
@@ -4274,9 +4280,9 @@ mod tests {
             fields: vec![SchemaField {
                 name: named("matrix"),
                 ty: ParseAsType::Array {
-                    len: 2,
+                    len: nonzero!(2u32),
                     element: Box::new(ParseAsType::Array {
-                        len: 3,
+                        len: nonzero!(3u32),
                         element: Box::new(ParseAsType::F32),
                     }),
                 },
@@ -4794,7 +4800,7 @@ mod tests {
         let relay = CreateRelay {
             name: named("orders_stream"),
             schema: named("orders"),
-            buffer: 1,
+            buffer: nonzero!(1usize),
             branching: RelayBranching::branched_by(named("by_orders")),
             materialized_state: None,
         };
@@ -4806,7 +4812,7 @@ mod tests {
         let relay = CreateRelay {
             name: named("orders_stream"),
             schema: named("orders"),
-            buffer: 1,
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
@@ -5122,7 +5128,7 @@ mod tests {
                 conflict_action: PostgresConflictAction::DoUpdate {
                     target: vec!["postgres_user_id".to_string()],
                 },
-                max_batch: 500,
+                max_batch: nonzero!(500u64),
                 flush_each: "10s".to_string(),
             }),
             flush_each: "10s".to_string(),
@@ -5161,7 +5167,7 @@ mod tests {
                     },
                 ],
                 conflict_action: MySqlConflictAction::DoNothing,
-                max_batch: 500,
+                max_batch: nonzero!(500u64),
                 flush_each: "10s".to_string(),
             }),
             flush_each: "10s".to_string(),
@@ -5207,7 +5213,7 @@ mod tests {
                 conflict_action: MongoDbConflictAction::DoUpdate {
                     target: vec!["mongodb_user_id".to_string()],
                 },
-                max_batch: 500,
+                max_batch: nonzero!(500u64),
                 flush_each: "10s".to_string(),
             }),
             flush_each: "10s".to_string(),
@@ -5269,9 +5275,9 @@ mod tests {
                         client: named("kafka_main"),
                         topic: named("orders_topic"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
-                        instances: 3,
+                        instances: nonzero!(3u64),
                         mode: KafkaIngestMode::AckParallel {
-                            max: 8,
+                            max: nonzero!(8u64),
                             batch_timeout: "100ms".to_string(),
                             timeout: "5s".to_string(),
                             retry_policy: retry.clone(),
@@ -5299,7 +5305,7 @@ mod tests {
                     source: IngestSource::Mqtt {
                         client: named("mqtt_main"),
                         topic: "orders_topic".to_string(),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: MqttIngestMode::NoAckSequential {
                             session: MqttSession::Clean,
                             qos: MqttQos::AtMostOnce,
@@ -5327,7 +5333,7 @@ mod tests {
                         client: named("nats_main"),
                         subject: named("orders_subject"),
                         queue_group: named("orders_workers"),
-                        instances: 2,
+                        instances: nonzero!(2u64),
                         mode: NatsIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     },
@@ -5351,7 +5357,7 @@ mod tests {
                     source: IngestSource::RabbitMq {
                         client: named("rmq_main"),
                         queue: named("orders_q"),
-                        instances: 2,
+                        instances: nonzero!(2u64),
                         mode: RabbitMqIngestMode::AckSequential {
                             timeout: "10s".to_string(),
                             retry_policy: retry.clone(),
@@ -5447,7 +5453,7 @@ mod tests {
                     source: IngestSource::Sqs {
                         client: named("sqs_main"),
                         queue: named("orders_queue"),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: SqsIngestMode::AckSequential {
                             timeout: "20s".to_string(),
                             retry_policy: retry.clone(),
@@ -5563,7 +5569,7 @@ mod tests {
             vec![named("ingest"), named("enrich")],
             vec![named("score")],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         )
         .expect("placement must be valid");
 
@@ -5592,18 +5598,20 @@ mod tests {
 
     #[test]
     fn byte_sizes_take_the_largest_prefix_that_divides_exactly() {
-        assert_eq!(super::byte_size_literal(67_108_864), "64MiB");
-        assert_eq!(super::byte_size_literal(1 << 10), "1KiB");
-        assert_eq!(super::byte_size_literal(1 << 30), "1GiB");
-        assert_eq!(super::byte_size_literal(1 << 40), "1TiB");
+        assert_eq!(super::byte_size_literal(nonzero!(67_108_864u64)), "64MiB");
+        assert_eq!(super::byte_size_literal(nonzero!(1_024u64)), "1KiB");
+        assert_eq!(super::byte_size_literal(nonzero!(1_073_741_824u64)), "1GiB");
+        assert_eq!(
+            super::byte_size_literal(nonzero!(1_099_511_627_776u64)),
+            "1TiB"
+        );
     }
 
     #[test]
     fn byte_sizes_that_divide_no_prefix_exactly_stay_counts() {
-        assert_eq!(super::byte_size_literal(0), "0B");
-        assert_eq!(super::byte_size_literal(1), "1B");
-        assert_eq!(super::byte_size_literal(100_000), "100000B");
-        assert_eq!(super::byte_size_literal((1 << 20) + 1), "1048577B");
+        assert_eq!(super::byte_size_literal(nonzero!(1u64)), "1B");
+        assert_eq!(super::byte_size_literal(nonzero!(100_000u64)), "100000B");
+        assert_eq!(super::byte_size_literal(nonzero!(1_048_577u64)), "1048577B");
     }
 
     #[test]

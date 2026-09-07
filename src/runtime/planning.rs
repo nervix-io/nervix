@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use nervix_models::{
     BranchName, CreateBranch, ModelName, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
@@ -66,7 +68,7 @@ fn processor_input_collect_policies(
 struct BranchPolicy {
     branch: Option<BranchName>,
     ttl: Option<String>,
-    max_instances: Option<u64>,
+    max_instances: Option<NonZeroU64>,
 }
 
 fn branch_policy(
@@ -652,8 +654,8 @@ fn materialize_nodes(
                     }
                     RelayProcessorOperationTemplate::WindowProcessor {
                         output_routes: materialized_outputs,
-                        width_messages: width.messages.map(|messages| messages as usize),
-                        step_messages: step.messages.map(|messages| messages as usize),
+                        width_messages: width.messages.map(|messages| messages.arch_into()),
+                        step_messages: step.messages.map(|messages| messages.arch_into()),
                         width_duration: parse_optional_window_duration(
                             &node.processor,
                             "width",
@@ -815,32 +817,6 @@ fn parse_branch_ttl_setting(
     .transpose()
 }
 
-fn parse_branch_max_instances_setting(
-    max_instances: Option<u64>,
-    kind: ModelKind,
-    identifier: &ModelName,
-) -> Result<Option<usize>, String> {
-    max_instances
-        .map(|max_instances| {
-            if max_instances == 0 {
-                return Err(format!(
-                    "invalid branch MAX INSTANCES '0' for {} '{}'",
-                    kind.as_str(),
-                    identifier.as_str()
-                ));
-            }
-            usize::try_from(max_instances).map_err(|_| {
-                format!(
-                    "branch MAX INSTANCES '{}' for {} '{}' is too large for this runtime",
-                    max_instances,
-                    kind.as_str(),
-                    identifier.as_str()
-                )
-            })
-        })
-        .transpose()
-}
-
 fn resolve_branch_relay_templates(
     branch_relay_ids: HashSet<RelayName>,
     model_index: &HashMap<NodeRef, Model>,
@@ -925,11 +901,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
                 spec.kind,
                 &spec.identifier,
             )?,
-            branch_max_instances: parse_branch_max_instances_setting(
-                spec.branch_max_instances,
-                spec.kind,
-                &spec.identifier,
-            )?,
+            branch_max_instances: spec.branch_max_instances.map(addressable_count),
             error_policies: spec.error_policies.clone(),
             relays,
             materialized_streams,
@@ -982,11 +954,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
             spec.kind,
             &spec.processor,
         )?,
-        branch_max_instances: parse_branch_max_instances_setting(
-            node.branch_max_instances,
-            spec.kind,
-            &spec.processor,
-        )?,
+        branch_max_instances: node.branch_max_instances.map(addressable_count),
         error_policies: spec.error_policies.clone(),
         relays,
         materialized_streams,
@@ -1011,11 +979,14 @@ pub(in crate::runtime) fn format_branched_by(branched_by: &[FieldName]) -> Strin
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use nervix_models::{
         CreateSchema, InferencerTensorDeclaration, InferencerTensorDimension,
         InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
         InferencerTensorSchema, ParseAsType, SchemaField,
     };
+    use nonzero_ext::nonzero;
     use triomphe::Arc;
 
     use super::*;
@@ -1028,7 +999,7 @@ mod tests {
         N::try_from(raw).expect("valid name")
     }
 
-    fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
+    fn inferencer_tensor_schema(size: NonZeroU32) -> InferencerTensorSchema {
         InferencerTensorSchema {
             representation: InferencerTensorRepresentation::Dense,
             element_type: InferencerTensorElementType::F32,
@@ -1046,7 +1017,7 @@ mod tests {
                 name: named("vector"),
                 ty: ParseAsType::Array {
                     element: Box::new(ParseAsType::F32),
-                    len: 2,
+                    len: nonzero!(2u32),
                 },
                 optional: false,
                 sensitive: false,
@@ -1077,13 +1048,13 @@ mod tests {
                 file: "models/fraud.onnx".to_string(),
                 inputs: vec![InferencerTensorMapping {
                     tensor: "features".to_string(),
-                    schema: inferencer_tensor_schema(2),
+                    schema: inferencer_tensor_schema(nonzero!(2u32)),
                     expression: nervix_nspl::parse_expression("input.missing")
                         .expect("test expression must parse"),
                 }],
                 output_schema: vec![InferencerTensorDeclaration {
                     tensor: "score".to_string(),
-                    schema: inferencer_tensor_schema(1),
+                    schema: inferencer_tensor_schema(nonzero!(1u32)),
                 }],
             },
         };

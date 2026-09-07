@@ -12,6 +12,7 @@ autocomplete = []
 default = []
 
 [dependencies]
+arch-into = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
 meticulous = { workspace = true }

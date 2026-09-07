@@ -17,9 +17,21 @@ use super::*;
 
 pub(in crate::runtime) struct NatsEmitter {
     client: Option<NatsClient>,
-    jetstream: Option<NatsJetStream>,
-    mode: NatsPublishingMode,
+    delivery: NatsDelivery,
     subject: Subject,
+}
+
+/// How this emitter publishes, together with whatever that way of publishing needs.
+///
+/// A JetStream context exists only for `MODE ACK`, so pairing the context with the mode that
+/// requires it means the publish path reads one value instead of matching a mode and then hoping
+/// the separately stored context agrees with it.
+enum NatsDelivery {
+    Core,
+    JetStream {
+        context: Box<NatsJetStream>,
+        confirmation: AckConfirmation,
+    },
 }
 
 type NatsConfirmation =
@@ -46,24 +58,23 @@ impl NatsEmitter {
             retry_policy,
         )
         .await?;
-        let jetstream = match mode {
-            NatsPublishingMode::Core => None,
-            NatsPublishingMode::JetStream {
-                max_in_flight,
-                timeout,
-            } => Some(
-                async_nats::jetstream::ContextBuilder::new()
-                    .timeout(timeout)
-                    .ack_timeout(timeout)
-                    .max_ack_inflight(max_in_flight)
-                    .backpressure_on_inflight(true)
-                    .build(client.clone()),
-            ),
+        let delivery = match mode {
+            NatsPublishingMode::Core => NatsDelivery::Core,
+            NatsPublishingMode::JetStream(confirmation) => NatsDelivery::JetStream {
+                context: Box::new(
+                    async_nats::jetstream::ContextBuilder::new()
+                        .timeout(confirmation.timeout)
+                        .ack_timeout(confirmation.timeout)
+                        .max_ack_inflight(confirmation.max_in_flight.get())
+                        .backpressure_on_inflight(true)
+                        .build(client.clone()),
+                ),
+                confirmation,
+            },
         };
         Ok(Self {
             client: Some(client),
-            jetstream,
-            mode,
+            delivery,
             subject: Subject::from(subject.as_str().to_string()),
         })
     }
@@ -141,9 +152,15 @@ impl NatsEmitter {
         &self,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
-        match self.mode {
-            NatsPublishingMode::Core => self.publish_core(records).await,
-            NatsPublishingMode::JetStream { .. } => self.publish_jetstream(records).await,
+        match &self.delivery {
+            NatsDelivery::Core => self.publish_core(records).await,
+            NatsDelivery::JetStream {
+                context,
+                confirmation,
+            } => {
+                self.publish_jetstream(context, *confirmation, records)
+                    .await
+            }
         }
     }
 
@@ -194,23 +211,14 @@ impl NatsEmitter {
 
     async fn publish_jetstream(
         &self,
+        jetstream: &NatsJetStream,
+        AckConfirmation {
+            max_in_flight,
+            timeout,
+        }: AckConfirmation,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
-        let Some(jetstream) = self.jetstream.as_ref() else {
-            outcome.fail(
-                Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized NATS JetStream context"),
-            );
-            return outcome;
-        };
-        let NatsPublishingMode::JetStream {
-            max_in_flight,
-            timeout,
-        } = self.mode
-        else {
-            unreachable!("JetStream publish requires JetStream mode");
-        };
         outcome.delivered.reserve(records.len());
         let mut pending: VecDeque<PendingNatsConfirmation> = VecDeque::new();
         for record in records {
@@ -248,7 +256,7 @@ impl NatsEmitter {
                 deadline: Instant::now() + timeout,
                 confirmation: Box::pin(confirmation.into_future()),
             });
-            if pending.len() >= max_in_flight
+            if pending.len() >= max_in_flight.get()
                 && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
             {
                 outcome.fail(error);

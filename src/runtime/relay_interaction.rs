@@ -884,6 +884,7 @@ async fn wait_until(deadline: Option<Instant>) {
 mod tests {
     use std::{num::NonZeroUsize, sync::OnceLock};
 
+    use arch_into::ArchInto as _;
     use nervix_models::{
         CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
     };
@@ -1349,7 +1350,7 @@ mod tests {
             tokio::task::consume_budget().await;
             match event(&mut interaction, None).await {
                 RelayInteractionEvent::Batch { batch, .. } => {
-                    for row in 0..batch.message_count() as usize {
+                    for row in 0..batch.message_count().arch_into() {
                         let record = batch.runtime_row(row).expect("row must exist");
                         let Ok(Some(RuntimeValue::I64(value))) = record.value("value") else {
                             panic!("row value must be I64")

@@ -8,6 +8,7 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+arch-into = { workspace = true }
 ciborium = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }

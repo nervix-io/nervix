@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use ahash::{HashMap, HashMapExt};
+use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
@@ -472,7 +473,9 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         }
         for (actual, declared) in shape.iter().zip(dimensions) {
             match declared {
-                InferencerTensorDimension::Fixed(expected) if *actual != *expected as usize => {
+                InferencerTensorDimension::Fixed(expected)
+                    if *actual != expected.get().arch_into() =>
+                {
                     return Err(format!(
                         "tensor shape {shape:?} has dimension {actual}, expected {expected}"
                     ));
@@ -593,9 +596,9 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         }
         let (values, size) = match (dimension, value) {
             (InferencerTensorDimension::Fixed(expected), RuntimeValue::Array(values))
-                if values.len() == *expected as usize =>
+                if values.len() == expected.get().arch_into() =>
             {
-                (values, *expected as usize)
+                (values, expected.get().arch_into())
             }
             (InferencerTensorDimension::Fixed(expected), RuntimeValue::Array(values)) => {
                 return Err(format!(
@@ -649,7 +652,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         let mut shape = Vec::new();
         for dimension in dimensions {
             match dimension {
-                InferencerTensorDimension::Fixed(size) => shape.push(*size as usize),
+                InferencerTensorDimension::Fixed(size) => shape.push(size.get().arch_into()),
                 InferencerTensorDimension::Dynamic => {
                     return Err(
                         "cannot infer an inner DYNAMIC axis from an empty outer vector".to_string(),
@@ -688,7 +691,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             return Err("tensor value has fewer axes than its schema".to_string());
         };
         if let InferencerTensorDimension::Fixed(expected) = dimension
-            && size != *expected as usize
+            && size != expected.get().arch_into()
         {
             return Err(format!(
                 "tensor axis has length {size}, expected {expected}"
@@ -731,6 +734,7 @@ mod tests {
         InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
         InferencerTensorSchema,
     };
+    use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
     use super::{RuntimeTensorSchema, RuntimeTensorSlice};
@@ -742,8 +746,8 @@ mod tests {
             representation: InferencerTensorRepresentation::Dense,
             element_type: InferencerTensorElementType::F32,
             dimensions: vec![
-                InferencerTensorDimension::Fixed(2),
-                InferencerTensorDimension::Fixed(3),
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
             ],
         };
         let value = RuntimeValue::Array(vec![
@@ -798,9 +802,9 @@ mod tests {
             representation: InferencerTensorRepresentation::Dense,
             element_type: InferencerTensorElementType::F32,
             dimensions: vec![
-                InferencerTensorDimension::Fixed(2),
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
                 InferencerTensorDimension::Batch,
-                InferencerTensorDimension::Fixed(3),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
             ],
         };
         let slices = vec![

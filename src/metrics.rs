@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use arch_into::ArchInto as _;
 use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -1850,11 +1851,15 @@ impl RuntimeMetrics {
         self.prometheus
             .ingestor_quiesce_buffered_records
             .with_label_values(&values)
-            .set(i64::try_from(records).unwrap_or(i64::MAX));
+            .set(i64::try_from(records).assured(
+                "buffered records occupy memory and cannot exceed the allocator's isize limit",
+            ));
         self.prometheus
             .ingestor_quiesce_buffered_bytes
             .with_label_values(&values)
-            .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+            .set(i64::try_from(bytes).assured(
+                "buffered bytes occupy memory and cannot exceed the allocator's isize limit",
+            ));
     }
 
     pub(crate) fn increment_ingestor_quiesce_dropped(
@@ -3117,7 +3122,7 @@ impl RuntimeMetrics {
             .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
             .observe_with_capacity(
                 value,
-                capacity.map(|capacity| u64::try_from(capacity).unwrap_or(u64::MAX)),
+                capacity.map(|capacity| capacity.arch_into()),
                 domain_timestamp,
             );
     }
@@ -3168,7 +3173,7 @@ impl RuntimeMetrics {
             .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
             .observe_with_capacity(
                 value,
-                capacity.map(|capacity| u64::try_from(capacity).unwrap_or(u64::MAX)),
+                capacity.map(|capacity| capacity.arch_into()),
                 domain_timestamp,
             );
     }

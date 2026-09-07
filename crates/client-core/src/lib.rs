@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use meticulous::OptionExt as _;
@@ -771,7 +772,7 @@ impl Client {
                     if read == 0 {
                         break;
                     }
-                    progress_callback(u64::try_from(read).unwrap_or(0));
+                    progress_callback(read.arch_into());
                     if tx
                         .send(proto::UploadResourceRequest {
                             event: Some(proto::upload_resource_request::Event::Chunk(

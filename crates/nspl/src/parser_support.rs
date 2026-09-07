@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{num::NonZeroU64, ops::Range};
 
 use chumsky::{
     error::{RichPattern, RichReason},
@@ -241,20 +241,13 @@ pub fn sequential_ack_window<'src>()
 
 /// The positive bound in `PARALLEL MAX <n>`, shared by ingestor and emitter modes.
 pub fn parallel_ack_window<'src>()
--> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Parallel)
         .ignore_then(kw(Identifier::Max))
-        .ignore_then(u64_value().labelled("max_in_flight"))
-        .try_map(|max, span| {
-            if max == 0 {
-                Err(Rich::custom(
-                    span,
-                    "parallel max in-flight must be greater than zero",
-                ))
-            } else {
-                Ok(max)
-            }
-        })
+        .ignore_then(nonzero_u64_value(
+            "max_in_flight",
+            "parallel max in-flight must be greater than zero",
+        ))
         .boxed()
 }
 
@@ -324,6 +317,26 @@ pub fn u64_value<'src>()
             .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
     })
     .boxed()
+}
+
+/// An integer written where zero has no meaning, parsed straight into `NonZeroU64`.
+///
+/// The bound belongs to the value, so this is the one place NSPL text turns into such a count and
+/// the only place that has to say what zero would mean. Downstream Models, the registry, and the
+/// runtime take the non-zero type and never re-check it.
+///
+/// The label goes on the integer itself, not on the checked parser: labelling the check would
+/// rewrite `zero_reason` into a bare expectation and lose the explanation.
+pub fn nonzero_u64_value<'src>(
+    label: &'static str,
+    zero_reason: &'static str,
+) -> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    u64_value()
+        .labelled(label)
+        .try_map(move |value, span| {
+            NonZeroU64::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
+        })
+        .boxed()
 }
 
 pub fn schema_ref<'src>()

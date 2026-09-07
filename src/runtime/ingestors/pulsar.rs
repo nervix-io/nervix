@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use nervix_models::{DomainName, IngestorName};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
@@ -44,7 +46,7 @@ impl PulsarIngestor {
         struct PulsarSource {
             topic: nervix_models::TopicName,
             subscription: nervix_models::PulsarSubscriptionName,
-            instances: u64,
+            instances: NonZeroU64,
             ack_mode: PulsarIngestMode,
         }
 
@@ -130,9 +132,9 @@ impl PulsarIngestor {
         let topic_name = Self::topic_from_config(&resolved_client.entries, topic.as_str());
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks = Vec::with_capacity(instances.get().arch_into());
 
-        for instance_idx in 0..instances {
+        for instance_idx in 0..instances.get() {
             let consumer_name = format!("{}-{instance_idx}", ingestor.name.as_str());
             let mut consumer: PulsarConsumer<Vec<u8>, TokioExecutor> = pulsar
                 .consumer()
@@ -197,8 +199,10 @@ impl PulsarIngestor {
                 );
 
                 let ack_parallel_limit = match &task_ack_mode {
-                    PulsarIngestMode::AckParallel { max, .. } => (*max).max(1) as usize,
-                    PulsarIngestMode::AckSequential { .. } | PulsarIngestMode::NoAckParallel => 1,
+                    PulsarIngestMode::AckParallel { max, .. } => addressable_count(*max),
+                    PulsarIngestMode::AckSequential { .. } | PulsarIngestMode::NoAckParallel => {
+                        NonZeroUsize::MIN
+                    }
                 };
                 let ack_timeout = task_ack_timeout;
                 let retry_policy = task_retry_policy;
@@ -565,7 +569,7 @@ impl PulsarIngestor {
                                             }
                                         }
                                         PulsarIngestMode::AckParallel { .. } => {
-                                            let mut batch = Vec::with_capacity(ack_parallel_limit);
+                                            let mut batch = Vec::with_capacity(ack_parallel_limit.get());
                                             let first = match Self::decode_message(
                                                 task_codec.clone(),
                                                 &task_domain,
@@ -599,7 +603,7 @@ impl PulsarIngestor {
                                             let batch_deadline =
                                                 Instant::now() + batch_timeout.verified("this branch runs only for the parallel ACK mode, which parses a batch timeout above");
 
-                                            while batch.len() < ack_parallel_limit {
+                                            while batch.len() < ack_parallel_limit.get() {
                                                 tokio::task::consume_budget().await;
                                                 tokio::select! {
                                                     _ = task_quiesce.wait_for_change() => {

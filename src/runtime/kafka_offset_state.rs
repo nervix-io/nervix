@@ -1,6 +1,11 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use ahash::{HashMap, RandomState};
+#[cfg(test)]
+use arch_into::ArchInto as _;
 use dashmap::DashMap;
 #[cfg(test)]
 use meticulous::OptionExt as _;
@@ -33,7 +38,7 @@ struct KafkaPartitionAssignmentSnapshot {
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaTopicSchedulingSnapshot {
     topic: String,
-    instances: u64,
+    instances: NonZeroU64,
     rebalance_epoch: u64,
     observed_partitions: Vec<i32>,
     assignments: Vec<KafkaPartitionAssignmentSnapshot>,
@@ -61,7 +66,7 @@ struct KafkaOffsetSnapshotState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KafkaTopicSchedulingState {
-    instances: u64,
+    instances: NonZeroU64,
     rebalance_epoch: u64,
     observed_partitions: Vec<i32>,
     assignments: HashMap<i32, u64>,
@@ -170,7 +175,7 @@ impl ReplicatedKafkaOffsetState {
     pub(super) fn update_partition_schedule(
         &self,
         topic: &str,
-        instances: u64,
+        instances: NonZeroU64,
         observed_partitions: Vec<i32>,
     ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
         let next_schedule = {
@@ -189,9 +194,10 @@ impl ReplicatedKafkaOffsetState {
                     .iter()
                     .enumerate()
                     .flat_map(|(instance_idx, partitions)| {
-                        partitions.iter().copied().map(move |partition| {
-                            (partition, u64::try_from(instance_idx).unwrap_or_default())
-                        })
+                        partitions
+                            .iter()
+                            .copied()
+                            .map(move |partition| (partition, instance_idx.arch_into()))
                     })
                     .collect(),
             }

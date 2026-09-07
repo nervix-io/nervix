@@ -1,5 +1,6 @@
 use std::{
     convert::Infallible,
+    num::NonZeroU64,
     ops::{Deref, DerefMut},
     sync::{
         Arc as StdArc,
@@ -9,9 +10,10 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use bytes::Bytes;
 use flatbuffers::{Allocator, FlatBufferBuilder};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
@@ -46,19 +48,18 @@ pub enum WasmProcessorError {
     Link(#[source] wasmtime::Error),
     #[error("failed to instantiate wasm module: {0}")]
     Instantiate(#[source] wasmtime::Error),
-    #[error("MAX FUEL must be greater than zero")]
-    InvalidMaxFuel,
-    #[error("MAX MEMORY {limit} bytes is not supported on this host")]
-    InvalidMaxMemory { limit: u64 },
     #[error("failed to reset MAX FUEL {limit} before {operation}: {source}")]
     ResetFuel {
-        limit: u64,
+        limit: NonZeroU64,
         operation: &'static str,
         #[source]
         source: wasmtime::Error,
     },
     #[error("wasm guest exhausted MAX FUEL {limit} during {operation}")]
-    FuelExhausted { limit: u64, operation: &'static str },
+    FuelExhausted {
+        limit: NonZeroU64,
+        operation: &'static str,
+    },
     #[error(
         "wasm guest exceeded MAX MEMORY {limit} bytes during {operation} (growing linear memory \
          by {growth} bytes past the {allocated} bytes already allocated)"
@@ -207,9 +208,9 @@ fn wasm_limit_error(
     source
         .downcast_ref::<GuestMemoryLimitExceeded>()
         .map(|exceeded| WasmProcessorError::MemoryLimitExceeded {
-            limit: u64::try_from(exceeded.limit).unwrap_or(u64::MAX),
-            allocated: u64::try_from(exceeded.allocated).unwrap_or(u64::MAX),
-            growth: u64::try_from(exceeded.growth).unwrap_or(u64::MAX),
+            limit: exceeded.limit.arch_into(),
+            allocated: exceeded.allocated.arch_into(),
+            growth: exceeded.growth.arch_into(),
             operation,
         })
 }
@@ -485,7 +486,7 @@ impl From<&ParseAsType> for WasmProcessorType {
             ParseAsType::F64 => Self::F64,
             ParseAsType::Array { element, len } => Self::Array {
                 element: Box::new(Self::from(element.as_ref())),
-                len: *len,
+                len: len.get(),
             },
             ParseAsType::Vec { element } => Self::Vec {
                 element: Box::new(Self::from(element.as_ref())),
@@ -1211,26 +1212,14 @@ impl CompiledWasmProcessor {
         restored_state: Option<&[u8]>,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
-        if limits.max_fuel == 0 {
-            return Err(WasmProcessorError::InvalidMaxFuel);
-        }
-        let max_memory_bytes = usize::try_from(limits.max_memory_bytes).map_err(|_| {
-            WasmProcessorError::InvalidMaxMemory {
-                limit: limits.max_memory_bytes,
-            }
-        })?;
-        if max_memory_bytes == 0 {
-            return Err(WasmProcessorError::InvalidMaxMemory {
-                limit: limits.max_memory_bytes,
-            });
-        }
+        let max_memory_bytes = limits.max_memory_bytes.get().arch_into();
         let mut store = Store::new(
             &self.engine,
             BranchStore::new(clock, max_memory_bytes, emitted_batch_sender),
         );
         store.limiter(|state| &mut state.memory_limiter);
         store
-            .set_fuel(limits.max_fuel)
+            .set_fuel(limits.max_fuel.get())
             .map_err(|source| WasmProcessorError::ResetFuel {
                 limit: limits.max_fuel,
                 operation: "module instantiation",
@@ -1322,7 +1311,7 @@ impl WasmBranchInstance {
 
     fn begin_operation(&mut self, operation: &'static str) -> Result<(), WasmProcessorError> {
         self.store
-            .set_fuel(self.limits.max_fuel)
+            .set_fuel(self.limits.max_fuel.get())
             .map_err(|source| WasmProcessorError::ResetFuel {
                 limit: self.limits.max_fuel,
                 operation,
@@ -1642,7 +1631,12 @@ impl WasmBranchInstance {
                     .clamp(bytes.len(), self.max_guest_buffer_bytes);
                 let ptr = self.allocate_guest_buffer(growth_target).await?;
                 self.memory
-                    .write(&mut self.store, ptr as usize, bytes)
+                    .write(
+                        &mut self.store,
+                        usize::try_from(ptr)
+                            .verified("the guest allocator returned a non-negative pointer"),
+                        bytes,
+                    )
                     .map_err(WasmProcessorError::MemoryWrite)?;
                 let size =
                     i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
@@ -1670,7 +1664,10 @@ impl WasmBranchInstance {
                 code: ptr,
             });
         }
-        self.guest_buffer_capacity = self.guest_buffer_capacity.max(size as usize);
+        self.guest_buffer_capacity = self.guest_buffer_capacity.max(
+            usize::try_from(size)
+                .verified("this size was converted from a supported host buffer length"),
+        );
         Ok(ptr)
     }
 
@@ -1681,7 +1678,12 @@ impl WasmBranchInstance {
         let ptr = self.allocate_guest_buffer(bytes.len()).await?;
         let size = i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
         self.memory
-            .write(&mut self.store, ptr as usize, bytes)
+            .write(
+                &mut self.store,
+                usize::try_from(ptr)
+                    .verified("the guest allocator returned a non-negative pointer"),
+                bytes,
+            )
             .map_err(WasmProcessorError::MemoryWrite)?;
         Ok((ptr, size))
     }
@@ -1826,6 +1828,7 @@ mod tests {
     use arrow_ipc::writer::StreamWriter;
     use arrow_schema::{DataType, Field, Schema};
     use nervix_models::{CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName};
+    use nonzero_ext::nonzero;
 
     use super::*;
 
@@ -2268,7 +2271,7 @@ mod tests {
             .expect("spill must be copied into a grown guest buffer");
 
         assert_eq!(
-            usize::try_from(size).expect("size must be positive"),
+            usize::try_from(size).verified("the returned buffer size is positive"),
             expected.len()
         );
         assert!(branch.guest_buffer_capacity >= expected.len());
@@ -2277,7 +2280,7 @@ mod tests {
             .memory
             .read(
                 &branch.store,
-                usize::try_from(ptr).expect("pointer must be positive"),
+                usize::try_from(ptr).verified("the returned buffer pointer is positive"),
                 &mut actual,
             )
             .expect("finished spill must be readable from guest memory");
@@ -2430,8 +2433,8 @@ mod tests {
 
     fn limits() -> WasmProcessorLimits {
         WasmProcessorLimits {
-            max_fuel: 1_000_000_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(1_000_000_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         }
     }
 
@@ -3654,8 +3657,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 1_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(1_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3675,9 +3678,9 @@ mod tests {
         assert!(matches!(
             error,
             WasmProcessorError::FuelExhausted {
-                limit: 1_000,
+                limit,
                 operation: "nervix_process_batch"
-            }
+            } if limit == nonzero!(1_000u64)
         ));
     }
 
@@ -3689,8 +3692,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 10_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(10_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3713,7 +3716,7 @@ mod tests {
             .expect("second operation must receive a fresh fuel budget");
         let second_remaining = branch.store.get_fuel().expect("fuel must be enabled");
 
-        assert!(first_remaining < configured_limits.max_fuel);
+        assert!(first_remaining < configured_limits.max_fuel.get());
         assert_eq!(second_remaining, first_remaining);
     }
 
@@ -3725,8 +3728,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 100_000,
-            max_memory_bytes: 128 * 1024,
+            max_fuel: nonzero!(100_000u64),
+            max_memory_bytes: nonzero!(131_072u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3765,8 +3768,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 100_000,
-            max_memory_bytes: 64 * 1024,
+            max_fuel: nonzero!(100_000u64),
+            max_memory_bytes: nonzero!(65_536u64),
         };
 
         let error = compiled

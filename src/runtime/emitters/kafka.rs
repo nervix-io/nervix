@@ -87,17 +87,17 @@ impl KafkaEmitter {
                     drop(confirmation);
                     outcome.deliver(position);
                 }
-                BrokerPublishingMode::Ack {
+                BrokerPublishingMode::Ack(AckConfirmation {
                     max_in_flight,
                     timeout,
-                } => {
+                }) => {
                     pending.push_back(PendingKafkaConfirmation {
                         position,
                         acks: record.acks,
                         deadline: Instant::now() + timeout,
                         confirmation,
                     });
-                    if pending.len() >= max_in_flight
+                    if pending.len() >= max_in_flight.get()
                         && let Err(error) =
                             Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
                     {
@@ -110,7 +110,7 @@ impl KafkaEmitter {
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
             let timeout = match self.mode {
-                BrokerPublishingMode::Ack { timeout, .. } => timeout,
+                BrokerPublishingMode::Ack(confirmation) => confirmation.timeout,
                 BrokerPublishingMode::NoAck => unreachable!("NO_ACK has no confirmations"),
             };
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {

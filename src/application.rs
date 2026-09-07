@@ -5,7 +5,7 @@ use std::{
     future::Future,
     io,
     net::SocketAddr,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
     path::{Component, Path, PathBuf},
     sync::{
         Arc as StdArc,
@@ -14,6 +14,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
+use arch_into::ArchInto as _;
 #[cfg(feature = "testing")]
 use argon2::{Algorithm, Params, Version};
 use argon2::{
@@ -273,7 +274,7 @@ fn emitter_publishing_drain_status_envelope(
                 EmitterPublishingDrainStateEnvelope::RetryingIcebergCommit
             }
         },
-        pending_messages: u64::try_from(status.pending_messages).unwrap_or(u64::MAX),
+        pending_messages: status.pending_messages.arch_into(),
         retry_backoff_millis: status
             .retry_backoff
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
@@ -535,7 +536,7 @@ impl OnnxTensorMetadata {
                 .zip(&schema.dimensions)
                 .any(|(actual, declared)| match declared {
                     InferencerTensorDimension::Fixed(declared) => {
-                        *actual >= 0 && *actual != i64::from(*declared)
+                        *actual >= 0 && *actual != i64::from(declared.get())
                     }
                     InferencerTensorDimension::Dynamic => *actual >= 0,
                     InferencerTensorDimension::Batch => *actual >= 0,
@@ -1294,7 +1295,7 @@ fn try_take_length_delimited_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
         return None;
     }
 
-    let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+    let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]).arch_into();
     if buffer.len() < 4 + len {
         return None;
     }
@@ -3165,7 +3166,7 @@ struct KafkaPartitionWatcherSpec {
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
-    instances: u64,
+    instances: NonZeroU64,
     client: nervix_models::CreateClientKafka,
 }
 
@@ -4120,7 +4121,7 @@ impl SessionService for SessionServiceImpl {
                 .await
                 .map_err(|_| Status::internal("failed to write upload resource chunk"))?;
             total_received = total_received
-                .checked_add(u64::try_from(chunk.len()).unwrap_or(0))
+                .checked_add(chunk.len().arch_into())
                 .ok_or_else(|| Status::invalid_argument("upload resource archive is too large"))?;
         }
         file.flush()
@@ -6078,11 +6079,10 @@ impl SessionServiceImpl {
             .map(emitter_publishing_drain_status_envelope)
             .collect();
         DomainDrainStatusEnvelope {
-            active_ingestors: u64::try_from(status.active_ingestors).unwrap_or(u64::MAX),
-            active_generators: u64::try_from(status.active_generators).unwrap_or(u64::MAX),
-            outstanding_acks: u64::try_from(status.outstanding_acks).unwrap_or(u64::MAX),
-            buffered_emitter_messages: u64::try_from(status.buffered_emitter_messages)
-                .unwrap_or(u64::MAX),
+            active_ingestors: status.active_ingestors.arch_into(),
+            active_generators: status.active_generators.arch_into(),
+            outstanding_acks: status.outstanding_acks.arch_into(),
+            buffered_emitter_messages: status.buffered_emitter_messages.arch_into(),
             emitter_publishing,
         }
     }
@@ -6154,10 +6154,9 @@ impl SessionServiceImpl {
             .map(emitter_publishing_drain_status_envelope)
             .collect();
         EntityDrainStatusEnvelope {
-            buffered_relay_batches: u64::try_from(status.buffered_relay_batches)
-                .unwrap_or(u64::MAX),
-            node_work_items: u64::try_from(status.node_work_items).unwrap_or(u64::MAX),
-            outstanding_acks: u64::try_from(status.outstanding_acks).unwrap_or(u64::MAX),
+            buffered_relay_batches: status.buffered_relay_batches.arch_into(),
+            node_work_items: status.node_work_items.arch_into(),
+            outstanding_acks: status.outstanding_acks.arch_into(),
             emitter_publishing,
         }
     }
@@ -6695,12 +6694,9 @@ impl SessionServiceImpl {
                     domain: domain.clone(),
                     operation: purpose.operation_name(),
                     pending_node,
-                    buffered_relay_batches: usize::try_from(last_status.buffered_relay_batches)
-                        .unwrap_or(usize::MAX),
-                    node_work_items: usize::try_from(last_status.node_work_items)
-                        .unwrap_or(usize::MAX),
-                    outstanding_acks: usize::try_from(last_status.outstanding_acks)
-                        .unwrap_or(usize::MAX),
+                    buffered_relay_batches: last_status.buffered_relay_batches.arch_into(),
+                    node_work_items: last_status.node_work_items.arch_into(),
+                    outstanding_acks: last_status.outstanding_acks.arch_into(),
                     emitter_publishing: emitter_publishing_drain_summary(
                         &last_status.emitter_publishing,
                     ),
@@ -7053,7 +7049,7 @@ impl SessionServiceImpl {
                     path: lookup.path.clone(),
                     decode_using_codec: lookup.decode_using_codec.clone(),
                     key_field: lookup.key_field.clone(),
-                    entry_count: description.entry_count as u64,
+                    entry_count: description.entry_count.arch_into(),
                 }),
                 Err(message) => Err(message),
             }
@@ -7133,7 +7129,7 @@ impl SessionServiceImpl {
             path: description.model.path,
             decode_using_codec: description.model.decode_using_codec,
             key_field: description.model.key_field,
-            entry_count: description.entry_count as u64,
+            entry_count: description.entry_count.arch_into(),
         })
     }
 
@@ -7962,7 +7958,7 @@ impl SessionServiceImpl {
         req: SuggestRequest,
         subscriptions: &SessionSubscriptions,
     ) -> SuggestResponse {
-        let cursor = usize::try_from(req.cursor).unwrap_or(req.input.len());
+        let cursor = req.cursor.arch_into();
         let domain = parse_request_domain(&req.domain).ok();
         let queued = self
             .queued_configuration(subscriptions, domain.as_ref())
@@ -13209,7 +13205,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         ingestor: &IngestorName,
         topic: &str,
-        instances: u64,
+        instances: NonZeroU64,
         observed_partitions: Vec<i32>,
     ) -> Result<(), String> {
         let leader = self.consensus.current_leader().await;
@@ -14184,10 +14180,8 @@ fn runtime_ingestor_describe_to_envelope(
         running: summary.running,
         ready: summary.ready,
         quiesce_state: summary.quiesce_state,
-        quiesce_buffered_records: u64::try_from(summary.quiesce_counters.buffered_records)
-            .unwrap_or(u64::MAX),
-        quiesce_buffered_bytes: u64::try_from(summary.quiesce_counters.buffered_bytes)
-            .unwrap_or(u64::MAX),
+        quiesce_buffered_records: summary.quiesce_counters.buffered_records.arch_into(),
+        quiesce_buffered_bytes: summary.quiesce_counters.buffered_bytes.arch_into(),
         quiesce_dropped_total: summary.quiesce_counters.dropped_total,
         quiesce_rejected_total: summary.quiesce_counters.rejected_total,
         memory_backpressure_paused: summary.memory_backpressure_paused,
@@ -14216,10 +14210,8 @@ fn runtime_ingestor_describe_from_envelope(
             ready: summary.ready,
             quiesce_state: summary.quiesce_state,
             quiesce_counters: crate::runtime::IngestorQuiesceCounters {
-                buffered_records: usize::try_from(summary.quiesce_buffered_records)
-                    .unwrap_or(usize::MAX),
-                buffered_bytes: usize::try_from(summary.quiesce_buffered_bytes)
-                    .unwrap_or(usize::MAX),
+                buffered_records: summary.quiesce_buffered_records.arch_into(),
+                buffered_bytes: summary.quiesce_buffered_bytes.arch_into(),
                 dropped_total: summary.quiesce_dropped_total,
                 rejected_total: summary.quiesce_rejected_total,
             },
@@ -14454,7 +14446,7 @@ fn format_ingestor_describe_output(
         } else if let KafkaOffsetMode::Domain = offset_mode {
             lines.push("kafka observed partitions: -".to_string());
             lines.push("kafka rebalance epoch: 0".to_string());
-            for instance_idx in 0..*instances {
+            for instance_idx in 0..instances.get() {
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
@@ -15956,9 +15948,7 @@ fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStat
             } => ReportedOutcome {
                 state: ApiTransactionState::Failed,
                 error: error.clone(),
-                failing_step: failing_step
-                    .checked_add(1)
-                    .and_then(|step| u64::try_from(step).ok()),
+                failing_step: failing_step.checked_add(1).map(|step| step.arch_into()),
             },
             TransactionOutcome::Reverted => {
                 ReportedOutcome::without_error(ApiTransactionState::Reverted)
@@ -15972,9 +15962,9 @@ fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStat
         id: transaction.id.clone(),
         domain: transaction.domain.to_string(),
         state: state as i32,
-        pending_count: u64::try_from(transaction.pending_statement_count()).unwrap_or(u64::MAX),
-        completed_count: u64::try_from(transaction.completed_statement_count()).unwrap_or(u64::MAX),
-        total_count: u64::try_from(transaction.statement_count).unwrap_or(u64::MAX),
+        pending_count: transaction.pending_statement_count().arch_into(),
+        completed_count: transaction.completed_statement_count().arch_into(),
+        total_count: transaction.statement_count.arch_into(),
         error,
         failing_step,
     }
@@ -16257,9 +16247,9 @@ impl SessionServiceImpl {
         );
         SessionResponse {
             event: Some(proto::session_response::Event::Cluster(ClusterSummary {
-                running_domains: u64::try_from(running_domains).unwrap_or(u64::MAX),
-                nodes: u64::try_from(nodes).unwrap_or(u64::MAX),
-                relays: u64::try_from(relays).unwrap_or(u64::MAX),
+                running_domains: running_domains.arch_into(),
+                nodes: nodes.arch_into(),
+                relays: relays.arch_into(),
             })),
         }
     }
@@ -19295,6 +19285,7 @@ mod tests {
         ModelKind, NodeRef, PlacementGroupSchedule, ResourceVersion, ResourceVersionCounter,
         ResourceVersionStatus, ScheduledNode, SchemaField, SubscriptionLiteral,
     };
+    use nonzero_ext::nonzero;
     use sorted_vec::SortedVec;
 
     use super::*;
@@ -19353,7 +19344,9 @@ mod tests {
         };
         let encoded = encode_cbor(&header).expect("snapshot relay header should encode");
         let mut wire = Vec::new();
-        wire.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        let encoded_len = u32::try_from(encoded.len())
+            .assured("the test snapshot header is smaller than u32::MAX bytes");
+        wire.extend_from_slice(&encoded_len.to_be_bytes());
         wire.extend_from_slice(&encoded);
         wire.extend_from_slice(b"snapshot-data");
 
@@ -20520,7 +20513,7 @@ mod tests {
     #[test]
     fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignment() {
         let domain = DomainName::parse("payments").expect("valid domain");
-        let preserved_schedule = KafkaPartitionSchedule::new(2, vec![0, 1], 7);
+        let preserved_schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![0, 1], 7);
         let mut next = DomainSchedule::new(
             domain.clone(),
             vec![ScheduledNode {
@@ -20579,12 +20572,20 @@ mod tests {
             vec![
                 ScheduledNode {
                     effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(2, vec![0, 1], 3)),
+                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
+                        nonzero!(2u64),
+                        vec![0, 1],
+                        3,
+                    )),
                     ..scheduled_node("other_ingestor", ModelKind::Ingestor)
                 },
                 ScheduledNode {
                     effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(1, vec![0], 2)),
+                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
+                        nonzero!(1u64),
+                        vec![0],
+                        2,
+                    )),
                     ..scheduled_node("ingest_notifications", ModelKind::Client)
                 },
             ],
@@ -22394,7 +22395,8 @@ mod tests {
             .process_suggest(
                 SuggestRequest {
                     input: input.to_string(),
-                    cursor: u32::try_from(input.len()).expect("test input length fits u32"),
+                    cursor: u32::try_from(input.len())
+                        .assured("the test suggestion input is smaller than u32::MAX bytes"),
                     domain: "default".to_string(),
                 },
                 &subscriptions,
@@ -22431,7 +22433,8 @@ mod tests {
             .process_suggest(
                 SuggestRequest {
                     input: input.to_string(),
-                    cursor: u32::try_from(input.len()).expect("test input length fits u32"),
+                    cursor: u32::try_from(input.len())
+                        .assured("the test suggestion input is smaller than u32::MAX bytes"),
                     domain: "default".to_string(),
                 },
                 subscriptions,

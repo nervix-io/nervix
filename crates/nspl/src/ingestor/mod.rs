@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -16,32 +18,16 @@ use crate::{
         consumer_group_ref, duration_lit, endpoint_ref, field_ref, filter_where_clause,
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
         into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
-        parallel_ack_window, queue_ref, relay_ref, retry_policy, sequential_ack_window, string_lit,
-        subject_ref, subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
+        nonzero_u64_value, parallel_ack_window, queue_ref, relay_ref, retry_policy,
+        sequential_ack_window, string_lit, subject_ref, subscription_ref, suggest_from, tok,
+        topic_ref, where_expression,
     },
 };
 
-/// A positive count, labelled so completion can name the slot rather than going silent.
-///
-/// The label goes on the integer itself, not on the range check: labelling the checked parser would
-/// rewrite its custom "must be greater than 0" message into a bare expectation and lose the
-/// explanation.
-fn positive_count<'src>(
-    label: &'static str,
-) -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    u64_value().labelled(label).try_map(|value, span| {
-        if value == 0 {
-            Err(Rich::custom(span, "instances must be greater than 0"))
-        } else {
-            Ok(value)
-        }
-    })
-}
-
 /// The count after `INSTANCES`.
 fn instance_count<'src>()
--> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    positive_count("instance_count")
+-> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    nonzero_u64_value("instance_count", "instances must be greater than 0")
 }
 
 fn batch_timeout_parser<'src>()
@@ -129,7 +115,7 @@ enum ParsedMqttIngestMode {
         retry_policy: RetryPolicy,
     },
     AckParallel {
-        max: u64,
+        max: NonZeroU64,
         batch_timeout: String,
         timeout: String,
         retry_policy: RetryPolicy,
@@ -450,7 +436,7 @@ fn kafka_ingest_source_parser<'src>()
             kw(Identifier::Instances)
                 .ignore_then(instance_count())
                 .or_not()
-                .map(|instances| instances.unwrap_or(1)),
+                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
         )
         .then_ignore(kw(Identifier::Mode))
         .then(mode_parser())
@@ -479,7 +465,7 @@ fn pulsar_ingest_source_parser<'src>()
             kw(Identifier::Instances)
                 .ignore_then(instance_count())
                 .or_not()
-                .map(|instances| instances.unwrap_or(1)),
+                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
         )
         .then_ignore(kw(Identifier::Mode))
         .then(pulsar_mode_parser())
@@ -508,7 +494,7 @@ fn rabbitmq_ingest_source_parser<'src>()
             kw(Identifier::Instances)
                 .ignore_then(instance_count())
                 .or_not()
-                .map(|instances| instances.unwrap_or(1)),
+                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
         )
         .then_ignore(kw(Identifier::Mode))
         .then(rabbitmq_mode_parser())
@@ -554,7 +540,7 @@ fn mqtt_ingest_source_parser<'src>()
             kw(Identifier::Instances)
                 .ignore_then(instance_count())
                 .or_not()
-                .map(|instances| instances.unwrap_or(1)),
+                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
         )
         .then(mqtt_mode_parser().then_with_ctx(mqtt_quiesce_clause()))
         .map(
@@ -669,7 +655,7 @@ fn sqs_ingest_source_parser<'src>()
             kw(Identifier::Instances)
                 .ignore_then(instance_count())
                 .or_not()
-                .map(|instances| instances.unwrap_or(1)),
+                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
         )
         .then_ignore(kw(Identifier::Mode))
         .then(sqs_mode_parser())
@@ -916,6 +902,8 @@ pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -1200,9 +1188,9 @@ mod tests {
                     nervix_models::ConsumerGroupName::try_from("nervix_consumer")
                         .expect("valid consumer group identifier"),
                 ),
-                instances: 1,
+                instances: nonzero!(1u64),
                 mode: KafkaIngestMode::AckParallel {
-                    max: 10,
+                    max: nonzero!(10u64),
                     batch_timeout: "500ms".to_string(),
                     timeout: "30s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1325,7 +1313,7 @@ mod tests {
         else {
             panic!("expected kafka ingestor source");
         };
-        assert_eq!(*instances, 1);
+        assert_eq!(*instances, nonzero!(1u64));
         assert_eq!(
             mode,
             &KafkaIngestMode::AckSequential {
@@ -1407,7 +1395,7 @@ mod tests {
                     "nervix_subscription"
                 )
                 .expect("valid subscription identifier"),
-                instances: 1,
+                instances: nonzero!(1u64),
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1466,7 +1454,7 @@ mod tests {
                     .expect("valid client identifier"),
                 queue: nervix_models::QueueName::try_from("notifications")
                     .expect("valid queue identifier"),
-                instances: 1,
+                instances: nonzero!(1u64),
                 mode: RabbitMqIngestMode::AckSequential {
                     timeout: "20s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1777,7 +1765,7 @@ mod tests {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: "notifications".to_string(),
-                instances: 1,
+                instances: nonzero!(1u64),
                 mode: MqttIngestMode::NoAckSequential {
                     session: MqttSession::Clean,
                     qos: MqttQos::AtMostOnce,
@@ -1812,7 +1800,7 @@ mod tests {
         };
         assert_eq!(client.as_str(), "mqtt_main");
         assert_eq!(topic, "notifications");
-        assert_eq!(*instances, 1);
+        assert_eq!(*instances, nonzero!(1u64));
         assert_eq!(*session, MqttSession::Clean);
         assert_eq!(*qos, MqttQos::AtLeastOnce);
     }
@@ -1840,9 +1828,9 @@ mod tests {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: "devices/+/notifications".to_string(),
-                instances: 3,
+                instances: nonzero!(3u64),
                 mode: MqttIngestMode::AckParallel {
-                    max: 8,
+                    max: nonzero!(8u64),
                     batch_timeout: "250ms".to_string(),
                     timeout: "5s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1968,7 +1956,7 @@ mod tests {
                     .expect("valid topic identifier"),
                 queue_group: nervix_models::QueueGroupName::try_from("nats_notifications_group")
                     .expect("valid queue group identifier"),
-                instances: 3,
+                instances: nonzero!(3u64),
                 mode: NatsIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
             }
@@ -2282,7 +2270,7 @@ mod tests {
                     .expect("valid client identifier"),
                 queue: nervix_models::QueueName::try_from("notifications")
                     .expect("valid queue identifier"),
-                instances: 1,
+                instances: nonzero!(1u64),
                 mode: SqsIngestMode::AckSequential {
                     timeout: "45s".to_string(),
                     retry_policy: RetryPolicy {
@@ -2311,7 +2299,7 @@ mod tests {
         let IngestSource::Kafka { instances, .. } = parsed.source else {
             panic!("expected kafka ingestor source");
         };
-        assert_eq!(instances, 3);
+        assert_eq!(instances, nonzero!(3u64));
     }
 
     #[test]
@@ -2330,7 +2318,7 @@ mod tests {
         let IngestSource::RabbitMq { instances, .. } = parsed.source else {
             panic!("expected rabbitmq ingestor source");
         };
-        assert_eq!(instances, 2);
+        assert_eq!(instances, nonzero!(2u64));
     }
 
     #[test]
@@ -2349,7 +2337,7 @@ mod tests {
         let IngestSource::Sqs { instances, .. } = parsed.source else {
             panic!("expected sqs ingestor source");
         };
-        assert_eq!(instances, 4);
+        assert_eq!(instances, nonzero!(4u64));
     }
 
     #[test]

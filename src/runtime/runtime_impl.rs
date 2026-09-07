@@ -1188,7 +1188,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-        expected_instances: u64,
+        expected_instances: NonZeroU64,
     ) {
         self.ingestor_readiness.insert(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
@@ -4854,10 +4854,11 @@ impl Runtime {
             .collect();
         let physical_node_id = self.local_node_id.read().clone();
         let estimated_bytes = rows.batch.estimated_bytes();
-        let row_count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let row_count: u64 = rows.len().arch_into();
         let bytes_per_row = estimated_bytes.checked_div(row_count).unwrap_or_default();
         let extra_bytes = estimated_bytes.checked_rem(row_count).unwrap_or_default();
         for (row, event_timestamp) in event_timestamps.iter().enumerate() {
+            let row: u64 = row.arch_into();
             self.metrics
                 .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                     domain,
@@ -4866,9 +4867,7 @@ impl Runtime {
                     physical_node_id: physical_node_id.as_ref(),
                     messages: 1,
                     bytes: bytes_per_row
-                        .checked_add(u64::from(
-                            u64::try_from(row).unwrap_or(u64::MAX) < extra_bytes,
-                        ))
+                        .checked_add(u64::from(row < extra_bytes))
                         .assured("a per-row byte share plus one remainder byte fits in u64"),
                     domain_timestamp: Some(*event_timestamp),
                 });
@@ -5408,17 +5407,6 @@ impl Runtime {
         };
         self.relay_boundary_fanouts.insert(key, fanout.clone());
         fanout
-    }
-
-    fn relay_capacity(
-        domain: &DomainName,
-        relay: &RelayName,
-        capacity: usize,
-    ) -> Result<NonZeroUsize, RuntimeError> {
-        NonZeroUsize::new(capacity).ok_or_else(|| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("relay '{}' capacity must be greater than 0", relay.as_str()),
-        })
     }
 
     pub(in crate::runtime) async fn domain_graph_handle(
@@ -7104,15 +7092,7 @@ impl Runtime {
             tokio::task::consume_budget().await;
             match update {
                 nervix_models::DynamicModelUpdate::RelayCapacity { relay, capacity } => {
-                    let Some(capacity) = NonZeroUsize::new(*capacity) else {
-                        warn!(
-                            domain = domain.as_str(),
-                            relay = relay.as_str(),
-                            "rejected zero-capacity dynamic relay update"
-                        );
-                        continue;
-                    };
-                    self.set_relay_capacity(domain, relay, capacity);
+                    self.set_relay_capacity(domain, relay, *capacity);
                 }
                 nervix_models::DynamicModelUpdate::Processor { .. } => {}
                 nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
@@ -7692,13 +7672,12 @@ impl Runtime {
                 let expiring_state = (node.executes_on(local_node_id)
                     && branch_relays.contains(&relay.name))
                 .then(|| self.expiring_stream_state(domain, &relay.name));
-                let capacity = Self::relay_capacity(domain, &relay.name, relay.buffer)?;
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
                         &relay.name,
                         !relay.branching.is_unbranched(),
-                        capacity,
+                        relay.buffer,
                     )
                     .await;
                 let registry = expiring_state
@@ -9987,7 +9966,7 @@ impl Runtime {
                 node: &ModelName::from(name),
                 physical_node_id: self.local_node_id.read().as_ref(),
                 messages: 1,
-                bytes: u64::try_from(key.len()).unwrap_or(u64::MAX),
+                bytes: key.len().arch_into(),
                 domain_timestamp: Some(current_timestamp()),
             });
         self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Lookup, name);
@@ -10272,13 +10251,12 @@ impl Runtime {
                 let expiring_state = branch_relays
                     .contains(&relay.name)
                     .then(|| self.expiring_stream_state(domain, &relay.name));
-                let capacity = Self::relay_capacity(domain, &relay.name, relay.buffer)?;
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
                         &relay.name,
                         !relay.branching.is_unbranched(),
-                        capacity,
+                        relay.buffer,
                     )
                     .await;
                 let registry = expiring_state
@@ -10819,13 +10797,12 @@ impl Runtime {
                     ),
                 });
             };
-            let capacity = Self::relay_capacity(domain, &relay.name.clone(), relay.buffer)?;
             let fanout = self
                 .relay_boundary_fanout_with_capacity(
                     domain,
                     &relay.name.clone(),
                     !relay.branching.is_unbranched(),
-                    capacity,
+                    relay.buffer,
                 )
                 .await;
             relay_builders.insert(
