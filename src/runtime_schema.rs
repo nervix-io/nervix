@@ -3498,6 +3498,7 @@ mod tests {
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema,
         CreateWireSchema, SchemaField,
     };
+    use rstest::{fixture, rstest};
 
     use super::*;
 
@@ -4384,6 +4385,136 @@ mod tests {
         Ok(payload)
     }
 
+    #[derive(Debug)]
+    enum NotificationCodecCase {
+        Json,
+        Avro,
+        SchemafulCbor,
+        JaqNativeCbor,
+    }
+
+    impl NotificationCodecCase {
+        fn compile(&self, schema: Arc<CompiledSchema>) -> Arc<CompiledCodec> {
+            match self {
+                Self::Json => {
+                    compile_codec(&codec("json_codec"), schema, Some(&json_wire_schema()))
+                }
+                Self::Avro => {
+                    compile_codec(&codec("avro_codec"), schema, Some(&avro_wire_schema()))
+                }
+                Self::SchemafulCbor => compile_codec(
+                    &schemaful_cbor_codec("schemaful_cbor_codec"),
+                    schema,
+                    Some(&cbor_wire_schema(WireSchemaStrictness::Strict)),
+                ),
+                Self::JaqNativeCbor => compile_codec(
+                    &jaq_native_identity_codec("cbor_codec", CodecJaqFormat::Cbor, "notification"),
+                    schema,
+                    None,
+                ),
+            }
+            .expect("codec fixture should compile")
+        }
+    }
+
+    #[derive(Debug)]
+    enum ArrayCodecCase {
+        Avro,
+        Cbor,
+        Yaml,
+    }
+
+    impl ArrayCodecCase {
+        fn compile(&self, schema: Arc<CompiledSchema>) -> Arc<CompiledCodec> {
+            match self {
+                Self::Avro => compile_codec(
+                    &array_codec("avro_array_codec"),
+                    schema,
+                    Some(&array_avro_wire_schema()),
+                ),
+                Self::Cbor => compile_codec(
+                    &jaq_native_identity_codec("cbor_array_codec", CodecJaqFormat::Cbor, "metrics"),
+                    schema,
+                    None,
+                ),
+                Self::Yaml => compile_codec(
+                    &jaq_native_identity_codec("yaml_array_codec", CodecJaqFormat::Yaml, "metrics"),
+                    schema,
+                    None,
+                ),
+            }
+            .expect("array codec fixture should compile")
+        }
+    }
+
+    #[derive(Debug)]
+    enum PrimitiveArrayCodecCase {
+        Avro,
+        Cbor,
+        Toml,
+    }
+
+    impl PrimitiveArrayCodecCase {
+        fn compile(&self, schema: Arc<CompiledSchema>) -> Arc<CompiledCodec> {
+            match self {
+                Self::Avro => compile_codec(
+                    &primitive_arrays_codec("avro_primitive_arrays_codec"),
+                    schema,
+                    Some(&primitive_arrays_avro_wire_schema()),
+                ),
+                Self::Cbor => compile_codec(
+                    &jaq_native_identity_codec(
+                        "cbor_primitive_arrays_codec",
+                        CodecJaqFormat::Cbor,
+                        "primitive_arrays",
+                    ),
+                    schema,
+                    None,
+                ),
+                Self::Toml => compile_codec(
+                    &jaq_native_identity_codec(
+                        "toml_primitive_arrays_codec",
+                        CodecJaqFormat::Toml,
+                        "primitive_arrays",
+                    ),
+                    schema,
+                    None,
+                ),
+            }
+            .expect("primitive-array codec fixture should compile")
+        }
+    }
+
+    #[fixture]
+    fn compiled_notification_schema() -> Arc<CompiledSchema> {
+        Arc::new(compile_schema(&schema()))
+    }
+
+    #[fixture]
+    fn notification_record() -> RuntimeRow {
+        record()
+    }
+
+    #[fixture]
+    fn compiled_array_schema() -> Arc<CompiledSchema> {
+        Arc::new(compile_schema(&array_schema()))
+    }
+
+    #[fixture]
+    fn array_record_fixture() -> RuntimeRow {
+        array_record()
+    }
+
+    #[fixture]
+    fn compiled_primitive_array_schema() -> Arc<CompiledSchema> {
+        Arc::new(compile_schema(&primitive_arrays_schema()))
+    }
+
+    #[fixture]
+    fn primitive_array_record_fixture() -> RuntimeRow {
+        primitive_arrays_record()
+    }
+
     #[test]
     fn compiled_schema_exposes_arrow_schema() {
         let compiled = compile_schema(&schema());
@@ -4497,30 +4628,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn json_codec_roundtrips_runtime_records() {
-        let compiled_schema = Arc::new(compile_schema(&schema()));
-        let compiled_codec = compile_codec(
-            &codec("json_codec"),
-            compiled_schema,
-            Some(&json_wire_schema()),
-        )
-        .expect("codec should compile");
-        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
+    #[rstest]
+    #[case::json(NotificationCodecCase::Json)]
+    #[case::avro(NotificationCodecCase::Avro)]
+    #[case::schemaful_cbor(NotificationCodecCase::SchemafulCbor)]
+    #[case::jaq_native_cbor(NotificationCodecCase::JaqNativeCbor)]
+    fn codec_roundtrips_runtime_records(
+        compiled_notification_schema: Arc<CompiledSchema>,
+        notification_record: RuntimeRow,
+        #[case] codec_case: NotificationCodecCase,
+    ) {
+        let compiled_codec = codec_case.compile(compiled_notification_schema.clone());
+        let payload =
+            encode_arrow_record(&compiled_codec, &notification_record).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        assert_eq!(
-            single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "tenant"),
-            Some(RuntimeValue::String("acme".to_string()))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "active"),
-            Some(RuntimeValue::Bool(true))
-        );
+        for field in compiled_notification_schema.fields() {
+            assert_eq!(
+                single_batch_value(&decoded, &field.name),
+                row_value(&notification_record, &field.name),
+                "field {} should roundtrip through {codec_case:?}",
+                field.name
+            );
+        }
     }
 
     #[test]
@@ -4925,32 +5055,6 @@ mod tests {
     }
 
     #[test]
-    fn avro_codec_roundtrips_runtime_records() {
-        let compiled_schema = Arc::new(compile_schema(&schema()));
-        let compiled_codec = compile_codec(
-            &codec("avro_codec"),
-            compiled_schema,
-            Some(&avro_wire_schema()),
-        )
-        .expect("codec should compile");
-        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
-        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
-
-        assert_eq!(
-            single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "tenant"),
-            Some(RuntimeValue::String("acme".to_string()))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "latency"),
-            Some(RuntimeValue::F64(OrderedFloat(12.5)))
-        );
-    }
-
-    #[test]
     fn avro_codec_decodes_wire_fields_into_internal_arrow_order() {
         let compiled_schema = Arc::new(compile_schema(&schema()));
         let mut wire_schema = avro_wire_schema();
@@ -4974,32 +5078,6 @@ mod tests {
         assert_eq!(
             single_batch_value(&decoded, "tenant"),
             Some(RuntimeValue::String("acme".to_string()))
-        );
-    }
-
-    #[test]
-    fn schemaful_cbor_codec_roundtrips_runtime_records_without_jaq() {
-        let compiled_schema = Arc::new(compile_schema(&schema()));
-        let compiled_codec = compile_codec(
-            &schemaful_cbor_codec("schemaful_cbor_codec"),
-            compiled_schema,
-            Some(&cbor_wire_schema(WireSchemaStrictness::Strict)),
-        )
-        .expect("codec should compile");
-        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
-        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
-
-        assert_eq!(
-            single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "tenant"),
-            Some(RuntimeValue::String("acme".to_string()))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "active"),
-            Some(RuntimeValue::Bool(true))
         );
     }
 
@@ -5102,72 +5180,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn avro_codec_supports_array_and_vector_fields() {
-        let compiled_schema = Arc::new(compile_schema(&array_schema()));
-        let compiled_codec = compile_codec(
-            &array_codec("avro_array_codec"),
-            compiled_schema,
-            Some(&array_avro_wire_schema()),
-        )
-        .expect("codec should compile");
-
-        let payload = encode_arrow_record(&compiled_codec, &array_record()).expect("must encode");
+    #[rstest]
+    #[case::avro(ArrayCodecCase::Avro)]
+    #[case::cbor(ArrayCodecCase::Cbor)]
+    #[case::yaml(ArrayCodecCase::Yaml)]
+    fn codec_roundtrips_array_and_vector_fields(
+        compiled_array_schema: Arc<CompiledSchema>,
+        array_record_fixture: RuntimeRow,
+        #[case] codec_case: ArrayCodecCase,
+    ) {
+        let compiled_codec = codec_case.compile(compiled_array_schema);
+        let payload =
+            encode_arrow_record(&compiled_codec, &array_record_fixture).expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
             single_batch_value(&decoded, "cpu_last_64"),
-            row_value(&array_record(), "cpu_last_64")
+            row_value(&array_record_fixture, "cpu_last_64")
         );
         assert_eq!(
             single_batch_value(&decoded, "labels"),
-            row_value(&array_record(), "labels")
-        );
-    }
-
-    #[test]
-    fn cbor_codec_supports_array_and_vector_fields() {
-        let compiled_schema = Arc::new(compile_schema(&array_schema()));
-        let compiled_codec = compile_codec(
-            &jaq_native_identity_codec("cbor_array_codec", CodecJaqFormat::Cbor, "metrics"),
-            compiled_schema,
-            None,
-        )
-        .expect("codec should compile");
-
-        let payload = encode_arrow_record(&compiled_codec, &array_record()).expect("must encode");
-        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
-
-        assert_eq!(
-            single_batch_value(&decoded, "cpu_last_64"),
-            row_value(&array_record(), "cpu_last_64")
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "labels"),
-            row_value(&array_record(), "labels")
-        );
-    }
-
-    #[test]
-    fn yaml_codec_supports_array_and_vector_fields() {
-        let compiled_schema = Arc::new(compile_schema(&array_schema()));
-        let compiled_codec = compile_codec(
-            &jaq_native_identity_codec("yaml_array_codec", CodecJaqFormat::Yaml, "metrics"),
-            compiled_schema,
-            None,
-        )
-        .expect("codec should compile");
-
-        let payload = encode_arrow_record(&compiled_codec, &array_record()).expect("must encode");
-        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
-
-        assert_eq!(
-            single_batch_value(&decoded, "cpu_last_64"),
-            row_value(&array_record(), "cpu_last_64")
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "labels"),
-            row_value(&array_record(), "labels")
+            row_value(&array_record_fixture, "labels")
         );
     }
 
@@ -5204,81 +5237,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cbor_codec_supports_arrays_and_vectors_for_all_primitive_types() {
-        let expected = primitive_arrays_record();
-        let compiled_schema = Arc::new(compile_schema(&primitive_arrays_schema()));
-        let compiled_codec = compile_codec(
-            &jaq_native_identity_codec(
-                "cbor_primitive_arrays_codec",
-                CodecJaqFormat::Cbor,
-                "primitive_arrays",
-            ),
-            compiled_schema.clone(),
-            None,
-        )
-        .expect("codec should compile");
-
-        let payload = encode_arrow_record(&compiled_codec, &expected).expect("must encode");
+    #[rstest]
+    #[case::avro(PrimitiveArrayCodecCase::Avro)]
+    #[case::cbor(PrimitiveArrayCodecCase::Cbor)]
+    #[case::toml(PrimitiveArrayCodecCase::Toml)]
+    fn codec_roundtrips_arrays_and_vectors_for_all_primitive_types(
+        compiled_primitive_array_schema: Arc<CompiledSchema>,
+        primitive_array_record_fixture: RuntimeRow,
+        #[case] codec_case: PrimitiveArrayCodecCase,
+    ) {
+        let compiled_codec = codec_case.compile(compiled_primitive_array_schema.clone());
+        let payload = encode_arrow_record(&compiled_codec, &primitive_array_record_fixture)
+            .expect("must encode");
         let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
 
-        for field in compiled_schema.fields() {
+        for field in compiled_primitive_array_schema.fields() {
             assert_eq!(
                 single_batch_value(&decoded, &field.name),
-                row_value(&expected, &field.name),
-                "field {} should roundtrip through CBOR",
-                field.name
-            );
-        }
-    }
-
-    #[test]
-    fn toml_codec_supports_arrays_and_vectors_for_all_primitive_types() {
-        let expected = primitive_arrays_record();
-        let compiled_schema = Arc::new(compile_schema(&primitive_arrays_schema()));
-        let compiled_codec = compile_codec(
-            &jaq_native_identity_codec(
-                "toml_primitive_arrays_codec",
-                CodecJaqFormat::Toml,
-                "primitive_arrays",
-            ),
-            compiled_schema.clone(),
-            None,
-        )
-        .expect("codec should compile");
-
-        let payload = encode_arrow_record(&compiled_codec, &expected).expect("must encode");
-        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
-
-        for field in compiled_schema.fields() {
-            assert_eq!(
-                single_batch_value(&decoded, &field.name),
-                row_value(&expected, &field.name),
-                "field {} should roundtrip through TOML",
-                field.name
-            );
-        }
-    }
-
-    #[test]
-    fn avro_codec_supports_arrays_and_vectors_for_all_primitive_types() {
-        let expected = primitive_arrays_record();
-        let compiled_schema = Arc::new(compile_schema(&primitive_arrays_schema()));
-        let compiled_codec = compile_codec(
-            &primitive_arrays_codec("avro_primitive_arrays_codec"),
-            compiled_schema.clone(),
-            Some(&primitive_arrays_avro_wire_schema()),
-        )
-        .expect("codec should compile");
-
-        let payload = encode_arrow_record(&compiled_codec, &expected).expect("must encode");
-        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
-
-        for field in compiled_schema.fields() {
-            assert_eq!(
-                single_batch_value(&decoded, &field.name),
-                row_value(&expected, &field.name),
-                "field {} should roundtrip through Avro",
+                row_value(&primitive_array_record_fixture, &field.name),
+                "field {} should roundtrip through {codec_case:?}",
                 field.name
             );
         }
@@ -5746,32 +5723,6 @@ mod tests {
 
         assert!(
             matches!(err, CodecError::InvalidCodec { reason, .. } if reason.contains("compiled descriptor"))
-        );
-    }
-
-    #[test]
-    fn cbor_codec_roundtrips_runtime_records() {
-        let compiled_schema = Arc::new(compile_schema(&schema()));
-        let compiled_codec = compile_codec(
-            &jaq_native_identity_codec("cbor_codec", CodecJaqFormat::Cbor, "notification"),
-            compiled_schema,
-            None,
-        )
-        .expect("codec should compile");
-        let payload = encode_arrow_record(&compiled_codec, &record()).expect("must encode");
-        let decoded = decode_with_codec(&compiled_codec, &payload).expect("must decode");
-
-        assert_eq!(
-            single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "tenant"),
-            Some(RuntimeValue::String("acme".to_string()))
-        );
-        assert_eq!(
-            single_batch_value(&decoded, "active"),
-            Some(RuntimeValue::Bool(true))
         );
     }
 

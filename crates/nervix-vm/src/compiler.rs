@@ -3178,6 +3178,7 @@ mod tests {
         Expr, FieldRef, InternalFieldNamespace, InternalFieldRef, Program, SpannedNode,
         parse_program,
     };
+    use rstest::{fixture, rstest};
 
     use super::*;
 
@@ -3199,6 +3200,11 @@ mod tests {
 
     fn sensitivity(fields: &[&str]) -> SchemaSensitivity {
         SchemaSensitivity::from_sensitive_fields(fields.iter().copied())
+    }
+
+    #[fixture]
+    fn sensitive_string_input_schema() -> Arc<Schema> {
+        schema(vec![Field::new("secret", DataType::Utf8, true)])
     }
 
     fn with_output_fields(input_schema: &Arc<Schema>, fields: Vec<Field>) -> Arc<Schema> {
@@ -3582,23 +3588,83 @@ mod tests {
         assert!(compiled.output_schema.field_with_name("total").is_ok());
     }
 
-    #[test]
-    fn rejects_sensitive_field_assignment_to_non_sensitive_output() {
-        let program =
-            parse_program("SET input.public_value = lower(input.secret);").expect("must parse");
-        let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
-        let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
+    #[derive(Clone, Copy)]
+    enum SensitivityExpectation {
+        Accepted,
+        Rejected,
+    }
 
-        let error = compile_program_with_sensitive_output(
+    #[rstest]
+    #[case::rejects_derived_sensitive_value_in_normal_output(
+        "SET input.public_value = lower(input.secret);",
+        "public_value",
+        false,
+        false,
+        SensitivityExpectation::Rejected
+    )]
+    #[case::accepts_sensitive_value_in_sensitive_output(
+        "SET input.copy = input.secret;",
+        "copy",
+        true,
+        false,
+        SensitivityExpectation::Accepted
+    )]
+    #[case::accepts_explicit_sensitive_leak(
+        "SET input.public_value = leak_sensitive(input.secret);",
+        "public_value",
+        false,
+        false,
+        SensitivityExpectation::Accepted
+    )]
+    #[case::accepts_sensitive_external_output(
+        "SET input.public_value = input.secret;",
+        "public_value",
+        false,
+        true,
+        SensitivityExpectation::Accepted
+    )]
+    fn validates_assignment_sensitivity_policy(
+        sensitive_string_input_schema: Arc<Schema>,
+        #[case] source: &str,
+        #[case] output_field: &str,
+        #[case] output_sensitive: bool,
+        #[case] allow_sensitive_output: bool,
+        #[case] expected: SensitivityExpectation,
+    ) {
+        let program = parse_program(source)
+            .unwrap_or_else(|error| panic!("sensitivity case must parse: {error:#?}"));
+        let output_schema = schema(vec![Field::new(output_field, DataType::Utf8, true)]);
+        let output_sensitivity = if output_sensitive {
+            sensitivity(&[output_field])
+        } else {
+            SchemaSensitivity::default()
+        };
+        let result = compile_program_with_options_for_bindings_with_sensitivity(
             &program,
-            input_schema,
-            sensitivity(&["secret"]),
             output_schema,
-            SchemaSensitivity::default(),
-        )
-        .expect_err("sensitive expression must not flow into normal output");
+            output_sensitivity,
+            [
+                CompileBinding::writable("input", sensitive_string_input_schema)
+                    .with_sensitivity(sensitivity(&["secret"])),
+            ],
+            CompileOptions {
+                allow_sensitive_output,
+                ..CompileOptions::default()
+            },
+        );
 
-        assert_eq!(error.code, "sensitive_leak");
+        match (expected, result) {
+            (SensitivityExpectation::Accepted, Ok(_)) => {}
+            (SensitivityExpectation::Rejected, Err(error)) => {
+                assert_eq!(error.code, "sensitive_leak");
+            }
+            (SensitivityExpectation::Accepted, Err(error)) => {
+                panic!("sensitivity case should compile: {error:#}");
+            }
+            (SensitivityExpectation::Rejected, Ok(_)) => {
+                panic!("sensitivity case should reject an implicit downgrade");
+            }
+        }
     }
 
     #[test]
@@ -3624,54 +3690,6 @@ mod tests {
         .expect_err("automatic sensitive passthrough into normal output must fail");
 
         assert_eq!(error.code, "sensitive_leak");
-    }
-
-    #[test]
-    fn allows_sensitive_output_when_compile_option_permits_external_output() {
-        let program = parse_program("SET input.public_value = input.secret;").expect("must parse");
-        let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
-        let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
-
-        compile_program_with_options_for_bindings_with_sensitivity(
-            &program,
-            output_schema,
-            SchemaSensitivity::default(),
-            [CompileBinding::writable("input", input_schema)
-                .with_sensitivity(sensitivity(&["secret"]))],
-            CompileOptions {
-                allow_sensitive_output: true,
-                ..CompileOptions::default()
-            },
-        )
-        .expect("emitter-style external output may receive sensitive values");
-    }
-
-    #[test]
-    fn allows_sensitive_output_and_explicit_leak_sensitive_downgrade() {
-        let sensitive_program =
-            parse_program("SET input.copy = input.secret;").expect("must parse");
-        let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
-        let output_schema = schema(vec![Field::new("copy", DataType::Utf8, true)]);
-        compile_program_with_sensitive_output(
-            &sensitive_program,
-            input_schema.clone(),
-            sensitivity(&["secret"]),
-            output_schema,
-            sensitivity(&["copy"]),
-        )
-        .expect("sensitive value may flow into sensitive output");
-
-        let leak_program = parse_program("SET input.public_value = leak_sensitive(input.secret);")
-            .expect("must parse");
-        let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
-        compile_program_with_sensitive_output(
-            &leak_program,
-            input_schema,
-            sensitivity(&["secret"]),
-            output_schema,
-            SchemaSensitivity::default(),
-        )
-        .expect("leak_sensitive explicitly removes sensitivity");
     }
 
     #[test]
