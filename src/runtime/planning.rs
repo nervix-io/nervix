@@ -115,9 +115,9 @@ pub(in crate::runtime) struct PlannedModel {
 }
 
 pub(in crate::runtime) fn branched_node_specs_from_scheduled_nodes(
-    nodes: &[ScheduledNode],
+    nodes: &ScheduledNodes,
 ) -> BranchedNodeSpecs {
-    branched_node_specs_from_models(nodes.iter().map(|node| PlannedModel {
+    branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
         kind: node.kind,
         identifier: node.identifier.clone(),
         model: (*node.config).clone(),

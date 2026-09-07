@@ -648,11 +648,7 @@ impl OtelEmitter {
                 return outcome;
             }
         };
-        let mapped = OtelMappedBatch {
-            output: &output,
-            values,
-            attributes,
-        };
+        let mapped = OtelMappedBatch::new(&output, values, attributes);
         let observed_time =
             match Self::timestamp_to_unix_nano(current_timestamp().unix_nanos(), "observed_time") {
                 Ok(value) => value,
@@ -1154,11 +1150,31 @@ struct OtelMappedBatch<'a> {
     output: &'a VmTypedBatch,
     values: &'a [OtelValueMapping],
     attributes: &'a [OtelValueMapping],
+    value_columns: HashMap<&'a str, usize>,
 }
 
-impl OtelMappedBatch<'_> {
+impl<'a> OtelMappedBatch<'a> {
+    fn new(
+        output: &'a VmTypedBatch,
+        values: &'a [OtelValueMapping],
+        attributes: &'a [OtelValueMapping],
+    ) -> Self {
+        let mut value_columns = HashMap::with_capacity(values.len());
+        for (index, mapping) in values.iter().enumerate() {
+            value_columns
+                .entry(mapping.column.as_str())
+                .or_insert(index);
+        }
+        Self {
+            output,
+            values,
+            attributes,
+            value_columns,
+        }
+    }
+
     fn value_array(&self, key: &str) -> Result<Option<ArrayRef>, OtelRecordError> {
-        let Some(index) = self.values.iter().position(|mapping| mapping.column == key) else {
+        let Some(index) = self.value_columns.get(key).copied() else {
             return Ok(None);
         };
         let array = self.output.columns().get(index).ok_or_else(|| {

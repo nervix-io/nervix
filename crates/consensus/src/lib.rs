@@ -367,22 +367,12 @@ impl StateMachineData {
 
     fn replace_domain_schedule(&mut self, domain: &DomainName, schedule: Option<&DomainSchedule>) {
         let Some(domain_schedule) = schedule else {
-            self.schedule.domains.retain(|item| item.domain != *domain);
+            self.schedule.domains.remove(domain);
             return;
         };
-        if let Some(existing) = self
-            .schedule
+        self.schedule
             .domains
-            .iter_mut()
-            .find(|item| item.domain == *domain)
-        {
-            *existing = domain_schedule.clone();
-        } else {
-            self.schedule.domains.push(domain_schedule.clone());
-            self.schedule
-                .domains
-                .sort_by(|left, right| left.domain.as_str().cmp(right.domain.as_str()));
-        }
+            .insert(domain.clone(), domain_schedule.clone());
     }
 }
 
@@ -2566,27 +2556,12 @@ struct RaftTransition {
     leader: String,
 }
 
-fn resource_catalog_slot(
-    resources: &ResourceVersionStatus,
-    domain: &DomainName,
-    identifier: &ResourceName,
-) -> Result<usize, usize> {
-    resources
-        .next_version_by_resource
-        .binary_search_by(|stored| {
-            stored
-                .domain
-                .cmp(domain)
-                .then_with(|| stored.identifier.cmp(identifier))
-        })
-}
-
 fn ensure_resource_catalog(
     resources: &mut ResourceVersionStatus,
     domain: &DomainName,
     identifier: &ResourceName,
 ) {
-    if let Err(index) = resource_catalog_slot(resources, domain, identifier) {
+    if let Err(index) = resources.resource_slot(domain, identifier) {
         resources.next_version_by_resource.mutate_vec(|entries| {
             entries.insert(
                 index,
@@ -2605,7 +2580,7 @@ fn advance_resource_version(
     domain: &DomainName,
     identifier: &ResourceName,
 ) {
-    match resource_catalog_slot(resources, domain, identifier) {
+    match resources.resource_slot(domain, identifier) {
         Ok(index) => {
             resources.next_version_by_resource.mutate_vec(|entries| {
                 entries[index].next_version = entries[index].next_version.saturating_add(1);
@@ -2761,11 +2736,7 @@ mod tests {
     }
 
     fn domain_schedule(raw: &str) -> DomainSchedule {
-        DomainSchedule {
-            domain: domain(raw),
-            nodes: Vec::new(),
-            placement_groups: Vec::new(),
-        }
+        DomainSchedule::new(domain(raw), Vec::new(), Vec::new())
     }
 
     fn running_domain_state(raw: &str) -> DomainState {
@@ -2871,9 +2842,7 @@ mod tests {
     #[test]
     fn apply_consensus_command_replaces_sorts_and_clears_schedule() {
         let mut state = StateMachineData {
-            schedule: ClusterSchedule {
-                domains: vec![domain_schedule("zeta")],
-            },
+            schedule: ClusterSchedule::from_iter([domain_schedule("zeta")]),
             ..Default::default()
         };
 
@@ -2888,8 +2857,8 @@ mod tests {
             state
                 .schedule
                 .domains
-                .iter()
-                .map(|item| item.domain.as_str())
+                .keys()
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["alpha", "zeta"]
         );
@@ -2914,8 +2883,8 @@ mod tests {
             state
                 .schedule
                 .domains
-                .iter()
-                .map(|item| item.domain.as_str())
+                .keys()
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["alpha"]
         );
@@ -3286,9 +3255,7 @@ mod tests {
         let schedule_keyspace = db
             .keyspace("raft_schedule", fjall::KeyspaceCreateOptions::default)
             .expect("schedule keyspace");
-        let schedule = ClusterSchedule {
-            domains: vec![domain_schedule("tenant")],
-        };
+        let schedule = ClusterSchedule::from_iter([domain_schedule("tenant")]);
         write_key(&schedule_keyspace, KEY_CLUSTER_SCHEDULE, &schedule).expect("write schedule");
 
         let store = FjallStore::from_database(db).expect("store should open");
@@ -3300,8 +3267,8 @@ mod tests {
                 .await
                 .schedule
                 .domains
-                .iter()
-                .map(|item| item.domain.as_str())
+                .keys()
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
@@ -3321,9 +3288,7 @@ mod tests {
     async fn snapshot_build_and_install_roundtrip_preserves_state() {
         let tenant = domain("tenant");
         let state = StateMachineData {
-            schedule: ClusterSchedule {
-                domains: vec![domain_schedule("tenant")],
-            },
+            schedule: ClusterSchedule::from_iter([domain_schedule("tenant")]),
             domains: [(tenant, running_domain_state("tenant"))]
                 .into_iter()
                 .collect(),

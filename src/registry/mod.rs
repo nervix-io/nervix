@@ -36,8 +36,8 @@ use nervix_models::{
     ModelChangeAspect, ModelKind, ModelName, MqttIngestMode, OtelAggregationTemporality,
     OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
     PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput,
-    ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, SchemaField,
-    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
+    ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, ScheduledNodes,
+    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -442,15 +442,11 @@ impl Registry {
         &self,
         schedule: &ClusterSchedule,
     ) -> Result<(), Report<RegistryError>> {
-        let desired_domains = schedule
-            .domains
-            .iter()
-            .map(|domain| domain.domain.clone())
-            .collect::<HashSet<_>>();
-        for domain_schedule in &schedule.domains {
+        let desired_domains = schedule.domains.keys().cloned().collect::<HashSet<_>>();
+        for domain_schedule in schedule.domains.values() {
             let models = domain_schedule
                 .nodes
-                .iter()
+                .values()
                 .map(|node| {
                     (
                         RegistryKey::new(node.kind, node.identifier.clone()),
@@ -4147,7 +4143,7 @@ impl ActiveGraph {
     pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
         let models = schedule
             .nodes
-            .iter()
+            .values()
             .map(|node| {
                 (
                     RegistryKey::new(node.kind, node.identifier.clone()),
@@ -4427,7 +4423,7 @@ impl ActiveGraph {
             .map(|candidate| (candidate.node.key(), candidate.index))
             .collect::<HashMap<_, _>>();
 
-        let mut scheduled_nodes = Vec::with_capacity(nodes.len());
+        let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
         for PlacementCandidate { index, node, .. } in nodes {
             let key = node.key();
             let group_index = placement.group_by_member.get(&key).copied();
@@ -4481,7 +4477,7 @@ impl ActiveGraph {
                     *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
                 }
             }
-            scheduled_nodes.push(ScheduledNode {
+            let scheduled_node = ScheduledNode {
                 identifier: node.identifier,
                 kind: node.kind,
                 config: Box::new((*node.config).clone()),
@@ -4491,7 +4487,8 @@ impl ActiveGraph {
                 kafka_partition_schedule: None,
                 primary_node,
                 assigned_nodes,
-            });
+            };
+            scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
         let placement_groups = placement
             .require_groups
@@ -4502,9 +4499,7 @@ impl ActiveGraph {
                     .map(placement_runtime_node)
                     .collect::<Vec<_>>();
                 let primary_node = if let Some(first) = members.first()
-                    && let Some(node) = scheduled_nodes
-                        .iter()
-                        .find(|node| node.kind == first.kind && node.identifier == first.identifier)
+                    && let Some(node) = scheduled_nodes.get(&placement_runtime_node(first))
                 {
                     node.primary_node.clone()
                 } else {
@@ -11818,13 +11813,14 @@ mod tests {
         KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
         MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, ModelName, MqttIngestMode,
         MqttQos, MqttSession, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelSignal,
-        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName, RelayBranching, RelayName,
-        RetryPolicy, ScheduledNode, SchemaField, SchemaName, SignalingProtobufConfig,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-        SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName, WireSchemaField,
-        WireSchemaName,
+        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, PlacementRuntimeNode,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName,
+        RelayBranching, RelayName, RetryPolicy, ScheduledNode, SchemaField, SchemaName,
+        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName,
+        WireSchemaField, WireSchemaName,
     };
+    use rstest::rstest;
 
     #[cfg(feature = "testing")]
     use super::SchedulerMode;
@@ -12164,10 +12160,6 @@ mod tests {
         })
     }
 
-    fn rfc3339_json_codec(name: &str, wire_schema: &str, schema: &str) -> Model {
-        rfc3339_json_codec_for_field(name, wire_schema, schema, "value")
-    }
-
     fn rfc3339_json_codec_for_field(
         name: &str,
         wire_schema: &str,
@@ -12184,6 +12176,72 @@ mod tests {
                 encoding: CodecEncoding::Rfc3339,
             }],
         })
+    }
+
+    #[derive(Debug)]
+    enum CodecTypeCase {
+        Json {
+            internal: ParseAsType,
+            wire: JsonType,
+            rfc3339_field: Option<&'static str>,
+        },
+        Avro {
+            internal: ParseAsType,
+            wire: nervix_models::AvroType,
+        },
+    }
+
+    impl CodecTypeCase {
+        fn models(self) -> Vec<Model> {
+            let internal = match &self {
+                Self::Json { internal, .. } | Self::Avro { internal, .. } => internal.clone(),
+            };
+            let schema = Model::Schema(CreateSchema {
+                name: named("event_schema"),
+                fields: vec![SchemaField {
+                    name: named("value"),
+                    ty: internal,
+                    optional: false,
+                    sensitive: false,
+                }],
+            });
+
+            match self {
+                Self::Json {
+                    wire,
+                    rfc3339_field,
+                    ..
+                } => {
+                    let codec = if let Some(field) = rfc3339_field {
+                        rfc3339_json_codec_for_field(
+                            "event_codec",
+                            "event_wire",
+                            "event_schema",
+                            field,
+                        )
+                    } else {
+                        codec("event_codec", "event_schema")
+                    };
+                    vec![
+                        schema,
+                        json_wire_schema_with_type("event_wire", wire),
+                        codec,
+                    ]
+                }
+                Self::Avro { wire, .. } => vec![
+                    schema,
+                    avro_wire_schema_with_type("event_wire", wire),
+                    avro_codec("event_codec", "event_wire", "event_schema"),
+                ],
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    enum CodecTypeExpectation {
+        Accepted,
+        IncompatibleSchema,
+        InvalidModel,
     }
 
     fn ingestor(name: &str, into: &str, codec: &str, client: &str) -> Model {
@@ -13065,10 +13123,10 @@ mod tests {
         kind: ModelKind,
         identifier: &str,
     ) -> &'a ScheduledNode {
+        let identity = PlacementRuntimeNode::new(kind, named::<ModelName>(identifier));
         schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == kind && node.identifier.as_str() == identifier)
+            .get(&identity)
             .unwrap_or_else(|| panic!("missing scheduled node {kind:?}:{identifier}"))
     }
 
@@ -13375,8 +13433,10 @@ mod tests {
             );
         let scheduled_relay = schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == named("notifications"))
+            .get(&PlacementRuntimeNode::new(
+                ModelKind::Relay,
+                named("notifications"),
+            ))
             .expect("fixture schedule must include its materialized relay");
         assert_eq!(
             scheduled_relay.assigned_nodes,
@@ -13387,9 +13447,7 @@ mod tests {
         {
             let replica = Registry::open(&replica_path).expect("replica registry should open");
             replica
-                .synchronize_cluster_schedule(&ClusterSchedule {
-                    domains: vec![schedule],
-                })
+                .synchronize_cluster_schedule(&ClusterSchedule::from_iter([schedule]))
                 .expect("schedule models should synchronize");
         }
 
@@ -16734,256 +16792,102 @@ mod tests {
         let _ = fs::remove_dir_all(path);
     }
 
-    #[test]
-    fn apply_batch_requires_explicit_rfc3339_encoding_for_json_string_datetime() {
+    #[rstest]
+    #[case::requires_explicit_rfc3339_for_json_string_datetime(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::String,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    #[case::accepts_explicit_rfc3339_for_json_string_datetime(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::String,
+            rfc3339_field: Some("value"),
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::rejects_rfc3339_for_unknown_field(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::String,
+            rfc3339_field: Some("missing"),
+        },
+        CodecTypeExpectation::InvalidModel
+    )]
+    #[case::rejects_rfc3339_for_non_datetime_field(
+        CodecTypeCase::Json {
+            internal: ParseAsType::String,
+            wire: JsonType::String,
+            rfc3339_field: Some("value"),
+        },
+        CodecTypeExpectation::InvalidModel
+    )]
+    #[case::rejects_rfc3339_without_json_string_wire_datetime(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::Number,
+            rfc3339_field: Some("value"),
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    #[case::accepts_json_integer_for_internal_u32(
+        CodecTypeCase::Json {
+            internal: ParseAsType::U32,
+            wire: JsonType::Integer,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_json_number_for_internal_f32(
+        CodecTypeCase::Json {
+            internal: ParseAsType::F32,
+            wire: JsonType::Number,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::rejects_avro_long_internal_i32_coercion(
+        CodecTypeCase::Avro {
+            internal: ParseAsType::I32,
+            wire: nervix_models::AvroType::Long,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    fn validates_codec_schema_type_matrix(
+        #[case] codec_type: CodecTypeCase,
+        #[case] expected: CodecTypeExpectation,
+    ) {
+        let case = format!("{codec_type:?}");
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = DomainName::parse("default").expect("valid domain");
+        let result = registry.apply_batch(&domain, codec_type.models());
 
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    codec("event_codec", "event_schema"),
-                ],
-            )
-            .expect_err("implicit string datetime parsing must fail");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_accepts_explicit_rfc3339_encoding_for_json_string_datetime() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    rfc3339_json_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect("explicit RFC3339 encoding should allow string datetime wire field");
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_rfc3339_encoding_for_unknown_field() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    rfc3339_json_codec_for_field(
-                        "event_codec",
-                        "event_wire",
-                        "event_schema",
-                        "missing",
+        match expected {
+            CodecTypeExpectation::Accepted => {
+                result.unwrap_or_else(|error| panic!("{case} should be accepted: {error:#}"));
+            }
+            CodecTypeExpectation::IncompatibleSchema => {
+                let error = result.expect_err("incompatible codec types must be rejected");
+                assert!(
+                    matches!(
+                        error.current_context(),
+                        RegistryError::IncompatibleSchema { .. }
                     ),
-                ],
-            )
-            .expect_err("RFC3339 encoding must reference an internal schema field");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::InvalidModel { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_rfc3339_encoding_for_non_datetime_field() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::String,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    rfc3339_json_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect_err("RFC3339 encoding must target a DATETIME internal schema field");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::InvalidModel { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_rfc3339_encoding_without_json_string_wire_datetime() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::Number),
-                    rfc3339_json_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect_err("RFC3339 encoding must require string wire field");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_accepts_json_integer_shape_for_internal_integer_widths() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::U32,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::Integer),
-                    codec("event_codec", "event_schema"),
-                ],
-            )
-            .expect("json integer shape should support internal U32");
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_accepts_json_number_shape_for_internal_f32() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::F32,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::Number),
-                    codec("event_codec", "event_schema"),
-                ],
-            )
-            .expect("json number shape should support internal F32");
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_avro_long_internal_width_coercion() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: named("event_schema"),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::I32,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    avro_wire_schema_with_type("event_wire", nervix_models::AvroType::Long),
-                    avro_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect_err("avro long must not implicitly match I32");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
-        ));
+                    "unexpected error for {case}: {error:#}"
+                );
+            }
+            CodecTypeExpectation::InvalidModel => {
+                let error = result.expect_err("invalid codec configuration must be rejected");
+                assert!(
+                    matches!(error.current_context(), RegistryError::InvalidModel { .. }),
+                    "unexpected error for {case}: {error:#}"
+                );
+            }
+        }
 
         let _ = fs::remove_dir_all(path);
     }

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use ahash_compile_time::HashSet;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -683,9 +684,12 @@ fn validate_mongodb_conflict_action<'src>(
         MongoDbConflictAction::DoNothing { target }
         | MongoDbConflictAction::DoUpdate { target } => target,
     };
+    let mapped_columns = values
+        .iter()
+        .map(|mapping| mapping.column.as_str())
+        .collect::<HashSet<_>>();
     for column in target {
-        let is_mapped = values.iter().any(|mapping| mapping.column == *column);
-        if !is_mapped {
+        if !mapped_columns.contains(column.as_str()) {
             return Err(Rich::custom(
                 span,
                 format!("MongoDB ON CONFLICT target column '{column}' is not mapped in VALUES"),
@@ -693,9 +697,10 @@ fn validate_mongodb_conflict_action<'src>(
         }
     }
     if let MongoDbConflictAction::DoUpdate { target } = conflict_action {
+        let target_columns = target.iter().map(String::as_str).collect::<HashSet<_>>();
         let has_update_column = values
             .iter()
-            .any(|mapping| !target.contains(&mapping.column));
+            .any(|mapping| !target_columns.contains(mapping.column.as_str()));
         if !has_update_column {
             return Err(Rich::custom(
                 span,

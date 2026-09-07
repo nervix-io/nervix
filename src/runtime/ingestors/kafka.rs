@@ -1291,6 +1291,7 @@ impl KafkaIngestor {
         let metadata = consumer
             .fetch_metadata(Some(topic), Duration::from_secs(5))
             .map_err(|source| source.to_string())?;
+        // The fetch above asked for this one topic, so the response carries at most that topic.
         let Some(topic_metadata) = metadata.topics().iter().find(|entry| entry.name() == topic)
         else {
             return Err(format!("missing kafka topic metadata for '{topic}'"));

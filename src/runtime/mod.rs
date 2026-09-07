@@ -55,12 +55,13 @@ use nervix_models::{
     MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName,
     MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, OtelAggregationTemporality, OtelMetric, OtelMetricKind,
-    OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
-    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, WireSchemaDefinition,
+    OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PlacementRuntimeNode,
+    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
+    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
+    RouteConstruction, ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -1038,6 +1039,26 @@ struct DomainExecution {
     tasks: Vec<JoinHandle<()>>,
 }
 
+impl DomainExecution {
+    /// The host and path keys inbound routing uses to reach this domain's endpoint routes.
+    fn routed_endpoints(&self) -> impl Iterator<Item = (HttpRouteKey, RoutedEndpoint)> + '_ {
+        self.endpoint_routes.values().flat_map(|route| {
+            route.hostnames.iter().map(|host| {
+                (
+                    HttpRouteKey {
+                        host: host.clone(),
+                        path: route.path.clone(),
+                    },
+                    RoutedEndpoint {
+                        endpoint_type: route.endpoint_type,
+                        signaling_protocol: route.signaling_protocol.clone(),
+                    },
+                )
+            })
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitterPublishingDrainState {
     AwaitingConfirmation,
@@ -1586,6 +1607,18 @@ struct EndpointRoute {
     endpoint_type: EndpointType,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
 }
+
+/// One instantiated endpoint route as inbound HTTP and WebSocket routing sees it, without the
+/// configuration a request never consults.
+#[derive(Debug, Clone)]
+struct RoutedEndpoint {
+    endpoint_type: EndpointType,
+    signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
+}
+
+/// Every domain publishing one exact host and path. A request resolves the host and path by key
+/// and then reads this map, which holds one entry per domain that claims that exact pair.
+type RoutedEndpointsByDomain = HashMap<DomainName, RoutedEndpoint>;
 
 #[derive(Clone)]
 struct EndpointIngestBinding {
@@ -3560,7 +3593,7 @@ impl RelayRetention {
     ) -> Result<Self, RuntimeError> {
         let Some(Model::Relay(model)) = schedule
             .nodes
-            .iter()
+            .values()
             .find(|node| {
                 node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
             })
@@ -3576,7 +3609,7 @@ impl RelayRetention {
         };
         let branch_model = schedule
             .nodes
-            .iter()
+            .values()
             .find_map(|node| {
                 let Model::Branch(candidate) = node.config.as_ref() else {
                     return None;
@@ -3978,7 +4011,7 @@ pub(crate) struct CompiledProgramWithMaterializedInterest {
     pub(crate) materialized_interest: MaterializedProgramInterest,
     output_namespace_input: OutputNamespaceInput,
     lookup_hash_maps: Vec<LookupHashMapCall>,
-    error_sites: Vec<CompiledMessageErrorSite>,
+    error_sites: CompiledMessageErrorSites,
 }
 
 #[derive(Debug, Clone)]
@@ -3992,9 +4025,14 @@ enum OutputNamespaceInput {
     Finalized,
 }
 
+/// Message-error metadata for one lowered operation, keyed by the span the VM reports when that
+/// operation fails.
+///
+/// Spans are two `usize`s, so ordered comparison is cheaper than hashing them.
+type CompiledMessageErrorSites = BTreeMap<VmSpan, CompiledMessageErrorSite>;
+
 #[derive(Debug, Clone)]
 struct CompiledMessageErrorSite {
-    span: VmSpan,
     operation: MessageErrorOperation,
     operation_index: Option<u32>,
     fields: SortedSet<FieldPath>,
@@ -4002,7 +4040,7 @@ struct CompiledMessageErrorSite {
 
 impl CompiledProgramWithMaterializedInterest {
     fn captures_partial_output(&self) -> bool {
-        self.error_sites.iter().any(|site| {
+        self.error_sites.values().any(|site| {
             matches!(
                 site.operation,
                 MessageErrorOperation::Inherit | MessageErrorOperation::Set
@@ -4016,7 +4054,7 @@ impl CompiledProgramWithMaterializedInterest {
         span: VmSpan,
         fallback_operation: MessageErrorOperation,
     ) -> StructuredMessageError {
-        let site = self.error_sites.iter().find(|site| site.span == span);
+        let site = self.error_sites.get(&span);
         structured_message_error(
             MessageErrorCode::Evaluation,
             reason,
@@ -4169,6 +4207,9 @@ pub struct Runtime {
     state_schema_fingerprints: Arc<DashMap<RuntimeStateSchemaKey, [u8; 32], RandomState>>,
     domain_graphs: Arc<DashMap<DomainName, SharedActiveGraph, RandomState>>,
     endpoint_bindings: Arc<DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>>,
+    /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so
+    /// request routing never scans domain executions or their configured routes.
+    routed_endpoints: Arc<DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>>,
     relay_boundary_fanouts: RelayBoundaryFanoutMap,
     events: broadcast::Sender<RuntimeEvent>,
     emitter_faults: Arc<EmitterFaultInjector>,
@@ -10582,6 +10623,9 @@ fn rewrite_lookup_hash_map_expr(
                             lookup.as_str()
                         )
                     })?;
+                // Deduplication over the calls lowered so far in this one program. The
+                // comparison includes the key expression, which has no hash or ordering, so the
+                // bound is the LOOKUP_HASH_MAP calls written in the program being compiled.
                 let existing = pending_calls.iter().find(|call| {
                     call.lookup == lookup
                         && call.lookup_field == lookup_field
@@ -10788,7 +10832,7 @@ fn referenced_materialized_stream_bindings(
     available_materialized_streams: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     current_branching: &[FieldName],
 ) -> Result<(Vec<VmCompileBinding>, MaterializedProgramInterest), String> {
-    let mut fields_by_relay = HashMap::<RelayName, HashSet<String>>::default();
+    let mut fields_by_relay = HashMap::<RelayName, BTreeSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
         if writable_namespaces.contains(&relay)
             || relay == INGEST_METADATA_NAMESPACE
@@ -10823,13 +10867,14 @@ fn referenced_materialized_stream_bindings(
         let Some(spec) = available_materialized_streams.get(&relay) else {
             continue;
         };
-        let mut ordered_fields = fields.into_iter().collect::<Vec<_>>();
-        ordered_fields.sort();
+        // The referenced fields are a set, so schema projection tests membership by key while
+        // still walking the set in the sorted order the binding and interest lists require.
+        let ordered_fields = fields;
         let projected_fields = spec
             .schema
             .fields()
             .iter()
-            .filter(|field| ordered_fields.iter().any(|name| name == field.name()))
+            .filter(|field| ordered_fields.contains(field.name()))
             .cloned()
             .collect::<Vec<_>>();
         let projected_sensitivity = VmSchemaSensitivity::from_sensitive_fields(
@@ -10945,7 +10990,7 @@ fn compiled_message_error_sites(
     program: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     set_operations: &[MessageErrorOperation],
     filter_operation: Option<MessageErrorOperation>,
-) -> Result<Vec<CompiledMessageErrorSite>, String> {
+) -> Result<CompiledMessageErrorSites, String> {
     if set_operations.len() != program.inner.set.len() {
         return Err(format!(
             "message-error metadata has {} SET operations for {} lowered assignments",
@@ -10953,51 +10998,54 @@ fn compiled_message_error_sites(
             program.inner.set.len()
         ));
     }
-    let mut sites = Vec::with_capacity(
-        program.inner.set.len()
-            + usize::from(program.inner.filter.is_some())
-            + program.inner.invoke.len(),
-    );
+    let mut sites = CompiledMessageErrorSites::new();
     for (index, (assignment, operation)) in program.inner.set.iter().zip(set_operations).enumerate()
     {
         let (target, expression) = assignment;
         let mut fields = vec![FieldPath::new(format!("{}.{}", target.relay, target.field))];
         collect_expression_field_paths(expression, &mut fields);
-        sites.push(CompiledMessageErrorSite {
-            span: expression.span,
-            operation: *operation,
-            operation_index: Some(
-                u32::try_from(index).map_err(|_| "too many ordered SET operations".to_string())?,
-            ),
-            fields: SortedSet::from_unsorted(fields),
-        });
+        sites.insert(
+            expression.span,
+            CompiledMessageErrorSite {
+                operation: *operation,
+                operation_index: Some(
+                    u32::try_from(index)
+                        .map_err(|_| "too many ordered SET operations".to_string())?,
+                ),
+                fields: SortedSet::from_unsorted(fields),
+            },
+        );
     }
     if let Some(expression) = &program.inner.filter {
         let mut fields = Vec::new();
         collect_expression_field_paths(expression, &mut fields);
-        sites.push(CompiledMessageErrorSite {
-            span: expression.span,
-            operation: filter_operation.ok_or_else(|| {
-                "message-error metadata is missing the filter operation".to_string()
-            })?,
-            operation_index: None,
-            fields: SortedSet::from_unsorted(fields),
-        });
+        sites.insert(
+            expression.span,
+            CompiledMessageErrorSite {
+                operation: filter_operation.ok_or_else(|| {
+                    "message-error metadata is missing the filter operation".to_string()
+                })?,
+                operation_index: None,
+                fields: SortedSet::from_unsorted(fields),
+            },
+        );
     }
     for (index, invocation) in program.inner.invoke.iter().enumerate() {
         let mut fields = Vec::new();
         for argument in &invocation.inner.args {
             collect_expression_field_paths(argument, &mut fields);
         }
-        sites.push(CompiledMessageErrorSite {
-            span: invocation.span,
-            operation: MessageErrorOperation::Invoke,
-            operation_index: Some(
-                u32::try_from(index)
-                    .map_err(|_| "too many ordered INVOKE operations".to_string())?,
-            ),
-            fields: SortedSet::from_unsorted(fields),
-        });
+        sites.insert(
+            invocation.span,
+            CompiledMessageErrorSite {
+                operation: MessageErrorOperation::Invoke,
+                operation_index: Some(
+                    u32::try_from(index)
+                        .map_err(|_| "too many ordered INVOKE operations".to_string())?,
+                ),
+                fields: SortedSet::from_unsorted(fields),
+            },
+        );
     }
     Ok(sites)
 }
@@ -11927,7 +11975,7 @@ fn compile_emitter_filter_map_part(
     parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     schemas: RuntimeVmSchemaPair,
     codec_route: bool,
-    error_sites: Vec<CompiledMessageErrorSite>,
+    error_sites: CompiledMessageErrorSites,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
     let RuntimeCompileTarget { domain, identifier } = target;
@@ -19414,6 +19462,8 @@ impl WasmOutputValidator<'_> {
                     token: source_token.0,
                 });
             }
+            // Bounded by the ack tokens the guest attached to this one row, so a per-row set
+            // would allocate more than the walk it replaces.
             if !row.tokens.contains(&source_token) {
                 return Err(WasmOutputError::SourceTokenNotCarried {
                     output_relay: output_relay.to_string(),
@@ -20605,8 +20655,10 @@ pub(crate) fn scheduled_relay_owner_nodes(
 ) -> Vec<ClusterNodeName> {
     schedule
         .nodes
-        .iter()
-        .find(|node| node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay))
+        .get(&PlacementRuntimeNode::new(
+            ModelKind::Relay,
+            ModelName::from(relay),
+        ))
         .and_then(ScheduledNode::execution_node)
         .map(|owner| vec![owner.clone()])
         .unwrap_or_default()
