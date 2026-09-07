@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ahash::{HashMap, RandomState};
+#[cfg(test)]
+use arch_into::ArchInto as _;
 use dashmap::DashMap;
 #[cfg(test)]
 use meticulous::OptionExt as _;
@@ -189,9 +191,10 @@ impl ReplicatedKafkaOffsetState {
                     .iter()
                     .enumerate()
                     .flat_map(|(instance_idx, partitions)| {
-                        partitions.iter().copied().map(move |partition| {
-                            (partition, u64::try_from(instance_idx).unwrap_or_default())
-                        })
+                        partitions
+                            .iter()
+                            .copied()
+                            .map(move |partition| (partition, instance_idx.arch_into()))
                     })
                     .collect(),
             }

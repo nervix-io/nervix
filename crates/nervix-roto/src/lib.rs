@@ -7,6 +7,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt};
+use arch_into::ArchInto as _;
 use arrow_arith::boolean;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Datum, FixedSizeListArray, Float32Array, Float64Array,
@@ -204,7 +205,7 @@ fn call_timestamp() -> Timestamp {
 }
 
 fn column_arg(args: Val<UdfArgs>, index: u64, expected: &DataType) -> Column {
-    let Some(column) = args.0.0.get(index as usize) else {
+    let Some(column) = args.0.0.get(index.arch_into()) else {
         fatal(format!(
             "generated UDF bridge requested missing argument {index}"
         ));
@@ -221,7 +222,7 @@ fn column_arg(args: Val<UdfArgs>, index: u64, expected: &DataType) -> Column {
 }
 
 fn untyped_column_arg(args: Val<UdfArgs>, index: u64) -> Column {
-    let Some(column) = args.0.0.get(index as usize) else {
+    let Some(column) = args.0.0.get(index.arch_into()) else {
         fatal(format!(
             "generated UDF bridge requested missing argument {index}"
         ));
@@ -368,7 +369,7 @@ macro_rules! integer_column_library {
     ($wrapper:ident, $arrow:ty, $scalar:ty) => {
         library! {
             impl Val<$wrapper> {
-                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len() as u64 }
+                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len().arch_into() }
                 fn add(value: Val<$wrapper>, other: Val<$wrapper>) -> Val<$wrapper> {
                     Val($wrapper(numeric_binary::<$arrow>(&value.0.0, &other.0.0, "add", <$scalar>::checked_add)))
                 }
@@ -426,7 +427,7 @@ macro_rules! float_column_library {
     ($wrapper:ident, $arrow:ty, $scalar:ty) => {
         library! {
             impl Val<$wrapper> {
-                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len() as u64 }
+                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len().arch_into() }
                 fn add(value: Val<$wrapper>, other: Val<$wrapper>) -> Val<$wrapper> {
                     Val($wrapper(numeric_binary::<$arrow>(&value.0.0, &other.0.0, "add", |a, b| Some(a + b))))
                 }
@@ -579,7 +580,7 @@ fn base_library() -> impl roto::Registerable {
         impl Val<ColumnBuilderFactory> {
             fn bool(capacity: u64) -> Val<BoolColumnBuilder> {
                 Val(BoolColumnBuilder(Arc::new(Mutex::new(Vec::with_capacity(
-                    usize::try_from(capacity).unwrap_or(row_count()).min(row_count())
+                    capacity.arch_into().min(row_count())
                 )))))
             }
         }
@@ -604,7 +605,7 @@ fn base_library() -> impl roto::Registerable {
 fn bool_library() -> impl roto::Registerable {
     library! {
         impl Val<BoolColumn> {
-            fn len(value: Val<BoolColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<BoolColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn not(value: Val<BoolColumn>) -> Val<BoolColumn> {
                 let input = value.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 match boolean::not(input) {
@@ -668,7 +669,7 @@ fn string_library() -> impl roto::Registerable {
         #[clone] type StringWhen = Val<StringWhen>;
 
         impl Val<StringColumn> {
-            fn len(value: Val<StringColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<StringColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn trim(value: Val<StringColumn>) -> Val<StringColumn> {
                 let input = value.0.0.0.as_any().downcast_ref::<StringArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 Val(StringColumn(Column(StdArc::new(StringArray::from_iter(
@@ -697,9 +698,7 @@ fn string_library() -> impl roto::Registerable {
             fn get(value: Val<StringColumn>, index: u64) -> Option<RotoString> {
                 let input = value.0.0.0.as_any().downcast_ref::<StringArray>()
                     .verified("the bridge builds this column wrapper only around the matching Arrow array");
-                let Ok(index) = usize::try_from(index) else {
-                    return None;
-                };
+                let index = index.arch_into();
                 (index < input.len() && input.is_valid(index))
                     .then(|| RotoString::new(input.value(index)))
             }
@@ -771,7 +770,7 @@ fn cast_library() -> impl roto::Registerable {
 fn list_library() -> impl roto::Registerable {
     library! {
         impl Val<VecStringColumn> {
-            fn len(value: Val<VecStringColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<VecStringColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn contains_s(value: Val<VecStringColumn>, needle: RotoString) -> Val<BoolColumn> {
                 let column = &value.0.0.0;
                 let output = match column.data_type() {
@@ -785,8 +784,12 @@ fn list_library() -> impl roto::Registerable {
                                 return None;
                             }
                             let offsets = lists.value_offsets();
-                            let start = offsets[row] as usize;
-                            let end = offsets[row + 1] as usize;
+                            let start = usize::try_from(offsets[row]).assured(
+                                "Arrow ListArray offsets are non-negative",
+                            );
+                            let end = usize::try_from(offsets[row + 1]).assured(
+                                "Arrow ListArray offsets are non-negative",
+                            );
                             Some((start..end).any(|index| {
                                 values.is_valid(index) && values.value(index) == needle.as_ref()
                             }))
@@ -797,7 +800,8 @@ fn list_library() -> impl roto::Registerable {
                             .verified("the bridge builds this column wrapper only around the matching Arrow array");
                         let values = lists.values().as_any().downcast_ref::<StringArray>()
                             .verified("the bridge builds this column wrapper only around the matching Arrow array");
-                        let size = *size as usize;
+                        let size = usize::try_from(*size)
+                            .assured("Arrow FixedSizeListArray sizes are non-negative");
                         BooleanArray::from_iter((0..lists.len()).map(|row| {
                             if lists.is_null(row) {
                                 return None;
@@ -822,7 +826,7 @@ fn list_library() -> impl roto::Registerable {
 fn datetime_library() -> impl roto::Registerable {
     library! {
         impl Val<DatetimeColumn> {
-            fn len(value: Val<DatetimeColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<DatetimeColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn lt_s(value: Val<DatetimeColumn>, other: Val<Timestamp>) -> Val<BoolColumn> {
                 let input = value.0.0.0.as_any().downcast_ref::<TimestampNanosecondArray>()
                     .verified("the bridge builds this column wrapper only around the matching Arrow array");

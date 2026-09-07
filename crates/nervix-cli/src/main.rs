@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use arch_into::ArchInto as _;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use byte_unit::{Byte, UnitType};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -813,8 +814,8 @@ fn subscribe_request(
 
 fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) {
     for diagnostic in diagnostics {
-        let start = usize::try_from(diagnostic.span_start).unwrap_or(0);
-        let mut end = usize::try_from(diagnostic.span_end).unwrap_or(start);
+        let start = diagnostic.span_start.arch_into();
+        let mut end = diagnostic.span_end.arch_into();
         if end < start {
             end = start;
         }

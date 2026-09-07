@@ -3,7 +3,7 @@ use std::{ops::Range, sync::Arc};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_wasm_protocol::{
     AckSidecar, Envelope, EnvelopeRef, OutputColumnRef, ProcessorType, ProtocolError, RoutedOutput,
 };
@@ -73,9 +73,10 @@ impl InputBatch {
         self.batches
             .iter()
             .try_fold(0_u64, |rows, batch| {
-                u64::try_from(batch.num_rows())
-                    .ok()
-                    .and_then(|batch_rows| rows.checked_add(batch_rows))
+                rows.checked_add(
+                    u64::try_from(batch.num_rows())
+                        .assured("usize fits u64 on every architecture supported by the WASM SDK"),
+                )
             })
             .assured("the rows counted here belong to batches this guest already holds in memory")
     }
@@ -99,8 +100,10 @@ impl OutputEnvelope {
     /// match the nullability of every destination field that references the
     /// column; several routes may reference the same index.
     pub fn add_generated_column(&mut self, array: ArrayRef, optional: bool) -> u32 {
+        let index = u32::try_from(self.generated.len())
+            .assured("WebAssembly linear memory limits generated column indices to u32");
         self.generated.push((array, optional));
-        (self.generated.len() - 1) as u32
+        index
     }
 
     /// Adds one routed output whose `columns` align positionally with the

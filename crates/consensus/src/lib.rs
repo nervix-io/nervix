@@ -1418,11 +1418,17 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
     ciborium::from_reader(Cursor::new(bytes)).map_err(io_error)
 }
 
-fn encode_stream_frame(bytes: &[u8]) -> Vec<u8> {
+fn encode_stream_frame(bytes: &[u8]) -> Result<Vec<u8>, io::Error> {
+    let encoded_len = u32::try_from(bytes.len()).map_err(|_| {
+        io_error(format!(
+            "stream frame length {} exceeds u32::MAX",
+            bytes.len()
+        ))
+    })?;
     let mut frame = Vec::with_capacity(4 + bytes.len());
-    frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&encoded_len.to_be_bytes());
     frame.extend_from_slice(bytes);
-    frame
+    Ok(frame)
 }
 
 async fn read_response_bytes(
@@ -1522,7 +1528,9 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
             &encode(&header)
                 .map_err(unreachable_err)
                 .map_err(StreamingError::from)?,
-        );
+        )
+        .map_err(unreachable_err)
+        .map_err(StreamingError::from)?;
         /// How far the snapshot relay body has been written: the framed header until it is sent,
         /// the encoded snapshot, and the offset the next chunk starts at.
         struct SnapshotRelayProgress {
@@ -2681,6 +2689,7 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 mod tests {
     use std::{io::Cursor, sync::Arc as StdArc};
 
+    use arch_into::ArchInto as _;
     use fjall::Database;
     use meticulous::OptionExt as _;
     use nervix_models::{
@@ -2834,12 +2843,13 @@ mod tests {
         };
 
         let payload = encode(&header).expect("snapshot relay header should encode");
-        let frame = encode_stream_frame(&payload);
+        let frame = encode_stream_frame(&payload).expect("snapshot relay frame should encode");
         let length = u32::from_be_bytes(
             frame[..4]
                 .try_into()
                 .expect("snapshot relay frame has a length prefix"),
-        ) as usize;
+        )
+        .arch_into();
         assert_eq!(length, payload.len());
         let decoded: SnapshotRelayHeader =
             decode(&frame[4..]).expect("snapshot relay header should decode");

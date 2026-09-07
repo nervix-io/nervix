@@ -10,10 +10,12 @@ use std::{
 
 use ahash::{HashMap, HashSet};
 use arc_swap::ArcSwapOption;
+use arch_into::ArchInto as _;
 use arrow_array::{Array, ArrayRef, Int32Array, RecordBatch, StringArray};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use fjall::Database;
+use meticulous::ResultExt as _;
 use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
@@ -2128,7 +2130,8 @@ fn wasm_identity_references_support_every_internal_arrow_field_kind() {
         vec![wasm_test_output(
             (0..schema.arrow_schema().fields().len())
                 .map(|column_index| WasmOutputColumnRef::Input {
-                    column_index: u32::try_from(column_index).expect("field index must fit u32"),
+                    column_index: u32::try_from(column_index)
+                        .assured("the test schema has fewer than u32::MAX fields"),
                 })
                 .collect(),
             wasm_input_acks(&input).rows.clone(),
@@ -10246,11 +10249,12 @@ fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
         .batch()
         .columns()
         .iter()
-        .map(|column| {
+        .map(|column| -> u64 {
             column
                 .to_data()
                 .get_slice_memory_size()
-                .expect("test Arrow type should report its logical payload size") as u64
+                .expect("test Arrow type should report its logical payload size")
+                .arch_into()
         })
         .sum::<u64>();
     let allocated_bytes = batch
@@ -10258,7 +10262,7 @@ fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
         .batch()
         .columns()
         .iter()
-        .map(|column| column.get_array_memory_size() as u64)
+        .map(|column| -> u64 { column.get_array_memory_size().arch_into() })
         .sum::<u64>();
 
     assert!(allocated_bytes > payload_bytes);
@@ -11476,7 +11480,13 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
                 ),
-                ("sequence".to_string(), RuntimeValue::U32(sequence as u32)),
+                (
+                    "sequence".to_string(),
+                    RuntimeValue::U32(
+                        u32::try_from(sequence)
+                            .assured("the VM blocking threshold fits a u32 test field"),
+                    ),
+                ),
                 (
                     "payload".to_string(),
                     RuntimeValue::String(format!("payload-{sequence}")),

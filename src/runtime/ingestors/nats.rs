@@ -93,7 +93,7 @@ impl NatsIngestor {
             );
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks = Vec::with_capacity(instances.arch_into());
         for instance_idx in 0..instances {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let task_runtime = runtime.clone();

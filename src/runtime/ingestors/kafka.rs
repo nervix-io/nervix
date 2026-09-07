@@ -138,7 +138,7 @@ impl KafkaIngestor {
         } else {
             None
         };
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks = Vec::with_capacity(instances.arch_into());
 
         if let Some(rebalance_tx) = rebalance_tx.as_ref() {
             let mut watcher_config = ClientConfig::new();
@@ -349,7 +349,7 @@ impl KafkaIngestor {
                 );
 
                 let ack_parallel_limit = match &task_ack_mode {
-                    KafkaIngestMode::AckParallel { max, .. } => (*max).max(1) as usize,
+                    KafkaIngestMode::AckParallel { max, .. } => (*max).max(1).arch_into(),
                     _ => 1,
                 };
                 let ack_timeout = task_ack_timeout;

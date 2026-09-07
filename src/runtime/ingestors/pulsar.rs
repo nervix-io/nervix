@@ -130,7 +130,7 @@ impl PulsarIngestor {
         let topic_name = Self::topic_from_config(&resolved_client.entries, topic.as_str());
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks = Vec::with_capacity(instances.arch_into());
 
         for instance_idx in 0..instances {
             let consumer_name = format!("{}-{instance_idx}", ingestor.name.as_str());
@@ -197,7 +197,7 @@ impl PulsarIngestor {
                 );
 
                 let ack_parallel_limit = match &task_ack_mode {
-                    PulsarIngestMode::AckParallel { max, .. } => (*max).max(1) as usize,
+                    PulsarIngestMode::AckParallel { max, .. } => (*max).max(1).arch_into(),
                     PulsarIngestMode::AckSequential { .. } | PulsarIngestMode::NoAckParallel => 1,
                 };
                 let ack_timeout = task_ack_timeout;
