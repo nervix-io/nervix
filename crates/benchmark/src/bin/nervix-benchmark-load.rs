@@ -12,6 +12,7 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use arch_into::ArchInto as _;
 use clap::{Parser, Subcommand};
 use meticulous::ResultExt as _;
+use nervix_approx_into::ApproxInto as _;
 use nervix_benchmark::LoadShape;
 use parking_lot::Mutex;
 use rdkafka::{
@@ -532,12 +533,13 @@ impl BenchmarkReport {
     fn print(&self) {
         let generation_seconds = self.generation_elapsed.as_secs_f64();
         let end_to_end_seconds = self.end_to_end_elapsed.as_secs_f64();
-        let input_rate = self.input_messages as f64 / generation_seconds;
-        let end_to_end_rate = self.input_messages as f64 / end_to_end_seconds;
+        let input_messages = self.input_messages.approx_into::<f64>();
+        let input_rate = input_messages / generation_seconds;
+        let end_to_end_rate = input_messages / end_to_end_seconds;
         let output_rate_during_generation =
-            self.output_records_at_generation_end as f64 / generation_seconds;
+            self.output_records_at_generation_end.approx_into::<f64>() / generation_seconds;
         let input_mib =
-            self.input_messages as f64 * self.wire_bytes_per_message as f64 / (1024.0 * 1024.0);
+            input_messages * self.wire_bytes_per_message.approx_into::<f64>() / (1024.0 * 1024.0);
 
         println!(
             "target_duration_seconds={:.6}",

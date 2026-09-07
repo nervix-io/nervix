@@ -91,7 +91,7 @@ impl RuntimeStatePlacement {
         let mut key = Vec::new();
         key.extend_from_slice(self.domain.as_str().as_bytes());
         key.push(0);
-        key.push(self.state as u8);
+        key.push(u8::from(self.state));
         key.push(0);
         key.extend_from_slice(self.kind.as_str().as_bytes());
         key.push(0);
@@ -265,7 +265,7 @@ impl RuntimeStateStore {
         let identifier = identifier.into();
         let mut prefix = domain.as_str().as_bytes().to_vec();
         prefix.push(0);
-        prefix.push(state as u8);
+        prefix.push(u8::from(state));
         prefix.push(0);
         prefix.extend_from_slice(kind.as_str().as_bytes());
         prefix.push(0);
@@ -393,21 +393,15 @@ fn stored_placement_schema(
     let state_offset = domain_end
         .checked_add(1)
         .verified("the separator position is an index into this key");
-    let state = match key.get(state_offset) {
-        Some(0) => RuntimeStateKind::BranchAggregated,
-        Some(1) => RuntimeStateKind::Correlator,
-        Some(2) => RuntimeStateKind::Deduplicator,
-        Some(3) => RuntimeStateKind::KafkaOffset,
-        Some(4) => RuntimeStateKind::MaterializedRelay,
-        Some(5) => RuntimeStateKind::WasmProcessor,
-        Some(6) => RuntimeStateKind::WindowProcessor,
-        Some(7) => RuntimeStateKind::BranchLru,
-        Some(_) | None => {
-            return Err(Report::new(RuntimePersistenceError::DecodeState(
+    let state = key
+        .get(state_offset)
+        .copied()
+        .and_then(RuntimeStateKind::from_repr)
+        .ok_or_else(|| {
+            RuntimePersistenceError::DecodeState(
                 "runtime state key has an invalid state kind".to_string(),
-            )));
-        }
-    };
+            )
+        })?;
     let kind_start = state_offset
         .checked_add(2)
         .verified("the state-kind byte position is an index into this key");
@@ -483,7 +477,7 @@ mod tests {
     fn truncated_state_key_reports_a_decode_error() {
         let mut key = b"acme".to_vec();
         key.push(0);
-        key.push(RuntimeStateKind::Deduplicator as u8);
+        key.push(u8::from(RuntimeStateKind::Deduplicator));
 
         let error = stored_placement_schema(&key)
             .err()

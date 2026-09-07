@@ -5,6 +5,7 @@ use chumsky::{
     prelude::*,
 };
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction};
 use sorted_vec::SortedSet;
 
@@ -550,7 +551,7 @@ fn validate_aggregate_call<'src>(
 
 fn percentile_arg<'src>(expr: &SpannedExpr, span: Span) -> Result<f64, Rich<'src, Token>> {
     let value = match &expr.inner {
-        Expr::Literal(Literal::Int64(value)) => *value as f64,
+        Expr::Literal(Literal::Int64(value)) => (*value).approx_into(),
         Expr::Literal(Literal::Float64(value)) => *value,
         _ => {
             return Err(Rich::custom(
@@ -624,7 +625,7 @@ fn int_arg<'src>(expr: &SpannedExpr, span: Span, name: &str) -> Result<i64, Rich
 
 fn numeric_arg<'src>(expr: &SpannedExpr, span: Span, name: &str) -> Result<f64, Rich<'src, Token>> {
     match &expr.inner {
-        Expr::Literal(Literal::Int64(value)) => Ok(*value as f64),
+        Expr::Literal(Literal::Int64(value)) => Ok((*value).approx_into()),
         Expr::Literal(Literal::Float64(value)) => Ok(*value),
         _ => Err(Rich::custom(
             span,

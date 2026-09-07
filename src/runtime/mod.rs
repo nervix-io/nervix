@@ -33,6 +33,7 @@ use dashmap::DashMap;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, TryApproxInto as _};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, RelayPayload, RelayPayloadKind, Transport,
     TransportMode as InterconnectTransportMode,
@@ -2619,13 +2620,15 @@ impl IngestMetadataBuilders {
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
         let rows = self.rows;
         let integration_columns = match &mut self.integration {
-            IngestIntegrationBuilders::Kafka(kafka) => vec![
-                StdArc::new(kafka.topic.finish()) as ArrayRef,
-                StdArc::new(kafka.partition.finish()) as ArrayRef,
-                StdArc::new(kafka.offset.finish()) as ArrayRef,
-            ],
+            IngestIntegrationBuilders::Kafka(kafka) => {
+                let topic: ArrayRef = StdArc::new(kafka.topic.finish());
+                let partition: ArrayRef = StdArc::new(kafka.partition.finish());
+                let offset: ArrayRef = StdArc::new(kafka.offset.finish());
+                vec![topic, partition, offset]
+            }
             IngestIntegrationBuilders::Syslog { peer_addr } => {
-                vec![StdArc::new(peer_addr.finish()) as ArrayRef]
+                let peer_addr: ArrayRef = StdArc::new(peer_addr.finish());
+                vec![peer_addr]
             }
             IngestIntegrationBuilders::Headers => Vec::new(),
         };
@@ -12572,21 +12575,21 @@ fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPart {
     match array {
         VmTypedArray::UInt8(array) => {
             if array.is_valid(row) {
-                ReorderKeyPart::UInt64(array.value(row) as u64)
+                ReorderKeyPart::UInt64(u64::from(array.value(row)))
             } else {
                 ReorderKeyPart::Null
             }
         }
         VmTypedArray::UInt16(array) => {
             if array.is_valid(row) {
-                ReorderKeyPart::UInt64(array.value(row) as u64)
+                ReorderKeyPart::UInt64(u64::from(array.value(row)))
             } else {
                 ReorderKeyPart::Null
             }
         }
         VmTypedArray::UInt32(array) => {
             if array.is_valid(row) {
-                ReorderKeyPart::UInt64(array.value(row) as u64)
+                ReorderKeyPart::UInt64(u64::from(array.value(row)))
             } else {
                 ReorderKeyPart::Null
             }
@@ -12600,21 +12603,21 @@ fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPart {
         }
         VmTypedArray::Int8(array) => {
             if array.is_valid(row) {
-                ReorderKeyPart::Int64(array.value(row) as i64)
+                ReorderKeyPart::Int64(i64::from(array.value(row)))
             } else {
                 ReorderKeyPart::Null
             }
         }
         VmTypedArray::Int16(array) => {
             if array.is_valid(row) {
-                ReorderKeyPart::Int64(array.value(row) as i64)
+                ReorderKeyPart::Int64(i64::from(array.value(row)))
             } else {
                 ReorderKeyPart::Null
             }
         }
         VmTypedArray::Int32(array) => {
             if array.is_valid(row) {
-                ReorderKeyPart::Int64(array.value(row) as i64)
+                ReorderKeyPart::Int64(i64::from(array.value(row)))
             } else {
                 ReorderKeyPart::Null
             }
@@ -12628,7 +12631,7 @@ fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPart {
         }
         VmTypedArray::Float32(array) => {
             if array.is_valid(row) {
-                ReorderKeyPart::Float64(OrderedFloat(array.value(row) as f64))
+                ReorderKeyPart::Float64(OrderedFloat(f64::from(array.value(row))))
             } else {
                 ReorderKeyPart::Null
             }
@@ -16234,7 +16237,7 @@ impl WindowAggregateAccumulator {
                     total: 0,
                     min: config.min,
                     max: config.max,
-                    width: (config.max - config.min) / config.buckets.get() as f64,
+                    width: (config.max - config.min) / config.buckets.get().approx_into::<f64>(),
                     delay: config.delay,
                     delayed_removals: VecDeque::new(),
                 }
@@ -16946,7 +16949,12 @@ fn linear_histogram_bucket(
     if value >= max {
         return Ok(bucket_count - 1);
     }
-    Ok(((value - min) / width).floor() as usize)
+    ((value - min) / width)
+        .floor()
+        .try_approx_into()
+        .map_err(|error| {
+            format!("PERCENTILE_LINEAR_HISTOGRAM value {value} has no bucket: {error}")
+        })
 }
 
 fn percentile_from_linear_histogram(
@@ -16960,12 +16968,17 @@ fn percentile_from_linear_histogram(
     if total == 0 {
         return Err("PERCENTILE_LINEAR_HISTOGRAM requires a non-empty window".to_string());
     }
-    let rank = ((percentile / 100.0) * ((total - 1) as f64)).round() as usize;
+    let rank: usize = ((percentile / 100.0) * (total - 1).approx_into::<f64>())
+        .round()
+        .try_approx_into()
+        .map_err(|error| {
+            format!("PERCENTILE_LINEAR_HISTOGRAM percentile {percentile} has no rank: {error}")
+        })?;
     let mut seen = 0usize;
     for (index, count) in buckets.iter().enumerate() {
         seen += *count;
         if seen > rank {
-            let midpoint = min + (index as f64 + 0.5) * width;
+            let midpoint = min + (index.approx_into::<f64>() + 0.5) * width;
             return Ok(RuntimeValue::F64(OrderedFloat(midpoint.clamp(min, max))));
         }
     }
@@ -17215,15 +17228,15 @@ fn evaluate_window_aggregate_expr<'a>(
 
 fn runtime_value_to_f64(value: &RuntimeValue) -> Result<f64, String> {
     match value {
-        RuntimeValue::U8(value) => Ok(*value as f64),
-        RuntimeValue::I8(value) => Ok(*value as f64),
-        RuntimeValue::U16(value) => Ok(*value as f64),
-        RuntimeValue::I16(value) => Ok(*value as f64),
-        RuntimeValue::U32(value) => Ok(*value as f64),
-        RuntimeValue::I32(value) => Ok(*value as f64),
-        RuntimeValue::U64(value) => Ok(*value as f64),
-        RuntimeValue::I64(value) => Ok(*value as f64),
-        RuntimeValue::F32(value) => Ok(value.0 as f64),
+        RuntimeValue::U8(value) => Ok(f64::from(*value)),
+        RuntimeValue::I8(value) => Ok(f64::from(*value)),
+        RuntimeValue::U16(value) => Ok(f64::from(*value)),
+        RuntimeValue::I16(value) => Ok(f64::from(*value)),
+        RuntimeValue::U32(value) => Ok(f64::from(*value)),
+        RuntimeValue::I32(value) => Ok(f64::from(*value)),
+        RuntimeValue::U64(value) => Ok((*value).approx_into()),
+        RuntimeValue::I64(value) => Ok((*value).approx_into()),
+        RuntimeValue::F32(value) => Ok(f64::from(value.0)),
         RuntimeValue::F64(value) => Ok(value.0),
         other => Err(format!(
             "expected numeric value, found {}",
@@ -20599,7 +20612,9 @@ async fn execute_generator_program_on_context(
 }
 
 fn checked_add_duration_to_timestamp(base: Timestamp, duration: Duration) -> Timestamp {
-    let nanos = duration.as_nanos().min(i64::MAX as u128) as i64;
+    // Saturation is the meaning here: a schedule further out than the nanosecond range is already
+    // further out than any timestamp this clock will reach.
+    let nanos = i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX);
     base.into_datetime()
         .checked_add_signed(TimeDelta::nanoseconds(nanos))
         .map(Timestamp::from)
@@ -20924,7 +20939,7 @@ fn domain_clock_window_matches(
         ));
     }
 
-    let tick_spacing_nanos = ((period.as_nanos() as f64) / time_rate).max(1.0);
+    let tick_spacing_nanos = (period.as_nanos().approx_into::<f64>() / time_rate).max(1.0);
     let first_tick = clock.wall_started_at;
     let event_offset_nanos = event_timestamp
         .into_datetime()
@@ -20934,23 +20949,25 @@ fn domain_clock_window_matches(
             i64::MAX
         } else {
             i64::MIN
-        }) as f64;
+        })
+        .approx_into::<f64>();
     let approx_index = event_offset_nanos / tick_spacing_nanos;
     let candidates = [
-        approx_index.floor() as i64 - 1,
-        approx_index.floor() as i64,
-        approx_index.ceil() as i64,
-        approx_index.ceil() as i64 + 1,
-        0,
+        approx_index.floor() - 1.0,
+        approx_index.floor(),
+        approx_index.ceil(),
+        approx_index.ceil() + 1.0,
+        0.0,
     ];
 
     for candidate in candidates {
-        if candidate < 0 {
+        if candidate < 0.0 {
             continue;
         }
-        let candidate_offset_nanos = (candidate as f64 * tick_spacing_nanos)
-            .round()
-            .clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+        let Ok(candidate_offset_nanos) = (candidate * tick_spacing_nanos).round().try_approx_into()
+        else {
+            continue;
+        };
         let tick_wall = first_tick
             .into_datetime()
             .checked_add_signed(TimeDelta::nanoseconds(candidate_offset_nanos))
@@ -21006,9 +21023,12 @@ fn current_domain_logical_time(
             } else {
                 i64::MAX
             });
-    let logical_elapsed_nanos = ((wall_elapsed_nanos.max(0) as f64) * time_rate)
+    // The rate is finite and positive, so the scaled span can only leave the nanosecond range at
+    // the far end, where a clock that has run past it pins to the end of the range.
+    let logical_elapsed_nanos = (wall_elapsed_nanos.max(0).approx_into::<f64>() * time_rate)
         .round()
-        .clamp(0.0, i64::MAX as f64) as i64;
+        .try_approx_into()
+        .unwrap_or(i64::MAX);
     Ok(anchor_logical
         .into_datetime()
         .checked_add_signed(TimeDelta::nanoseconds(logical_elapsed_nanos))
@@ -21041,9 +21061,12 @@ fn wall_duration_until_logical_target(
         .signed_duration_since(current_logical.into_datetime())
         .to_std()
         .unwrap_or(Duration::ZERO);
-    let wall_delta_nanos = ((logical_delta.as_nanos() as f64) / time_rate)
+    // As above, only the far end of the range is reachable, and a wall wait that long is capped
+    // by the caller's own polling cadence anyway.
+    let wall_delta_nanos = (logical_delta.as_nanos().approx_into::<f64>() / time_rate)
         .round()
-        .clamp(0.0, u64::MAX as f64) as u64;
+        .try_approx_into()
+        .unwrap_or(u64::MAX);
     Ok(Duration::from_nanos(wall_delta_nanos.max(1)))
 }
 

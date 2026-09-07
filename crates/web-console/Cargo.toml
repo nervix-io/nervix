@@ -16,6 +16,7 @@ gloo-net = { workspace = true, features = ["http", "websocket"] }
 js-sys = { workspace = true }
 leptos = { workspace = true }
 meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }

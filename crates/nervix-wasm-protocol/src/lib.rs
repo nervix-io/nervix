@@ -872,9 +872,9 @@ mod tests {
             panic!("expected input view");
         };
         assert_eq!(view.arrow_ipc_batch(), [0, 1, 2, 255]);
-        let start = encoded.as_ptr() as usize;
+        let start = encoded.as_ptr().addr();
         let end = start + encoded.len();
-        let borrowed = view.arrow_ipc_batch().as_ptr() as usize;
+        let borrowed = view.arrow_ipc_batch().as_ptr().addr();
         assert!((start..end).contains(&borrowed));
         assert_eq!(Envelope::decode(&encoded).expect("must own"), envelope);
     }
@@ -917,7 +917,7 @@ mod tests {
             },
         );
         let outputs = builder.create_vector(&[routed]);
-        let generated = builder.create_vector(&[] as &[u8]);
+        let generated = builder.create_vector::<u8>(&[]);
         let output = wire::OutputEnvelope::create(
             &mut builder,
             &wire::OutputEnvelopeArgs {

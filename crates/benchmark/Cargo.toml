@@ -15,6 +15,7 @@ arch-into = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 humantime = { workspace = true }
 meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }

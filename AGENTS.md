@@ -308,7 +308,20 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   `error-stack`, and `anyhow` is limited to boundaries where callers cannot make semantic choices.
   Do not introduce `String` as a domain error type.
 - Prefer deriving declarative enum string conversions and metadata with `strum`, including
-  `AsRefStr`, `EnumString`, and `EnumProperty`, over manual match-based helpers.
+  `AsRefStr`, `EnumString`, `EnumProperty`, and `FromRepr`, over manual match-based helpers.
+- Convert values through `From`, `Into`, `TryFrom`, and `TryInto`. A total conversion is `From` or
+  `Into`; a fallible one is `TryFrom` or `TryInto` and classifies its failure exactly as any other
+  panic site is classified. Two crates cover the pairs the standard library cannot express:
+  `arch-into` for pointer width, and `nervix-approx-into` for integer and floating point, where
+  `approx_into` says the conversion rounds to the nearest representable value and
+  `try_approx_into` says a float has no integer value unless it is finite and in range.
+- `as` is denied workspace-wide by `clippy::as_conversions`, so a cast has to be the operation
+  itself rather than a conversion written the short way: `cast_unsigned` for a two's complement
+  reinterpretation, `addr` for a pointer's address, and a typed binding or an annotated collection
+  for an unsizing coercion. The rounding and truncating casts live inside `nervix-approx-into`,
+  each behind an `#[expect(clippy::as_conversions, reason = "...")]` that states which operation it
+  is. Generated code that casts is admitted the same way, through a `reason`-carrying `#[expect]`
+  applied by its build script.
 - When sorted vectors or arrays are an invariant, use `sorted-vec`'s `SortedVec` or `SortedSet`
   instead of a plain `Vec` with manual sorting and deduplication.
 - Do not scan a `Vec` to look a value up. Treat "`n` is small" as a claim that needs proof at the
@@ -408,7 +421,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   `docs/src` and should be read from there rather than restated in the skill.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
-  casts, bare `unwrap` and `expect`, `saturating_*` and `wrapping_*` calls outside the time API,
+  casts outside imports and qualified paths, bare `unwrap` and `expect`, `saturating_*` and
+  `wrapping_*` calls outside the time API,
   `Result<_, String>`, signatures returning a Nervix error without `Report`, node identities
   carried as `String`, struct fields gated on `cfg(feature = "testing")`, parser references outside
   the language edges, and `Model` references in the data plane, and CI fails when a count is above

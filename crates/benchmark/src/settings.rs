@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use nervix_approx_into::TryApproxInto as _;
 use thiserror::Error;
 
 use crate::{BenchmarkDefinition, LoadDuration};
@@ -154,7 +155,7 @@ fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsEr
 }
 
 fn automatic_duration(parameters: &toml::Table) -> Result<u64, SettingsError> {
-    let mut duration = DEFAULT_MINIMUM_DURATION;
+    let mut seconds = DEFAULT_MINIMUM_DURATION.as_secs();
     for (name, value) in parameters {
         if !name.ends_with("_flush_each") {
             continue;
@@ -172,9 +173,17 @@ fn automatic_duration(parameters: &toml::Table) -> Result<u64, SettingsError> {
                 value: value.clone(),
                 reason: error.to_string(),
             })?;
-        duration = duration.max(Duration::from_secs_f64(flush.as_secs_f64() * FLUSH_CYCLES));
+        let required: u64 = (flush.as_secs_f64() * FLUSH_CYCLES)
+            .ceil()
+            .try_approx_into()
+            .map_err(|error| SettingsError::InvalidParameter {
+                name: name.clone(),
+                value: value.clone(),
+                reason: format!("flush interval needs an unrunnable duration: {error}"),
+            })?;
+        seconds = seconds.max(required);
     }
-    Ok(duration.as_secs_f64().ceil() as u64)
+    Ok(seconds)
 }
 
 fn parse_duration_parameter(name: &str, value: &str) -> Result<Duration, SettingsError> {

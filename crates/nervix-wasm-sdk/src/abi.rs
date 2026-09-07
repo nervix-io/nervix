@@ -13,7 +13,7 @@ use nervix_wasm_protocol::GuestSnapshot;
 use crate::{
     context::{BranchContext, GuestContext, TimeoutHandle},
     envelope::InputBatch,
-    error::{ERR_ERROR_STATE, ERR_INVALID_SIZE, GuestError, SUCCESS},
+    error::{ERR_ERROR_STATE, ERR_INVALID_SIZE, ERR_OUT_OF_BOUNDS, GuestError, SUCCESS},
     processor::Processor,
 };
 
@@ -82,14 +82,14 @@ impl RuntimeCore {
             self.buffer.reserve_exact(size - self.buffer.capacity());
         }
         self.buffer.resize(size, 0);
-        self.buffer.as_mut_ptr() as i32
+        abi_pointer(self.buffer.as_mut_ptr())
     }
 
     fn buffer_range(&self, ptr: i32, size: i32) -> Result<Range<usize>, GuestError> {
         let ptr = usize::try_from(ptr).map_err(|_| GuestError::OutOfBounds)?;
         let size = usize::try_from(size).map_err(|_| GuestError::InvalidSize)?;
         let end = ptr.checked_add(size).ok_or(GuestError::OutOfBounds)?;
-        let base = self.buffer.as_ptr() as usize;
+        let base = self.buffer.as_ptr().addr();
         if ptr < base || end > base + self.buffer.len() {
             return Err(GuestError::OutOfBounds);
         }
@@ -216,13 +216,24 @@ fn guarded(
 }
 
 pub fn buffer_ptr() -> i32 {
-    CORE.with(|core| core.buffer.as_mut_ptr() as i32)
+    CORE.with(|core| abi_pointer(core.buffer.as_mut_ptr()))
 }
 
 fn abi_size(size: usize) -> i32 {
     match i32::try_from(size) {
         Ok(size) => size,
         Err(_) => ERR_INVALID_SIZE,
+    }
+}
+
+/// Renders a guest address as the `i32` the C ABI passes addresses in.
+///
+/// A wasm32 guest addresses at most four gigabytes, so an address the ABI cannot express is a
+/// buffer the host could never read back.
+fn abi_pointer<T>(ptr: *const T) -> i32 {
+    match i32::try_from(ptr.addr()) {
+        Ok(address) => address,
+        Err(_) => ERR_OUT_OF_BOUNDS,
     }
 }
 
@@ -246,7 +257,7 @@ pub fn global_error_ptr() -> i32 {
         if core.global_error.is_empty() {
             0
         } else {
-            core.global_error.as_mut_ptr() as i32
+            abi_pointer(core.global_error.as_mut_ptr())
         }
     })
 }

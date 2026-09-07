@@ -442,7 +442,7 @@ impl SqsEmitter {
     fn has_valid_message_characters(value: &str) -> bool {
         value.chars().all(|character| {
             matches!(character, '\u{0009}' | '\u{000A}' | '\u{000D}')
-                || matches!(character as u32, 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
+                || matches!(u32::from(character), 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
         })
     }
 

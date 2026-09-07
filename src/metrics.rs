@@ -9,6 +9,7 @@ use arch_into::ArchInto as _;
 use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, TryApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
     BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
@@ -73,8 +74,8 @@ const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
-const ONE_MINUTE_SECONDS: f64 = 60.0;
-const FIFTEEN_MINUTES_SECONDS: f64 = 15.0 * 60.0;
+const ONE_MINUTE: Duration = Duration::from_secs(60);
+const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
 const RATE_DECAY_TAU_FRACTION: f64 = 20.0;
 const WALL_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
 const WALL_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
@@ -245,7 +246,10 @@ impl WallEma {
         if elapsed_seconds <= 0.0 {
             return;
         }
-        self.observe_sample(delta as f64 / elapsed_seconds, elapsed_seconds);
+        self.observe_sample(
+            delta.approx_into::<f64>() / elapsed_seconds,
+            elapsed_seconds,
+        );
     }
 
     fn observe_sample(&mut self, sample: f64, elapsed_seconds: f64) {
@@ -307,11 +311,17 @@ impl DomainEma {
         let Some(elapsed_nanos) = now.checked_sub(last_at) else {
             return;
         };
-        if elapsed_nanos <= 0 {
+        let Ok(elapsed_nanos) = u64::try_from(elapsed_nanos) else {
+            return;
+        };
+        let elapsed_seconds = Duration::from_nanos(elapsed_nanos).as_secs_f64();
+        if elapsed_seconds <= 0.0 {
             return;
         }
-        let elapsed_seconds = elapsed_nanos as f64 / 1_000_000_000.0;
-        self.observe_sample(delta as f64 / elapsed_seconds, elapsed_seconds);
+        self.observe_sample(
+            delta.approx_into::<f64>() / elapsed_seconds,
+            elapsed_seconds,
+        );
     }
 
     fn observe_sample(&mut self, sample: f64, elapsed_seconds: f64) {
@@ -328,10 +338,10 @@ impl DomainEma {
         let last_at = self.last_at_nanos?;
         let now = now?.unix_nanos();
         let elapsed_nanos = now.checked_sub(last_at)?;
-        if elapsed_nanos < 0 {
+        let Ok(elapsed_nanos) = u64::try_from(elapsed_nanos) else {
             return Some(value);
-        }
-        let elapsed_seconds = elapsed_nanos as f64 / 1_000_000_000.0;
+        };
+        let elapsed_seconds = Duration::from_nanos(elapsed_nanos).as_secs_f64();
         Some(value * decay_factor(elapsed_seconds, self.tau_seconds))
     }
 
@@ -362,10 +372,10 @@ struct RollingRates {
 impl RollingRates {
     fn new() -> Self {
         Self {
-            wall_1m: WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS)),
-            wall_15m: WallEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS)),
-            domain_1m: DomainEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS)),
-            domain_15m: DomainEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS)),
+            wall_1m: WallEma::new(rate_decay_tau_seconds(ONE_MINUTE)),
+            wall_15m: WallEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES)),
+            domain_1m: DomainEma::new(rate_decay_tau_seconds(ONE_MINUTE)),
+            domain_15m: DomainEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES)),
         }
     }
 
@@ -377,20 +387,20 @@ impl RollingRates {
             wall_1m: WallEma::from_snapshot(
                 &snapshot.wall_1m,
                 series_started_at,
-                rate_decay_tau_seconds(ONE_MINUTE_SECONDS),
+                rate_decay_tau_seconds(ONE_MINUTE),
             ),
             wall_15m: WallEma::from_snapshot(
                 &snapshot.wall_15m,
                 series_started_at,
-                rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS),
+                rate_decay_tau_seconds(FIFTEEN_MINUTES),
             ),
             domain_1m: DomainEma::from_snapshot(
                 &snapshot.domain_1m,
-                rate_decay_tau_seconds(ONE_MINUTE_SECONDS),
+                rate_decay_tau_seconds(ONE_MINUTE),
             ),
             domain_15m: DomainEma::from_snapshot(
                 &snapshot.domain_15m,
-                rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS),
+                rate_decay_tau_seconds(FIFTEEN_MINUTES),
             ),
         }
     }
@@ -475,7 +485,12 @@ impl HistogramConfig {
             .filter(|bucket| bucket.is_finite() && *bucket > 0.0)
             .fold(1.0, f64::max);
         Self {
-            highest_trackable_value: scaled_histogram_value(highest_bucket).max(2),
+            highest_trackable_value: scaled_histogram_value(highest_bucket)
+                .assured(
+                    "the fold above starts at 1.0 and keeps only finite positive buckets, and \
+                     every bucket ladder in this module ends far below the u64 range",
+                )
+                .max(2),
             significant_figures: HDR_HISTOGRAM_SIGFIG,
         }
     }
@@ -541,8 +556,9 @@ impl TimeRollingHistogram {
             .buckets
             .iter_mut()
             .find(|bucket| bucket.start_at_nanos == current_start)
+            && let Some(scaled) = scaled_histogram_value(value)
         {
-            let _ = bucket.histogram.record(scaled_histogram_value(value));
+            let _ = bucket.histogram.record(scaled);
         }
     }
 
@@ -721,23 +737,11 @@ struct RollingHistograms {
 impl RollingHistograms {
     fn new(buckets: &'static [f64]) -> Self {
         Self {
-            wall_1m: WallRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                WALL_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
-            wall_15m: WallRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
-                WALL_HISTOGRAM_15M_STEP,
-                buckets,
-            ),
-            domain_1m: DomainRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                DOMAIN_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
+            wall_1m: WallRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
+            wall_15m: WallRollingHistogram::new(FIFTEEN_MINUTES, WALL_HISTOGRAM_15M_STEP, buckets),
+            domain_1m: DomainRollingHistogram::new(ONE_MINUTE, DOMAIN_HISTOGRAM_1M_STEP, buckets),
             domain_15m: DomainRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 DOMAIN_HISTOGRAM_15M_STEP,
                 buckets,
             ),
@@ -755,25 +759,25 @@ impl RollingHistograms {
         Self {
             wall_1m: WallRollingHistogram::from_snapshot(
                 &snapshot.wall_1m,
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
+                ONE_MINUTE,
                 WALL_HISTOGRAM_1M_STEP,
                 buckets,
             ),
             wall_15m: WallRollingHistogram::from_snapshot(
                 &snapshot.wall_15m,
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 WALL_HISTOGRAM_15M_STEP,
                 buckets,
             ),
             domain_1m: DomainRollingHistogram::from_snapshot(
                 &snapshot.domain_1m,
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
+                ONE_MINUTE,
                 DOMAIN_HISTOGRAM_1M_STEP,
                 buckets,
             ),
             domain_15m: DomainRollingHistogram::from_snapshot(
                 &snapshot.domain_15m,
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 DOMAIN_HISTOGRAM_15M_STEP,
                 buckets,
             ),
@@ -820,23 +824,11 @@ struct AggregatedRollingHistograms {
 impl AggregatedRollingHistograms {
     fn new(buckets: &'static [f64]) -> Self {
         Self {
-            wall_1m: TimeRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                WALL_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
-            wall_15m: TimeRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
-                WALL_HISTOGRAM_15M_STEP,
-                buckets,
-            ),
-            domain_1m: TimeRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                DOMAIN_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
+            wall_1m: TimeRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
+            wall_15m: TimeRollingHistogram::new(FIFTEEN_MINUTES, WALL_HISTOGRAM_15M_STEP, buckets),
+            domain_1m: TimeRollingHistogram::new(ONE_MINUTE, DOMAIN_HISTOGRAM_1M_STEP, buckets),
             domain_15m: TimeRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 DOMAIN_HISTOGRAM_15M_STEP,
                 buckets,
             ),
@@ -1663,32 +1655,38 @@ impl Collector for JemallocMetricsCollector {
         self.active_gauge.set(
             self.active
                 .read()
-                .verified("this MIB was resolved when the collector was built") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
         self.allocated_gauge.set(
             self.allocated
                 .read()
-                .verified("this MIB was resolved when the collector was built") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
         self.mapped_gauge.set(
             self.mapped
                 .read()
-                .verified("this MIB was resolved when the collector was built") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
         self.metadata_gauge.set(
             self.metadata
                 .read()
-                .verified("this MIB was resolved when the collector was built") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
         self.resident_gauge.set(
             self.resident
                 .read()
-                .verified("this MIB was resolved when the collector was built") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
         self.retained_gauge.set(
             self.retained
                 .read()
-                .verified("this MIB was resolved when the collector was built") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
 
         let mut metric_families = Vec::with_capacity(self.descs.len());
@@ -2361,12 +2359,12 @@ impl RuntimeMetrics {
         );
         self.observe_histogram_with_capacity(
             key.clone(),
-            observation.len as f64,
+            observation.len.approx_into(),
             Some(observation.capacity),
             None,
         );
         self.prometheus
-            .observe_histogram(&key, observation.len as f64);
+            .observe_histogram(&key, observation.len.approx_into());
     }
 
     pub fn observe_branch_relay_buffer_len(
@@ -2383,7 +2381,7 @@ impl RuntimeMetrics {
                 observation.direction,
                 RELAY_BUFFER_LEN,
             ),
-            observation.len as f64,
+            observation.len.approx_into(),
             Some(observation.capacity),
             None,
         );
@@ -3060,9 +3058,9 @@ impl RuntimeMetrics {
             domain_timestamp,
         );
         let batch_key = with_metric(&messages_key, MESSAGES_PER_BATCH);
-        self.observe_histogram(batch_key.clone(), messages as f64, domain_timestamp);
+        self.observe_histogram(batch_key.clone(), messages.approx_into(), domain_timestamp);
         self.prometheus
-            .observe_histogram(&batch_key, messages as f64);
+            .observe_histogram(&batch_key, messages.approx_into());
     }
 
     fn observe_branch_batch(
@@ -3089,7 +3087,7 @@ impl RuntimeMetrics {
         self.observe_branch_histogram(
             branch_key,
             with_metric(&messages_key, MESSAGES_PER_BATCH),
-            messages as f64,
+            messages.approx_into(),
             domain_timestamp,
         );
     }
@@ -3361,7 +3359,7 @@ fn wall_rate(value: u64, started_at: Instant) -> f64 {
     if elapsed <= 0.0 {
         0.0
     } else {
-        value as f64 / elapsed
+        value.approx_into::<f64>() / elapsed
     }
 }
 
@@ -3441,10 +3439,11 @@ fn domain_rate(value: u64, started_at_nanos: &AtomicI64, last_at_nanos: &AtomicI
         return None;
     }
     let elapsed_nanos = last_at_nanos.checked_sub(started_at_nanos)?;
-    if elapsed_nanos <= 0 {
+    let elapsed = Duration::from_nanos(u64::try_from(elapsed_nanos).ok()?).as_secs_f64();
+    if elapsed <= 0.0 {
         return None;
     }
-    Some(value as f64 / ((elapsed_nanos as f64) / 1_000_000_000.0))
+    Some(value.approx_into::<f64>() / elapsed)
 }
 
 fn decay_factor(elapsed_seconds: f64, tau_seconds: f64) -> f64 {
@@ -3458,16 +3457,25 @@ fn time_decay_alpha(elapsed_seconds: f64, tau_seconds: f64) -> f64 {
     1.0 - decay_factor(elapsed_seconds, tau_seconds)
 }
 
-fn rate_decay_tau_seconds(window_seconds: f64) -> f64 {
-    window_seconds / RATE_DECAY_TAU_FRACTION
+fn rate_decay_tau_seconds(window: Duration) -> f64 {
+    window.as_secs_f64() / RATE_DECAY_TAU_FRACTION
 }
 
-fn scaled_histogram_value(value: f64) -> u64 {
-    (value * HISTOGRAM_VALUE_SCALE).round().max(0.0) as u64
+/// Scales a sample into the fixed-point unit the HDR histograms record in.
+///
+/// Returns `None` for a sample that has no such unit: a non-finite observation, or one whose
+/// scaled magnitude leaves the `u64` range. Neither belongs in a histogram, so the caller drops
+/// it rather than recording a saturated stand-in.
+fn scaled_histogram_value(value: f64) -> Option<u64> {
+    (value * HISTOGRAM_VALUE_SCALE)
+        .round()
+        .max(0.0)
+        .try_approx_into()
+        .ok()
 }
 
 fn unscale_histogram_value(value: u64) -> f64 {
-    value as f64 / HISTOGRAM_VALUE_SCALE
+    value.approx_into::<f64>() / HISTOGRAM_VALUE_SCALE
 }
 
 fn hdr_histogram_to_snapshot(histogram: &HdrHistogram<u64>) -> Vec<HdrRecordedValueSnapshot> {
@@ -4160,7 +4168,7 @@ mod tests {
 
     #[test]
     fn wall_ema_rate_decays_when_no_new_samples_arrive() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS));
+        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
         let now = Instant::now();
         let last = now
             .checked_sub(std::time::Duration::from_secs(5 * 60))
@@ -4176,7 +4184,7 @@ mod tests {
 
     #[test]
     fn one_minute_rate_ema_is_nearly_zero_after_one_minute_without_activity() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS));
+        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
         let now = Instant::now();
         let last = now
             .checked_sub(std::time::Duration::from_secs(60))
@@ -4195,7 +4203,7 @@ mod tests {
 
     #[test]
     fn one_minute_rate_ema_reacts_to_short_rate_changes() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS));
+        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
 
         ema.value = Some(10.0);
         ema.observe_sample(100.0, 5.0);
@@ -4220,7 +4228,7 @@ mod tests {
         let restored = WallEma::from_snapshot(
             &snapshot,
             Instant::now(),
-            rate_decay_tau_seconds(ONE_MINUTE_SECONDS),
+            rate_decay_tau_seconds(ONE_MINUTE),
         );
         let decayed = restored
             .value_at(Instant::now())
@@ -4237,7 +4245,9 @@ mod tests {
         let five_minutes = 5_i64 * 60 * 1_000_000_000;
         let old = now_wall - five_minutes;
         let mut histogram = HistogramConfig::for_buckets(MESSAGE_BATCH_BUCKETS).new_histogram();
-        let _ = histogram.record(scaled_histogram_value(10.0));
+        let _ = histogram.record(
+            scaled_histogram_value(10.0).expect("ten seconds has a scaled histogram value"),
+        );
         let snapshot = WallRollingHistogramSnapshot {
             buckets: vec![RollingHistogramBucketSnapshot {
                 start_at_nanos: bucket_start(old, WALL_HISTOGRAM_1M_STEP),
@@ -4247,7 +4257,7 @@ mod tests {
 
         let restored = WallRollingHistogram::from_snapshot(
             &snapshot,
-            Duration::from_secs(ONE_MINUTE_SECONDS as u64),
+            ONE_MINUTE,
             WALL_HISTOGRAM_1M_STEP,
             MESSAGE_BATCH_BUCKETS,
         );

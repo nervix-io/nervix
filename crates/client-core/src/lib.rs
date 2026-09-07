@@ -1528,7 +1528,7 @@ mod tests {
                 span_start: 3,
                 span_end: 7,
             }],
-            kind: proto::CommandResultKind::NotLeader as i32,
+            kind: i32::from(proto::CommandResultKind::NotLeader),
             leader: "node-2".to_string(),
             leader_grpc_uri: "http://127.0.0.1:47393".to_string(),
             already_existed: true,
@@ -1537,7 +1537,7 @@ mod tests {
             transaction: Some(proto::TransactionStatus {
                 id: "tx-1".to_string(),
                 domain: "tenant".to_string(),
-                state: proto::TransactionState::Open as i32,
+                state: i32::from(proto::TransactionState::Open),
                 pending_count: 2,
                 completed_count: 0,
                 total_count: 2,
@@ -1579,7 +1579,7 @@ mod tests {
         assert_eq!(subscription.payload, "{\"id\":42}");
 
         let server = ServerEvent::from(proto::ServerEvent {
-            level: proto::ServerEventLevel::Warn as i32,
+            level: i32::from(proto::ServerEventLevel::Warn),
             message: "watch out".to_string(),
         });
         assert_eq!(

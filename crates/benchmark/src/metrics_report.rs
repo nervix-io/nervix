@@ -5,6 +5,7 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
+use nervix_approx_into::{ApproxInto as _, TryApproxInto as _};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -53,7 +54,7 @@ pub struct BatchTargetMetrics {
 impl BatchTargetMetrics {
     #[must_use]
     pub fn mean_messages_per_batch(&self) -> f64 {
-        self.messages_total as f64 / self.batches_total as f64
+        self.messages_total.approx_into::<f64>() / self.batches_total.approx_into::<f64>()
     }
 
     fn validate(&self) -> Result<(), MetricsReportError> {
@@ -376,7 +377,10 @@ impl Histogram {
         quantile_name: &'static str,
         largest_finite: f64,
     ) -> Result<f64, MetricsReportError> {
-        let rank = (count as f64 * quantile).ceil() as u64;
+        let rank: u64 = (count.approx_into::<f64>() * quantile)
+            .ceil()
+            .try_approx_into()
+            .unwrap_or(u64::MAX);
         for (upper_bound, cumulative) in &self.buckets {
             if *cumulative >= rank {
                 if upper_bound.is_finite() {
@@ -591,20 +595,22 @@ impl PrometheusSample {
     }
 
     fn count(&self, line: usize) -> Result<u64, MetricsReportError> {
-        if !self.value.is_finite()
-            || self.value < 0.0
-            || self.value.fract() != 0.0
-            || self.value > u64::MAX as f64
-        {
-            return Err(MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: format!(
-                    "metric '{}' value '{}' is not a non-negative integer count",
-                    self.name, self.value
-                ),
-            });
+        if self.value.fract() != 0.0 {
+            return Err(self.not_a_count(line));
         }
-        Ok(self.value as u64)
+        self.value
+            .try_approx_into()
+            .map_err(|_| self.not_a_count(line))
+    }
+
+    fn not_a_count(&self, line: usize) -> MetricsReportError {
+        MetricsReportError::InvalidPrometheusSample {
+            line,
+            reason: format!(
+                "metric '{}' value '{}' is not a non-negative integer count",
+                self.name, self.value
+            ),
+        }
     }
 }
 

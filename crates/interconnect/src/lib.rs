@@ -25,6 +25,7 @@ use rustls::{
     server::WebPkiClientVerifier,
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
+use strum::FromRepr;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -196,7 +197,8 @@ pub struct DomainTickEnvelope {
     pub tick: DomainTick,
 }
 
-#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
+/// The kinds of runtime state a node persists, and the byte each one occupies in a storage key.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash, FromRepr)]
 #[repr(u8)]
 pub enum RuntimeStateKind {
     BranchAggregated = 0,
@@ -207,6 +209,21 @@ pub enum RuntimeStateKind {
     WasmProcessor = 5,
     WindowProcessor = 6,
     BranchLru = 7,
+}
+
+impl From<RuntimeStateKind> for u8 {
+    fn from(value: RuntimeStateKind) -> Self {
+        match value {
+            RuntimeStateKind::BranchAggregated => 0,
+            RuntimeStateKind::Correlator => 1,
+            RuntimeStateKind::Deduplicator => 2,
+            RuntimeStateKind::KafkaOffset => 3,
+            RuntimeStateKind::MaterializedRelay => 4,
+            RuntimeStateKind::WasmProcessor => 5,
+            RuntimeStateKind::WindowProcessor => 6,
+            RuntimeStateKind::BranchLru => 7,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -1001,7 +1018,7 @@ async fn accept_inbound_stream(
             acceptor
                 .accept(stream)
                 .await
-                .map(|stream| Box::new(stream) as BoxedIo)
+                .map(|stream| -> BoxedIo { Box::new(stream) })
                 .map_err(|err| {
                     warn!(?err, %peer_addr, "failed to accept interconnect tls connection");
                     TransportError::Io(io::Error::other(err.to_string()))
@@ -1034,7 +1051,7 @@ async fn connect_outbound_stream(
             connector
                 .connect(server_name, tcp)
                 .await
-                .map(|stream| Box::new(stream) as BoxedIo)
+                .map(|stream| -> BoxedIo { Box::new(stream) })
                 .map_err(|err| {
                     debug!(?err, target = %key.addr, "outbound interconnect tls connect failed");
                     TransportError::Io(io::Error::other(err.to_string()))

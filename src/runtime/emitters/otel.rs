@@ -1295,12 +1295,12 @@ impl<'a> OtelMappedBatch<'a> {
 
     fn span(&self, row: usize) -> Result<Span, OtelRecordError> {
         let kind = match self.optional_string("kind", row)?.as_deref() {
-            None => span::SpanKind::Unspecified as i32,
-            Some("INTERNAL") => span::SpanKind::Internal as i32,
-            Some("SERVER") => span::SpanKind::Server as i32,
-            Some("CLIENT") => span::SpanKind::Client as i32,
-            Some("PRODUCER") => span::SpanKind::Producer as i32,
-            Some("CONSUMER") => span::SpanKind::Consumer as i32,
+            None => i32::from(span::SpanKind::Unspecified),
+            Some("INTERNAL") => i32::from(span::SpanKind::Internal),
+            Some("SERVER") => i32::from(span::SpanKind::Server),
+            Some("CLIENT") => i32::from(span::SpanKind::Client),
+            Some("PRODUCER") => i32::from(span::SpanKind::Producer),
+            Some("CONSUMER") => i32::from(span::SpanKind::Consumer),
             Some(_) => {
                 return Err(OtelRecordError::new(
                     "kind",
@@ -1310,9 +1310,9 @@ impl<'a> OtelMappedBatch<'a> {
         };
         let status_code = match self.optional_string("status_code", row)?.as_deref() {
             None => None,
-            Some("UNSET") => Some(status::StatusCode::Unset as i32),
-            Some("OK") => Some(status::StatusCode::Ok as i32),
-            Some("ERROR") => Some(status::StatusCode::Error as i32),
+            Some("UNSET") => Some(i32::from(status::StatusCode::Unset)),
+            Some("OK") => Some(i32::from(status::StatusCode::Ok)),
+            Some("ERROR") => Some(i32::from(status::StatusCode::Error)),
             Some(_) => {
                 return Err(OtelRecordError::new(
                     "status_code",
@@ -1325,7 +1325,7 @@ impl<'a> OtelMappedBatch<'a> {
             (None, None) => None,
             (code, message) => Some(Status {
                 message: message.unwrap_or_default(),
-                code: code.unwrap_or(status::StatusCode::Unset as i32),
+                code: code.unwrap_or(i32::from(status::StatusCode::Unset)),
             }),
         };
         Ok(Span {
@@ -1571,8 +1571,8 @@ impl<'a> OtelMappedBatch<'a> {
 
 fn aggregation_temporality(value: OtelAggregationTemporality) -> i32 {
     match value {
-        OtelAggregationTemporality::Delta => AggregationTemporality::Delta as i32,
-        OtelAggregationTemporality::Cumulative => AggregationTemporality::Cumulative as i32,
+        OtelAggregationTemporality::Delta => i32::from(AggregationTemporality::Delta),
+        OtelAggregationTemporality::Cumulative => i32::from(AggregationTemporality::Cumulative),
     }
 }
 
@@ -1841,54 +1841,66 @@ fn numeric_as_f64(array: &ArrayRef, row: usize) -> Result<f64, String> {
                  Arrow array type",
             )
             .value(row)),
-        DataType::UInt8 => Ok(array
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .verified(
-                "the match arm above narrowed this array's data type, which fixes its concrete \
-                 Arrow array type",
-            )
-            .value(row) as f64),
-        DataType::Int8 => Ok(array
-            .as_any()
-            .downcast_ref::<Int8Array>()
-            .verified(
-                "the match arm above narrowed this array's data type, which fixes its concrete \
-                 Arrow array type",
-            )
-            .value(row) as f64),
-        DataType::UInt16 => Ok(array
-            .as_any()
-            .downcast_ref::<UInt16Array>()
-            .verified(
-                "the match arm above narrowed this array's data type, which fixes its concrete \
-                 Arrow array type",
-            )
-            .value(row) as f64),
-        DataType::Int16 => Ok(array
-            .as_any()
-            .downcast_ref::<Int16Array>()
-            .verified(
-                "the match arm above narrowed this array's data type, which fixes its concrete \
-                 Arrow array type",
-            )
-            .value(row) as f64),
-        DataType::UInt32 => Ok(array
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .verified(
-                "the match arm above narrowed this array's data type, which fixes its concrete \
-                 Arrow array type",
-            )
-            .value(row) as f64),
-        DataType::Int32 => Ok(array
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .verified(
-                "the match arm above narrowed this array's data type, which fixes its concrete \
-                 Arrow array type",
-            )
-            .value(row) as f64),
+        DataType::UInt8 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::Int8 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::UInt16 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::Int16 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::UInt32 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::Int32 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
         DataType::UInt64 => Ok(array
             .as_any()
             .downcast_ref::<UInt64Array>()
@@ -1896,7 +1908,8 @@ fn numeric_as_f64(array: &ArrayRef, row: usize) -> Result<f64, String> {
                 "the match arm above narrowed this array's data type, which fixes its concrete \
                  Arrow array type",
             )
-            .value(row) as f64),
+            .value(row)
+            .approx_into()),
         DataType::Int64 => Ok(array
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -1904,7 +1917,8 @@ fn numeric_as_f64(array: &ArrayRef, row: usize) -> Result<f64, String> {
                 "the match arm above narrowed this array's data type, which fixes its concrete \
                  Arrow array type",
             )
-            .value(row) as f64),
+            .value(row)
+            .approx_into()),
         ty => Err(format!("OTEL value requires a numeric type, found {ty}")),
     }
 }
@@ -2121,7 +2135,7 @@ mod tests {
         let unsigned: ArrayRef = StdArc::new(UInt64Array::from(vec![u64::MAX]));
         assert_eq!(
             numeric_as_f64(&unsigned, 0).expect("histogram numerics accept the U64 range"),
-            u64::MAX as f64
+            u64::MAX.approx_into::<f64>()
         );
     }
 

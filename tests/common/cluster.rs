@@ -23,6 +23,7 @@ use lapin::{
     types::FieldTable,
 };
 use meticulous::ResultExt as _;
+use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
 use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
@@ -328,7 +329,7 @@ fn observability_metric_has_value(
         }
         matching_lines.push(line.to_string());
         if let Some(value) = parse_prometheus_sample_value(line)
-            && (value - expected_value as f64).abs() < f64::EPSILON
+            && (value - expected_value.approx_into::<f64>()).abs() < f64::EPSILON
         {
             return true;
         }
@@ -2814,7 +2815,7 @@ impl RawTestSession {
                         Some(proto::SessionResponse {
                             event: Some(Event::Server(event)),
                         }) => {
-                            if event.level == ServerEventLevel::Error as i32 {
+                            if event.level == i32::from(ServerEventLevel::Error) {
                                 return Ok(Some(TestServerEvent {
                                     level: event.level,
                                     message: event.message,
