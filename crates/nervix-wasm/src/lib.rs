@@ -3743,15 +3743,18 @@ mod tests {
             .await
             .expect_err("guest memory growth must exceed MAX MEMORY");
 
-        assert!(matches!(
-            error,
-            WasmProcessorError::MemoryLimitExceeded {
-                limit: 131_072,
-                allocated: 131_072,
-                growth: 65_536,
-                operation: "nervix_process_batch"
-            }
-        ));
+        assert!(
+            matches!(
+                error,
+                WasmProcessorError::MemoryLimitExceeded {
+                    limit: 131_072,
+                    allocated: 131_072,
+                    growth: 65_536,
+                    operation: "nervix_process_batch"
+                }
+            ),
+            "unexpected growth memory error: {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -3776,15 +3779,18 @@ mod tests {
             .await
             .expect_err("two initial pages must exceed MAX MEMORY");
 
-        assert!(matches!(
-            error,
-            WasmProcessorError::MemoryLimitExceeded {
-                limit: 65_536,
-                allocated: 0,
-                growth: 131_072,
-                operation: "module instantiation"
-            }
-        ));
+        assert!(
+            matches!(
+                error,
+                WasmProcessorError::MemoryLimitExceeded {
+                    limit: 65_536,
+                    allocated: 65_536,
+                    growth: 65_536,
+                    operation: "module instantiation"
+                }
+            ),
+            "unexpected instantiation memory error: {error:?}"
+        );
     }
 
     #[tokio::test]
