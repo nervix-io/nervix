@@ -436,7 +436,7 @@ impl SessionServiceImpl {
         }
         #[cfg(not(feature = "testing"))]
         {
-            graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count, placement)
+            graph.schedule_for_domain(domain, &cluster_nodes, self.inner.replica_count, placement)
         }
     }
 }
