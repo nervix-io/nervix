@@ -1,3 +1,20 @@
+//! The decisions a cluster makes about Models, before anything runs.
+//!
+//! Layer: decisions.
+//!
+//! - **Owns.** The durable model store, validation of domains, references, schemas, branches,
+//!   capabilities and execution contracts, transaction mutation planning, placement and relocation,
+//!   the active execution graph, and the assignment of nodes to cluster members.
+//! - **Depends on.** The vocabulary, the dataflow-graph description, the VM and the UDF host to
+//!   type-check what it validates, and `fjall` for storage.
+//! - **Must not know.** How a validated node runs. No Tokio task, no Arrow batch, no connector and
+//!   no branch-local state belongs here, and a decision must be computable without a cluster.
+//!
+//! This module breaks its own contract: route validation lowers programs through
+//! `nervix_nspl::vm_program`, so a decision names the language layer instead of the VM frontend the
+//! runtime compiles with, and the same Models are then lowered a second time in the runtime. One
+//! frontend used by both closes it.
+
 mod relocation;
 mod stored;
 

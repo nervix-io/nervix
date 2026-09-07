@@ -1,5 +1,6 @@
 [package]
 build = "build.rs"
+description = "Cross-language FlatBuffers protocol for the Nervix WASM ABI, shared by host and guest"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-wasm-protocol"

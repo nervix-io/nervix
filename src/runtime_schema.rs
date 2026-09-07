@@ -1,3 +1,15 @@
+//! Schemas and codecs: the boundary between an external encoding and an Arrow batch.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Compiled schemas, compiled codecs, the Protobuf descriptor pool, decoding wire
+//!   payloads directly into typed Arrow builders, encoding column values back out, and `RuntimeRow`
+//!   — the shared view of one row in an Arc'd batch, which is the only in-memory representation of
+//!   an individual payload.
+//! - **Depends on.** The vocabulary, the jaq programs, and Arrow.
+//! - **Must not know.** Relays, branches, schedules or the registry. A codec converts a payload and
+//!   answers; it decides nothing about where the result goes.
+
 use std::{io::Cursor, num::NonZeroU32, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashSet};

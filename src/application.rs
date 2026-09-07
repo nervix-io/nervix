@@ -1,3 +1,23 @@
+//! The control plane and the edges it is reached through.
+//!
+//! Layer: control plane and edges.
+//!
+//! - **Owns.** The session service, transaction lifecycle, domain lifecycle commands, users and
+//!   authentication, resource upload and replication, subscription management, the domain clock,
+//!   leader-side coordination, and the listeners for HTTP endpoints, the cluster API, metrics and
+//!   the console.
+//! - **Depends on.** The registry for decisions, the runtime for execution, consensus and the
+//!   interconnect for cluster state, the proto wire types, and the language layer: this module is
+//!   the session adapter and the one place in the server that may name the parser.
+//! - **Must not know.** Connector internals, VM IR, Arrow batches or branch-local runtime state. It
+//!   commands the data plane and reads what the data plane reports.
+//!
+//! This module breaks its own contract: it is a single file in which one `SessionServiceImpl` is at
+//! once the gRPC adapter, the transaction manager, the leader-side scheduler, the describe fan-out,
+//! the domain-clock owner, the subscription manager, the resource uploader and four HTTP servers.
+//! Separating the use cases from the adapters is a later move; every piece it is split into
+//! inherits the contract above.
+
 use std::{
     collections::BTreeSet,
     convert::Infallible,

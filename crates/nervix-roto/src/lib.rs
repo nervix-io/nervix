@@ -1,3 +1,15 @@
+//! The Roto host for user-defined functions, injected into the expression VM.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Compiling a `CREATE UDF` definition, the watchdog that bounds a call, and the
+//!   `FunctionInjector` that returns results to the VM as typed Arrow arrays.
+//! - **Depends on.** The VM and the vocabulary.
+//! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
+//!
+//! This crate breaks its own contract: it names `nervix_nspl::vm_program` for spans and function
+//! names, inheriting the VM's dependency on the language layer.
+
 use std::{
     cell::RefCell,
     fmt,

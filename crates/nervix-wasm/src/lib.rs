@@ -1,3 +1,14 @@
+//! The wasmtime host for Nervix WASM processors.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Engine configuration, instance lifetime, linear-memory limits, epoch deadlines, the
+//!   host half of the C ABI, and the guest snapshot calls.
+//! - **Depends on.** The vocabulary for processor limits and timestamps, and `nervix-wasm-protocol`
+//!   for the envelopes it exchanges with a guest.
+//! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
+//!   routed. It calls a guest and returns what the guest produced.
+
 use std::{
     convert::Infallible,
     num::NonZeroU64,

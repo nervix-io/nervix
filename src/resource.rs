@@ -1,3 +1,13 @@
+//! The on-disk store for uploaded resource versions.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Content-addressed installation of a version: its manifest and checksums, the staging
+//!   directory it is built in, and the atomic promotion into place.
+//! - **Depends on.** The vocabulary's resource identities and the filesystem.
+//! - **Must not know.** How a version was uploaded, replicated or referenced. Those are
+//!   control-plane use cases; this store installs bytes and reports what is installed.
+
 use std::{
     fs,
     io::Read,

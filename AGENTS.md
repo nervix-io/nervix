@@ -96,6 +96,62 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
   schema, branch, error, or sensitivity rules.
 
+## System Layers and Migration
+
+### Layer order
+
+Nervix is layered. Innermost first, and each layer may name only the layers inside it:
+
+1. **Primitives.** Self-contained data structures and conversions that name nothing in Nervix.
+   They sit beneath the vocabulary and are reusable outside it.
+2. **Vocabulary.** Models, names, timestamps, branch keys, and node references: the words every
+   other layer speaks.
+3. **Language.** NSPL lexing, parsing, completion, and lowering into Models. The parser is an edge
+   dependency only. It is named by the language crate itself, the formatter, the client tools, and
+   the session adapter; every other layer consumes Models.
+4. **Engines and infrastructure.** The expression VM and its frontend, the UDF and WASM hosts, wire
+   codecs, consensus, the interconnect, gossip, the state store, and the resource store. An engine
+   is driven by its caller and decides nothing about the graph.
+5. **Decisions.** Registry validation, placement, scheduling, and planning. A decision is a
+   synchronous pure function from typed inputs to a typed outcome, with no Tokio types, locks, or
+   shared maps in its signature, and it is unit-tested directly from those inputs.
+6. **Data plane.** Per-node execution: relays, branch-local processor tasks, connectors,
+   materialized state, and acknowledgement tracking. It applies decisions and executes plans.
+7. **Control plane.** Transactions, domain lifecycle, applying schedules, observation,
+   subscriptions, resources, and cluster coordination.
+8. **Edges.** The session service, HTTP endpoints, the cluster API, metric exposition, the web
+   console, and the client tools.
+
+Dependencies point inward only. Test and benchmark harnesses sit outside the order, may name any
+layer, and are never named by product code.
+
+One representation per stage: text becomes a Model, a Model becomes a validated node, a validated
+node becomes an execution plan, and an execution plan becomes running tasks. Each stage converts
+once at its boundary and hands the next stage a type that already carries the guarantees the
+previous stage is responsible for. The data plane executes plans and never reads a `Model`.
+
+Identities are typed once and shared. A second key type for an identity that already has one is a
+duplicate to remove, not a local convenience.
+
+### Boundaries
+
+Every crate and every layer module opens with an ownership contract in its `//!` documentation:
+the layer it belongs to, then three lines naming what it **owns**, what it may **depend on**, and
+what it **must not know**. A reviewer decides whether a change belongs in that crate or module by
+reading those three lines and nothing else.
+
+The contract states the target, not the present. Where the code contradicts its own contract, the
+header names the contradiction and the layer it violates; it never softens the contract to match
+the code. A contract rewritten to describe today's imports has stopped saying anything.
+
+### Migration discipline
+
+Architecture debt is counted and only decreases. `just ratchet` owns the counts and the checked-in
+baseline; see [Repository commands and documentation](#repository-commands-and-documentation).
+
+Mechanical moves and behavior changes never share a commit. A move-only commit is verified by the
+build and the existing tests, and nothing in it changes behavior.
+
 ## Language and Model Invariants
 
 ### Structured semantics

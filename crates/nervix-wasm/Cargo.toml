@@ -1,4 +1,5 @@
 [package]
+description = "Wasmtime host for Nervix WASM processors: instances, limits, epoch deadlines and the guest ABI"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-wasm"

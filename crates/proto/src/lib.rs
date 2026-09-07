@@ -1,3 +1,12 @@
+//! The generated wire contract of the Nervix session and cluster APIs.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** The Protobuf and gRPC types generated from `proto/`, and nothing else.
+//! - **Depends on.** `prost` and `tonic`.
+//! - **Must not know.** Models, name types or any server type. Hand-written code never appears
+//!   here; changing the wire means changing the `.proto` files.
+
 include!(concat!(env!("OUT_DIR"), "/io.nervix.api.v1.rs"));
 
 #[cfg(test)]

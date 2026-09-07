@@ -1,3 +1,16 @@
+//! The description of an execution graph, produced once and rendered many times.
+//!
+//! Layer: vocabulary.
+//!
+//! - **Owns.** What a graph is when it is described rather than run: nodes, edges, roles, branch
+//!   identity, per-node and per-branch statistics, and the ASCII rendering of the whole.
+//! - **Depends on.** Serialization and rendering crates.
+//! - **Must not know.** How a graph is validated, scheduled or executed. The registry fills this
+//!   in; the console, the CLI and the API read it.
+//!
+//! This crate breaks its own contract: it names nothing in Nervix, so its domain, node and schema
+//! identities are `String` where the vocabulary already has typed names for them.
+
 use std::collections::BTreeMap;
 
 use ascii_dag::{Graph, LayoutConfig, RenderMode};

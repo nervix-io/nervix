@@ -16,6 +16,14 @@
 //!
 //! Use `From` and `TryFrom` wherever they apply. This crate deliberately implements only the pairs
 //! they leave out, so reaching for `approx_into` is itself a statement that the conversion rounds.
+//!
+//! Layer: primitives.
+//!
+//! - **Owns.** The rounding and the failing conversion between integers and floating point, and the
+//!   rules each one follows.
+//! - **Depends on.** The standard library.
+//! - **Must not know.** Anything in Nervix. It names no Model, no name type and no runtime concept,
+//!   which is what keeps it usable from the innermost layer outward.
 
 /// A conversion into floating point that rounds to the nearest representable value.
 pub trait ApproxFrom<T>: Sized {

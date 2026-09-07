@@ -1,3 +1,18 @@
+//! The Models and the vocabulary every other layer speaks.
+//!
+//! Layer: vocabulary.
+//!
+//! - **Owns.** Every NSPL Model, the validated name types, `Timestamp`, branch and node references,
+//!   structured message errors, and the canonical NSPL rendering of a Model.
+//! - **Depends on.** Serialization and primitive crates.
+//! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
+//!   no registry state, no Arrow array and no Tokio type belongs here.
+//!
+//! This crate breaks its own contract. It also carries replicated control-plane state —
+//! `ClusterSchedule`, `DomainState`, `ResourceVersionStatus` and their neighbours — which belongs to
+//! consensus, and the interconnect's wire values in `remote`, which belong to the transport.
+//! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
+
 mod canonical;
 mod expression;
 mod message_error;
