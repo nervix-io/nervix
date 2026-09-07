@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, num::NonZeroU64};
 
 use ahash_compile_time::HashSet;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
@@ -19,9 +19,9 @@ use crate::{
         collection_ref, duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
         from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
         kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
-        queue_ref, relay_ref, render_vm_program_tokens, retry_policy, route_construction,
-        string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref, where_expression,
-        where_only_route_construction, word_raw,
+        nonzero_u64_value, queue_ref, relay_ref, render_vm_program_tokens, retry_policy,
+        route_construction, string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref,
+        where_expression, where_only_route_construction, word_raw,
     },
 };
 
@@ -525,23 +525,12 @@ fn clickhouse_emit_sink_parser<'src>()
         )
 }
 
-fn max_batch<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone
-{
-    kw_phrase3(Identifier::With, Identifier::Max, Identifier::Batch)
-        .ignore_then(select! { Token::NumberLiteral(value) => value }.labelled("batch_size"))
-        .try_map(|value, span| {
-            let value = value
-                .parse::<u64>()
-                .map_err(|_| Rich::custom(span, format!("invalid max batch size '{value}'")))?;
-            if value == 0 {
-                Err(Rich::custom(
-                    span,
-                    "max batch size must be greater than zero",
-                ))
-            } else {
-                Ok(value)
-            }
-        })
+fn max_batch<'src>()
+-> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Identifier::With, Identifier::Max, Identifier::Batch).ignore_then(nonzero_u64_value(
+        "batch_size",
+        "max batch size must be greater than zero",
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -1411,6 +1400,8 @@ pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -2173,7 +2164,7 @@ mod tests {
                         expression: expression("LOWER ( input.action )"),
                     },
                 ],
-                max_batch: 100,
+                max_batch: nonzero!(100u64),
                 flush_each: "10s".to_string(),
             }
         );
@@ -2599,7 +2590,7 @@ mod tests {
                     },
                 ],
                 conflict_action: PostgresConflictAction::None,
-                max_batch: 25,
+                max_batch: nonzero!(25u64),
                 flush_each: "10s".to_string(),
             }
         );
@@ -2818,7 +2809,7 @@ mod tests {
                     },
                 ],
                 conflict_action: MySqlConflictAction::None,
-                max_batch: 25,
+                max_batch: nonzero!(25u64),
                 flush_each: "10s".to_string(),
             }
         );
@@ -2994,7 +2985,7 @@ mod tests {
                     },
                 ],
                 conflict_action: MongoDbConflictAction::None,
-                max_batch: 25,
+                max_batch: nonzero!(25u64),
                 flush_each: "10s".to_string(),
             }
         );

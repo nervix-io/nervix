@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -72,24 +74,23 @@ pub(crate) fn nervix_type<'src>()
             kw(Identifier::F64).to(ParseAsType::F64),
         );
 
+        // The label goes on the number itself, not on the checked parser: labelling the check
+        // would rewrite the messages below into a bare expectation and lose the explanation.
         let array_len = select! { Token::NumberLiteral(raw) => raw }
+            .labelled("array_length")
             .try_map(|raw, span| {
-                let len = raw
-                    .parse::<u32>()
-                    .map_err(|_| Rich::custom(span, "array length must be an unsigned integer"))?;
-                if len == 0 {
-                    return Err(Rich::custom(span, "array length must be greater than zero"));
-                }
+                let len = raw.parse::<NonZeroU32>().map_err(|_| {
+                    Rich::custom(span, "array length must be a positive unsigned integer")
+                })?;
                 // An array field becomes an Arrow fixed-size list, whose length is an i32.
-                if i32::try_from(len).is_err() {
+                if i32::try_from(len.get()).is_err() {
                     return Err(Rich::custom(
                         span,
                         "array length must not exceed 2147483647",
                     ));
                 }
                 Ok(len)
-            })
-            .labelled("array_length");
+            });
 
         let array = kw(Identifier::Array).ignore_then(
             ty.clone()
@@ -549,6 +550,8 @@ pub fn suggest_alter_wire_schema(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -647,7 +650,7 @@ mod tests {
             parsed.fields[0].ty,
             ParseAsType::Array {
                 element: Box::new(ParseAsType::F32),
-                len: 64
+                len: nonzero!(64u32)
             }
         );
         assert_eq!(
@@ -673,9 +676,9 @@ mod tests {
         assert_eq!(
             parsed.fields[0].ty,
             ParseAsType::Array {
-                len: 2,
+                len: nonzero!(2u32),
                 element: Box::new(ParseAsType::Array {
-                    len: 3,
+                    len: nonzero!(3u32),
                     element: Box::new(ParseAsType::F32),
                 }),
             }
@@ -684,7 +687,7 @@ mod tests {
             parsed.fields[1].ty,
             ParseAsType::Vec {
                 element: Box::new(ParseAsType::Array {
-                    len: 4,
+                    len: nonzero!(4u32),
                     element: Box::new(ParseAsType::F32),
                 }),
             }
@@ -692,7 +695,7 @@ mod tests {
         assert_eq!(
             parsed.fields[2].ty,
             ParseAsType::Array {
-                len: 2,
+                len: nonzero!(2u32),
                 element: Box::new(ParseAsType::Vec {
                     element: Box::new(ParseAsType::I64),
                 }),
@@ -756,7 +759,7 @@ mod tests {
                 parsed.fields[index * 2].ty,
                 ParseAsType::Array {
                     element: Box::new(element.clone()),
-                    len: 2
+                    len: nonzero!(2u32)
                 }
             );
             assert_eq!(

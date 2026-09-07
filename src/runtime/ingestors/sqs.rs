@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, num::NonZeroU64};
 
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
@@ -48,7 +48,7 @@ impl SqsIngestor {
         /// rest of startup reads named values rather than re-matching the source.
         struct SqsSource {
             queue: nervix_models::QueueName,
-            instances: u64,
+            instances: NonZeroU64,
             ack_mode: SqsIngestMode,
         }
 
@@ -118,9 +118,9 @@ impl SqsIngestor {
             })?;
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances.arch_into());
+        let mut tasks = Vec::with_capacity(instances.get().arch_into());
 
-        for instance_idx in 0..instances {
+        for instance_idx in 0..instances.get() {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let task_runtime = runtime.clone();
             let task_domain = domain.clone();

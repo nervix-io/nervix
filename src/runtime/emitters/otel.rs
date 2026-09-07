@@ -1,4 +1,4 @@
-use std::{io::Write, str::FromStr};
+use std::{io::Write, num::NonZeroU64, str::FromStr};
 
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
@@ -218,16 +218,15 @@ impl OtelClientSettings {
             }
         };
         let timeout = optional_client_config_value(config, "timeout_ms")
-            .map(|raw| {
-                let millis = raw.parse::<u64>().map_err(|_| {
-                    emitter_config_error(format!("invalid OTEL timeout_ms '{raw}'"))
+            .map(|raw| -> EmitterRuntimeResult<Duration> {
+                // `NonZeroU64` rejects both a non-number and a zero, so a request budget that
+                // could never allow a request is not representable past this point.
+                let millis = raw.parse::<NonZeroU64>().map_err(|_| {
+                    emitter_config_error(format!(
+                        "invalid OTEL timeout_ms '{raw}'; expected a positive integer"
+                    ))
                 })?;
-                if millis == 0 {
-                    return Err(emitter_config_error(
-                        "OTEL timeout_ms must be greater than zero",
-                    ));
-                }
-                Ok(Duration::from_millis(millis))
+                Ok(Duration::from_millis(millis.get()))
             })
             .transpose()?;
         let headers = optional_client_config_value(config, "headers")

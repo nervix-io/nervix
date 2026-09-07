@@ -1,4 +1,4 @@
-use std::{io::Cursor, sync::Arc as StdArc};
+use std::{io::Cursor, num::NonZeroU32, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashSet};
 use apache_avro::{
@@ -1458,7 +1458,9 @@ pub(crate) fn parse_as_type_from_arrow(data_type: &ArrowDataType) -> Result<Pars
         ArrowDataType::FixedSizeList(element, len) => Ok(ParseAsType::Array {
             element: Box::new(parse_as_type_from_arrow(element.data_type())?),
             len: u32::try_from(*len)
-                .map_err(|_| format!("negative fixed-size list length {len}"))?,
+                .ok()
+                .and_then(NonZeroU32::new)
+                .ok_or_else(|| format!("fixed-size list length {len} is not a positive count"))?,
         }),
         other => Err(format!(
             "runtime record materialization does not support Arrow type {other:?}"
@@ -2101,7 +2103,7 @@ impl<'a> ArrowCodecValue<'a> {
             }
             ParseAsType::Array { element, len } => {
                 let array = self.typed::<FixedSizeListArray>("FixedSizeListArray")?;
-                if array.value_length() != i32::try_from(*len).unwrap_or(i32::MAX) {
+                if array.value_length() != i32::try_from(len.get()).unwrap_or(i32::MAX) {
                     return Err(format!(
                         "field '{}' fixed-size list length {} does not match schema length {}",
                         self.field,
@@ -2116,7 +2118,7 @@ impl<'a> ArrowCodecValue<'a> {
                     )
                 })?;
                 let end = start
-                    .checked_add((*len).arch_into())
+                    .checked_add(len.get().arch_into())
                     .verified("the offset and length address one fixed-size list already decoded");
                 Ok(ArrowCodecSequence {
                     codec: self.codec,
@@ -2834,7 +2836,7 @@ fn append_json_value_to_arrow(
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(&incompatible)?;
-            if values.len() != (*len).arch_into() {
+            if values.len() != len.get().arch_into() {
                 return Err(incompatible());
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
@@ -2961,7 +2963,7 @@ fn append_avro_value_to_arrow(
             let AvroValue::Array(values) = value else {
                 return Err(incompatible());
             };
-            if values.len() != (*len).arch_into() {
+            if values.len() != len.get().arch_into() {
                 return Err(incompatible());
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
@@ -3038,7 +3040,7 @@ pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
         ParseAsType::F64 => ArrowDataType::Float64,
         ParseAsType::Array { element, len } => ArrowDataType::FixedSizeList(
             ArrowFieldRef::new(ArrowField::new("item", arrow_data_type(element), false)),
-            i32::try_from(*len).verified(
+            i32::try_from(len.get()).verified(
                 "the schema parser rejects an array length that does not fit an Arrow fixed-size \
                  list",
             ),
@@ -3141,7 +3143,7 @@ fn append_runtime_value_to_arrow(
                 .downcast_mut::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>()
                 .ok_or_else(|| format!("{context} has an incompatible Arrow array builder"))?;
             let values = match value {
-                Some(RuntimeValue::Array(values)) if values.len() == (*len).arch_into() => {
+                Some(RuntimeValue::Array(values)) if values.len() == len.get().arch_into() => {
                     Some(values)
                 }
                 Some(RuntimeValue::Array(values)) => {
@@ -3158,7 +3160,7 @@ fn append_runtime_value_to_arrow(
                     ));
                 }
             };
-            for index in 0..(*len).arch_into() {
+            for index in 0..len.get().arch_into() {
                 append_runtime_value_to_arrow(
                     builder.values().as_mut(),
                     element,
@@ -3347,7 +3349,7 @@ pub(crate) fn runtime_value_from_arrow_array(
                 .as_any()
                 .downcast_ref::<FixedSizeListArray>()
                 .ok_or_else(|| format!("field '{field}' is not a FixedSizeListArray"))?;
-            if array.value_length() != i32::try_from(*len).unwrap_or(i32::MAX) {
+            if array.value_length() != i32::try_from(len.get()).unwrap_or(i32::MAX) {
                 return Err(format!(
                     "field '{field}' fixed-size list length {} does not match schema length {}",
                     array.value_length(),
@@ -3506,6 +3508,7 @@ mod tests {
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema,
         CreateWireSchema, SchemaField,
     };
+    use nonzero_ext::nonzero;
     use rstest::{fixture, rstest};
 
     use super::*;
@@ -3733,7 +3736,7 @@ mod tests {
                     name: named("cpu_last_64"),
                     ty: ParseAsType::Array {
                         element: Box::new(ParseAsType::F32),
-                        len: 3,
+                        len: nonzero!(3u32),
                     },
                     optional: false,
                     sensitive: false,
@@ -3829,9 +3832,9 @@ mod tests {
                 SchemaField {
                     name: named("matrix"),
                     ty: ParseAsType::Array {
-                        len: 2,
+                        len: nonzero!(2u32),
                         element: Box::new(ParseAsType::Array {
-                            len: 3,
+                            len: nonzero!(3u32),
                             element: Box::new(ParseAsType::F32),
                         }),
                     },
@@ -3842,7 +3845,7 @@ mod tests {
                     name: named("samples"),
                     ty: ParseAsType::Vec {
                         element: Box::new(ParseAsType::Array {
-                            len: 2,
+                            len: nonzero!(2u32),
                             element: Box::new(ParseAsType::F32),
                         }),
                     },
@@ -4011,7 +4014,7 @@ mod tests {
                 name: named(&format!("{name}_array")),
                 ty: ParseAsType::Array {
                     element: Box::new(case.ty.clone()),
-                    len: 2,
+                    len: nonzero!(2u32),
                 },
                 optional: false,
                 sensitive: false,

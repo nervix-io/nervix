@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, Event, Incoming, MqttOptions, Publish, QoS,
     SessionMode, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
@@ -75,7 +77,7 @@ impl MqttIngestor {
         /// rest of startup reads named values rather than re-matching the source.
         struct MqttSource {
             topic: String,
-            instances: u64,
+            instances: NonZeroU64,
             mode: MqttIngestMode,
         }
 
@@ -183,14 +185,14 @@ impl MqttIngestor {
             );
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances.arch_into());
+        let mut tasks = Vec::with_capacity(instances.get().arch_into());
         let subscribe_filter = Self::subscribe_filter(&topic, domain, &ingestor.name);
         let settings = MqttClientSettings {
             session: mode.session(),
             manual_acks: mode.is_ack(),
         };
 
-        for instance_idx in 0..instances {
+        for instance_idx in 0..instances.get() {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let task_context = MqttTaskContext {
                 runtime: runtime.clone(),
@@ -477,7 +479,7 @@ impl MqttIngestor {
                                         "this branch runs only for the parallel ACK mode, which \
                                          parses a batch timeout above",
                                     );
-                                while batch.len() < (*max).arch_into().max(1) {
+                                while batch.len() < addressable_count(*max).get() {
                                     tokio::task::consume_budget().await;
                                     tokio::select! {
                                         _ = sleep_until(deadline) => break,
@@ -1220,10 +1222,10 @@ impl MqttIngestor {
     fn client_id_template(
         config: &[nervix_models::ClientConfigEntry],
         default_client_id: &str,
-        instances: u64,
+        instances: NonZeroU64,
     ) -> Result<String, String> {
         let configured = optional_client_config_value(config, "client_id");
-        if instances <= 1 {
+        if instances == NonZeroU64::MIN {
             return Ok(configured
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| default_client_id.to_string()));
@@ -1274,6 +1276,7 @@ impl MqttIngestor {
 #[cfg(test)]
 mod tests {
     use nervix_models::{ClientConfigEntry, MqttSession};
+    use nonzero_ext::nonzero;
     use rumqttc::BrokerSessionResumePolicy;
 
     use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor};
@@ -1315,9 +1318,12 @@ mod tests {
 
     #[test]
     fn multi_instance_mqtt_client_id_requires_instance_template() {
-        let error =
-            MqttIngestor::client_id_template(&config_with_client_id("fixed-client"), "fallback", 2)
-                .expect_err("fixed multi-instance client_id must be rejected");
+        let error = MqttIngestor::client_id_template(
+            &config_with_client_id("fixed-client"),
+            "fallback",
+            nonzero!(2u64),
+        )
+        .expect_err("fixed multi-instance client_id must be rejected");
 
         assert_eq!(
             error,
@@ -1331,7 +1337,7 @@ mod tests {
         let template = MqttIngestor::client_id_template(
             &config_with_client_id("templated-{{instance}}"),
             "fallback",
-            2,
+            nonzero!(2u64),
         )
         .expect("templated multi-instance client_id must be accepted");
 
@@ -1343,7 +1349,7 @@ mod tests {
 
     #[test]
     fn single_instance_mqtt_client_id_uses_default_when_omitted() {
-        let template = MqttIngestor::client_id_template(&[], "fallback", 1)
+        let template = MqttIngestor::client_id_template(&[], "fallback", nonzero!(1u64))
             .expect("single-instance default client_id must be accepted");
 
         assert_eq!(template, "fallback");

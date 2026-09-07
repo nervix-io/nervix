@@ -28,7 +28,9 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("byte_size_literal", "1MiB"),
     ("instance_count", "2"),
     ("integer_literal", "1"),
+    ("max_fuel", "1000000"),
     ("max_in_flight", "10"),
+    ("max_instances", "16"),
     ("mqtt_qos", "1"),
     ("resource_version", "1"),
     // Deliberately constant: a conflict target has to name a column the VALUES record already
@@ -54,6 +56,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("otel_metric_unit", "'1'"),
     ("otel_scope_name", "'nx/scope'"),
     ("otel_scope_version", "'1.0'"),
+    ("placement_rank", "1"),
     ("relay_capacity", "1024"),
     ("string", "'nx_value'"),
     ("string_literal", "'nx_value'"),

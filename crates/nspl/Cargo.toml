@@ -20,6 +20,7 @@ error-stack = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
+nonzero_ext = { workspace = true }
 sorted-vec = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 ubyte = { workspace = true }

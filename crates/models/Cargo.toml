@@ -13,6 +13,7 @@ chrono = { workspace = true }
 error-stack = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 meticulous = { workspace = true }
+nonzero_ext = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
 sorted-vec = { workspace = true, features = ["serde"] }

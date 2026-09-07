@@ -1,3 +1,5 @@
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+
 use error_stack::{Report, ResultExt};
 use meticulous::ResultExt as _;
 use nervix_models::{
@@ -417,7 +419,7 @@ pub enum StoredParseAsType {
     Array {
         #[rkyv(omit_bounds)]
         element: Box<StoredParseAsType>,
-        len: u32,
+        len: NonZeroU32,
     },
     Vec {
         #[rkyv(omit_bounds)]
@@ -750,7 +752,7 @@ pub struct StoredCreateBranch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredBranchEviction {
-    Lru { max_instances: u64 },
+    Lru { max_instances: NonZeroU64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -768,7 +770,7 @@ pub struct StoredCreatePlacement {
     pub from: Vec<String>,
     pub to: Vec<String>,
     pub policy: StoredPlacementPolicy,
-    pub rank: Option<u64>,
+    pub rank: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -842,8 +844,8 @@ pub struct StoredCreateWasmProcessor {
     pub resource: String,
     pub resource_version: Option<u64>,
     pub file: String,
-    pub max_fuel: u64,
-    pub max_memory_bytes: u64,
+    pub max_fuel: NonZeroU64,
+    pub max_memory_bytes: NonZeroU64,
     pub mode: AckMode,
     pub global_error_policy: StoredGeneralErrorPolicy,
     pub filter_where: Option<Expression>,
@@ -882,7 +884,7 @@ pub enum StoredInferencerTensorElementType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredInferencerTensorDimension {
-    Fixed(u32),
+    Fixed(NonZeroU32),
     Dynamic,
     Batch,
 }
@@ -898,7 +900,7 @@ pub enum StoredIngestSource {
         client: String,
         topic: String,
         offset_mode: StoredKafkaOffsetMode,
-        instances: u64,
+        instances: NonZeroU64,
         mode: StoredKafkaIngestMode,
         quiesce: StoredIngestQuiesceMode,
     },
@@ -906,14 +908,14 @@ pub enum StoredIngestSource {
         client: String,
         topic: String,
         subscription: String,
-        instances: u64,
+        instances: NonZeroU64,
         mode: StoredKafkaIngestMode,
         quiesce: StoredIngestQuiesceMode,
     },
     RabbitMq {
         client: String,
         queue: String,
-        instances: u64,
+        instances: NonZeroU64,
         mode: StoredRabbitMqIngestMode,
         quiesce: StoredIngestQuiesceMode,
     },
@@ -926,7 +928,7 @@ pub enum StoredIngestSource {
     Mqtt {
         client: String,
         topic: String,
-        instances: u64,
+        instances: NonZeroU64,
         mode: StoredMqttIngestMode,
         quiesce: StoredIngestQuiesceMode,
     },
@@ -934,7 +936,7 @@ pub enum StoredIngestSource {
         client: String,
         subject: String,
         queue_group: String,
-        instances: u64,
+        instances: NonZeroU64,
         mode: StoredNatsIngestMode,
         quiesce: StoredIngestQuiesceMode,
     },
@@ -952,7 +954,7 @@ pub enum StoredIngestSource {
     Sqs {
         client: String,
         queue: String,
-        instances: u64,
+        instances: NonZeroU64,
         mode: StoredSqsIngestMode,
         quiesce: StoredIngestQuiesceMode,
     },
@@ -1003,7 +1005,7 @@ pub enum StoredKafkaOffsetMode {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredKafkaIngestMode {
     AckParallel {
-        max: u64,
+        max: NonZeroU64,
         batch_timeout: String,
         timeout: String,
         retry_backoff: String,
@@ -1047,7 +1049,7 @@ pub enum StoredMqttIngestMode {
         retry_max_backoff: String,
     },
     AckParallel {
-        max: u64,
+        max: NonZeroU64,
         batch_timeout: String,
         timeout: String,
         retry_backoff: String,
@@ -1100,7 +1102,7 @@ pub enum StoredWebsocketsIngestMode {
 pub struct StoredCreateRelay {
     pub name: String,
     pub schema: String,
-    pub buffer: usize,
+    pub buffer: NonZeroUsize,
     pub branching: StoredRelayBranching,
     pub materialized_state: Option<StoredMaterializedRelayState>,
 }
@@ -1306,7 +1308,7 @@ pub struct StoredCreateEmitterPublishing {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredEmitterAckWindow {
     Sequential,
-    Parallel { max: u64 },
+    Parallel { max: NonZeroU64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1405,7 +1407,7 @@ pub enum StoredEmitSink {
         table: String,
         values: Vec<StoredPostgresValueMapping>,
         conflict_action: StoredPostgresConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     MySql {
@@ -1413,7 +1415,7 @@ pub enum StoredEmitSink {
         table: String,
         values: Vec<StoredMySqlValueMapping>,
         conflict_action: StoredMySqlConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     MongoDb {
@@ -1421,7 +1423,7 @@ pub enum StoredEmitSink {
         collection: String,
         values: Vec<StoredMongoDbValueMapping>,
         conflict_action: StoredMongoDbConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     Iceberg {
@@ -1445,7 +1447,7 @@ pub enum StoredEmitSink {
         client: String,
         table: String,
         values: Vec<StoredClickHouseValueMapping>,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     Otel {
@@ -1512,7 +1514,7 @@ enum PrePublishingModeStoredEmitSink {
         table: String,
         values: Vec<StoredPostgresValueMapping>,
         conflict_action: StoredPostgresConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     MySql {
@@ -1520,7 +1522,7 @@ enum PrePublishingModeStoredEmitSink {
         table: String,
         values: Vec<StoredMySqlValueMapping>,
         conflict_action: StoredMySqlConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     MongoDb {
@@ -1528,7 +1530,7 @@ enum PrePublishingModeStoredEmitSink {
         collection: String,
         values: Vec<StoredMongoDbValueMapping>,
         conflict_action: StoredMongoDbConflictAction,
-        max_batch: u64,
+        max_batch: NonZeroU64,
         flush_each: String,
     },
     Iceberg {
@@ -5554,6 +5556,8 @@ impl From<StoredOtelScope> for OtelScope {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
 
     fn named<N>(raw: &str) -> N
@@ -5821,8 +5825,8 @@ mod tests {
                 resource_version: Some(3),
                 file: "processor.wasm".to_string(),
                 limits: nervix_models::WasmProcessorLimits {
-                    max_fuel: 12_345_678,
-                    max_memory_bytes: 96 * 1024 * 1024,
+                    max_fuel: nonzero!(12_345_678u64),
+                    max_memory_bytes: nonzero!(100_663_296u64),
                 },
                 global_error_policy: GeneralErrorPolicy::Log,
                 mode: AckMode::Attached,
@@ -5934,7 +5938,7 @@ mod tests {
                     vec![named("events_ingestor"), named("events_junction")],
                     vec![named("events_emitter")],
                     PlacementPolicy::RequireColocation,
-                    Some(1),
+                    Some(nonzero!(1u64)),
                 )
                 .expect("placement fixture must be valid"),
             ),
@@ -6086,7 +6090,7 @@ mod tests {
         let nested = ParseAsType::Vec {
             element: Box::new(ParseAsType::Array {
                 element: Box::new(ParseAsType::F32),
-                len: 4,
+                len: nonzero!(4u32),
             }),
         };
         assert_eq!(

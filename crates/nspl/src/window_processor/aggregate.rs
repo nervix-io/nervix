@@ -1,4 +1,4 @@
-use std::{ops::Range, time::Duration};
+use std::{num::NonZeroUsize, ops::Range, time::Duration};
 
 use chumsky::{
     input::{Stream, ValueInput},
@@ -41,7 +41,7 @@ pub type WindowAggregateDemandId = usize;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowLinearHistogramConfig {
-    pub buckets: usize,
+    pub buckets: NonZeroUsize,
     pub min: f64,
     pub max: f64,
     pub delay: Duration,
@@ -572,13 +572,15 @@ fn linear_histogram_config<'src>(
     args: &[SpannedExpr],
     span: Span,
 ) -> Result<WindowLinearHistogramConfig, Rich<'src, Token>> {
-    let buckets = int_arg(&args[2], span, "bucket count")?;
-    if buckets <= 0 {
-        return Err(Rich::custom(
-            span,
-            "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
-        ));
-    }
+    let buckets = usize::try_from(int_arg(&args[2], span, "bucket count")?)
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| {
+            Rich::custom(
+                span,
+                "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
+            )
+        })?;
     let min = numeric_arg(&args[3], span, "minimum")?;
     let max = numeric_arg(&args[4], span, "maximum")?;
     if min >= max {
@@ -603,8 +605,7 @@ fn linear_histogram_config<'src>(
         )
     })?;
     Ok(WindowLinearHistogramConfig {
-        buckets: usize::try_from(buckets)
-            .verified("the bucket count was checked to be a positive i64 above"),
+        buckets,
         min,
         max,
         delay,
@@ -846,6 +847,8 @@ pub fn span_range(span: Span) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
 
     #[test]
@@ -997,7 +1000,7 @@ mod tests {
         assert_eq!(
             parsed.demands()[0].linear_histogram,
             Some(WindowLinearHistogramConfig {
-                buckets: 2048,
+                buckets: nonzero!(2048usize),
                 min: 0.0,
                 max: 10000.0,
                 delay: Duration::from_secs(2),
