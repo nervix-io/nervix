@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use arch_into::ArchInto as _;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use nervix_server::runtime::relay_interaction_benchmark::{
     RelayInteractionBenchmark, RelayInteractionBenchmarkEvent,
@@ -16,7 +17,7 @@ fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
         .expect("benchmark runtime must build");
     runtime.block_on(async move {
         let mut benchmark =
-            RelayInteractionBenchmark::pass_through(source_count, READY_CHUNK as usize);
+            RelayInteractionBenchmark::pass_through(source_count, READY_CHUNK.arch_into());
         let mut completed = 0;
         let mut elapsed = Duration::ZERO;
         while completed < iterations {
@@ -25,7 +26,7 @@ fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
             for offset in 0..chunk {
                 tokio::task::consume_budget().await;
                 benchmark
-                    .enqueue(((completed + offset) as usize) % source_count)
+                    .enqueue((completed + offset).arch_into() % source_count)
                     .await;
             }
             let started = Instant::now();
@@ -49,7 +50,8 @@ fn force_drain_collections(iterations: u64) -> Duration {
         .build()
         .expect("benchmark runtime must build");
     runtime.block_on(async move {
-        let capacity = COLLECTED_BATCHES.div_ceil(FAN_IN_SOURCES as u64) as usize;
+        let fan_in_sources: u64 = FAN_IN_SOURCES.arch_into();
+        let capacity = COLLECTED_BATCHES.div_ceil(fan_in_sources).arch_into();
         let mut benchmark = RelayInteractionBenchmark::collecting(FAN_IN_SOURCES, capacity);
         let mut elapsed = Duration::ZERO;
         for iteration in 0..iterations {
@@ -57,7 +59,7 @@ fn force_drain_collections(iterations: u64) -> Duration {
             for batch in 0..COLLECTED_BATCHES {
                 tokio::task::consume_budget().await;
                 benchmark
-                    .enqueue(((iteration + batch) as usize) % FAN_IN_SOURCES)
+                    .enqueue((iteration + batch).arch_into() % FAN_IN_SOURCES)
                     .await;
             }
             benchmark.force_flush();

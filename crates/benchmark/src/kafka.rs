@@ -1,5 +1,6 @@
 use std::{io, sync::Arc as StdArc, time::Duration};
 
+use meticulous::ResultExt as _;
 use rdkafka::{
     ClientConfig,
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
@@ -44,7 +45,7 @@ pub async fn provision_topics(
     }
 
     let expected = usize::try_from(partitions)
-        .map_err(|_| io::Error::other("Kafka partition count exceeds usize"))?;
+        .assured("the partition count was converted from a non-negative u32 above");
     let admin = StdArc::new(admin);
     for topic in [input_topic, output_topic] {
         loop {

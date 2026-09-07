@@ -8,6 +8,7 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+arch-into = { workspace = true }
 bytes = { workspace = true }
 flatbuffers = { workspace = true }
 meticulous = { workspace = true }

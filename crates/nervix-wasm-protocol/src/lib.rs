@@ -347,7 +347,8 @@ fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
             .try_into()
             .verified("the let-else above returned unless the split produced a four-byte prefix"),
     );
-    let declared = usize::try_from(declared).unwrap_or(usize::MAX);
+    let declared = usize::try_from(declared)
+        .assured("u32 fits usize on every architecture supported by the WASM protocol");
     let actual = bytes
         .len()
         .checked_sub(4)

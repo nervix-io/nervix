@@ -652,8 +652,8 @@ fn materialize_nodes(
                     }
                     RelayProcessorOperationTemplate::WindowProcessor {
                         output_routes: materialized_outputs,
-                        width_messages: width.messages.map(|messages| messages as usize),
-                        step_messages: step.messages.map(|messages| messages as usize),
+                        width_messages: width.messages.map(|messages| messages.arch_into()),
+                        step_messages: step.messages.map(|messages| messages.arch_into()),
                         width_duration: parse_optional_window_duration(
                             &node.processor,
                             "width",
@@ -829,14 +829,7 @@ fn parse_branch_max_instances_setting(
                     identifier.as_str()
                 ));
             }
-            usize::try_from(max_instances).map_err(|_| {
-                format!(
-                    "branch MAX INSTANCES '{}' for {} '{}' is too large for this runtime",
-                    max_instances,
-                    kind.as_str(),
-                    identifier.as_str()
-                )
-            })
+            Ok::<usize, String>(max_instances.arch_into())
         })
         .transpose()
 }

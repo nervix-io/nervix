@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
+use arch_into::ArchInto as _;
 use nervix_benchmark::{
     BenchmarkCatalog, KafkaRenderInputs, LoadShape, LoadedBenchmark, RunSettings,
 };
@@ -52,7 +53,7 @@ fn kafka_filter_map_implementations_render_from_one_workload() {
         .expect("Nervix implementation should render");
     assert_eq!(
         statements_starting_with(&nervix, "CREATE JUNCTION"),
-        LANES as usize
+        LANES.arch_into()
     );
 
     let vector = benchmark
@@ -95,11 +96,11 @@ fn kafka_dedup_window_renders_a_stateful_graph_and_a_matching_competitor() {
         .expect("Nervix implementation should render");
     assert_eq!(
         statements_starting_with(&nervix, "CREATE DEDUPLICATOR"),
-        LANES as usize
+        LANES.arch_into()
     );
     assert_eq!(
         statements_starting_with(&nervix, "CREATE WINDOW PROCESSOR"),
-        LANES as usize
+        LANES.arch_into()
     );
     assert!(nervix.contains("FILTER WHERE contains(input.value, \"x\")"));
     assert!(nervix.contains("MAX TIME 10s"));
@@ -110,7 +111,7 @@ fn kafka_dedup_window_renders_a_stateful_graph_and_a_matching_competitor() {
         nervix
             .matches("FLUSH EACH 50ms MAX BATCH SIZE 64KiB")
             .count(),
-        2 * LANES as usize
+        2 * LANES.arch_into()
     );
 
     let vector = benchmark

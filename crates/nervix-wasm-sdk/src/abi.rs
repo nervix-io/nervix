@@ -219,12 +219,19 @@ pub fn buffer_ptr() -> i32 {
     CORE.with(|core| core.buffer.as_mut_ptr() as i32)
 }
 
+fn abi_size(size: usize) -> i32 {
+    match i32::try_from(size) {
+        Ok(size) => size,
+        Err(_) => ERR_INVALID_SIZE,
+    }
+}
+
 pub fn buffer_len() -> i32 {
-    CORE.with(|core| core.buffer.len() as i32)
+    CORE.with(|core| abi_size(core.buffer.len()))
 }
 
 pub fn buffer_capacity() -> i32 {
-    CORE.with(|core| core.buffer.capacity() as i32)
+    CORE.with(|core| abi_size(core.buffer.capacity()))
 }
 
 pub fn alloc(size: i32) -> i32 {
@@ -245,7 +252,7 @@ pub fn global_error_ptr() -> i32 {
 }
 
 pub fn global_error_len() -> i32 {
-    CORE.with(|core| core.global_error.len() as i32)
+    CORE.with(|core| abi_size(core.global_error.len()))
 }
 
 pub fn clear_global_error() -> i32 {
@@ -336,7 +343,7 @@ pub fn read_emit() -> i32 {
         let envelope = core.pending_emit.remove(0);
         core.buffer.clear();
         core.buffer.extend_from_slice(&envelope);
-        Ok(core.buffer.len() as i32)
+        i32::try_from(core.buffer.len()).map_err(|_| GuestError::InvalidSize)
     })
 }
 
@@ -356,7 +363,7 @@ pub fn dump_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
             error_state: core.error_state.clone(),
         };
         core.buffer = snapshot.encode();
-        Ok(core.buffer.len() as i32)
+        i32::try_from(core.buffer.len()).map_err(|_| GuestError::InvalidSize)
     })
 }
 
