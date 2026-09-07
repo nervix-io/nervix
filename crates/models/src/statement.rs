@@ -1,5 +1,9 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    collections::BTreeMap,
+    ops::{Deref, DerefMut},
+};
 
+use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -3666,20 +3670,54 @@ pub enum MaterializedRelayState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ClusterSchedule {
-    pub domains: Vec<DomainSchedule>,
+    pub domains: BTreeMap<DomainName, DomainSchedule>,
 }
 
 impl ClusterSchedule {
     pub fn domain(&self, domain: &DomainName) -> Option<&DomainSchedule> {
-        self.domains.iter().find(|item| item.domain == *domain)
+        self.domains.get(domain)
     }
 }
+
+impl FromIterator<DomainSchedule> for ClusterSchedule {
+    fn from_iter<I: IntoIterator<Item = DomainSchedule>>(schedules: I) -> Self {
+        Self {
+            domains: schedules
+                .into_iter()
+                .map(|schedule| (schedule.domain.clone(), schedule))
+                .collect(),
+        }
+    }
+}
+
+/// A domain's scheduled nodes, in the order the registry emitted them and keyed by runtime node
+/// identity so callers resolve a node by kind and identifier without scanning the sequence.
+pub type ScheduledNodes = IndexMap<PlacementRuntimeNode, ScheduledNode>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainSchedule {
     pub domain: DomainName,
-    pub nodes: Vec<ScheduledNode>,
+    pub nodes: ScheduledNodes,
     pub placement_groups: Vec<PlacementGroupSchedule>,
+}
+
+impl DomainSchedule {
+    /// Builds a schedule from the registry's emitted node sequence, keeping that order and keying
+    /// each node by its runtime identity.
+    pub fn new(
+        domain: DomainName,
+        nodes: impl IntoIterator<Item = ScheduledNode>,
+        placement_groups: Vec<PlacementGroupSchedule>,
+    ) -> Self {
+        Self {
+            domain,
+            nodes: nodes
+                .into_iter()
+                .map(|node| (node.identity(), node))
+                .collect(),
+            placement_groups,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3745,6 +3783,12 @@ pub struct ScheduledNode {
 }
 
 impl ScheduledNode {
+    /// The runtime node this scheduled entry configures. Kind and identifier together name a node
+    /// in a domain, and this is the key its schedule is stored under.
+    pub fn identity(&self) -> PlacementRuntimeNode {
+        PlacementRuntimeNode::new(self.kind, self.identifier.clone())
+    }
+
     fn executes_on_every_cluster_node(&self) -> bool {
         self.config.executes_on_every_cluster_node()
     }
@@ -4515,19 +4559,9 @@ mod tests {
 
     #[test]
     fn cluster_schedule_returns_matching_domain() {
-        let alpha = DomainSchedule {
-            domain: domain("alpha"),
-            nodes: Vec::new(),
-            placement_groups: Vec::new(),
-        };
-        let beta = DomainSchedule {
-            domain: domain("beta"),
-            nodes: Vec::new(),
-            placement_groups: Vec::new(),
-        };
-        let schedule = ClusterSchedule {
-            domains: vec![alpha.clone(), beta],
-        };
+        let alpha = DomainSchedule::new(domain("alpha"), Vec::new(), Vec::new());
+        let beta = DomainSchedule::new(domain("beta"), Vec::new(), Vec::new());
+        let schedule = ClusterSchedule::from_iter([alpha.clone(), beta]);
 
         assert_eq!(schedule.domain(&domain("alpha")), Some(&alpha));
         assert_eq!(schedule.domain(&domain("gamma")), None);

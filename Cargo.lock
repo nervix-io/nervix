@@ -6539,6 +6539,7 @@ dependencies = [
  "blake3",
  "chrono",
  "error-stack",
+ "indexmap 2.14.1",
  "meticulous",
  "rkyv 0.8.18",
  "serde",

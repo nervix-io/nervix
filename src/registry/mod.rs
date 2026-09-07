@@ -36,8 +36,8 @@ use nervix_models::{
     ModelChangeAspect, ModelKind, ModelName, MqttIngestMode, OtelAggregationTemporality,
     OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
     PlacementGroupSchedule, PlacementName, PlacementPolicy, PlacementRuntimeNode, ProcessorOutput,
-    ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, SchemaField,
-    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
+    ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction, ScheduledNode, ScheduledNodes,
+    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -442,15 +442,11 @@ impl Registry {
         &self,
         schedule: &ClusterSchedule,
     ) -> Result<(), Report<RegistryError>> {
-        let desired_domains = schedule
-            .domains
-            .iter()
-            .map(|domain| domain.domain.clone())
-            .collect::<HashSet<_>>();
-        for domain_schedule in &schedule.domains {
+        let desired_domains = schedule.domains.keys().cloned().collect::<HashSet<_>>();
+        for domain_schedule in schedule.domains.values() {
             let models = domain_schedule
                 .nodes
-                .iter()
+                .values()
                 .map(|node| {
                     (
                         RegistryKey::new(node.kind, node.identifier.clone()),
@@ -4147,7 +4143,7 @@ impl ActiveGraph {
     pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
         let models = schedule
             .nodes
-            .iter()
+            .values()
             .map(|node| {
                 (
                     RegistryKey::new(node.kind, node.identifier.clone()),
@@ -4417,7 +4413,7 @@ impl ActiveGraph {
             .map(|(index, node, _)| (node.key(), *index))
             .collect::<HashMap<_, _>>();
 
-        let mut scheduled_nodes = Vec::with_capacity(nodes.len());
+        let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
         for (index, node, _) in nodes {
             let key = node.key();
             let group_index = placement.group_by_member.get(&key).copied();
@@ -4471,7 +4467,7 @@ impl ActiveGraph {
                     *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
                 }
             }
-            scheduled_nodes.push(ScheduledNode {
+            let scheduled_node = ScheduledNode {
                 identifier: node.identifier,
                 kind: node.kind,
                 config: Box::new((*node.config).clone()),
@@ -4481,7 +4477,8 @@ impl ActiveGraph {
                 kafka_partition_schedule: None,
                 primary_node,
                 assigned_nodes,
-            });
+            };
+            scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
         let placement_groups = placement
             .require_groups
@@ -4492,9 +4489,7 @@ impl ActiveGraph {
                     .map(placement_runtime_node)
                     .collect::<Vec<_>>();
                 let primary_node = if let Some(first) = members.first()
-                    && let Some(node) = scheduled_nodes
-                        .iter()
-                        .find(|node| node.kind == first.kind && node.identifier == first.identifier)
+                    && let Some(node) = scheduled_nodes.get(&placement_runtime_node(first))
                 {
                     node.primary_node.clone()
                 } else {
@@ -11740,12 +11735,12 @@ mod tests {
         KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
         MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, ModelName, MqttIngestMode,
         MqttQos, MqttSession, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelSignal,
-        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName, RelayBranching, RelayName,
-        RetryPolicy, ScheduledNode, SchemaField, SchemaName, SignalingProtobufConfig,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-        SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName, WireSchemaField,
-        WireSchemaName,
+        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, PlacementRuntimeNode,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName,
+        RelayBranching, RelayName, RetryPolicy, ScheduledNode, SchemaField, SchemaName,
+        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName,
+        WireSchemaField, WireSchemaName,
     };
     use rstest::rstest;
 
@@ -13050,10 +13045,10 @@ mod tests {
         kind: ModelKind,
         identifier: &str,
     ) -> &'a ScheduledNode {
+        let identity = PlacementRuntimeNode::new(kind, named::<ModelName>(identifier));
         schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == kind && node.identifier.as_str() == identifier)
+            .get(&identity)
             .unwrap_or_else(|| panic!("missing scheduled node {kind:?}:{identifier}"))
     }
 
@@ -13360,8 +13355,10 @@ mod tests {
             );
         let scheduled_relay = schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == named("notifications"))
+            .get(&PlacementRuntimeNode::new(
+                ModelKind::Relay,
+                named("notifications"),
+            ))
             .expect("fixture schedule must include its materialized relay");
         assert_eq!(
             scheduled_relay.assigned_nodes,
@@ -13372,9 +13369,7 @@ mod tests {
         {
             let replica = Registry::open(&replica_path).expect("replica registry should open");
             replica
-                .synchronize_cluster_schedule(&ClusterSchedule {
-                    domains: vec![schedule],
-                })
+                .synchronize_cluster_schedule(&ClusterSchedule::from_iter([schedule]))
                 .expect("schedule models should synchronize");
         }
 
