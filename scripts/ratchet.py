@@ -290,7 +290,6 @@ def _generic_arguments(code: str, open_index: int) -> list[str] | None:
 
 
 _USE_ITEM = re.compile(r"\b(?:use|extern\s+crate)\b")
-_QUALIFIED_PATH = re.compile(r"<[^<>;{}]*\bas\b[^<>;{}]*>::")
 _AS_CAST = re.compile(r"\bas\b")
 
 
@@ -298,10 +297,39 @@ def count_as_casts(files: Sequence[RustFile]) -> list[Site]:
     sites: list[Site] = []
     for file in product_files(files):
         code = blank(file.product, _use_item_spans(file.product))
-        code = blank(code, (match.span() for match in _QUALIFIED_PATH.finditer(code)))
+        code = blank(code, _qualified_path_spans(code))
         for match in _AS_CAST.finditer(code):
             sites.append(file.site(match.start(), file.source_line(match.start())))
     return sites
+
+
+def _qualified_path_spans(code: str) -> Iterator[tuple[int, int]]:
+    """Yield the spans of `<Type as Trait>::` qualified paths.
+
+    The `as` in one of these names the trait an item resolves through, so it is not a cast. The
+    brackets nest — `<&[Token] as Input<'src>>::Span` — which a regular expression cannot follow,
+    so the scan tracks depth and keeps only an `as` written at the top level of the outer pair.
+    """
+
+    for start, character in enumerate(code):
+        if character != "<":
+            continue
+        depth = 0
+        qualified = False
+        for index in range(start, len(code)):
+            current = code[index]
+            if current == "<":
+                depth += 1
+            elif current == ">":
+                depth -= 1
+                if depth == 0:
+                    if qualified and code.startswith("::", index + 1):
+                        yield start, index + 2
+                    break
+            elif current in ";{}":
+                break
+            elif depth == 1 and _AS_CAST.match(code, index):
+                qualified = True
 
 
 def _use_item_spans(code: str) -> Iterator[tuple[int, int]]:

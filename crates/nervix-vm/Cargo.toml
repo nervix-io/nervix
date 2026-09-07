@@ -21,6 +21,7 @@ arrow-string = { workspace = true }
 chrono = { workspace = true }
 md5 = { workspace = true }
 meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 regex = { workspace = true }

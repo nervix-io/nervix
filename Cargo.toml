@@ -85,6 +85,7 @@ mongodb = { workspace = true }
 multer = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
+nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
@@ -213,6 +214,7 @@ required-features = ["benchmarks"]
 [workspace]
 members = [
   ".",
+  "crates/approx-into",
   "crates/benchmark",
   "crates/client-core",
   "crates/consensus",
@@ -239,6 +241,7 @@ license-file = "LICENSE.md"
 version = "0.1.0-dev"
 
 [workspace.lints.clippy]
+as-conversions = "deny"
 disallowed-types = "deny"
 
 [workspace.dependencies]
@@ -347,6 +350,7 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 ] }
 multer = "3"
 mysql_async = "0.36.2"
+nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }

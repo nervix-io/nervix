@@ -21,6 +21,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, TimeUnit};
 use arrow_select::{nullif::nullif, zip::zip};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto;
 use nervix_models::{CreateUdf, ParseAsType, Timestamp};
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
@@ -642,7 +643,9 @@ fn bool_library() -> impl roto::Registerable {
                 let mask = value.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 let truthy = truthy.0.0.0.as_ref();
                 let falsy = falsy.0.0.0.as_ref();
-                match zip(mask, &truthy as &dyn Datum, &falsy as &dyn Datum) {
+                let truthy_datum: &dyn Datum = &truthy;
+                let falsy_datum: &dyn Datum = &falsy;
+                match zip(mask, truthy_datum, falsy_datum) {
                     Ok(output) => Val(StringColumn(Column(output))),
                     Err(error) => {
                         fatal(format!("select failed: {error}"));
@@ -760,7 +763,7 @@ fn cast_library() -> impl roto::Registerable {
             fn cast_f64(value: Val<I64Column>) -> Val<F64Column> {
                 let input = value.0.0.0.as_any().downcast_ref::<Int64Array>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 Val(F64Column(Column(StdArc::new(Float64Array::from_iter(
-                    input.iter().map(|value| value.map(|value| value as f64))
+                    input.iter().map(|value| value.map(ApproxInto::approx_into))
                 )))))
             }
         }

@@ -34,8 +34,15 @@ impl InputBatch {
                 }));
             };
             let arrow_ipc = input.arrow_ipc_batch();
-            let start = arrow_ipc.as_ptr() as usize - bytes.as_ptr() as usize;
-            (start..start + arrow_ipc.len(), input.acks())
+            let start = arrow_ipc
+                .as_ptr()
+                .addr()
+                .checked_sub(bytes.as_ptr().addr())
+                .assured("the accessor returns a subslice of the envelope bytes");
+            let end = start
+                .checked_add(arrow_ipc.len())
+                .assured("the subslice ends inside the envelope bytes");
+            (start..end, input.acks())
         };
         let reader = StreamReader::try_new(&bytes[arrow.clone()], None)?;
         let batches = reader.collect::<Result<Vec<_>, _>>()?;
@@ -264,10 +271,8 @@ mod tests {
     #[test]
     fn output_envelope_encodes_shared_generated_pool() {
         let mut output = OutputEnvelope::new();
-        let bucket = output.add_generated_column(
-            Arc::new(StringArray::from(vec![Some("EVEN")])) as ArrayRef,
-            false,
-        );
+        let bucket =
+            output.add_generated_column(Arc::new(StringArray::from(vec![Some("EVEN")])), false);
         output.add_route(
             "enriched_events",
             vec![

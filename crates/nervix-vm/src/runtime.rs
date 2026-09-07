@@ -43,6 +43,7 @@ use arrow_string::like::{
 };
 use chrono::DateTime;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 use regex::Regex;
@@ -943,7 +944,9 @@ impl Instruction {
                 let previous = typed_array_to_array_ref(previous);
                 let input = input.as_ref();
                 let previous = previous.as_ref();
-                let output = zip(&success, &input as &dyn Datum, &previous as &dyn Datum)
+                let success_input: &dyn Datum = &input;
+                let success_previous: &dyn Datum = &previous;
+                let output = zip(&success, success_input, success_previous)
                     .map_err(|error| arrow_kernel_error("assignment fallback failed", error))?;
                 registers.set_array(*dst, array_ref_to_typed_array(output)?)
             }
@@ -1055,12 +1058,11 @@ impl Instruction {
                     let mask = registers.boolean(arm.mask)?;
                     let value = typed_array_to_array_ref(registers.read_array(arm.value)?);
                     let fallback = typed_array_to_array_ref(output);
-                    let selected = zip(
-                        mask,
-                        &value.as_ref() as &dyn Datum,
-                        &fallback.as_ref() as &dyn Datum,
-                    )
-                    .map_err(|error| arrow_kernel_error("conditional selection failed", error))?;
+                    let value_datum: &dyn Datum = &value.as_ref();
+                    let fallback_datum: &dyn Datum = &fallback.as_ref();
+                    let selected = zip(mask, value_datum, fallback_datum).map_err(|error| {
+                        arrow_kernel_error("conditional selection failed", error)
+                    })?;
                     output = array_ref_to_typed_array(selected)?;
                 }
                 registers.set_array(*dst, output)
@@ -1421,8 +1423,8 @@ fn try_execute_numeric_kernel(
     right: &dyn Array,
     op: BinaryOp,
 ) -> Option<ArrayRef> {
-    let left = &left as &dyn Datum;
-    let right = &right as &dyn Datum;
+    let left: &dyn Datum = &left;
+    let right: &dyn Datum = &right;
     match op {
         BinaryOp::Add => add(left, right).ok(),
         BinaryOp::Sub => sub(left, right).ok(),
@@ -1502,7 +1504,9 @@ fn execute_coalesce_arrow(inputs: &[TypedArray]) -> Result<TypedArray, RuntimeEr
             .map_err(|error| arrow_kernel_error("coalesce is_null kernel failed", error))?;
         let truthy = typed_array_as_array(input);
         let falsy = result.as_ref();
-        result = zip(&mask, &truthy as &dyn Datum, &falsy as &dyn Datum)
+        let truthy_datum: &dyn Datum = &truthy;
+        let falsy_datum: &dyn Datum = &falsy;
+        result = zip(&mask, truthy_datum, falsy_datum)
             .map_err(|error| arrow_kernel_error("coalesce zip kernel failed", error))?;
     }
     array_ref_to_typed_array(result)
@@ -1925,8 +1929,8 @@ fn compare_with_arrow_ord(
     op: BinaryOp,
     context: &str,
 ) -> Result<BooleanArray, RuntimeError> {
-    let left = &left as &dyn Datum;
-    let right = &right as &dyn Datum;
+    let left: &dyn Datum = &left;
+    let right: &dyn Datum = &right;
     match op {
         BinaryOp::Eq => eq(left, right)
             .map_err(|error| arrow_kernel_error(&format!("{context} eq kernel failed"), error)),
@@ -1952,8 +1956,8 @@ fn compare_with_arrow_ord(
 }
 
 fn execute_nullif_arrow(left: &dyn Array, right: &dyn Array) -> Result<TypedArray, RuntimeError> {
-    let left_datum = &left as &dyn Datum;
-    let right_datum = &right as &dyn Datum;
+    let left_datum: &dyn Datum = &left;
+    let right_datum: &dyn Datum = &right;
     let predicate = eq(left_datum, right_datum)
         .map_err(|error| arrow_kernel_error("nullif eq kernel failed", error))?;
     let output = nullif(left, &predicate)
@@ -2560,8 +2564,8 @@ define_checked_abs!(
 
 fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span) -> Float32Array {
     let zero = Float32Array::new_scalar(0.0);
-    let input_datum = input as &dyn Datum;
-    let zero_datum = &zero as &dyn Datum;
+    let input_datum: &dyn Datum = input;
+    let zero_datum: &dyn Datum = &zero;
     let negative = lt(input_datum, zero_datum).assured(
         "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
          else",
@@ -2571,7 +2575,8 @@ fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span)
          else",
     );
     let negated = negated.as_ref();
-    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum).verified(
+    let negated_datum: &dyn Datum = &negated;
+    let zipped = zip(&negative, negated_datum, input_datum).verified(
         "the kernel returns an array of the operand's own type, which this mapping covers",
     );
     let TypedArray::Float32(output) = array_ref_to_typed_array(zipped).verified(
@@ -2589,8 +2594,8 @@ fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span)
 
 fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span) -> Float64Array {
     let zero = Float64Array::new_scalar(0.0);
-    let input_datum = input as &dyn Datum;
-    let zero_datum = &zero as &dyn Datum;
+    let input_datum: &dyn Datum = input;
+    let zero_datum: &dyn Datum = &zero;
     let negative = lt(input_datum, zero_datum).assured(
         "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
          else",
@@ -2600,7 +2605,8 @@ fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span)
          else",
     );
     let negated = negated.as_ref();
-    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum).verified(
+    let negated_datum: &dyn Datum = &negated;
+    let zipped = zip(&negative, negated_datum, input_datum).verified(
         "the kernel returns an array of the operand's own type, which this mapping covers",
     );
     let TypedArray::Float64(output) = array_ref_to_typed_array(zipped).verified(
@@ -2672,7 +2678,7 @@ fn execute_ascii(input: &StringArray) -> Int64Array {
                 .value(row)
                 .chars()
                 .next()
-                .map(|ch| ch as i64)
+                .map(|ch| i64::from(u32::from(ch)))
                 .unwrap_or(0);
             builder.append_value(value);
         }
@@ -2772,15 +2778,15 @@ fn execute_unary_math_f64(
         };
     }
     match input {
-        TypedArray::UInt8(array) => execute!(array, |value| value as f64),
-        TypedArray::Int8(array) => execute!(array, |value| value as f64),
-        TypedArray::UInt16(array) => execute!(array, |value| value as f64),
-        TypedArray::Int16(array) => execute!(array, |value| value as f64),
-        TypedArray::UInt32(array) => execute!(array, |value| value as f64),
-        TypedArray::Int32(array) => execute!(array, |value| value as f64),
-        TypedArray::UInt64(array) => execute!(array, |value| value as f64),
-        TypedArray::Int64(array) => execute!(array, |value| value as f64),
-        TypedArray::Float32(array) => execute!(array, |value| value as f64),
+        TypedArray::UInt8(array) => execute!(array, f64::from),
+        TypedArray::Int8(array) => execute!(array, f64::from),
+        TypedArray::UInt16(array) => execute!(array, f64::from),
+        TypedArray::Int16(array) => execute!(array, f64::from),
+        TypedArray::UInt32(array) => execute!(array, f64::from),
+        TypedArray::Int32(array) => execute!(array, f64::from),
+        TypedArray::UInt64(array) => execute!(array, |value| value.approx_into()),
+        TypedArray::Int64(array) => execute!(array, |value| value.approx_into()),
+        TypedArray::Float32(array) => execute!(array, f64::from),
         TypedArray::Float64(array) => execute!(array, |value| value),
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
@@ -3533,25 +3539,25 @@ fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
             (!array.is_null(row)).then(|| u64::from(array.value(row)))
         }),
         TypedArray::Int8(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| u64::from(array.value(row) as u8))
+            (!array.is_null(row)).then(|| u64::from(array.value(row).cast_unsigned()))
         }),
         TypedArray::UInt16(array) => execute_to_hex_values(array.len(), |row| {
             (!array.is_null(row)).then(|| u64::from(array.value(row)))
         }),
         TypedArray::Int16(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| u64::from(array.value(row) as u16))
+            (!array.is_null(row)).then(|| u64::from(array.value(row).cast_unsigned()))
         }),
         TypedArray::UInt32(array) => execute_to_hex_values(array.len(), |row| {
             (!array.is_null(row)).then(|| u64::from(array.value(row)))
         }),
         TypedArray::Int32(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| u64::from(array.value(row) as u32))
+            (!array.is_null(row)).then(|| u64::from(array.value(row).cast_unsigned()))
         }),
         TypedArray::UInt64(array) => execute_to_hex_values(array.len(), |row| {
             (!array.is_null(row)).then(|| array.value(row))
         }),
         TypedArray::Int64(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| array.value(row) as u64)
+            (!array.is_null(row)).then(|| array.value(row).cast_unsigned())
         }),
         TypedArray::Float32(_)
         | TypedArray::Float64(_)
@@ -3648,15 +3654,21 @@ impl TranslateTable {
 
 fn numeric_value_as_f64(input: &TypedArray, row: usize) -> Result<Option<f64>, RuntimeError> {
     match input {
-        TypedArray::UInt8(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int8(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::UInt16(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int16(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::UInt32(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int32(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::UInt64(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int64(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Float32(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
+        TypedArray::UInt8(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::Int8(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::UInt16(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::Int16(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::UInt32(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::Int32(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::UInt64(array) => {
+            Ok((!array.is_null(row)).then(|| array.value(row).approx_into()))
+        }
+        TypedArray::Int64(array) => {
+            Ok((!array.is_null(row)).then(|| array.value(row).approx_into()))
+        }
+        TypedArray::Float32(array) => {
+            Ok((!array.is_null(row)).then(|| f64::from(array.value(row))))
+        }
         TypedArray::Float64(array) => Ok((!array.is_null(row)).then(|| array.value(row))),
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
@@ -4390,7 +4402,7 @@ mod tests {
 
     #[test]
     fn executes_array_builtins() {
-        let values = StdArc::new(
+        let values: ArrayRef = StdArc::new(
             ListArray::from_iter_primitive::<Int64Type, _, _>([
                 Some(vec![Some(99)]),
                 Some(vec![Some(1), None, Some(3)]),
@@ -4400,7 +4412,7 @@ mod tests {
             ])
             .slice(1, 3),
         );
-        let fixed = StdArc::new(
+        let fixed: ArrayRef = StdArc::new(
             FixedSizeListArray::from_iter_primitive::<Int64Type, _, _>(
                 [
                     Some(vec![Some(98), Some(99)]),
@@ -4437,10 +4449,7 @@ mod tests {
         );
         let batch = TypedBatch::try_new(
             schema,
-            vec![
-                TypedArray::Generic(values as ArrayRef),
-                TypedArray::Generic(fixed as ArrayRef),
-            ],
+            vec![TypedArray::Generic(values), TypedArray::Generic(fixed)],
         )
         .expect("batch must build");
 

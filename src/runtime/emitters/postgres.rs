@@ -244,7 +244,7 @@ impl PostgresEmitter {
         }
         let params = column_values
             .iter()
-            .map(|values| values as &(dyn ToSql + Sync))
+            .map(|values| -> &(dyn ToSql + Sync) { values })
             .collect::<Vec<_>>();
         let param_refs = (1..=columns.len())
             .map(|index| format!("${index}::text[]"))

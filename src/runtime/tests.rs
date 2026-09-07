@@ -1219,7 +1219,7 @@ async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
 fn window_advance_removes_step_messages() {
     let aggregate = window_aggregate("SET count = COUNT(input.latency)");
     let mut state = WindowProcessorState::new(&aggregate);
-    for sequence in 0..5 {
+    for sequence in 0_i64..5 {
         state
             .push_message(
                 &aggregate,
@@ -1228,11 +1228,11 @@ fn window_advance_removes_step_messages() {
                     key: None,
                     record: test_runtime_row([(
                         "latency".to_string(),
-                        RuntimeValue::I64(sequence as i64),
+                        RuntimeValue::I64(sequence),
                     )]),
                     acks: AckSet::empty(),
                 },
-                window_inputs(&aggregate, RuntimeValue::I64(sequence as i64)),
+                window_inputs(&aggregate, RuntimeValue::I64(sequence)),
             )
             .expect("aggregate state should accept message");
     }
@@ -7841,6 +7841,24 @@ fn prometheus_helpers_render_payload_and_validate_inputs() {
         super::ingestors::prometheus::PrometheusIngestor::timestamp_to_rfc3339(f64::INFINITY)
             .is_err()
     );
+}
+
+#[test]
+fn prometheus_query_time_keeps_every_nanosecond_digit() {
+    let render = |unix_nanos: i64| {
+        super::ingestors::prometheus::PrometheusIngestor::query_time_seconds(
+            Timestamp::from_unix_nanos(unix_nanos),
+        )
+    };
+
+    assert_eq!(render(1_788_765_595_123_456_789), "1788765595.123456789");
+    assert_ne!(
+        render(1_788_765_595_123_456_789),
+        render(1_788_765_595_123_456_790)
+    );
+    assert_eq!(render(0), "0.000000000");
+    assert_eq!(render(-500_000_000), "-0.500000000");
+    assert_eq!(render(-1_500_000_000), "-1.500000000");
 }
 
 #[test]

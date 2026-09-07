@@ -123,6 +123,10 @@ fn qualified() -> u8 {
     <u8 as Default>::default()
 }
 
+fn nested_qualified<'src>() -> <&'src [u8] as Widen<'src>>::Output {
+    <Reader<'src> as Label<'src, &'src [u8], Pattern<'src, u8>>>::expected()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

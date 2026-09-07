@@ -48,6 +48,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{
     Client as NervixClient, ConnectOptions as ClientConnectOptions,
     TlsRequirement as ClientTlsRequirement,
@@ -775,7 +776,7 @@ impl SessionSubscriptions {
                                         let event = SessionResponse {
                                             event: Some(proto::session_response::Event::Server(
                                                 ServerEvent {
-                                                    level: ServerEventLevel::Error as i32,
+                                                    level: i32::from(ServerEventLevel::Error),
                                                     message: format!(
                                                         "session subscription '{}' failed to expand relay batch: {}",
                                                         event_name, error
@@ -812,7 +813,7 @@ impl SessionSubscriptions {
                                                     let event = SessionResponse {
                                                         event: Some(proto::session_response::Event::Server(
                                                             ServerEvent {
-                                                                level: ServerEventLevel::Error as i32,
+                                                                level: i32::from(ServerEventLevel::Error),
                                                                 message: format!(
                                                                     "session subscription '{}' failed to load materialized side inputs: {}",
                                                                     event_name, error
@@ -840,7 +841,7 @@ impl SessionSubscriptions {
                                                 let event = SessionResponse {
                                                     event: Some(proto::session_response::Event::Server(
                                                         ServerEvent {
-                                                            level: ServerEventLevel::Error as i32,
+                                                            level: i32::from(ServerEventLevel::Error),
                                                             message: format!(
                                                                 "session subscription '{}' FILTER-MAP failed: {}",
                                                                 event_name, error
@@ -893,7 +894,7 @@ impl SessionSubscriptions {
                                 let event = SessionResponse {
                                     event: Some(proto::session_response::Event::Server(
                                         ServerEvent {
-                                            level: ServerEventLevel::Error as i32,
+                                            level: i32::from(ServerEventLevel::Error),
                                             message: format!(
                                                 "session subscription '{}' was dropped because \
                                                  relay '{}' in domain '{}' was rebuilt after a \
@@ -1144,7 +1145,7 @@ fn subscription_sample_passes(batch_sample_rate: Option<f64>, message: &RelayMes
     let hash = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&hash.as_bytes()[..8]);
-    let draw = u64::from_le_bytes(bytes) as f64 / u64::MAX as f64;
+    let draw = u64::from_le_bytes(bytes).approx_into::<f64>() / u64::MAX.approx_into::<f64>();
     draw < rate
 }
 
@@ -2378,7 +2379,7 @@ where
 fn web_console_server_error_response(message: String) -> SessionResponse {
     SessionResponse {
         event: Some(proto::session_response::Event::Server(ServerEvent {
-            level: ServerEventLevel::Error as i32,
+            level: i32::from(ServerEventLevel::Error),
             message,
         })),
     }
@@ -2469,14 +2470,12 @@ async fn build_web_console_upload_archive(
         )
     })?;
     let archive_path = archive.into_temp_path();
-    let file = File::create(<TempPath as AsRef<Path>>::as_ref(&archive_path))
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open temporary upload archive".to_string(),
-            )
-        })?;
+    let file = File::create(&archive_path).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to open temporary upload archive".to_string(),
+        )
+    })?;
     write_web_console_upload_archive(directory, file)
         .await
         .map_err(|message| {
@@ -2490,14 +2489,12 @@ async fn build_web_console_upload_archive(
         })?;
 
     let mut hasher = Hasher::new();
-    let mut file = File::open(<TempPath as AsRef<Path>>::as_ref(&archive_path))
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to read temporary upload archive".to_string(),
-            )
-        })?;
+    let mut file = File::open(&archive_path).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read temporary upload archive".to_string(),
+        )
+    })?;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         tokio::task::consume_budget().await;
@@ -4022,7 +4019,7 @@ impl SessionService for SessionServiceImpl {
                             Ok(RuntimeEvent::Error(message)) => {
                                 let response = SessionResponse {
                                     event: Some(proto::session_response::Event::Server(ServerEvent {
-                                        level: ServerEventLevel::Error as i32,
+                                        level: i32::from(ServerEventLevel::Error),
                                         message,
                                     })),
                                 };
@@ -4075,7 +4072,7 @@ impl SessionService for SessionServiceImpl {
                 message: "resource uploads must be sent to the cluster leader".to_string(),
                 version: 0,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::NotLeader as i32,
+                kind: i32::from(CommandResultKind::NotLeader),
                 leader: leader.map_or_else(String::new, |leader| leader.to_string()),
                 leader_grpc_uri,
             }));
@@ -4113,7 +4110,7 @@ impl SessionService for SessionServiceImpl {
                 message: format!("resource '{}' does not exist", identifier.as_str()),
                 version: 0,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
             }));
@@ -4122,7 +4119,7 @@ impl SessionService for SessionServiceImpl {
         let temp_archive = tempfile::NamedTempFile::new()
             .map_err(|_| Status::internal("failed to create temporary upload archive"))?;
         let temp_path = temp_archive.into_temp_path();
-        let mut file = File::create(<TempPath as AsRef<std::path::Path>>::as_ref(&temp_path))
+        let mut file = File::create(&temp_path)
             .await
             .map_err(|_| Status::internal("failed to open temporary upload archive"))?;
         let mut hasher = Hasher::new();
@@ -4156,7 +4153,7 @@ impl SessionService for SessionServiceImpl {
                 ),
                 version: 0,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
             }));
@@ -4167,12 +4164,7 @@ impl SessionService for SessionServiceImpl {
             encode_hex(hash.as_bytes())
         };
         match self
-            .install_uploaded_resource_archive(
-                &domain,
-                identifier,
-                <TempPath as AsRef<std::path::Path>>::as_ref(&temp_path),
-                root_checksum,
-            )
+            .install_uploaded_resource_archive(&domain, identifier, &temp_path, root_checksum)
             .await
         {
             Ok(version) => Ok(Response::new(UploadResourceResponse {
@@ -4180,7 +4172,7 @@ impl SessionService for SessionServiceImpl {
                 message: format!("uploaded resource version {version}"),
                 version,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Ok as i32,
+                kind: i32::from(CommandResultKind::Ok),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
             })),
@@ -4200,9 +4192,9 @@ impl SessionService for SessionServiceImpl {
                     _ => String::new(),
                 };
                 let kind = if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                    CommandResultKind::NotLeader as i32
+                    i32::from(CommandResultKind::NotLeader)
                 } else {
-                    CommandResultKind::Error as i32
+                    i32::from(CommandResultKind::Error)
                 };
                 Ok(Response::new(UploadResourceResponse {
                     success: false,
@@ -4345,7 +4337,7 @@ impl SessionServiceImpl {
 
     fn broadcast_error(&self, message: impl Into<String>) {
         let _ = self.inner.events.send(ServerEvent {
-            level: ServerEventLevel::Error as i32,
+            level: i32::from(ServerEventLevel::Error),
             message: message.into(),
         });
     }
@@ -4854,7 +4846,7 @@ impl SessionServiceImpl {
                 .resource_store
                 .install_from_archive_path(
                     resource.id.clone(),
-                    <TempPath as AsRef<std::path::Path>>::as_ref(&archive.path),
+                    &archive.path,
                     archive.root_checksum.clone(),
                     resource.created_by_node.clone(),
                     resource.created_at,
@@ -5347,7 +5339,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5360,7 +5352,7 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5410,7 +5402,7 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5426,7 +5418,7 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5452,7 +5444,7 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5476,7 +5468,7 @@ impl SessionServiceImpl {
                             span_end: 0,
                         }],
                         message: error.to_string(),
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -5512,7 +5504,7 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5527,7 +5519,7 @@ impl SessionServiceImpl {
                             span_end: 0,
                         }],
                         message,
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -5579,7 +5571,7 @@ impl SessionServiceImpl {
             success: true,
             message: lines.join("\n"),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             ..Default::default()
         }
     }
@@ -8177,14 +8169,14 @@ impl SessionServiceImpl {
             .into_iter()
             .map(|value| ApiSuggestion {
                 value,
-                kind: SuggestionKind::Text as i32,
+                kind: i32::from(SuggestionKind::Text),
             })
             .collect::<Vec<_>>();
 
         if let Some(fragment) = upload_resource_path_fragment(&req.input, cursor) {
             response_suggestions.push(ApiSuggestion {
                 value: fragment.to_string(),
-                kind: SuggestionKind::LocalDirectoryLookup as i32,
+                kind: i32::from(SuggestionKind::LocalDirectoryLookup),
             });
         }
 
@@ -8492,7 +8484,7 @@ impl SessionServiceImpl {
             success: true,
             message: command_results_message(&results),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             results,
             transaction,
             ..Default::default()
@@ -9668,7 +9660,7 @@ impl SessionServiceImpl {
             success: true,
             message: command_results_message(&results),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             results,
             ..Default::default()
         }
@@ -10016,7 +10008,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: u32::try_from(query.len()).unwrap_or(0),
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -10311,7 +10303,7 @@ impl SessionServiceImpl {
                                 span_start: 0,
                                 span_end: u32::try_from(query.len()).unwrap_or(0),
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -10736,7 +10728,7 @@ impl SessionServiceImpl {
                                 span_start: u32::try_from(name_span.start).unwrap_or(0),
                                 span_end: u32::try_from(name_span.end).unwrap_or(0),
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -10749,7 +10741,7 @@ impl SessionServiceImpl {
                                 span_start: 0,
                                 span_end: 0,
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -10768,7 +10760,7 @@ impl SessionServiceImpl {
                                 span_start: 0,
                                 span_end: 0,
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -10778,7 +10770,7 @@ impl SessionServiceImpl {
                     success: true,
                     message: canonical,
                     diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
+                    kind: i32::from(CommandResultKind::Ok),
                     ..Default::default()
                 }
             }
@@ -10804,7 +10796,7 @@ impl SessionServiceImpl {
                 success: true,
                 message: render_cluster_status(&self.inner.cluster, &self.inner.consensus).await,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Ok as i32,
+                kind: i32::from(CommandResultKind::Ok),
                 ..Default::default()
             },
             Statement::ShowTransactions(_) => self.show_transactions().await,
@@ -11079,7 +11071,7 @@ impl SessionServiceImpl {
         *active_domain = Some(domain.clone());
         Ok(SessionResponse {
             event: Some(proto::session_response::Event::Server(ServerEvent {
-                level: ServerEventLevel::Info as i32,
+                level: i32::from(ServerEventLevel::Info),
                 message: format!("using domain '{}'", domain.as_str()),
             })),
         })
@@ -14063,7 +14055,7 @@ impl SessionServiceImpl {
                     span_start: 0,
                     span_end: 0,
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             };
         }
@@ -14083,7 +14075,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -14114,7 +14106,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -14127,7 +14119,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -14141,7 +14133,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -14172,7 +14164,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -14193,7 +14185,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -14237,7 +14229,7 @@ impl SessionServiceImpl {
                                 span_start: 0,
                                 span_end: 0,
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -14261,7 +14253,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -14274,7 +14266,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -14295,7 +14287,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -14332,7 +14324,7 @@ impl SessionServiceImpl {
                 domain.as_str()
             ),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             ..Default::default()
         }
     }
@@ -14356,7 +14348,7 @@ impl SessionServiceImpl {
                         subscription_domain.as_str()
                     ),
                     diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
+                    kind: i32::from(CommandResultKind::Ok),
                     ..Default::default()
                 }
             }
@@ -14371,7 +14363,7 @@ impl SessionServiceImpl {
                     span_start: 0,
                     span_end: 0,
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             },
         }
@@ -14396,7 +14388,7 @@ impl SessionTransactionBindingError {
         let detached = matches!(self, Self::Detached { .. });
         let mut result = command_error(self.to_string());
         if detached {
-            result.kind = CommandResultKind::TransactionDetached as i32;
+            result.kind = i32::from(CommandResultKind::TransactionDetached);
         }
         result
     }
@@ -16004,9 +15996,12 @@ fn logical_timestamp_at_wall_time(
         .signed_duration_since(clock.wall_started_at.into_datetime())
         .to_std()
         .unwrap_or(Duration::ZERO);
-    let progressed_nanos = ((elapsed.as_nanos() as f64) * time_rate)
+    // The rate is finite and positive, so the scaled span can only leave the nanosecond range at
+    // the far end, where a clock that has run past it pins to the end of the range.
+    let progressed_nanos = (elapsed.as_nanos().approx_into::<f64>() * time_rate)
         .floor()
-        .clamp(0.0, i64::MAX as f64) as i64;
+        .checked_approx_into()
+        .unwrap_or(i64::MAX);
     clock
         .logical_start
         .into_datetime()
@@ -16028,7 +16023,7 @@ fn command_ok_with_state(message: String, already_existed: bool) -> CommandResul
         success: true,
         message,
         diagnostics: Vec::new(),
-        kind: CommandResultKind::Ok as i32,
+        kind: i32::from(CommandResultKind::Ok),
         already_existed,
         ..Default::default()
     }
@@ -16062,12 +16057,12 @@ fn command_batch_result(
             .map(|result| result.diagnostics.clone())
             .unwrap_or_default(),
         kind: if success {
-            CommandResultKind::Ok as i32
+            i32::from(CommandResultKind::Ok)
         } else {
             previous_results
                 .last()
                 .map(|result| result.kind)
-                .unwrap_or(CommandResultKind::Error as i32)
+                .unwrap_or(i32::from(CommandResultKind::Error))
         },
         results: previous_results,
         transaction,
@@ -16117,7 +16112,7 @@ fn model_mutation_success_result(
             success: true,
             message,
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             ..Default::default()
         });
     }
@@ -16134,7 +16129,7 @@ fn model_mutation_success_result(
         success: true,
         message: command_results_message(&results),
         diagnostics: Vec::new(),
-        kind: CommandResultKind::Ok as i32,
+        kind: i32::from(CommandResultKind::Ok),
         results,
         ..Default::default()
     }
@@ -16149,7 +16144,7 @@ fn command_error(message: String) -> CommandResult {
             span_end: 0,
         }],
         message,
-        kind: CommandResultKind::Error as i32,
+        kind: i32::from(CommandResultKind::Error),
         ..Default::default()
     }
 }
@@ -16205,7 +16200,7 @@ fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStat
     ApiTransactionStatus {
         id: transaction.id.clone(),
         domain: transaction.domain.to_string(),
-        state: state as i32,
+        state: i32::from(state),
         pending_count: transaction.pending_statement_count().arch_into(),
         completed_count: transaction.completed_statement_count().arch_into(),
         total_count: transaction.statement_count.arch_into(),
@@ -16284,9 +16279,9 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
         message,
         diagnostics,
         kind: if success {
-            CommandResultKind::Ok as i32
+            i32::from(CommandResultKind::Ok)
         } else {
-            CommandResultKind::Error as i32
+            i32::from(CommandResultKind::Error)
         },
         ..Default::default()
     };
@@ -16369,7 +16364,7 @@ async fn fetch_resource_archive(
     let temp_archive = tempfile::NamedTempFile::new()
         .map_err(|error| format!("failed to create temporary resource archive: {error}"))?;
     let temp_path = temp_archive.into_temp_path();
-    let mut file = File::create(<TempPath as AsRef<std::path::Path>>::as_ref(&temp_path))
+    let mut file = File::create(&temp_path)
         .await
         .map_err(|error| format!("failed to open temporary resource archive: {error}"))?;
     let mut hasher = Hasher::new();
@@ -16424,7 +16419,7 @@ fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult 
         success: false,
         message: kind.to_string(),
         diagnostics: diagnostics.iter().map(map_diagnostic).collect(),
-        kind: CommandResultKind::Error as i32,
+        kind: i32::from(CommandResultKind::Error),
         ..Default::default()
     }
 }
@@ -16448,7 +16443,7 @@ impl SessionServiceImpl {
 
         Some(SessionResponse {
             event: Some(proto::session_response::Event::Server(ServerEvent {
-                level: ServerEventLevel::Info as i32,
+                level: i32::from(ServerEventLevel::Info),
                 message: format!(
                     "connected to leader '{}'",
                     self.inner.consensus.local_node_id()
@@ -16681,7 +16676,7 @@ impl SessionServiceImpl {
                 span_start: 0,
                 span_end: u32::try_from(query.len()).unwrap_or(0),
             }],
-            kind: CommandResultKind::NotLeader as i32,
+            kind: i32::from(CommandResultKind::NotLeader),
             leader: leader.map_or_else(String::new, |leader| leader.to_string()),
             leader_grpc_uri,
             leader_web_console_uri,
@@ -16745,7 +16740,7 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
@@ -16762,7 +16757,7 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
@@ -16779,7 +16774,7 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
@@ -16796,7 +16791,7 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
@@ -16808,7 +16803,7 @@ fn create_registry_error_response(
                 span_start: 0,
                 span_end: 0,
             }],
-            kind: CommandResultKind::Error as i32,
+            kind: i32::from(CommandResultKind::Error),
             ..Default::default()
         },
     }
@@ -17191,9 +17186,12 @@ fn decode_hex(input: &str) -> Option<Vec<u8>> {
     let bytes = input.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
-        let high = (bytes[index] as char).to_digit(16)?;
-        let low = (bytes[index + 1] as char).to_digit(16)?;
-        out.push(((high << 4) | low) as u8);
+        let high = char::from(bytes[index]).to_digit(16)?;
+        let low = char::from(bytes[index + 1]).to_digit(16)?;
+        out.push(
+            u8::try_from((high << 4) | low)
+                .verified("both nibbles are hex digits, so the packed byte stays below 256"),
+        );
         index += 2;
     }
     Some(out)
@@ -17446,9 +17444,12 @@ async fn run_domain_clock(
             .signed_duration_since(reached_logical.into_datetime())
             .to_std()
             .unwrap_or(Duration::ZERO);
-        let wait_nanos = ((remaining_logical.as_nanos() as f64) / time_rate)
+        // As above, only the far end of the range is reachable, and the sleep below caps the
+        // wait at its own polling cadence anyway.
+        let wait_nanos = (remaining_logical.as_nanos().approx_into::<f64>() / time_rate)
             .ceil()
-            .clamp(0.0, u64::MAX as f64) as u64;
+            .checked_approx_into()
+            .unwrap_or(u64::MAX);
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = sleep(Duration::from_nanos(wait_nanos.clamp(1_000_000, 250_000_000))) => {}
@@ -19283,7 +19284,7 @@ impl Application {
                     received = cluster_event_rx.recv() => match received {
                         Ok(message) => {
                             let _ = cluster_events.send(ServerEvent {
-                                level: ServerEventLevel::Info as i32,
+                                level: i32::from(ServerEventLevel::Info),
                                 message,
                             });
                         }
@@ -19304,7 +19305,7 @@ impl Application {
                     received = consensus_event_rx.recv() => match received {
                         Ok(message) => {
                             let _ = consensus_events.send(ServerEvent {
-                                level: ServerEventLevel::Info as i32,
+                                level: i32::from(ServerEventLevel::Info),
                                 message,
                             });
                         }
@@ -19976,7 +19977,8 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
         let grpc_addr = test_addr(
             64000u16
                 .checked_add(id)
@@ -21790,7 +21792,7 @@ mod tests {
         let Some(proto::session_response::Event::Server(event)) = response.event else {
             panic!("expected server error event");
         };
-        assert_eq!(event.level, ServerEventLevel::Error as i32);
+        assert_eq!(event.level, i32::from(ServerEventLevel::Error));
         assert!(
             event
                 .message
@@ -22481,7 +22483,7 @@ mod tests {
         );
         assert_eq!(
             attached.transaction.as_ref().map(|status| status.state),
-            Some(ApiTransactionState::Committed as i32)
+            Some(i32::from(ApiTransactionState::Committed))
         );
         assert!(attached.message.contains("finished with outcome COMMITTED"));
         assert_eq!(attached.results.len(), 1);
@@ -23089,7 +23091,8 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
         let grpc_addr = test_addr(
             51000u16
                 .checked_add(id)
@@ -23264,7 +23267,8 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
         let grpc_addr = test_addr(
             61000u16
                 .checked_add(id)
@@ -23428,7 +23432,8 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
         let grpc_addr = test_addr(
             61000u16
                 .checked_add(id)
@@ -23601,7 +23606,8 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
         let expected_leader = test_node_name(id);
         let grpc_addr = test_addr(
             61000u16

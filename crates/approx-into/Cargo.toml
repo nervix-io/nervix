@@ -1,0 +1,8 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-approx-into"
+version.workspace = true
+
+[lints]
+workspace = true

@@ -29,11 +29,11 @@ mod tests {
             ..Default::default()
         };
         let encoded = prost::bytes::Bytes::from(snapshot.encode_to_vec());
-        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_start = encoded.as_ptr().addr();
         let encoded_end = encoded_start + encoded.len();
 
         let decoded = DomainSnapshot::decode(encoded).expect("snapshot should decode");
-        let field_start = decoded.dataflow_graph.as_ptr() as usize;
+        let field_start = decoded.dataflow_graph.as_ptr().addr();
         let field_end = field_start + decoded.dataflow_graph.len();
 
         assert!(field_start >= encoded_start);

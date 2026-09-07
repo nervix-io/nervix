@@ -28,6 +28,7 @@ use arrow_select::{
 };
 use chrono::{DateTime, FixedOffset};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto;
 use nervix_models::{
     AvroType, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
     CreateWireSchema, JsonType, ModelName, ParseAsType, RemoteRuntimeElementValue,
@@ -1650,7 +1651,7 @@ impl RuntimeValue {
             Self::String(v) => JsonValue::String(v.clone()),
             Self::Datetime(v) => JsonValue::String(v.to_rfc3339()),
             Self::F32(v) => {
-                JsonValue::Number(JsonNumber::from_f64(v.into_inner() as f64).verified(
+                JsonValue::Number(JsonNumber::from_f64(f64::from(v.into_inner())).verified(
                     "the VM turns a non-finite float result into a row error, so a stored float \
                      is finite",
                 ))
@@ -2831,7 +2832,7 @@ fn append_json_value_to_arrow(
             }
         ),
         ParseAsType::F32 => {
-            append_primitive!(Float32Builder, value.as_f64().map(|value| value as f32))
+            append_primitive!(Float32Builder, value.as_f64().map(ApproxInto::approx_into))
         }
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
@@ -3403,7 +3404,7 @@ fn json_value_matches_wire_type(value: &JsonValue, ty: JsonType) -> bool {
 
 fn avro_to_i64(value: &AvroValue) -> Option<i64> {
     match value {
-        AvroValue::Int(v) => Some(*v as i64),
+        AvroValue::Int(v) => Some(i64::from(*v)),
         AvroValue::Long(v) => Some(*v),
         _ => None,
     }

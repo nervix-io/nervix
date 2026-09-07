@@ -933,8 +933,15 @@ impl WasmEnvelope {
                 let generated_arrow_ipc_batch = if generated.is_empty() {
                     Bytes::new()
                 } else {
-                    let offset = generated.as_ptr() as usize - bytes.as_ptr() as usize;
-                    bytes.slice(offset..offset + generated.len())
+                    let offset = generated
+                        .as_ptr()
+                        .addr()
+                        .checked_sub(bytes.as_ptr().addr())
+                        .assured("the accessor returns a subslice of the envelope bytes");
+                    let end = offset
+                        .checked_add(generated.len())
+                        .assured("the subslice ends inside the envelope bytes");
+                    bytes.slice(offset..end)
                 };
                 Ok(Self::Output {
                     generated_arrow_ipc_batch,
@@ -2207,9 +2214,9 @@ mod tests {
             panic!("expected borrowed input envelope");
         };
         assert_eq!(view.arrow_ipc_batch(), [0, 1, 2, 255]);
-        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_start = encoded.as_ptr().addr();
         let encoded_end = encoded_start + encoded.len();
-        assert!((encoded_start..encoded_end).contains(&(view.arrow_ipc_batch().as_ptr() as usize)));
+        assert!((encoded_start..encoded_end).contains(&view.arrow_ipc_batch().as_ptr().addr()));
     }
 
     #[test]
@@ -2334,11 +2341,11 @@ mod tests {
             panic!("expected borrowed output envelope");
         };
         assert_eq!(view.generated_arrow_ipc_batch(), generated_arrow_ipc_batch);
-        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_start = encoded.as_ptr().addr();
         let encoded_end = encoded_start + encoded.len();
         assert!(
             (encoded_start..encoded_end)
-                .contains(&(view.generated_arrow_ipc_batch().as_ptr() as usize))
+                .contains(&view.generated_arrow_ipc_batch().as_ptr().addr())
         );
         let WasmEnvelope::Output {
             generated_arrow_ipc_batch,
@@ -2347,9 +2354,7 @@ mod tests {
         else {
             panic!("expected owned output envelope");
         };
-        assert!(
-            (encoded_start..encoded_end).contains(&(generated_arrow_ipc_batch.as_ptr() as usize))
-        );
+        assert!((encoded_start..encoded_end).contains(&generated_arrow_ipc_batch.as_ptr().addr()));
     }
 
     #[test]

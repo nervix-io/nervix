@@ -708,7 +708,7 @@ impl ResolvedRun {
             .unwrap_or(benchmark.definition().load.warmup_seconds);
         ensure!(partitions > 0, "partition count must be positive");
         ensure!(
-            partitions <= i32::MAX as u32,
+            i32::try_from(partitions).is_ok(),
             "partition count exceeds Kafka's supported range"
         );
         ensure!(value_bytes > 0, "value byte count must be positive");

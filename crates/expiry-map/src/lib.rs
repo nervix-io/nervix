@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, fmt, hash::Hash};
+use std::{borrow::Borrow, fmt, hash::Hash, ptr};
 
 use ahash::HashMap;
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
@@ -19,7 +19,7 @@ impl<K> KeyRef<K> {
     fn from_key(key: &K) -> &Self {
         // SAFETY: `KeyRef<K>` is transparent over `K`, so the shared reference
         // has the same address, alignment, validity, and lifetime.
-        unsafe { &*(key as *const K).cast::<Self>() }
+        unsafe { &*ptr::from_ref(key).cast::<Self>() }
     }
 }
 
@@ -112,7 +112,7 @@ where
     pub fn remove_oldest(&mut self) -> Option<V> {
         let oldest = self.order.front().get()?;
         let key = oldest.key.clone();
-        let node_ptr = oldest as *const Entry<K, V>;
+        let node_ptr = ptr::from_ref(oldest);
         let (stored_key, node) = self
             .entries
             .remove_entry(KeyRef::from_key(key.as_ref()))
@@ -232,6 +232,7 @@ mod tests {
     };
 
     use ahash::HashMap;
+    use meticulous::ResultExt as _;
 
     use super::ExpiryMap;
 
@@ -349,10 +350,12 @@ mod tests {
             random = random
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
-            let key = ((random >> 32) % 257) as u16;
+            let key = u16::try_from((random >> 32) % 257)
+                .verified("the modulus above keeps the key below 257");
             match random & 3 {
                 0 => {
-                    let value = step as u32;
+                    let value = u32::try_from(step)
+                        .verified("the loop runs for a fixed number of steps below u32::MAX");
                     let expected = match values.entry(key) {
                         std::collections::hash_map::Entry::Vacant(slot) => {
                             slot.insert(value);

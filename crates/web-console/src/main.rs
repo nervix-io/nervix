@@ -11,6 +11,7 @@ use gloo_net::websocket::{
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
@@ -974,7 +975,7 @@ async fn wait_for_websocket_reconnect(delay: Duration) {
         if let Some(window) = web_sys::window() {
             let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                 &resolve,
-                delay.as_millis().min(i32::MAX as u128) as i32,
+                i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
             );
         } else {
             let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
@@ -2564,9 +2565,10 @@ struct GraphEdgeFocusRequest {
 fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<GraphEdgeFocusRequest> {
     let pointer_hit = if let Some(window) = web_sys::window()
         && let Some(document) = window.document()
-        && let Some(element) =
-            document.element_from_point(event.client_x() as f32, event.client_y() as f32)
-    {
+        && let Some(element) = document.element_from_point(
+            event.client_x().approx_into(),
+            event.client_y().approx_into(),
+        ) {
         graph_edge_hit_from_element(element)
     } else {
         None
@@ -2711,7 +2713,7 @@ fn GraphPanel(
             return "OFFLINE";
         }
         let age = freshness_now.get() - snapshot_observed_at.get();
-        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis() as f64 {
+        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis().approx_into::<f64>() {
             "LIVE"
         } else {
             "STALE"
@@ -2853,7 +2855,13 @@ fn GraphPanel(
                                 graph_pan_y.set(0.0);
                             }
                         >
-                            {move || format!("{}%", (graph_zoom.get() * 100.0).round() as i32)}
+                            {move || {
+                                let percent: i32 = (graph_zoom.get() * 100.0)
+                                    .round()
+                                    .checked_approx_into()
+                                    .unwrap_or(i32::MAX);
+                                format!("{percent}%")
+                            }}
                         </button>
                         <button
                             type="button"
@@ -3515,11 +3523,15 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
         return view! { <span class="node-reconnect-timer empty"></span> }.into_any();
     };
     let started_at = js_sys::Date::now();
-    let deadline = started_at + wait_millis as f64;
+    let deadline = started_at + wait_millis.approx_into::<f64>();
     let remaining = RwSignal::new(wait_millis);
     let interval = set_interval_with_handle(
         move || {
-            let millis = (deadline - js_sys::Date::now()).max(0.0).round() as u64;
+            let millis = (deadline - js_sys::Date::now())
+                .max(0.0)
+                .round()
+                .checked_approx_into()
+                .unwrap_or(u64::MAX);
             remaining.set(millis);
         },
         Duration::from_millis(100),
@@ -3532,8 +3544,8 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
     });
     let label = move || format_timer_millis(remaining.get());
     let progress_style = move || {
-        let remaining = remaining.get() as f64;
-        let total = wait_millis.max(1) as f64;
+        let remaining = remaining.get().approx_into::<f64>();
+        let total = wait_millis.max(1).approx_into::<f64>();
         let progress = (1.0 - remaining / total).clamp(0.0, 1.0);
         format!("--timer-progress: {:.3};", progress)
     };
@@ -3548,7 +3560,7 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
 
 fn format_timer_millis(millis: u64) -> String {
     if millis >= 1_000 {
-        format!("{:.1}s", millis as f64 / 1_000.0)
+        format!("{:.1}s", millis.approx_into::<f64>() / 1_000.0)
     } else {
         format!("{millis}ms")
     }
@@ -4700,7 +4712,7 @@ impl GraphViewRelay {
             return 0.0;
         }
         let value = value.unwrap_or(0.0);
-        (value / capacity as f64 * 100.0).clamp(0.0, 100.0)
+        (value / capacity.approx_into::<f64>() * 100.0).clamp(0.0, 100.0)
     }
 
     fn buffer_capacity_data(&self) -> String {
@@ -4801,7 +4813,7 @@ impl GraphBranchGroup {
     /// The outline weight, which grows with the number of live branches so a busy group reads as
     /// heavier than a quiet one.
     fn outline_stroke_width(&self) -> String {
-        let count = self.active_branches.min(8) as f64;
+        let count = self.active_branches.min(8).approx_into::<f64>();
         format!("{:.2}", 1.0 + count * 0.35)
     }
 
@@ -5327,7 +5339,7 @@ mod tests {
         let lines = command_result_lines(
             nervix_proto::CommandResult {
                 success: true,
-                kind: nervix_proto::CommandResultKind::Ok as i32,
+                kind: i32::from(nervix_proto::CommandResultKind::Ok),
                 ..Default::default()
             },
             "CREATE DOMAIN quiet",
@@ -5341,7 +5353,7 @@ mod tests {
         let previous = nervix_proto::TransactionStatus {
             id: "tx-1".to_string(),
             domain: "tenant".to_string(),
-            state: nervix_proto::TransactionState::Open as i32,
+            state: i32::from(nervix_proto::TransactionState::Open),
             pending_count: 1,
             completed_count: 0,
             total_count: 1,
@@ -5362,7 +5374,7 @@ mod tests {
         ));
 
         let mut committing = previous.clone();
-        committing.state = nervix_proto::TransactionState::Committing as i32;
+        committing.state = i32::from(nervix_proto::TransactionState::Committing);
         assert!(transaction_operation_was_observed(
             Some(&previous),
             Some(&committing)

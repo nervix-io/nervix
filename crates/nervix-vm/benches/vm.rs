@@ -2,11 +2,12 @@ use std::sync::Arc as StdArc;
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, StringArray, types::Int64Type,
+    BooleanArray, Float64Array, Int64Array, ListArray, StringArray, types::Int64Type,
 };
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use meticulous::ResultExt as _;
+use nervix_approx_into::ApproxInto as _;
 use nervix_nspl::vm_program::parse_program;
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, TypedArray, TypedBatch,
@@ -105,13 +106,13 @@ fn nullable_cast_output_schema() -> StdArc<Schema> {
 
 fn float_batch(row_count: usize) -> TypedBatch {
     let left = Float64Array::from_iter(
-        (0..row_count).map(|row| (row % 17 != 0).then_some((row % 97) as f64 + 1.25)),
+        (0..row_count).map(|row| (row % 17 != 0).then_some((row % 97).approx_into::<f64>() + 1.25)),
     );
     let right = Float64Array::from_iter(
-        (0..row_count).map(|row| (row % 19 != 0).then_some((row % 13) as f64 + 0.5)),
+        (0..row_count).map(|row| (row % 19 != 0).then_some((row % 13).approx_into::<f64>() + 0.5)),
     );
     let divisor = Float64Array::from_iter(
-        (0..row_count).map(|row| (row % 23 != 0).then_some((row % 7) as f64 + 1.0)),
+        (0..row_count).map(|row| (row % 23 != 0).then_some((row % 7).approx_into::<f64>() + 1.0)),
     );
 
     TypedBatch::try_new(
@@ -237,7 +238,7 @@ fn list_batch(row_count: usize) -> TypedBatch {
     TypedBatch::try_new(
         list_schema(),
         vec![
-            TypedArray::Generic(StdArc::new(values) as ArrayRef),
+            TypedArray::Generic(StdArc::new(values)),
             TypedArray::Int64(index),
         ],
     )
@@ -298,7 +299,8 @@ fn long_tail_batch(row_count: usize) -> TypedBatch {
     let start = Int64Array::from_iter((0..row_count).map(|_| Some(3)));
     let length = Int64Array::from_iter((0..row_count).map(|_| Some(12)));
     let integer = Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row) + 1)));
-    let numeric = Float64Array::from_iter((0..row_count).map(|row| Some((row % 100) as f64)));
+    let numeric =
+        Float64Array::from_iter((0..row_count).map(|row| Some((row % 100).approx_into::<f64>())));
 
     TypedBatch::try_new(
         long_tail_schema(),

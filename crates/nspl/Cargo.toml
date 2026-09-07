@@ -19,6 +19,7 @@ chumsky = { workspace = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
 nonzero_ext = { workspace = true }
 sorted-vec = { workspace = true }

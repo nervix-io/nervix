@@ -6420,6 +6420,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
+name = "nervix-approx-into"
+version = "0.1.0-dev"
+
+[[package]]
 name = "nervix-benchmark"
 version = "0.1.0-dev"
 dependencies = [
@@ -6428,6 +6432,7 @@ dependencies = [
  "clap",
  "humantime",
  "meticulous",
+ "nervix-approx-into",
  "nervix-client-core",
  "nervix-models",
  "nervix-nspl",
@@ -6548,6 +6553,7 @@ dependencies = [
  "rkyv 0.8.18",
  "rustls",
  "rustls-pki-types",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6589,6 +6595,7 @@ dependencies = [
  "error-stack",
  "humantime",
  "meticulous",
+ "nervix-approx-into",
  "nervix-models",
  "nonzero_ext",
  "rstest",
@@ -6638,6 +6645,7 @@ dependencies = [
  "arrow-select",
  "fastrand",
  "meticulous",
+ "nervix-approx-into",
  "nervix-models",
  "nervix-nspl",
  "nervix-vm",
@@ -6714,6 +6722,7 @@ dependencies = [
  "mongodb",
  "multer",
  "mysql_async",
+ "nervix-approx-into",
  "nervix-client-core",
  "nervix-consensus",
  "nervix-dataflow-graph",
@@ -6823,6 +6832,7 @@ dependencies = [
  "criterion",
  "md5",
  "meticulous",
+ "nervix-approx-into",
  "nervix-models",
  "nervix-nspl",
  "regex",
@@ -6888,6 +6898,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "meticulous",
+ "nervix-approx-into",
  "nervix-dataflow-graph",
  "nervix-models",
  "nervix-nspl",

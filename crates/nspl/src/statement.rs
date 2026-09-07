@@ -381,7 +381,7 @@ mod tests {
         /// A bound whose floor is itself non-zero, so the generated value is too.
         fn bounded_nonzero_u64(&mut self, min: NonZeroU64, max: NonZeroU64) -> NonZeroU64 {
             let span = max.get() - min.get() + 1;
-            min.saturating_add(self.next_u8() as u64 % span)
+            min.saturating_add(u64::from(self.next_u8()) % span)
         }
 
         fn bounded_nonzero_usize(&mut self, min: NonZeroU64, max: NonZeroU64) -> NonZeroUsize {
@@ -413,11 +413,11 @@ mod tests {
             for i in 0..len {
                 let raw = self.next_u8();
                 let ch = if i == 0 {
-                    (b'a' + (raw % 26)) as char
+                    char::from(b'a' + (raw % 26))
                 } else {
                     match raw % 3 {
-                        0 => (b'a' + (raw % 26)) as char,
-                        1 => (b'0' + (raw % 10)) as char,
+                        0 => char::from(b'a' + (raw % 26)),
+                        1 => char::from(b'0' + (raw % 10)),
                         _ => '_',
                     }
                 };
@@ -435,8 +435,8 @@ mod tests {
             for _ in 0..len {
                 let b = self.next_u8();
                 let ch = match b % 7 {
-                    0 => (b'a' + (b % 26)) as char,
-                    1 => (b'0' + (b % 10)) as char,
+                    0 => char::from(b'a' + (b % 26)),
+                    1 => char::from(b'0' + (b % 10)),
                     2 => '.',
                     3 => ':',
                     4 => ',',
@@ -457,7 +457,10 @@ mod tests {
 
         if depth == 0 {
             return match g.next_u8() % 4 {
-                0 => Expression::Literal(Literal::I64(g.bounded_u64(0, 999) as i64)),
+                0 => Expression::Literal(Literal::I64(
+                    i64::try_from(g.bounded_u64(0, 999))
+                        .verified("the generator bounds this value at 999"),
+                )),
                 1 => Expression::Literal(Literal::Bool(g.bool())),
                 2 => Expression::Literal(Literal::Null),
                 // Prefixed so a generated name can never collide with a language keyword.

@@ -78,9 +78,9 @@ fn right_from_where_boundary_token(token: &Token) -> bool {
 fn side_from_clauses<'src>(
     side: Identifier,
 ) -> impl Parser<'src, &'src [Token], ProcessorInputs, extra::Err<ParseError<'src>>> + Clone {
-    let boundary = match side {
-        Identifier::Left => left_from_where_boundary_token as fn(&Token) -> bool,
-        Identifier::Right => right_from_where_boundary_token as fn(&Token) -> bool,
+    let boundary: fn(&Token) -> bool = match side {
+        Identifier::Left => left_from_where_boundary_token,
+        Identifier::Right => right_from_where_boundary_token,
         _ => unreachable!("correlator inputs expose only left and right sides"),
     };
     kw(side)

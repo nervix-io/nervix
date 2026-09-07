@@ -207,7 +207,7 @@ impl BenchmarkDefinition {
         if self.load.warmup_seconds == 0 {
             return Err("load.warmup_seconds must be positive".to_string());
         }
-        if self.load.partitions > i32::MAX as u32 {
+        if i32::try_from(self.load.partitions).is_err() {
             return Err("load.partitions exceeds Kafka's supported range".to_string());
         }
         if self.load.value_bytes == 0 {

@@ -5,6 +5,7 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -436,16 +437,12 @@ impl BenchmarkRuns {
         for (index, run) in self.runs.iter().enumerate() {
             let end_to_end = format!(
                 "{} msg/s",
-                format_count(run.report.end_to_end_messages_per_second.round() as u64)
+                format_rounded_count(run.report.end_to_end_messages_per_second)
             );
             let payload = format!("{:.2} MiB/s", run.report.end_to_end_payload_mib_per_second);
             let generation = format!(
                 "{} rec/s",
-                format_count(
-                    run.report
-                        .output_records_per_second_during_generation
-                        .round() as u64
-                )
+                format_rounded_count(run.report.output_records_per_second_during_generation)
             );
             let drain = format!("{:.3} s", run.report.drain_seconds);
             let parity = format!(
@@ -453,8 +450,8 @@ impl BenchmarkRuns {
                 format_count(run.report.input_messages),
                 format_count(run.report.output_records)
             );
-            let backlog_percentage = run.report.peak_backlog_messages as f64
-                / run.report.max_backlog_messages as f64
+            let backlog_percentage = run.report.peak_backlog_messages.approx_into::<f64>()
+                / run.report.max_backlog_messages.approx_into::<f64>()
                 * 100.0;
             let cap_marker = if run.report.saturated_backlog() {
                 "⚠️ "
@@ -737,12 +734,16 @@ fn validate_report(
             "generation and end-to-end durations must be positive".to_string(),
         ));
     }
-    if (report.target_duration_seconds - manifest.duration_seconds as f64).abs() > 0.000_001 {
+    if (report.target_duration_seconds - manifest.duration_seconds.approx_into::<f64>()).abs()
+        > 0.000_001
+    {
         return Err(invalid(
             "target duration does not match run.toml".to_string(),
         ));
     }
-    if (report.warmup_target_seconds - manifest.warmup_seconds as f64).abs() > 0.000_001 {
+    if (report.warmup_target_seconds - manifest.warmup_seconds.approx_into::<f64>()).abs()
+        > 0.000_001
+    {
         return Err(invalid(
             "warm-up target does not match run.toml".to_string(),
         ));
@@ -916,9 +917,20 @@ pub(crate) fn format_count(value: u64) -> String {
     formatted
 }
 
+/// Renders a measured rate as a grouped integer count.
+///
+/// A rate that has no integer value at all — a non-finite sample, or one past the `u64` range —
+/// renders as the unformatted float, so a report never claims a count it did not measure.
+pub(crate) fn format_rounded_count(value: f64) -> String {
+    match value.round().checked_approx_into() {
+        Some(count) => format_count(count),
+        None => value.to_string(),
+    }
+}
+
 fn format_metric_value(value: f64) -> String {
     if value.fract() == 0.0 {
-        format_count(value as u64)
+        format_rounded_count(value)
     } else {
         format_metric_decimal(value, 3)
             .trim_end_matches('0')

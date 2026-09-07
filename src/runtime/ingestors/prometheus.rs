@@ -237,7 +237,7 @@ impl PrometheusIngestor {
                             next_logical_query = current_logical
                                 .into_datetime()
                                 .checked_add_signed(TimeDelta::nanoseconds(
-                                    logical_interval_nanos.min(i64::MAX as u64) as i64,
+                                    i64::try_from(logical_interval_nanos).unwrap_or(i64::MAX),
                                 ))
                                 .map(Timestamp::from);
                             Duration::ZERO
@@ -420,8 +420,7 @@ impl PrometheusIngestor {
     ) -> Result<Vec<PrometheusVectorResult>, String> {
         let mut params = vec![("query".to_string(), query.to_string())];
         if let Some(query_time) = query_time {
-            let seconds = query_time.unix_nanos() as f64 / 1_000_000_000.0;
-            params.push(("time".to_string(), format!("{seconds:.9}")));
+            params.push(("time".to_string(), Self::query_time_seconds(query_time)));
         }
         let url = Self::query_url(addr, params)?;
         let response = client
@@ -451,6 +450,23 @@ impl PrometheusIngestor {
             ));
         }
         Ok(payload.data.result)
+    }
+
+    /// Renders an evaluation instant as the decimal number of seconds Prometheus expects.
+    ///
+    /// Nanosecond Unix time passed the `f64` mantissa in 1970, so the digits are laid out from the
+    /// integer. Routing them through a float would round the sub-microsecond ones away, and a
+    /// paced domain clock queries at instants that differ by less than that.
+    pub(in crate::runtime) fn query_time_seconds(query_time: Timestamp) -> String {
+        let unix_nanos = query_time.unix_nanos();
+        let seconds = unix_nanos / 1_000_000_000;
+        let fraction = (unix_nanos % 1_000_000_000).unsigned_abs();
+        let sign = if unix_nanos < 0 && seconds == 0 {
+            "-"
+        } else {
+            ""
+        };
+        format!("{sign}{seconds}.{fraction:09}")
     }
 
     pub(in crate::runtime) fn query_url(
@@ -494,8 +510,14 @@ impl PrometheusIngestor {
         if !timestamp.is_finite() {
             return Err(format!("invalid prometheus timestamp '{timestamp}'"));
         }
-        let secs = timestamp.trunc() as i64;
-        let nanos = ((timestamp.fract().abs()) * 1_000_000_000.0).round() as u32;
+        let secs: i64 = timestamp
+            .trunc()
+            .checked_approx_into()
+            .ok_or_else(|| format!("invalid prometheus timestamp '{timestamp}'"))?;
+        let nanos: u32 = (timestamp.fract().abs() * 1_000_000_000.0)
+            .round()
+            .checked_approx_into()
+            .verified("a fractional part scaled by a billion stays inside the u32 range");
         let datetime = Utc
             .timestamp_opt(secs, nanos.min(999_999_999))
             .single()

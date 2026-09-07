@@ -49,6 +49,7 @@ use mysql_async::{
     Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Pool as MySqlPool, SslOpts as MySqlSslOpts,
     prelude::Queryable as MySqlQueryable,
 };
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{Client, TransactionState as ClientTransactionState};
 #[cfg(feature = "testing")]
 use nervix_server::SchedulerMode;
@@ -3519,7 +3520,7 @@ fn avro_array_item_from_json(value: &serde_json::Value) -> (String, apache_avro:
     match value {
         serde_json::Value::Number(v) if v.as_f64().is_some() => (
             "float".to_string(),
-            AvroValue::Float(v.as_f64().expect("checked above") as f32),
+            AvroValue::Float(v.as_f64().expect("checked above").approx_into()),
         ),
         other => avro_field_from_json(other),
     }
@@ -12679,7 +12680,9 @@ async fn then_mongodb_collection_eventually_contains_document(
                 let user_id = match document.get("mongodb_user_id") {
                     Some(MongoDbBson::Int32(value)) => i64::from(*value),
                     Some(MongoDbBson::Int64(value)) => *value,
-                    Some(MongoDbBson::Double(value)) => *value as i64,
+                    Some(MongoDbBson::Double(value)) => {
+                        (*value).checked_approx_into().unwrap_or_default()
+                    }
                     _ => 0,
                 };
                 let action = document.get_str("mongodb_action").unwrap_or_default();
@@ -12776,16 +12779,14 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
         let mut command_sizes = Vec::with_capacity(profile_documents.len());
         for profile_document in &profile_documents {
             let size = match profile_document.get("ninserted") {
-                Some(MongoDbBson::Int32(value)) => usize::try_from(*value),
-                Some(MongoDbBson::Int64(value)) => usize::try_from(*value),
-                Some(MongoDbBson::Double(value))
-                    if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
-                {
-                    usize::try_from(*value as u64)
+                Some(MongoDbBson::Int32(value)) => usize::try_from(*value).ok(),
+                Some(MongoDbBson::Int64(value)) => usize::try_from(*value).ok(),
+                Some(MongoDbBson::Double(value)) if value.fract() == 0.0 => {
+                    (*value).checked_approx_into()
                 }
                 _ => continue,
             };
-            if let Ok(size) = size {
+            if let Some(size) = size {
                 command_sizes.push(size);
             }
         }
