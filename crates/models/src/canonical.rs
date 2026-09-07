@@ -25,22 +25,22 @@ use crate::{
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint, EmitSink,
     EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression,
-    FieldName, FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelName, MongoDbConfigEntry,
-    MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
-    MySqlConflictAction, NatsConfigEntry, NatsIngestMode, OtelConfigEntry, OtelMetricKind,
-    OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConfigEntry,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
-    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, QueueName, RabbitMqConfigEntry,
-    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RelayName,
-    ResourceName, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
-    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry,
-    SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName, UnaryOperator,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
-    ZeroMqIngestMode,
+    FieldName, FieldScope, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
+    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelName,
+    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
+    OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, QueueName,
+    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    RelayBranching, RelayName, ResourceName, RetryPolicy, RouteConstruction, S3ConfigEntry,
+    SchemaField, SentryConfigEntry, SignalingProtocolName, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode, Statement,
+    SubscriptionLiteral, TopicName, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode,
+    WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -1985,14 +1985,15 @@ fn materialized_relay_state_to_nspl(state: &MaterializedRelayState) -> &'static 
     }
 }
 
-fn flush_policy_to_nspl_with_max(policy: &str, max_batch_size: Option<&str>) -> String {
-    if policy.eq_ignore_ascii_case("IMMEDIATE") {
-        "FLUSH IMMEDIATE".to_string()
-    } else {
-        format!(
-            "FLUSH EACH {policy} MAX BATCH SIZE {}",
-            max_batch_size.unwrap_or("1MiB")
-        )
+impl FlushPolicy {
+    pub fn to_canonical_nspl(&self) -> String {
+        match self {
+            Self::Immediate => "FLUSH IMMEDIATE".to_string(),
+            Self::Each {
+                interval,
+                max_batch_size,
+            } => format!("FLUSH EACH {interval} MAX BATCH SIZE {max_batch_size}"),
+        }
     }
 }
 
@@ -2229,11 +2230,7 @@ impl CreateWindowProcessor {
 
 impl CreateEmitter {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let (flush_each, max_batch_size) = self.flush_policy();
-        let flush_policy = format!(
-            " {}",
-            flush_policy_to_nspl_with_max(flush_each, max_batch_size)
-        );
+        let flush_policy = format!(" {}", self.flush_policy.to_canonical_nspl());
         let commit_policy = self
             .sink
             .commit_policy()
@@ -2548,10 +2545,7 @@ fn processor_output_clause(output: &crate::ProcessorOutput) -> Result<Clause, Ca
         nested.push(Clause::line(output_branch_to_nspl(branch)?));
     }
     if let Some(policy) = &output.flush_policy {
-        nested.push(Clause::line(flush_policy_to_nspl_with_max(
-            &policy.flush_each,
-            policy.max_batch_size.as_deref(),
-        )));
+        nested.push(Clause::line(policy.to_canonical_nspl()));
     }
     nested.push(Clause::line(message_error_policy_to_nspl(
         &output.message_error_policy,
@@ -2567,12 +2561,7 @@ fn processor_output_to_nspl(output: &crate::ProcessorOutput) -> Result<String, C
     let flush = output
         .flush_policy
         .as_ref()
-        .map(|policy| {
-            format!(
-                " {}",
-                flush_policy_to_nspl_with_max(&policy.flush_each, policy.max_batch_size.as_deref(),)
-            )
-        })
+        .map(|policy| format!(" {}", policy.to_canonical_nspl()))
         .unwrap_or_default();
     let construction = route_construction_to_nspl(&output.construction)?;
     let construction = if construction.is_empty() {
@@ -2792,13 +2781,9 @@ fn alter_emitter_operation_to_nspl(
         AlterEmitterOperation::SetPublishingMode { mode } => {
             Ok(format!("SET MODE {}", mode.to_canonical_nspl()))
         }
-        AlterEmitterOperation::SetFlush {
-            flush_each,
-            max_batch_size,
-        } => Ok(format!(
-            "SET {}",
-            flush_policy_to_nspl_with_max(flush_each, max_batch_size.as_deref())
-        )),
+        AlterEmitterOperation::SetFlush { flush_policy } => {
+            Ok(format!("SET {}", flush_policy.to_canonical_nspl()))
+        }
         AlterEmitterOperation::SetCommit {
             commit_each,
             max_commit_size,
@@ -4076,14 +4061,14 @@ mod tests {
         CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
         CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor,
         CreateWireSchema, EmitSink, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-        ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, IngestSource,
-        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy,
-        Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
-        PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
-        SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        ErrorPolicies, Expression, FieldScope, FlushPolicy, GeneralErrorPolicy, HttpConfigEntry,
+        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal,
+        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
+        ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresValueMapping,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
+        RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
+        SchemaField, SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
         SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
         WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode, expression_to_nspl,
     };
@@ -4112,8 +4097,10 @@ mod tests {
     fn flushed_output(relay: &str, construction: Option<RouteConstruction>) -> ProcessorOutput {
         let mut output = ProcessorOutput::with_flush_policy(
             named(relay),
-            "100ms".to_string(),
-            Some("1MiB".to_string()),
+            FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
         );
         output.construction = construction.unwrap_or_default();
         output
@@ -5044,8 +5031,10 @@ mod tests {
                     .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
                 encode_using_codec: Some(named("orders_codec")),
                 sink: Box::new(sink),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 publishing_mode,
                 mode: AckMode::Attached,
                 error_policies: ErrorPolicies::handled_by_log(),
@@ -5088,10 +5077,11 @@ mod tests {
                     target: vec!["postgres_user_id".to_string()],
                 },
                 max_batch: nonzero!(500u64),
-                flush_each: "10s".to_string(),
             }),
-            flush_each: "10s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "10s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -5127,10 +5117,11 @@ mod tests {
                 ],
                 conflict_action: MySqlConflictAction::DoNothing,
                 max_batch: nonzero!(500u64),
-                flush_each: "10s".to_string(),
             }),
-            flush_each: "10s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "10s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -5173,10 +5164,11 @@ mod tests {
                     target: vec!["mongodb_user_id".to_string()],
                 },
                 max_batch: nonzero!(500u64),
-                flush_each: "10s".to_string(),
             }),
-            flush_each: "10s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "10s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),

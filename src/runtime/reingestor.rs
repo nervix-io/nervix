@@ -975,8 +975,7 @@ impl Runtime {
                                 domain,
                                 "reingestor output",
                                 &output.relay,
-                                &policy.flush_each,
-                                policy.max_batch_size.as_deref(),
+                                policy,
                             )
                         })
                         .transpose()?;
@@ -1642,7 +1641,10 @@ mod tests {
                     output_routes: with_inherit_all(ProcessorOutputs::single(named(
                         "tenant_orders",
                     )))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    })
                     .with_branch(branched_by("tenant_orders", &["tenant"])),
                     mode: AckMode::Attached,
                     filter_where: None,
@@ -1823,7 +1825,10 @@ mod tests {
                     name: reingestor.clone(),
                     from: ProcessorInputs::single(input_relay.clone()),
                     output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
-                        .with_flush_policy("10s".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "10s".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
                     mode: AckMode::Attached,
                     filter_where: None,
                     materialized_state: Vec::new(),

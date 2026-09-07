@@ -677,8 +677,7 @@ impl Runtime {
                     domain,
                     node_kind.as_str(),
                     node,
-                    &model.flush_each,
-                    model.max_batch_size.as_deref(),
+                    &model.flush_policy,
                 )
                 .map(Some)
                 .map_err(|error| error.to_string());
@@ -702,15 +701,9 @@ impl Runtime {
         let Some(policy) = output.flush_policy.as_ref() else {
             return Ok(None);
         };
-        Self::parse_runtime_node_flush_policy(
-            domain,
-            node_kind.as_str(),
-            node,
-            &policy.flush_each,
-            policy.max_batch_size.as_deref(),
-        )
-        .map(Some)
-        .map_err(|error| error.to_string())
+        Self::parse_runtime_node_flush_policy(domain, node_kind.as_str(), node, policy)
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
 
     pub(super) fn message_error_compile_schemas(

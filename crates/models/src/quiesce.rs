@@ -1311,8 +1311,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         from: base_from,
         encode_using_codec: base_codec,
         sink: base_sink,
-        flush_each: base_flush_each,
-        max_batch_size: base_max_batch_size,
+        flush_policy: base_flush_policy,
         error_policies: base_error_policies,
         publishing_mode: base_publishing_mode,
         mode: base_mode,
@@ -1324,8 +1323,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         from: candidate_from,
         encode_using_codec: candidate_codec,
         sink: candidate_sink,
-        flush_each: candidate_flush_each,
-        max_batch_size: candidate_max_batch_size,
+        flush_policy: candidate_flush_policy,
         error_policies: candidate_error_policies,
         publishing_mode: candidate_publishing_mode,
         mode: candidate_mode,
@@ -1371,7 +1369,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_materialized_state != candidate_materialized_state {
         changes.push(ModelChangeAspect::EmitterMaterializedState);
     }
-    if base_flush_each != candidate_flush_each || base_max_batch_size != candidate_max_batch_size {
+    if base_flush_policy != candidate_flush_policy {
         changes.push_dynamic(
             ModelChangeAspect::EmitterFlushPolicy,
             DynamicModelUpdate::Emitter {
@@ -1490,14 +1488,12 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 table: base_table,
                 values: base_values,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::ClickHouse {
                 client: _,
                 table: candidate_table,
                 values: candidate_values,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_table == candidate_table
@@ -1511,7 +1507,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 conflict_action: base_conflict,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::Postgres {
                 client: _,
@@ -1519,7 +1514,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 conflict_action: candidate_conflict,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_table == candidate_table
@@ -1534,7 +1528,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 conflict_action: base_conflict,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::MySql {
                 client: _,
@@ -1542,7 +1535,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 conflict_action: candidate_conflict,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_table == candidate_table
@@ -1557,7 +1549,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 conflict_action: base_conflict,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::MongoDb {
                 client: _,
@@ -1565,7 +1556,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 conflict_action: candidate_conflict,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_collection == candidate_collection
@@ -1581,8 +1571,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 location: base_location,
                 catalog: base_catalog,
-                flush_each: _,
-                max_batch_size: _,
                 commit_each: base_commit_each,
                 max_commit_size: base_max_commit_size,
             },
@@ -1593,8 +1581,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 location: candidate_location,
                 catalog: candidate_catalog,
-                flush_each: _,
-                max_batch_size: _,
                 commit_each: candidate_commit_each,
                 max_commit_size: candidate_max_commit_size,
             },
@@ -1650,11 +1636,11 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, IngestSource,
-        IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+        IngestSource, IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
         MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-        ModelChangeAspect, ModelKind, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
+        ModelChangeAspect, ModelKind, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1681,8 +1667,10 @@ mod tests {
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
@@ -1697,8 +1685,10 @@ mod tests {
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             deduplicate_on: vec![crate::Expression::Literal(Literal::I64(1))],
@@ -1715,8 +1705,10 @@ mod tests {
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             order_by: vec![crate::Expression::Literal(Literal::I64(1))],
@@ -1735,8 +1727,10 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
-            flush_each: "1s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -1756,8 +1750,10 @@ mod tests {
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             mode: AckMode::Attached,
             materialized_state: Vec::new(),
@@ -1773,8 +1769,10 @@ mod tests {
             each: "1s".to_string(),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
         }
     }
@@ -1784,8 +1782,10 @@ mod tests {
             name: named("ingest"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("events"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             decode_using_codec: named("event_codec"),
             timestamp_source: None,
@@ -1910,9 +1910,9 @@ mod tests {
         );
 
         let mut flush = base.clone();
-        flush.output_routes.routes[0].flush_policy = Some(OutputFlushPolicy {
-            flush_each: "2s".to_string(),
-            max_batch_size: Some("2MiB".to_string()),
+        flush.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+            interval: "2s".to_string(),
+            max_batch_size: "2MiB".to_string(),
         });
         assert_single_aspect(
             Model::Junction(base.clone()),
@@ -2076,8 +2076,7 @@ mod tests {
         let base = emitter();
 
         let mut flush = base.clone();
-        flush.flush_each = "IMMEDIATE".to_string();
-        flush.max_batch_size = None;
+        flush.flush_policy = FlushPolicy::Immediate;
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(flush.clone()),
@@ -2235,11 +2234,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.output_routes.routes[0]
-                        .flush_policy
-                        .as_mut()
-                        .expect("test route has a flush policy")
-                        .flush_each = "2s".to_string();
+                    candidate.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+                        interval: "2s".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::IngestorRoutes,
@@ -2279,11 +2277,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.output_routes.routes[0]
-                        .flush_policy
-                        .as_mut()
-                        .expect("test route has a flush policy")
-                        .flush_each = "2s".to_string();
+                    candidate.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+                        interval: "2s".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::ReingestorRoutes,
@@ -2366,11 +2363,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.output_routes.routes[0]
-                        .flush_policy
-                        .as_mut()
-                        .expect("test route has a flush policy")
-                        .flush_each = "2s".to_string();
+                    candidate.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+                        interval: "2s".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::GeneratorRoutes,
@@ -2401,7 +2397,7 @@ mod catch_all_kind_tests {
         AckMode, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
         CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
         CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, GeneralErrorPolicy, Literal, Model, ModelChangeAspect,
+        CreateWindowProcessor, FlushPolicy, GeneralErrorPolicy, Literal, Model, ModelChangeAspect,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
         WasmProcessorLimits, WindowBound,
     };
@@ -2421,8 +2417,10 @@ mod catch_all_kind_tests {
     fn outputs() -> ProcessorOutputs {
         ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
             named("output"),
-            "1s".to_string(),
-            Some("1MiB".to_string()),
+            FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
         )])
     }
 

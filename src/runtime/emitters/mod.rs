@@ -850,16 +850,11 @@ struct EmitterBatchBuffer {
 impl EmitterBatchBuffer {
     fn new(
         context: &EmitterSinkContext,
-        flush_each: &str,
-        max_batch_size: Option<&str>,
+        flush_policy: &FlushPolicy,
         buffered_messages: Arc<EmitterBufferedMessages>,
     ) -> Self {
         Self {
-            flush_policy: context.parse_flush_policy_with_max(
-                "emitter",
-                flush_each,
-                max_batch_size,
-            ),
+            flush_policy: context.parse_flush_policy("emitter", flush_policy),
             pending: Vec::new(),
             pending_messages: 0,
             pending_bytes: 0,
@@ -873,14 +868,8 @@ impl EmitterBatchBuffer {
             .set_generic(self.pending_messages.arch_into());
     }
 
-    fn reconfigure(
-        &mut self,
-        context: &EmitterSinkContext,
-        flush_each: &str,
-        max_batch_size: Option<&str>,
-    ) {
-        self.flush_policy =
-            context.parse_flush_policy_with_max("emitter", flush_each, max_batch_size);
+    fn reconfigure(&mut self, context: &EmitterSinkContext, flush_policy: &FlushPolicy) {
+        self.flush_policy = context.parse_flush_policy("emitter", flush_policy);
         self.flush_at = self
             .flush_policy
             .filter(|_| !self.pending.is_empty())
@@ -1572,19 +1561,8 @@ impl EmitterSinkContext {
         );
     }
 
-    fn parse_flush_policy_with_max(
-        &self,
-        kind: &str,
-        flush_each: &str,
-        max_batch_size: Option<&str>,
-    ) -> Option<RuntimeFlushPolicy> {
-        match Runtime::parse_runtime_node_flush_policy(
-            &self.domain,
-            kind,
-            &self.emitter,
-            flush_each,
-            max_batch_size,
-        ) {
+    fn parse_flush_policy(&self, kind: &str, policy: &FlushPolicy) -> Option<RuntimeFlushPolicy> {
+        match Runtime::parse_runtime_node_flush_policy(&self.domain, kind, &self.emitter, policy) {
             Ok(policy) => Some(policy),
             Err(error) => {
                 let _ = self
@@ -1631,6 +1609,7 @@ struct SinkEmitterRuntime {
 
 struct SinkEmitterInit<'a> {
     sink: &'a EmitSink,
+    flush_policy: &'a FlushPolicy,
     publishing: EmitterPublishingSettings,
     client: Option<&'a Model>,
     resolved: Option<&'a ResolvedClientConfig>,
@@ -1657,6 +1636,7 @@ impl SinkEmitter {
     async fn new(init: SinkEmitterInit<'_>) -> Self {
         let SinkEmitterInit {
             sink,
+            flush_policy,
             publishing,
             client,
             resolved,
@@ -1837,8 +1817,6 @@ impl SinkEmitter {
                     values,
                     location,
                     catalog,
-                    flush_each,
-                    max_batch_size,
                     commit_each,
                     max_commit_size,
                     ..
@@ -1857,8 +1835,7 @@ impl SinkEmitter {
                     values,
                     location,
                     catalog,
-                    flush_each,
-                    max_batch_size: max_batch_size.as_deref(),
+                    flush_policy,
                     commit_each,
                     max_commit_size,
                     input_schema,
@@ -1873,8 +1850,6 @@ impl SinkEmitter {
                     values,
                     location,
                     catalog,
-                    flush_each,
-                    max_batch_size,
                     commit_each,
                     max_commit_size,
                     ..
@@ -1893,8 +1868,7 @@ impl SinkEmitter {
                     values,
                     location,
                     catalog,
-                    flush_each,
-                    max_batch_size: max_batch_size.as_deref(),
+                    flush_policy,
                     commit_each,
                     max_commit_size,
                     input_schema,
@@ -1909,8 +1883,6 @@ impl SinkEmitter {
                     values,
                     location,
                     catalog,
-                    flush_each,
-                    max_batch_size,
                     commit_each,
                     max_commit_size,
                     ..
@@ -1929,8 +1901,7 @@ impl SinkEmitter {
                     values,
                     location,
                     catalog,
-                    flush_each,
-                    max_batch_size: max_batch_size.as_deref(),
+                    flush_policy,
                     commit_each,
                     max_commit_size,
                     input_schema,
@@ -2049,12 +2020,10 @@ impl SinkEmitter {
     fn reconfigure_flush_policy(
         &mut self,
         context: &EmitterSinkContext,
-        flush_each: &str,
-        max_batch_size: Option<&str>,
+        flush_policy: &FlushPolicy,
     ) {
         if let Self::Iceberg(emitter) = self
-            && let Some(policy) =
-                context.parse_flush_policy_with_max("iceberg emitter", flush_each, max_batch_size)
+            && let Some(policy) = context.parse_flush_policy("iceberg emitter", flush_policy)
         {
             emitter.reconfigure_flush_policy(policy);
         }
@@ -3223,8 +3192,7 @@ impl EmitterTask {
             &emitter.sink,
             &emitter.publishing_mode,
         )?;
-        let task_flush_each = emitter.flush_each.clone();
-        let task_max_batch_size = emitter.max_batch_size.clone();
+        let task_flush_policy = emitter.flush_policy.clone();
         let task_error_policies = emitter.error_policies.clone();
         let task_materialized_state = emitter.materialized_state.clone();
         let fault_injector = runtime.inner.emitter_faults.clone();
@@ -3305,12 +3273,8 @@ impl EmitterTask {
             };
             let mut publish_backoff =
                 RuntimeReconnectBackoff::from_policy(task_publishing.retry_policy);
-            let mut emitter_buffer = EmitterBatchBuffer::new(
-                &context,
-                &task_flush_each,
-                task_max_batch_size.as_deref(),
-                buffered_messages.clone(),
-            );
+            let mut emitter_buffer =
+                EmitterBatchBuffer::new(&context, &task_flush_policy, buffered_messages.clone());
             let sink_runtime = SinkEmitterRuntime {
                 input_schema: input_schema.clone(),
                 buffered_messages,
@@ -3318,6 +3282,7 @@ impl EmitterTask {
             let mut sink = SinkEmitter::new_until_cancelled(
                 SinkEmitterInit {
                     sink: &task_sink,
+                    flush_policy: &task_flush_policy,
                     publishing: task_publishing,
                     client: client.as_deref(),
                     resolved: resolved_client.as_ref(),
@@ -3381,16 +3346,8 @@ impl EmitterTask {
                         config,
                         response,
                     }) => {
-                        emitter_buffer.reconfigure(
-                            &context,
-                            &config.flush_each,
-                            config.max_batch_size.as_deref(),
-                        );
-                        sink.reconfigure_flush_policy(
-                            &context,
-                            &config.flush_each,
-                            config.max_batch_size.as_deref(),
-                        );
+                        emitter_buffer.reconfigure(&context, &config.flush_policy);
+                        sink.reconfigure_flush_policy(&context, &config.flush_policy);
                         let _ = response.send(());
                     }
                     RelayInteractionEvent::Command(EmitterTaskCommand::Stop {
@@ -3643,6 +3600,7 @@ impl EmitterTask {
                             sink = SinkEmitter::new_until_cancelled(
                                 SinkEmitterInit {
                                     sink: &task_sink,
+                                    flush_policy: &task_flush_policy,
                                     publishing: task_publishing,
                                     client: client.as_deref(),
                                     resolved: resolved_client.as_ref(),
@@ -5044,14 +5002,20 @@ mod tests {
         let context = sink_context();
         let reported_messages = Arc::new(AtomicUsize::new(0));
         let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
-        let mut buffer =
-            EmitterBatchBuffer::new(&context, "10s", Some("1MiB"), buffered_messages.clone());
+        let mut buffer = EmitterBatchBuffer::new(
+            &context,
+            &FlushPolicy::Each {
+                interval: "10s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
+            buffered_messages.clone(),
+        );
         assert!(buffer.flush_policy.is_some());
         buffer
             .push(EmitterPublishBatch::from_batch(input_batch()))
             .expect("configured buffer must accept input");
         assert_eq!(buffer.pending_messages, 1);
-        buffer.reconfigure(&context, "IMMEDIATE", None);
+        buffer.reconfigure(&context, &FlushPolicy::Immediate);
         assert_eq!(buffer.flush_policy, Some(RuntimeFlushPolicy::Immediate));
         assert!(buffer.deadline().is_some());
 
@@ -5674,7 +5638,6 @@ mod tests {
                     table: TableName::parse("target").expect("valid name"),
                     values: Vec::new(),
                     max_batch: nonzero!(1u64),
-                    flush_each: "1s".to_string(),
                 },
                 "clickhouse",
             ),
@@ -5685,7 +5648,6 @@ mod tests {
                     values: Vec::new(),
                     conflict_action: PostgresConflictAction::None,
                     max_batch: nonzero!(1u64),
-                    flush_each: "1s".to_string(),
                 },
                 "postgres",
             ),
@@ -5696,7 +5658,6 @@ mod tests {
                     values: Vec::new(),
                     conflict_action: MySqlConflictAction::None,
                     max_batch: nonzero!(1u64),
-                    flush_each: "1s".to_string(),
                 },
                 "mysql",
             ),
@@ -5707,7 +5668,6 @@ mod tests {
                     values: Vec::new(),
                     conflict_action: MongoDbConflictAction::None,
                     max_batch: nonzero!(1u64),
-                    flush_each: "1s".to_string(),
                 },
                 "mongodb",
             ),
@@ -5719,8 +5679,6 @@ mod tests {
                     values: Vec::new(),
                     location: "s3://bucket/table".to_string(),
                     catalog,
-                    flush_each: "1s".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     commit_each: "1s".to_string(),
                     max_commit_size: "1MiB".to_string(),
                 },
@@ -5743,7 +5701,13 @@ mod tests {
         context.report_flush_error("nats", "flush failed");
         assert!(
             context
-                .parse_flush_policy_with_max("emitter", "not-a-duration", Some("1MiB"))
+                .parse_flush_policy(
+                    "emitter",
+                    &FlushPolicy::Each {
+                        interval: "not-a-duration".to_string(),
+                        max_batch_size: "1MiB".to_string()
+                    }
+                )
                 .is_none()
         );
 

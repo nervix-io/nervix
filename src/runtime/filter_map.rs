@@ -1835,8 +1835,10 @@ mod tests {
                 client: named("kafka_main"),
                 topic: named("notifications_out"),
             }),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
@@ -1966,8 +1968,10 @@ mod tests {
                     "concat(input.tenant, '-', input.region)",
                 ))),
             }),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::SqsBatch {

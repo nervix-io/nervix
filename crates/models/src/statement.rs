@@ -1289,9 +1289,7 @@ pub struct CreateEmitter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encode_using_codec: Option<CodecName>,
     pub sink: Box<EmitSink>,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
+    pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
     pub publishing_mode: EmitterPublishingMode,
     #[serde(default)]
@@ -1302,10 +1300,6 @@ pub struct CreateEmitter {
 }
 
 impl CreateEmitter {
-    pub fn flush_policy(&self) -> (&str, Option<&str>) {
-        (self.flush_each.as_str(), self.max_batch_size.as_deref())
-    }
-
     pub fn apply_alter(&mut self, alter: &AlterEmitter) -> Result<(), AlterEmitterError> {
         if self.name != alter.emitter {
             return Err(AlterEmitterError::EmitterNameMismatch {
@@ -1393,9 +1387,7 @@ impl CreateEmitter {
                         mode: publishing_mode.kind_label().to_string(),
                     });
                 }
-                let mut sink = sink.clone();
-                sink.copy_flush_policy_from(self);
-                self.sink = sink;
+                self.sink = sink.clone();
                 self.publishing_mode = publishing_mode.clone();
             }
             AlterEmitterOperation::SetClient { client } => {
@@ -1427,15 +1419,8 @@ impl CreateEmitter {
                 }
                 self.publishing_mode = mode.clone();
             }
-            AlterEmitterOperation::SetFlush {
-                flush_each,
-                max_batch_size,
-            } => {
-                self.flush_each = flush_each.clone();
-                self.max_batch_size = max_batch_size.clone();
-                let mut sink = self.sink.clone();
-                sink.copy_flush_policy_from(self);
-                self.sink = sink;
+            AlterEmitterOperation::SetFlush { flush_policy } => {
+                self.flush_policy = flush_policy.clone();
             }
             AlterEmitterOperation::SetCommit {
                 commit_each,
@@ -1521,8 +1506,7 @@ pub enum AlterEmitterOperation {
         mode: EmitterPublishingMode,
     },
     SetFlush {
-        flush_each: String,
-        max_batch_size: Option<String>,
+        flush_policy: FlushPolicy,
     },
     SetCommit {
         commit_each: String,
@@ -1749,7 +1733,6 @@ pub enum EmitSink {
         table: TableName,
         values: Vec<ClickHouseValueMapping>,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     Postgres {
         client: ClientName,
@@ -1757,7 +1740,6 @@ pub enum EmitSink {
         values: Vec<PostgresValueMapping>,
         conflict_action: PostgresConflictAction,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     #[strum(serialize = "MYSQL")]
     MySql {
@@ -1766,7 +1748,6 @@ pub enum EmitSink {
         values: Vec<MySqlValueMapping>,
         conflict_action: MySqlConflictAction,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     #[strum(serialize = "MONGODB")]
     MongoDb {
@@ -1775,7 +1756,6 @@ pub enum EmitSink {
         values: Vec<MongoDbValueMapping>,
         conflict_action: MongoDbConflictAction,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     Iceberg {
         backend: IcebergStorageBackend,
@@ -1784,8 +1764,6 @@ pub enum EmitSink {
         values: Vec<IcebergValueMapping>,
         location: String,
         catalog: IcebergCatalog,
-        flush_each: String,
-        max_batch_size: Option<String>,
         commit_each: String,
         max_commit_size: String,
     },
@@ -1872,36 +1850,6 @@ impl EmitSink {
             | Self::MySql { client, .. }
             | Self::MongoDb { client, .. }
             | Self::Iceberg { client, .. } => client,
-        }
-    }
-
-    fn copy_flush_policy_from(&mut self, emitter: &CreateEmitter) {
-        match self {
-            Self::ClickHouse { flush_each, .. }
-            | Self::Postgres { flush_each, .. }
-            | Self::MySql { flush_each, .. }
-            | Self::MongoDb { flush_each, .. } => {
-                *flush_each = emitter.flush_each.clone();
-            }
-            Self::Iceberg {
-                flush_each,
-                max_batch_size,
-                ..
-            } => {
-                *flush_each = emitter.flush_each.clone();
-                *max_batch_size = emitter.max_batch_size.clone();
-            }
-            Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. } => {}
         }
     }
 
@@ -2009,31 +1957,6 @@ impl EmitSink {
             | Self::MySql { .. }
             | Self::MongoDb { .. }
             | Self::Iceberg { .. } => false,
-        }
-    }
-
-    pub fn flush_policy(&self) -> Option<(&str, Option<&str>)> {
-        match self {
-            Self::ClickHouse { flush_each, .. }
-            | Self::Postgres { flush_each, .. }
-            | Self::MySql { flush_each, .. }
-            | Self::MongoDb { flush_each, .. } => Some((flush_each.as_str(), None)),
-            Self::Iceberg {
-                flush_each,
-                max_batch_size,
-                ..
-            } => Some((flush_each.as_str(), max_batch_size.as_deref())),
-            Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. } => None,
         }
     }
 
@@ -2531,16 +2454,23 @@ pub struct ProcessorOutput {
     #[serde(default)]
     pub construction: crate::RouteConstruction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flush_policy: Option<OutputFlushPolicy>,
+    pub flush_policy: Option<FlushPolicy>,
     pub message_error_policy: MessageErrorPolicy,
     pub branch: Option<crate::OutputBranch>,
 }
 
+/// How a route or an emitter releases what it has buffered.
+///
+/// `FLUSH IMMEDIATE` releases each message as it arrives, so there is no batch left to bound.
+/// `FLUSH EACH` releases on a cadence and always bounds the batch it releases. One variant per
+/// form is what keeps a cadence without a bound, and a bound without a cadence, out of the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputFlushPolicy {
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
+pub enum FlushPolicy {
+    Immediate,
+    Each {
+        interval: String,
+        max_batch_size: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2623,18 +2553,11 @@ impl ProcessorOutput {
         }
     }
 
-    pub fn with_flush_policy(
-        relay: RelayName,
-        flush_each: String,
-        max_batch_size: Option<String>,
-    ) -> Self {
+    pub fn with_flush_policy(relay: RelayName, flush_policy: FlushPolicy) -> Self {
         Self {
             relay,
             construction: crate::RouteConstruction::default(),
-            flush_policy: Some(OutputFlushPolicy {
-                flush_each,
-                max_batch_size,
-            }),
+            flush_policy: Some(flush_policy),
             message_error_policy: MessageErrorPolicy::Log,
             branch: None,
         }
@@ -2663,12 +2586,9 @@ impl ProcessorOutputs {
         }
     }
 
-    pub fn with_flush_policy(mut self, flush_each: String, max_batch_size: Option<String>) -> Self {
+    pub fn with_flush_policy(mut self, flush_policy: FlushPolicy) -> Self {
         for output in &mut self.routes {
-            output.flush_policy = Some(OutputFlushPolicy {
-                flush_each: flush_each.clone(),
-                max_batch_size: max_batch_size.clone(),
-            });
+            output.flush_policy = Some(flush_policy.clone());
         }
         self
     }
@@ -4502,9 +4422,9 @@ mod tests {
         AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
         ClusterSchedule, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
         CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
-        EmitterPublishingMode, ErrorPolicies, GeneralErrorPolicy, InferencerTensorDimension,
-        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
-        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, OutputFlushPolicy,
+        EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
+        InferencerTensorSchema, KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind,
         PlacementPolicy, RelayBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
@@ -4742,8 +4662,10 @@ mod tests {
                 ),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                     named("orders_out"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
                 )]),
                 branched_by: BranchSelection::unbranched(),
                 mode: AckMode::Attached,
@@ -4767,8 +4689,10 @@ mod tests {
                 name: named("orders_http"),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                     named("orders_out"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
                 )]),
                 decode_using_codec: named("codec"),
                 timestamp_source: None,
@@ -4800,8 +4724,10 @@ mod tests {
                 name: named("orders_syslog"),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                     named("orders_out"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
                 )]),
                 decode_using_codec: named("codec"),
                 timestamp_source: None,
@@ -4903,13 +4829,17 @@ mod tests {
             output_routes: ProcessorOutputs::new(vec![
                 ProcessorOutput::with_flush_policy(
                     named("accepted"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
                 ),
                 ProcessorOutput::with_flush_policy(
                     named("accepted"),
-                    "200ms".to_string(),
-                    Some("2MiB".to_string()),
+                    FlushPolicy::Each {
+                        interval: "200ms".to_string(),
+                        max_batch_size: "2MiB".to_string(),
+                    },
                 ),
             ]),
             branched_by: BranchSelection::unbranched(),
@@ -4947,8 +4877,10 @@ mod tests {
             from: ProcessorInputs::single(named("incoming_a")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("accepted"),
-                "100ms".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
@@ -4959,8 +4891,10 @@ mod tests {
         let false_expression = Expression::Literal(Literal::Bool(false));
         let replacement = ProcessorOutput::with_flush_policy(
             named("accepted"),
-            "250ms".to_string(),
-            Some("2MiB".to_string()),
+            FlushPolicy::Each {
+                interval: "250ms".to_string(),
+                max_batch_size: "2MiB".to_string(),
+            },
         );
         junction
             .apply_alter(&AlterJunction {
@@ -4999,8 +4933,10 @@ mod tests {
                     AlterProcessorOperation::AddRoute {
                         route: ProcessorOutput::with_flush_policy(
                             named("audit"),
-                            "100ms".to_string(),
-                            Some("1MiB".to_string()),
+                            FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            },
                         ),
                     },
                     AlterProcessorOperation::ReplaceRoute {
@@ -5232,8 +5168,10 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),
-            flush_each: "1s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -5260,12 +5198,13 @@ mod tests {
                         client: named("sink_b"),
                     },
                     AlterEmitterOperation::SetFlush {
-                        flush_each: "2s".to_string(),
-                        max_batch_size: Some("2MiB".to_string()),
+                        flush_policy: FlushPolicy::Each {
+                            interval: "2s".to_string(),
+                            max_batch_size: "2MiB".to_string(),
+                        },
                     },
                     AlterEmitterOperation::SetFlush {
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
+                        flush_policy: FlushPolicy::Immediate,
                     },
                     AlterEmitterOperation::SetAttachment {
                         mode: AckMode::Detached,
@@ -5274,7 +5213,7 @@ mod tests {
             })
             .expect("emitter alter should apply");
         assert_eq!(emitter.sink.client(), &named("sink_b"));
-        assert_eq!(emitter.flush_policy(), ("IMMEDIATE", None));
+        assert_eq!(emitter.flush_policy, FlushPolicy::Immediate);
         assert_eq!(emitter.mode, AckMode::Detached);
         assert_eq!(
             emitter.from.relays(),
@@ -5308,8 +5247,7 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
-            flush_each: "IMMEDIATE".to_string(),
-            max_batch_size: None,
+            flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -5387,9 +5325,9 @@ mod tests {
         let route = ProcessorOutput {
             relay: named("events"),
             construction: crate::RouteConstruction::default(),
-            flush_policy: Some(OutputFlushPolicy {
-                flush_each: "1s".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+            flush_policy: Some(FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
             }),
             message_error_policy: super::MessageErrorPolicy::Log,
             branch: Some(crate::OutputBranch::Unbranched),
@@ -5434,10 +5372,7 @@ mod tests {
                     AlterIngestorOperation::ReplaceRoute {
                         route: ProcessorOutput {
                             relay: named("events"),
-                            flush_policy: Some(OutputFlushPolicy {
-                                flush_each: "IMMEDIATE".to_string(),
-                                max_batch_size: None,
-                            }),
+                            flush_policy: Some(FlushPolicy::Immediate),
                             ..route.clone()
                         },
                     },

@@ -18,15 +18,15 @@ use nervix_models::{
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DeduplicatorName, EmitSink, EmitterAckWindow,
     EmitterName, EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType,
-    ErrorPolicies, Expression, FieldName, GeneralErrorPolicy, GeneratorName, IcebergCatalog,
-    IcebergStorageBackend, InferencerName, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, IngestorName, InputCollectPolicy, JsonType, JunctionName,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName, MaterializedRelayState,
-    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OtelAggregationTemporality,
-    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OutputFlushPolicy, ParseAsType,
+    ErrorPolicies, Expression, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    IcebergCatalog, IcebergStorageBackend, InferencerName, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, InputCollectPolicy,
+    JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, LookupName,
+    MaterializedRelayState, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal, ParseAsType,
     PlacementName, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput, ProcessorOutputs, PulsarIngestMode, PulsarSubscriptionName, QueueGroupName,
     QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayBranching,
@@ -85,9 +85,8 @@ pub enum StoredModelVersioned {
     Reorderer(StoredCreateReorderer),
     Junction(StoredCreateJunction),
     WindowProcessor(StoredCreateWindowProcessor),
-    Emitter(StoredCreateEmitter),
     Udf(StoredCreateUdf),
-    EmitterPublishing(StoredCreateEmitterPublishing),
+    Emitter(Box<StoredCreateEmitter>),
     Placement(StoredCreatePlacement),
 }
 
@@ -284,11 +283,6 @@ pub enum StoredModelConversionError {
     InvalidName,
     #[error("stored model uses the removed Kinesis integration")]
     RemovedIntegration,
-    #[error(
-        "stored emitter definition has no publishing MODE; recreate the emitter with an explicit \
-         MODE"
-    )]
-    EmitterPublishingModeMissing,
     #[error("stored placement definition is invalid")]
     InvalidPlacement,
 }
@@ -1128,15 +1122,18 @@ pub enum StoredBranchSelection {
 pub struct StoredProcessorOutput {
     pub relay: String,
     pub construction: nervix_models::RouteConstruction,
-    pub flush_policy: Option<StoredOutputFlushPolicy>,
+    pub flush_policy: Option<StoredFlushPolicy>,
     pub message_error_policy: StoredMessageErrorPolicy,
     pub branch: Option<nervix_models::OutputBranch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredOutputFlushPolicy {
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
+pub enum StoredFlushPolicy {
+    Immediate,
+    Each {
+        interval: String,
+        max_batch_size: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1268,25 +1265,12 @@ pub struct StoredWindowBound {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredCreateEmitter {
-    pub name: String,
-    pub from: StoredProcessorInputs,
-    pub encode_using_codec: Option<String>,
-    pub sink: StoredEmitSink,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
-    pub mode: AckMode,
-    pub error_policies: StoredErrorPolicies,
-    pub construction: nervix_models::RouteConstruction,
-    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 struct PrePublishingModeStoredCreateEmitter {
     name: String,
     from: StoredProcessorInputs,
     encode_using_codec: Option<String>,
     sink: PrePublishingModeStoredEmitSink,
+
     flush_each: String,
     max_batch_size: Option<String>,
     mode: AckMode,
@@ -1296,13 +1280,12 @@ struct PrePublishingModeStoredCreateEmitter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredCreateEmitterPublishing {
+pub struct StoredCreateEmitter {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub encode_using_codec: Option<String>,
     pub sink: StoredEmitSink,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
+    pub flush_policy: StoredFlushPolicy,
     pub publishing_mode: StoredEmitterPublishingMode,
     pub mode: AckMode,
     pub error_policies: StoredErrorPolicies,
@@ -1413,7 +1396,6 @@ pub enum StoredEmitSink {
         values: Vec<StoredPostgresValueMapping>,
         conflict_action: StoredPostgresConflictAction,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     MySql {
         client: String,
@@ -1421,7 +1403,6 @@ pub enum StoredEmitSink {
         values: Vec<StoredMySqlValueMapping>,
         conflict_action: StoredMySqlConflictAction,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     MongoDb {
         client: String,
@@ -1429,7 +1410,6 @@ pub enum StoredEmitSink {
         values: Vec<StoredMongoDbValueMapping>,
         conflict_action: StoredMongoDbConflictAction,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     Iceberg {
         backend: StoredIcebergStorageBackend,
@@ -1438,8 +1418,6 @@ pub enum StoredEmitSink {
         values: Vec<StoredClickHouseValueMapping>,
         location: String,
         catalog: StoredIcebergCatalog,
-        flush_each: String,
-        max_batch_size: Option<String>,
         commit_each: String,
         max_commit_size: String,
     },
@@ -1453,7 +1431,6 @@ pub enum StoredEmitSink {
         table: String,
         values: Vec<StoredClickHouseValueMapping>,
         max_batch: NonZeroU64,
-        flush_each: String,
     },
     Otel {
         client: String,
@@ -1545,6 +1522,7 @@ enum PrePublishingModeStoredEmitSink {
         values: Vec<StoredClickHouseValueMapping>,
         location: String,
         catalog: StoredIcebergCatalog,
+
         flush_each: String,
         max_batch_size: Option<String>,
         commit_each: String,
@@ -1694,7 +1672,7 @@ impl From<Model> for StoredModelVersioned {
             Model::Reorderer(v) => Self::Reorderer(v.into()),
             Model::Junction(v) => Self::Junction(v.into()),
             Model::WindowProcessor(v) => Self::WindowProcessor(v.into()),
-            Model::Emitter(v) => Self::EmitterPublishing(v.into()),
+            Model::Emitter(v) => Self::Emitter(Box::new(v.into())),
             Model::Placement(v) => Self::Placement(v.into()),
             Model::Udf(v) => Self::Udf(v.into()),
         }
@@ -1785,17 +1763,11 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::WindowProcessor(v) => {
                 Ok(Model::WindowProcessor(convert_stored(v)?))
             }
+            StoredModelVersioned::Udf(v) => Ok(Model::Udf(convert_stored(v)?)),
             StoredModelVersioned::Emitter(v) if v.sink.is_removed_integration() => {
                 Err(Report::new(StoredModelConversionError::RemovedIntegration))
             }
-            StoredModelVersioned::Emitter(_) => Err(Report::new(
-                StoredModelConversionError::EmitterPublishingModeMissing,
-            )),
-            StoredModelVersioned::Udf(v) => Ok(Model::Udf(convert_stored(v)?)),
-            StoredModelVersioned::EmitterPublishing(v) if v.sink.is_removed_integration() => {
-                Err(Report::new(StoredModelConversionError::RemovedIntegration))
-            }
-            StoredModelVersioned::EmitterPublishing(v) => Ok(Model::Emitter(convert_stored(v)?)),
+            StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(convert_stored(*v)?)),
             StoredModelVersioned::Placement(v) => Ok(Model::Placement(v.try_into()?)),
         }
     }
@@ -3423,20 +3395,32 @@ impl TryFrom<StoredProcessorOutput> for ProcessorOutput {
     }
 }
 
-impl From<OutputFlushPolicy> for StoredOutputFlushPolicy {
-    fn from(value: OutputFlushPolicy) -> Self {
-        Self {
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
+impl From<FlushPolicy> for StoredFlushPolicy {
+    fn from(value: FlushPolicy) -> Self {
+        match value {
+            FlushPolicy::Immediate => Self::Immediate,
+            FlushPolicy::Each {
+                interval,
+                max_batch_size,
+            } => Self::Each {
+                interval,
+                max_batch_size,
+            },
         }
     }
 }
 
-impl From<StoredOutputFlushPolicy> for OutputFlushPolicy {
-    fn from(value: StoredOutputFlushPolicy) -> Self {
-        Self {
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
+impl From<StoredFlushPolicy> for FlushPolicy {
+    fn from(value: StoredFlushPolicy) -> Self {
+        match value {
+            StoredFlushPolicy::Immediate => Self::Immediate,
+            StoredFlushPolicy::Each {
+                interval,
+                max_batch_size,
+            } => Self::Each {
+                interval,
+                max_batch_size,
+            },
         }
     }
 }
@@ -4823,15 +4807,14 @@ impl TryFrom<StoredCreateJunction> for CreateJunction {
     }
 }
 
-impl From<CreateEmitter> for StoredCreateEmitterPublishing {
+impl From<CreateEmitter> for StoredCreateEmitter {
     fn from(value: CreateEmitter) -> Self {
         Self {
             name: value.name.to_string(),
             from: value.from.into(),
             encode_using_codec: value.encode_using_codec.map(|codec| codec.to_string()),
             sink: (*value.sink).into(),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
+            flush_policy: value.flush_policy.into(),
             publishing_mode: value.publishing_mode.into(),
             mode: value.mode,
             error_policies: value.error_policies.into(),
@@ -4841,10 +4824,10 @@ impl From<CreateEmitter> for StoredCreateEmitterPublishing {
     }
 }
 
-impl TryFrom<StoredCreateEmitterPublishing> for CreateEmitter {
+impl TryFrom<StoredCreateEmitter> for CreateEmitter {
     type Error = Report<NameError>;
 
-    fn try_from(value: StoredCreateEmitterPublishing) -> Result<Self, Self::Error> {
+    fn try_from(value: StoredCreateEmitter) -> Result<Self, Self::Error> {
         Ok(Self {
             name: EmitterName::parse(&value.name)?,
             from: value.from.try_into()?,
@@ -4853,8 +4836,7 @@ impl TryFrom<StoredCreateEmitterPublishing> for CreateEmitter {
                 .map(|codec| CodecName::parse(&codec))
                 .transpose()?,
             sink: Box::new(value.sink.try_into()?),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
+            flush_policy: value.flush_policy.into(),
             publishing_mode: value.publishing_mode.into(),
             mode: value.mode,
             error_policies: value.error_policies.try_into()?,
@@ -5159,13 +5141,11 @@ impl From<EmitSink> for StoredEmitSink {
                 table,
                 values,
                 max_batch,
-                flush_each,
             } => Self::ClickHousePublishing {
                 client: client.to_string(),
                 table: table.to_string(),
                 values: values.into_iter().map(Into::into).collect(),
                 max_batch,
-                flush_each,
             },
             EmitSink::Postgres {
                 client,
@@ -5173,14 +5153,12 @@ impl From<EmitSink> for StoredEmitSink {
                 values,
                 conflict_action,
                 max_batch,
-                flush_each,
             } => Self::Postgres {
                 client: client.to_string(),
                 table: table.to_string(),
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
-                flush_each,
             },
             EmitSink::MySql {
                 client,
@@ -5188,14 +5166,12 @@ impl From<EmitSink> for StoredEmitSink {
                 values,
                 conflict_action,
                 max_batch,
-                flush_each,
             } => Self::MySql {
                 client: client.to_string(),
                 table: table.to_string(),
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
-                flush_each,
             },
             EmitSink::MongoDb {
                 client,
@@ -5203,14 +5179,12 @@ impl From<EmitSink> for StoredEmitSink {
                 values,
                 conflict_action,
                 max_batch,
-                flush_each,
             } => Self::MongoDb {
                 client: client.to_string(),
                 collection: collection.to_string(),
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
-                flush_each,
             },
             EmitSink::Iceberg {
                 backend,
@@ -5219,8 +5193,6 @@ impl From<EmitSink> for StoredEmitSink {
                 values,
                 location,
                 catalog,
-                flush_each,
-                max_batch_size,
                 commit_each,
                 max_commit_size,
             } => Self::Iceberg {
@@ -5230,8 +5202,6 @@ impl From<EmitSink> for StoredEmitSink {
                 values: values.into_iter().map(Into::into).collect(),
                 location,
                 catalog: catalog.into(),
-                flush_each,
-                max_batch_size,
                 commit_each,
                 max_commit_size,
             },
@@ -5304,14 +5274,12 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 values,
                 conflict_action,
                 max_batch,
-                flush_each,
             } => Ok(Self::Postgres {
                 client: ClientName::parse(&client)?,
                 table: TableName::parse(&table)?,
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
-                flush_each,
             }),
             StoredEmitSink::MySql {
                 client,
@@ -5319,14 +5287,12 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 values,
                 conflict_action,
                 max_batch,
-                flush_each,
             } => Ok(Self::MySql {
                 client: ClientName::parse(&client)?,
                 table: TableName::parse(&table)?,
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
-                flush_each,
             }),
             StoredEmitSink::MongoDb {
                 client,
@@ -5334,14 +5300,12 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 values,
                 conflict_action,
                 max_batch,
-                flush_each,
             } => Ok(Self::MongoDb {
                 client: ClientName::parse(&client)?,
                 collection: CollectionName::parse(&collection)?,
                 values: values.into_iter().map(Into::into).collect(),
                 conflict_action: conflict_action.into(),
                 max_batch,
-                flush_each,
             }),
             StoredEmitSink::Iceberg {
                 backend,
@@ -5350,8 +5314,6 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 values,
                 location,
                 catalog,
-                flush_each,
-                max_batch_size,
                 commit_each,
                 max_commit_size,
             } => Ok(Self::Iceberg {
@@ -5361,8 +5323,6 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 values: values.into_iter().map(Into::into).collect(),
                 location,
                 catalog: catalog.into(),
-                flush_each,
-                max_batch_size,
                 commit_each,
                 max_commit_size,
             }),
@@ -5380,13 +5340,11 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 table,
                 values,
                 max_batch,
-                flush_each,
             } => Ok(Self::ClickHouse {
                 client: ClientName::parse(&client)?,
                 table: TableName::parse(&table)?,
                 values: values.into_iter().map(Into::into).collect(),
                 max_batch,
-                flush_each,
             }),
         }
     }
@@ -5718,7 +5676,10 @@ mod tests {
             Model::Ingestor(CreateIngestor {
                 name: named("events_ingestor"),
                 output_routes: (ProcessorOutputs::single(named("events_stream")))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    }),
                 decode_using_codec: named("events_codec"),
                 timestamp_source: None,
                 source: IngestSource::Http {
@@ -5733,7 +5694,10 @@ mod tests {
             Model::Ingestor(CreateIngestor {
                 name: named("syslog_ingestor"),
                 output_routes: (ProcessorOutputs::single(named("events_stream")))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    }),
                 decode_using_codec: named("syslog_codec"),
                 timestamp_source: None,
                 source: IngestSource::Syslog {
@@ -5751,7 +5715,10 @@ mod tests {
                 from: ProcessorInputs::new(vec![named("events_a"), named("events_b")], Vec::new())
                     .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
                 output_routes: (ProcessorOutputs::single(named("events_stream")))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    }),
                 branched_by: processor_branched_by("events"),
                 mode: AckMode::Attached,
                 filter_where: None,
@@ -5773,7 +5740,10 @@ mod tests {
                     },
                     ProcessorOutput::new(named("events_other")),
                 ]))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                .with_flush_policy(FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                }),
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),
@@ -5792,7 +5762,10 @@ mod tests {
                     message_error_policy: MessageErrorPolicy::Log,
                     branch: None,
                 }]))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                .with_flush_policy(FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                }),
                 mode: AckMode::Detached,
                 filter_where: Some(
                     nervix_nspl::parse_expression("input.tenant = \"acme\"")
@@ -5858,8 +5831,10 @@ mod tests {
                         max_backoff: "30s".to_string(),
                     },
                 },
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 mode: AckMode::Detached,
                 error_policies: ErrorPolicies::handled_by_log(),
 
@@ -5879,8 +5854,10 @@ mod tests {
                         max_backoff: "30s".to_string(),
                     },
                 },
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 mode: AckMode::Detached,
                 error_policies: ErrorPolicies::handled_by_log(),
                 construction: nervix_models::RouteConstruction::default(),
@@ -5935,8 +5912,10 @@ mod tests {
                         max_backoff: "30s".to_string(),
                     },
                 },
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 mode: AckMode::Detached,
                 error_policies: ErrorPolicies::handled_by_log(),
                 construction: nervix_models::RouteConstruction::default(),
@@ -6008,8 +5987,8 @@ mod tests {
 
     #[test]
     fn stored_model_try_from_rejects_invalid_identifiers() {
-        let err = Model::try_from(StoredModelVersioned::EmitterPublishing(
-            StoredCreateEmitterPublishing {
+        let err = Model::try_from(StoredModelVersioned::Emitter(Box::new(
+            StoredCreateEmitter {
                 name: "events_emitter".to_string(),
                 from: StoredProcessorInputs {
                     from: vec!["events_stream".to_string()],
@@ -6021,8 +6000,10 @@ mod tests {
                     client: "bad client".to_string(),
                     topic: "events_topic".to_string(),
                 },
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: StoredFlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 publishing_mode: StoredEmitterPublishingMode::NoAck {
                     retry_policy: StoredEmitterRetryPolicy {
                         backoff: "250ms".to_string(),
@@ -6037,7 +6018,7 @@ mod tests {
                 construction: nervix_models::RouteConstruction::default(),
                 materialized_state: Vec::new(),
             },
-        ))
+        )))
         .expect_err("invalid identifiers must fail");
 
         assert!(matches!(
@@ -6045,42 +6026,6 @@ mod tests {
             StoredModelConversionError::InvalidName
         ));
         assert!(format!("{err:?}").contains("invalid character ' ' in name"));
-    }
-
-    #[test]
-    fn stored_legacy_emitter_requires_recreation_with_a_publishing_mode() {
-        // The raw historical archive path is covered at the registry decode boundary. This test
-        // separately guards the semantic boundary: a retained legacy discriminant that reaches
-        // model conversion is rejected clearly and is never reinterpreted.
-        let error = Model::try_from(StoredModelVersioned::Emitter(StoredCreateEmitter {
-            name: "events_emitter".to_string(),
-            from: StoredProcessorInputs {
-                from: vec!["events_stream".to_string()],
-                r#where: Vec::new(),
-                collect_policy: None,
-            },
-            encode_using_codec: Some("events_codec".to_string()),
-            sink: StoredEmitSink::Kafka {
-                client: "kafka_main".to_string(),
-                topic: "events_topic".to_string(),
-            },
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
-            mode: AckMode::Attached,
-            error_policies: StoredErrorPolicies {
-                message: StoredMessageErrorPolicy::Log,
-                general: StoredGeneralErrorPolicy::Log,
-            },
-            construction: nervix_models::RouteConstruction::default(),
-            materialized_state: Vec::new(),
-        }))
-        .expect_err("legacy emitters without MODE must not be reinterpreted");
-
-        assert!(matches!(
-            error.current_context(),
-            StoredModelConversionError::EmitterPublishingModeMissing
-        ));
-        assert!(format!("{error:#}").contains("recreate the emitter with an explicit MODE"));
     }
 
     #[test]

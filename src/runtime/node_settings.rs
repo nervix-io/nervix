@@ -124,30 +124,25 @@ impl Runtime {
         domain: &DomainName,
         kind: &str,
         identifier: impl Into<ModelName>,
-        value: &str,
-        max_batch_size: Option<&str>,
+        policy: &FlushPolicy,
     ) -> Result<RuntimeFlushPolicy, RuntimeError> {
         let identifier = identifier.into();
-        if value.eq_ignore_ascii_case("IMMEDIATE") {
-            Ok(RuntimeFlushPolicy::Immediate)
-        } else {
-            let interval = Self::parse_runtime_node_duration_setting(
-                domain,
-                kind,
-                identifier.clone(),
-                "flush_each",
-                value,
-            )?;
-            let max_batch_size =
-                max_batch_size.ok_or_else(|| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "{} '{}' FLUSH EACH requires MAX BATCH SIZE",
-                        kind,
-                        identifier.as_str()
-                    ),
-                })?;
-            let max_batch_size = max_batch_size
+        let FlushPolicy::Each {
+            interval,
+            max_batch_size,
+        } = policy
+        else {
+            return Ok(RuntimeFlushPolicy::Immediate);
+        };
+        let interval = Self::parse_runtime_node_duration_setting(
+            domain,
+            kind,
+            identifier.clone(),
+            "flush_each",
+            interval,
+        )?;
+        let parsed_max_batch_size =
+            max_batch_size
                 .parse::<ubyte::ByteUnit>()
                 .map_err(|source| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -159,11 +154,10 @@ impl Runtime {
                         source
                     ),
                 })?;
-            Ok(RuntimeFlushPolicy::Each {
-                interval,
-                max_batch_size: max_batch_size.as_u64(),
-            })
-        }
+        Ok(RuntimeFlushPolicy::Each {
+            interval,
+            max_batch_size: parsed_max_batch_size.as_u64(),
+        })
     }
 
     pub(in crate::runtime) fn parse_runtime_node_input_collect_policy(

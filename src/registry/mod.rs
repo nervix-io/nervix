@@ -50,7 +50,7 @@ use nervix_models::{
     CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateLookup, CreatePlacement,
     CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, DomainName,
     DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType, Expression, FieldName,
-    IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
+    FlushPolicy, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
     MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
     ModelChangeAspect, ModelKind, ModelName, NodeRef, OtelAggregationTemporality, OtelMetricKind,
     OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementName,
@@ -7783,48 +7783,30 @@ fn ensure_processor_output_flush_policies(
                 ),
             }));
         };
-        if policy.flush_each.eq_ignore_ascii_case("IMMEDIATE") {
-            if policy.max_batch_size.is_some() {
-                return Err(Report::new(RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!(
-                        "TO output '{}' FLUSH IMMEDIATE cannot declare MAX BATCH SIZE",
-                        output.relay.as_str()
-                    ),
-                }));
-            }
+        let FlushPolicy::Each {
+            interval,
+            max_batch_size,
+        } = policy
+        else {
             continue;
-        }
-        humantime::parse_duration(&policy.flush_each).map_err(|error| {
+        };
+        humantime::parse_duration(interval).map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "invalid TO output '{}' FLUSH EACH duration '{}': {error}",
-                    output.relay.as_str(),
-                    policy.flush_each
+                    "invalid TO output '{}' FLUSH EACH duration '{interval}': {error}",
+                    output.relay.as_str()
                 ),
             })
         })?;
-        let Some(max_batch_size) = policy.max_batch_size.as_deref() else {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "TO output '{}' FLUSH EACH requires MAX BATCH SIZE",
-                    output.relay.as_str()
-                ),
-            }));
-        };
         max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "invalid TO output '{}' MAX BATCH SIZE '{}': {error}",
-                    output.relay.as_str(),
-                    max_batch_size
+                    "invalid TO output '{}' MAX BATCH SIZE '{max_batch_size}': {error}",
+                    output.relay.as_str()
                 ),
             })
         })?;
@@ -11594,8 +11576,8 @@ mod tests {
         CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DeduplicatorName, DomainName,
         DomainSchedule, DropModel, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode,
         EndpointName, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope,
-        GeneralErrorPolicy, IngestSource, IngestTimestampSource, IngestorName, Inheritance,
-        InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode,
+        FlushPolicy, GeneralErrorPolicy, IngestSource, IngestTimestampSource, IngestorName,
+        Inheritance, InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode,
         KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
         MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, ModelName, MqttIngestMode,
         MqttQos, MqttSession, NodeRef, OtelAggregationTemporality, OtelMetric, OtelMetricKind,
@@ -11726,8 +11708,12 @@ mod tests {
 
     fn unbranched_transforming_outputs(relay: &str) -> ProcessorOutputs {
         with_output_branch(
-            with_inherit_all(ProcessorOutputs::single(named(relay)))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            with_inherit_all(ProcessorOutputs::single(named(relay))).with_flush_policy(
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
+            ),
             OutputBranch::Unbranched,
         )
     }
@@ -12061,8 +12047,12 @@ mod tests {
         Model::Ingestor(CreateIngestor {
             name: named(name),
             output_routes: with_output_branch(
-                with_inherit_all(ProcessorOutputs::single(named(into)))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                with_inherit_all(ProcessorOutputs::single(named(into))).with_flush_policy(
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
+                ),
                 branch,
             ),
             decode_using_codec: named(codec),
@@ -12183,8 +12173,11 @@ mod tests {
         right_relay: &str,
         into_relay: &str,
     ) -> Model {
-        let mut output_routes = (ProcessorOutputs::single(named(into_relay)))
-            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()));
+        let mut output_routes =
+            (ProcessorOutputs::single(named(into_relay))).with_flush_policy(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            });
         output_routes.routes[0].construction =
             nervix_nspl::parse_route_construction("SET value = left.value")
                 .expect("route construction must parse");
@@ -12250,7 +12243,10 @@ mod tests {
             output_routes: with_inherit_all(ProcessorOutputs::single(
                 RelayName::parse(into_relay).expect("valid identifier"),
             ))
-            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            .with_flush_policy(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            }),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(
                 from_relays
                     .first()
@@ -12275,7 +12271,10 @@ mod tests {
             output_routes: with_inherit_all(ProcessorOutputs::single(
                 RelayName::parse(into_relay).expect("valid identifier"),
             ))
-            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            .with_flush_policy(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            }),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             deduplicate_on: vec![
                 nervix_nspl::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
@@ -12301,7 +12300,10 @@ mod tests {
                 with_inherit_all(ProcessorOutputs::single(
                     RelayName::parse(into_relay).expect("valid identifier"),
                 ))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                .with_flush_policy(FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                }),
                 branch,
             ),
             mode: AckMode::Attached,
@@ -12325,8 +12327,10 @@ mod tests {
                     max_backoff: "30s".to_string(),
                 },
             },
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -12811,8 +12815,10 @@ mod tests {
                     max_backoff: "30s".to_string(),
                 },
             },
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
             construction: nervix_nspl::parse_route_construction(
@@ -13419,7 +13425,10 @@ mod tests {
                         output_routes: with_inherit_all(ProcessorOutputs::single(named(
                             "outgoing",
                         )))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
                         branched_by: BranchSelection::unbranched(),
                         mode: AckMode::Attached,
                         filter_where: None,
@@ -13485,8 +13494,7 @@ mod tests {
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
                     emitter: named("event_sink"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetFlush {
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
+                        flush_policy: FlushPolicy::Immediate,
                     }],
                 })],
             )
@@ -14180,7 +14188,7 @@ mod tests {
                         output_routes: with_inherit_all(ProcessorOutputs::single(named(
                             "projected_events",
                         )))
-                        .with_flush_policy("IMMEDIATE".to_string(), None),
+                        .with_flush_policy(FlushPolicy::Immediate),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![
                             nervix_nspl::parse_expression("input.value")
@@ -15703,7 +15711,10 @@ mod tests {
                             message_error_policy: MessageErrorPolicy::Log,
                             branch: Some(branched_by("notifications", &["tenant"])),
                         }]))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
                         decode_using_codec: CodecName::parse("event_codec")
                             .expect("valid identifier"),
                         timestamp_source: None,
@@ -15778,7 +15789,10 @@ mod tests {
                         message_error_policy: MessageErrorPolicy::Log,
                         branch: Some(OutputBranch::Unbranched),
                     }]))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    }),
                     decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
@@ -15864,7 +15878,10 @@ mod tests {
                         message_error_policy: MessageErrorPolicy::Log,
                         branch: Some(OutputBranch::Unbranched),
                     }]))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    }),
                     decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
@@ -16832,7 +16849,7 @@ mod tests {
                             Vec::new(),
                         ),
                         output_routes: (ProcessorOutputs::single(named("deduped")))
-                            .with_flush_policy("IMMEDIATE".to_string(), None),
+                            .with_flush_policy(FlushPolicy::Immediate),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![
                             nervix_nspl::parse_expression("input.value")
@@ -17525,7 +17542,10 @@ mod tests {
                         name: named("ing_b"),
                         output_routes: with_output_branch(
                             with_inherit_all(ProcessorOutputs::single(named("notifications")))
-                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                                .with_flush_policy(FlushPolicy::Each {
+                                    interval: "100ms".to_string(),
+                                    max_batch_size: "1MiB".to_string(),
+                                }),
                             OutputBranch::BranchedBy {
                                 branch: branch_name_for_relay("notifications"),
                                 assignments: vec![Assignment {
@@ -17697,10 +17717,7 @@ mod tests {
                                 "SET value = relay_state.input.value",
                             )
                             .expect("generator route must parse"),
-                            flush_policy: Some(nervix_models::OutputFlushPolicy {
-                                flush_each: "IMMEDIATE".to_string(),
-                                max_batch_size: None,
-                            }),
+                            flush_policy: Some(FlushPolicy::Immediate),
                             message_error_policy: MessageErrorPolicy::Log,
                             branch: None,
                         }]),
@@ -17961,7 +17978,10 @@ mod tests {
                                 },
                                 ProcessorOutput::new(named("info")),
                             ]))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                             branched_by("route_logs", &["tenant", "user_id"]),
                         ),
                         mode: AckMode::Attached,
@@ -18074,7 +18094,10 @@ mod tests {
                                 },
                                 ProcessorOutput::new(named("info")),
                             ]))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                             OutputBranch::BranchedBy {
                                 branch: branch_name_for_relay("notifications"),
                                 assignments: Vec::new(),

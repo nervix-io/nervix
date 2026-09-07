@@ -9,7 +9,7 @@ use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction,
-    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ErrorPolicies, FieldName,
+    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ErrorPolicies, FieldName, FlushPolicy,
     InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, ModelKind, ModelName,
     RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp, WindowBound,
 };
@@ -67,8 +67,7 @@ pub(super) struct BranchedIngestorSpec {
     pub(super) branch_ttl: Option<String>,
     pub(super) branch_max_instances: Option<NonZeroU64>,
     pub(super) output_ack_boundary: BranchInstanceAckBoundary,
-    pub(super) output_flush_each: String,
-    pub(super) output_max_batch_size: Option<String>,
+    pub(super) output_flush_policy: FlushPolicy,
     pub(super) error_policies: ErrorPolicies,
 }
 
@@ -179,8 +178,7 @@ impl BranchedProcessorOutputsSpec {
 pub(super) struct BranchedProcessorOutputSpec {
     pub(super) relay: RelayName,
     pub(super) construction: nervix_models::RouteConstruction,
-    pub(super) flush_each: Option<String>,
-    pub(super) max_batch_size: Option<String>,
+    pub(super) flush_policy: Option<FlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
 }
 

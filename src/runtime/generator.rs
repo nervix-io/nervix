@@ -370,8 +370,7 @@ impl Runtime {
                     domain,
                     "generator",
                     &generator.name,
-                    &policy.flush_each,
-                    policy.max_batch_size.as_deref(),
+                    policy,
                 )?;
                 Ok((route, flush_policy))
             })
@@ -1045,9 +1044,9 @@ mod tests {
                  samples = relay_state.notifications.samples, labels = \
                  relay_state.notifications.labels",
             ),
-            flush_policy: Some(nervix_models::OutputFlushPolicy {
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+            flush_policy: Some(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
             }),
             message_error_policy: MessageErrorPolicy::Log,
             branch: None,

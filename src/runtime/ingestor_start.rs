@@ -403,8 +403,7 @@ impl Runtime {
                         domain,
                         "ingestor output",
                         &output.relay,
-                        &policy.flush_each,
-                        policy.max_batch_size.as_deref(),
+                        policy,
                     )
                 })
                 .transpose()?;
@@ -683,7 +682,10 @@ mod tests {
                                 output_routes: with_inherit_all(ProcessorOutputs::single(
                                     relay.clone(),
                                 ))
-                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                                .with_flush_policy(FlushPolicy::Each {
+                                    interval: "100ms".to_string(),
+                                    max_batch_size: "1MiB".to_string(),
+                                })
                                 .with_branch(OutputBranch::Unbranched),
                                 decode_using_codec: codec.clone(),
                                 timestamp_source: None,
@@ -826,7 +828,10 @@ mod tests {
                                 output_routes: with_inherit_all(ProcessorOutputs::single(
                                     relay.clone(),
                                 ))
-                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                                .with_flush_policy(FlushPolicy::Each {
+                                    interval: "100ms".to_string(),
+                                    max_batch_size: "1MiB".to_string(),
+                                })
                                 .with_branch(OutputBranch::Unbranched),
                                 decode_using_codec: codec.clone(),
                                 timestamp_source: None,

@@ -284,7 +284,7 @@ mod tests {
         CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
         CreateSignalingProtocol, CreateWireSchema, DeduplicatorName, DescribeRelay, DrainNode,
         DropModel, DropNode, EmitSink, EmitterName, EmitterPublishingMode, EndpointIngestMode,
-        EndpointName, EndpointType, ErrorPolicies, FieldName, GeneralErrorPolicy,
+        EndpointName, EndpointType, ErrorPolicies, FieldName, FlushPolicy, GeneralErrorPolicy,
         IngestQuiesceMode, IngestSource, IngestorName, JsonType, JunctionName, KafkaConfigEntry,
         KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, ModelName, MqttIngestMode, MqttQos,
         MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
@@ -307,8 +307,10 @@ mod tests {
     fn flushed_output(relay: RelayName, filter_map: Option<String>) -> ProcessorOutput {
         let mut output = ProcessorOutput::with_flush_policy(
             relay,
-            "100ms".to_string(),
-            Some("1MiB".to_string()),
+            FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
         );
         output.construction = filter_map
             .map(|source| {
@@ -920,8 +922,10 @@ mod tests {
                         encode_using_codec: Some(g.name()),
                         sink: Box::new(sink),
                         publishing_mode,
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
+                        flush_policy: FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        },
                         mode: if g.bool() {
                             AckMode::Attached
                         } else {
@@ -982,8 +986,10 @@ mod tests {
                 encode_using_codec: Some(g.name()),
                 sink: Box::new(EmitSink::ZeroMq { client: g.name() }),
                 publishing_mode: emitter_publishing_mode(),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 mode: if g.bool() {
                     AckMode::Attached
                 } else {
@@ -1015,8 +1021,10 @@ mod tests {
                     subject: g.name(),
                 }),
                 publishing_mode: emitter_publishing_mode(),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 mode: if g.bool() {
                     AckMode::Attached
                 } else {
@@ -2008,9 +2016,8 @@ mod tests {
             processor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "IMMEDIATE"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Immediate
         );
         let canonical = processor
             .to_canonical_nspl()
@@ -2038,9 +2045,11 @@ mod tests {
             reingestor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
     }
 
@@ -2071,9 +2080,11 @@ mod tests {
             reingestor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
         assert_eq!(
             reingestor.filter_where,
@@ -2109,9 +2120,11 @@ mod tests {
             reingestor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
         assert!(!output.construction.assignments.is_empty());
         assert!(output.construction.where_clause.is_some());
