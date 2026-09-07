@@ -1276,11 +1276,14 @@ impl MqttIngestor {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{ClientConfigEntry, MqttSession};
+    use std::time::Duration;
+
+    use nervix_models::{ClientConfigEntry, CreateClientMqtt, MqttSession};
     use nonzero_ext::nonzero;
     use rumqttc::BrokerSessionResumePolicy;
 
-    use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor};
+    use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor, MqttIngestorAddr};
+    use crate::runtime::{ParsedRetryPolicy, named, next_retry_delay};
 
     fn config_with_client_id(client_id: &str) -> Vec<ClientConfigEntry> {
         vec![ClientConfigEntry {
@@ -1354,5 +1357,103 @@ mod tests {
             .expect("single-instance default client_id must be accepted");
 
         assert_eq!(template, "fallback");
+    }
+
+    #[test]
+    fn parse_mqtt_addr_handles_valid_and_invalid_inputs() {
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtt://user:pass@broker.example.com:1883/topic")
+                .expect("must parse"),
+            MqttIngestorAddr {
+                host: "broker.example.com".to_string(),
+                port: 1883,
+                tls: false,
+            }
+        );
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtts://broker.example.com:8883").expect("must parse"),
+            MqttIngestorAddr {
+                host: "broker.example.com".to_string(),
+                port: 8883,
+                tls: true,
+            }
+        );
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtt://[2001:db8::1]:1883/topic").expect("must parse"),
+            MqttIngestorAddr {
+                host: "2001:db8::1".to_string(),
+                port: 1883,
+                tls: false,
+            }
+        );
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtt://broker.example.com:1883?keep_alive=30")
+                .expect("must parse"),
+            MqttIngestorAddr {
+                host: "broker.example.com".to_string(),
+                port: 1883,
+                tls: false,
+            }
+        );
+        assert!(MqttIngestor::parse_addr("http://broker.example.com:1883").is_err());
+        assert!(MqttIngestor::parse_addr("mqtt://broker.example.com").is_err());
+        assert!(MqttIngestor::parse_addr("mqtt://:1883").is_err());
+    }
+
+    #[test]
+    fn mqtt_client_builder_uses_configured_or_default_client_id() {
+        let client = CreateClientMqtt {
+            name: named("mqtt_main"),
+            mount: None,
+            config: vec![nervix_models::ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "mqtt://broker.example.com:1883".to_string(),
+            }],
+        };
+
+        MqttIngestor::client_from_client(&client, "default-client")
+            .expect("must build client from default id");
+
+        let client_with_id = CreateClientMqtt {
+            name: named("mqtt_main"),
+            mount: None,
+            config: vec![
+                nervix_models::ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: "mqtt://broker.example.com:1883".to_string(),
+                },
+                nervix_models::ClientConfigEntry {
+                    key: "client_id".to_string(),
+                    value: "explicit-client".to_string(),
+                },
+            ],
+        };
+
+        MqttIngestor::client_from_client(&client_with_id, "default-client")
+            .expect("must build client from explicit id");
+    }
+
+    #[test]
+    fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
+        let err = MqttIngestor::client_from_client(
+            &CreateClientMqtt {
+                name: named("mqtt_main"),
+                mount: None,
+                config: vec![],
+            },
+            "default-client",
+        )
+        .err()
+        .expect("missing mqtt addr");
+        assert!(err.contains("missing MQTT client config key 'addr'"));
+
+        let policy = ParsedRetryPolicy {
+            backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(10),
+        };
+        assert_eq!(
+            next_retry_delay(Duration::MAX, policy),
+            Duration::from_secs(10)
+        );
     }
 }

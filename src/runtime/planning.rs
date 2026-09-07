@@ -982,9 +982,11 @@ mod tests {
     use std::num::NonZeroU32;
 
     use nervix_models::{
-        CreateSchema, InferencerTensorDeclaration, InferencerTensorDimension,
-        InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-        InferencerTensorSchema, ParseAsType, SchemaField,
+        BranchSelection, CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema,
+        CreateWasmProcessor, CreateWindowProcessor, InferencerTensorDeclaration,
+        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+        InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType, ProcessorOutputs,
+        RelayBranching, SchemaField, WindowBound, ZeroMqIngestMode,
     };
     use nonzero_ext::nonzero;
     use triomphe::Arc;
@@ -1067,6 +1069,945 @@ mod tests {
         assert!(
             error.contains("inferencer 'score_model' INPUTS compile failed"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn branched_node_specs_capture_downstream_processing_tree() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("tenant", "orders", &["tenant"]),
+                branch_model("tenant", "projected_orders", &["tenant"]),
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("orders_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("orders_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("orders", &["tenant"])),
+                        decode_using_codec: named("orders_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_orders"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_orders"),
+                        from: ProcessorInputs::single(named("orders"))
+                            .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
+                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_projected_orders"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_projected_orders"),
+                        from: ProcessorInputs::single(named("projected_orders")),
+                        output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("projected_orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Emitter,
+                    identifier: named("orders_emitter"),
+                    model: nervix_models::Model::Emitter(CreateEmitter {
+                        name: named("orders_emitter"),
+                        from: ProcessorInputs::single(named("aggregated_orders")),
+                        encode_using_codec: Some(named("orders_codec")),
+                        sink: Box::new(EmitSink::ZeroMq {
+                            client: named("zmq_client"),
+                        }),
+                        flush_each: "100ms".to_string(),
+                        max_batch_size: Some("1MiB".to_string()),
+                        mode: AckMode::Attached,
+                        error_policies: ErrorPolicies::handled_by_log(),
+                        publishing_mode: EmitterPublishingMode::NoAck {
+                            retry_policy: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                        },
+                        construction: nervix_models::RouteConstruction::default(),
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        let spec = &specs.entrypoints[0];
+        assert_eq!(spec.identifier, named("orders_ingestor"));
+        assert_eq!(spec.root_relay, named("orders"));
+        assert_eq!(spec.branch.as_ref(), Some(&named("by_orders")));
+        assert_eq!(specs.processors.len(), 2);
+        let dedup_orders = &specs.processors[0];
+        assert_eq!(dedup_orders.spec.processor, named("dedup_orders"));
+        assert_eq!(dedup_orders.spec.input_relays, vec![named("orders")]);
+        let collect_policy = dedup_orders
+            .spec
+            .input_collect_policies
+            .get(&RelayName::from(&named::<ModelName>("orders")))
+            .expect("input collection policy must be planned for its source relay");
+        assert_eq!(collect_policy.collect_for, "25ms");
+        assert_eq!(collect_policy.max_batch_size.as_deref(), Some("2MiB"));
+        assert_eq!(dedup_orders.branch.as_ref(), Some(&named("by_orders")));
+        assert_eq!(dedup_orders.branch_ttl.as_deref(), Some("5m"));
+        assert_eq!(dedup_orders.branch_max_instances, None);
+        let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+            &dedup_orders.spec.operation
+        else {
+            panic!("expected deduplicator output");
+        };
+        let output = output_routes
+            .routes
+            .first()
+            .expect("deduplicator should have output route");
+        assert_eq!(output.relay, named("projected_orders"));
+        let dedup_projected = &specs.processors[1];
+        assert_eq!(
+            dedup_projected.spec.processor,
+            named("dedup_projected_orders")
+        );
+        assert_eq!(
+            dedup_projected.spec.input_relays,
+            vec![named("projected_orders")]
+        );
+        assert_eq!(dedup_projected.branch_ttl.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn branched_node_specs_capture_window_processor_as_branch_node() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("host", "metrics", &["host"]),
+                branch_model("host", "metric_summary", &["host"]),
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("metrics_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("metrics_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("metrics")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("metrics", &["host"])),
+                        decode_using_codec: named("metrics_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::WindowProcessor,
+                    identifier: named("metric_window"),
+                    model: nervix_models::Model::WindowProcessor(CreateWindowProcessor {
+                        name: named("metric_window"),
+                        from: ProcessorInputs::single(named("metrics")),
+                        output_routes: window_outputs(
+                            "metric_summary",
+                            "SET count = COUNT(input.latency)",
+                        ),
+                        branched_by: processor_branched_by("metrics", &["host"]),
+                        width: WindowBound {
+                            messages: Some(100),
+                            duration: None,
+                        },
+                        step: WindowBound {
+                            messages: Some(10),
+                            duration: None,
+                        },
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_summary"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_summary"),
+                        from: ProcessorInputs::single(named("metric_summary")),
+                        output_routes: (ProcessorOutputs::single(named("projected_summary")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("metric_summary", &["host"]),
+                        deduplicate_on: vec![expression("input.count")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        let spec = &specs.entrypoints[0];
+        assert_eq!(spec.root_relay, named("metrics"));
+        assert_eq!(specs.processors.len(), 2);
+        let window = specs
+            .processors
+            .iter()
+            .find(|node| node.spec.processor == named("metric_window"))
+            .expect("window processor spec must exist");
+        let BranchedProcessorOperationSpec::WindowProcessor {
+            output_routes,
+            width,
+            step,
+        } = &window.spec.operation
+        else {
+            panic!("expected window processor branch node");
+        };
+        let output = output_routes
+            .routes
+            .first()
+            .expect("window processor should have output route");
+        assert_eq!(output.relay, named("metric_summary"));
+        assert_eq!(width.messages, Some(100));
+        assert_eq!(step.messages, Some(10));
+        assert_eq!(output.construction.assignments.len(), 1);
+        assert!(
+            specs
+                .processors
+                .iter()
+                .any(|node| node.spec.processor == named("dedup_summary")
+                    && node.spec.input_relays == vec![named("metric_summary")])
+        );
+    }
+
+    #[test]
+    fn branched_node_specs_capture_inferencer_as_branch_node() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("tenant", "features", &["tenant"]),
+                branch_model("tenant", "scores", &["tenant"]),
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("features_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("features_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("features")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("features", &["tenant"])),
+                        decode_using_codec: named("features_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Inferencer,
+                    identifier: named("score_model"),
+                    model: nervix_models::Model::Inferencer(CreateInferencer {
+                        name: named("score_model"),
+                        from: ProcessorInputs::single(named("features")),
+                        output_routes: (ProcessorOutputs::single(named("scores")))
+                            .with_flush_policy("IMMEDIATE".to_string(), None),
+                        branched_by: processor_branched_by("features", &["tenant"]),
+                        resource: named("fraud_model"),
+                        resource_version: Some(3),
+                        file: "models/fraud.onnx".to_string(),
+                        inputs: vec![InferencerTensorMapping {
+                            tensor: "features".to_string(),
+                            schema: inferencer_tensor_schema(nonzero!(2u32)),
+                            expression: expression("input.vector"),
+                        }],
+                        output_schema: vec![InferencerTensorDeclaration {
+                            tensor: "score".to_string(),
+                            schema: inferencer_tensor_schema(nonzero!(1u32)),
+                        }],
+                        mode: AckMode::Attached,
+                        filter_where: Some(expression("input.active")),
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_scores"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_scores"),
+                        from: ProcessorInputs::single(named("scores")),
+                        output_routes: (ProcessorOutputs::single(named("projected_scores")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("scores", &["tenant"]),
+                        deduplicate_on: vec![expression("input.score")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        let spec = &specs.entrypoints[0];
+        assert_eq!(spec.root_relay, named("features"));
+        assert_eq!(specs.processors.len(), 2);
+        let inferencer = specs
+            .processors
+            .iter()
+            .find(|node| node.spec.processor == named("score_model"))
+            .expect("inferencer spec must exist");
+        let BranchedProcessorOperationSpec::Inferencer {
+            output_routes,
+            resource,
+            resource_version,
+            file,
+            inputs,
+            output_schema,
+            ..
+        } = &inferencer.spec.operation
+        else {
+            panic!("expected inferencer branch node");
+        };
+        let output = output_routes
+            .routes
+            .first()
+            .expect("inferencer should have output route");
+        assert_eq!(output.relay, named("scores"));
+        assert_eq!(resource, &named("fraud_model"));
+        assert_eq!(*resource_version, Some(3));
+        assert_eq!(file, "models/fraud.onnx");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(output_schema.len(), 1);
+        assert_eq!(output.flush_each.as_deref(), Some("IMMEDIATE"));
+        assert_eq!(
+            inferencer.spec.filter_where,
+            Some(expression("input.active"))
+        );
+        assert!(
+            specs
+                .processors
+                .iter()
+                .any(|node| node.spec.processor == named("dedup_scores")
+                    && node.spec.input_relays == vec![named("scores")])
+        );
+    }
+
+    #[test]
+    fn branched_node_specs_capture_reingestor_entrypoint_tree() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("tenant", "tenant_orders", &["tenant"]),
+                PlannedModel {
+                    kind: ModelKind::Reingestor,
+                    identifier: named("tenant_partition"),
+                    model: nervix_models::Model::Reingestor(CreateReingestor {
+                        name: named("tenant_partition"),
+                        from: ProcessorInputs::single(named("orders")),
+                        output_routes: with_inherit_all(ProcessorOutputs::single(named(
+                            "tenant_orders",
+                        )))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("tenant_orders", &["tenant"])),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_orders"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_orders"),
+                        from: ProcessorInputs::single(named("tenant_orders")),
+                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("tenant_orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        let spec = &specs.entrypoints[0];
+        assert_eq!(spec.kind, ModelKind::Reingestor);
+        assert_eq!(spec.identifier, named("tenant_partition"));
+        assert_eq!(spec.root_relay, named("tenant_orders"));
+        assert_eq!(spec.branch.as_ref(), Some(&named("by_tenant_orders")));
+        assert_eq!(specs.processors.len(), 1);
+        assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
+        assert_eq!(
+            specs.processors[0].spec.input_relays,
+            vec![named("tenant_orders")]
+        );
+        assert_eq!(
+            specs.processors[0].branch.as_ref(),
+            Some(&named("by_tenant_orders"))
+        );
+        assert_eq!(specs.processors[0].branch_ttl.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn branched_node_specs_capture_processor_output_route_tree() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("tenant", "orders", &["tenant"]),
+                branch_model("tenant", "urgent_orders", &["tenant"]),
+                branch_model("tenant", "default_orders", &["tenant"]),
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("orders_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("orders_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("orders", &["tenant"])),
+                        decode_using_codec: named("orders_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("orders_splitter"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("orders_splitter"),
+                        from: ProcessorInputs::single(named("orders")),
+                        output_routes: (ProcessorOutputs::new(vec![
+                            ProcessorOutput {
+                                relay: named("urgent_orders"),
+                                construction: nervix_nspl::parse_route_construction(
+                                    "WHERE output.urgent",
+                                )
+                                .expect("route construction must parse"),
+                                flush_policy: None,
+                                message_error_policy: MessageErrorPolicy::Log,
+                                branch: None,
+                            },
+                            ProcessorOutput {
+                                relay: named("default_orders"),
+                                construction: nervix_models::RouteConstruction::default(),
+                                flush_policy: None,
+                                message_error_policy: MessageErrorPolicy::Log,
+                                branch: None,
+                            },
+                        ]))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: Some(expression("input.active")),
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_urgent"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_urgent"),
+                        from: ProcessorInputs::single(named("urgent_orders")),
+                        output_routes: (ProcessorOutputs::single(named("urgent_projected")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("urgent_orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_default"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_default"),
+                        from: ProcessorInputs::single(named("default_orders")),
+                        output_routes: (ProcessorOutputs::single(named("default_projected")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("default_orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        assert_eq!(specs.processors.len(), 3);
+        let splitter = specs
+            .processors
+            .iter()
+            .find(|node| node.spec.processor == named("orders_splitter"))
+            .expect("splitter spec must exist");
+        let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+            &splitter.spec.operation
+        else {
+            panic!("expected deduplicator output routes");
+        };
+        assert_eq!(splitter.spec.filter_where, Some(expression("input.active")));
+        assert_eq!(output_routes.routes.len(), 2);
+        assert_eq!(
+            output_routes.routes[0].construction.where_clause,
+            Some(expression("output.urgent"))
+        );
+        assert_eq!(output_routes.routes[0].relay, named("urgent_orders"));
+        assert_eq!(output_routes.routes[1].relay, named("default_orders"));
+        assert!(
+            specs
+                .processors
+                .iter()
+                .any(|node| node.spec.processor == named("dedup_urgent")
+                    && node.spec.input_relays == vec![named("urgent_orders")])
+        );
+        assert!(
+            specs
+                .processors
+                .iter()
+                .any(|node| node.spec.processor == named("dedup_default")
+                    && node.spec.input_relays == vec![named("default_orders")])
+        );
+    }
+
+    #[test]
+    fn branched_node_specs_capture_junction_as_single_branch_processor() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("tenant", "left_stream", &["tenant"]),
+                branch_model("tenant", "right_stream", &["tenant"]),
+                branch_model("tenant", "joined_stream", &["tenant"]),
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("left_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("left_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("left_stream")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("left_stream", &["tenant"])),
+                        decode_using_codec: named("notification_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("right_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("right_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("right_stream")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("right_stream", &["tenant"])),
+                        decode_using_codec: named("notification_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Junction,
+                    identifier: named("join_streams"),
+                    model: nervix_models::Model::Junction(CreateJunction {
+                        name: named("join_streams"),
+                        from: ProcessorInputs::new(
+                            vec![named("left_stream"), named("right_stream")],
+                            Vec::new(),
+                        ),
+                        output_routes: (ProcessorOutputs::single(named("joined_stream")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("left_stream", &["tenant"]),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_joined"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_joined"),
+                        from: ProcessorInputs::single(named("joined_stream")),
+                        output_routes: (ProcessorOutputs::single(named("projected_joined")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("joined_stream", &["tenant"]),
+                        deduplicate_on: vec![expression("input.tenant")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 2);
+        assert_eq!(
+            specs
+                .processors
+                .iter()
+                .filter(|node| node.spec.processor == named("join_streams"))
+                .count(),
+            1
+        );
+        let junction = specs
+            .processors
+            .iter()
+            .find(|node| node.spec.processor == named("join_streams"))
+            .expect("junction spec must exist");
+        assert_eq!(
+            junction.spec.input_relays,
+            vec![named("left_stream"), named("right_stream")]
+        );
+        let BranchedProcessorOperationSpec::Junction { output_routes, .. } =
+            &junction.spec.operation
+        else {
+            panic!("expected junction processor");
+        };
+        let output = output_routes
+            .routes
+            .first()
+            .expect("junction should have output route");
+        assert_eq!(output.relay, named("joined_stream"));
+        assert!(
+            specs
+                .processors
+                .iter()
+                .any(|node| node.spec.processor == named("dedup_joined"))
+        );
+    }
+
+    #[test]
+    fn branched_node_specs_capture_single_processor_output_route_tree() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("tenant", "orders", &["tenant"]),
+                branch_model("tenant", "projected_orders", &["tenant"]),
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("orders_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("orders_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("orders", &["tenant"])),
+                        decode_using_codec: named("orders_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("orders_filter"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("orders_filter"),
+                        from: ProcessorInputs::new(
+                            vec![named("orders")],
+                            vec![ProcessorInputWhere {
+                                relay: named("orders"),
+                                where_clause: expression("input.active"),
+                            }],
+                        ),
+                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: Some(expression("input.active")),
+                        materialized_state: Vec::new(),
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_projected"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_projected"),
+                        from: ProcessorInputs::single(named("projected_orders")),
+                        output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("projected_orders", &["tenant"]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        let orders_filter = specs
+            .processors
+            .iter()
+            .find(|node| node.spec.processor == named("orders_filter"))
+            .expect("orders filter spec must exist");
+        assert_eq!(
+            orders_filter
+                .spec
+                .from_where
+                .get(&RelayName::from(&named::<ModelName>("orders"))),
+            Some(&expression("input.active"))
+        );
+        let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+            &orders_filter.spec.operation
+        else {
+            panic!("expected processor output routes");
+        };
+        assert_eq!(
+            orders_filter.spec.filter_where,
+            Some(expression("input.active"))
+        );
+        assert_eq!(output_routes.routes.len(), 1);
+        assert_eq!(output_routes.routes[0].relay, named("projected_orders"));
+        assert!(
+            specs
+                .processors
+                .iter()
+                .any(|node| node.spec.processor == named("dedup_projected")
+                    && node.spec.input_relays == vec![named("projected_orders")])
+        );
+    }
+
+    #[test]
+    fn branched_node_specs_include_singleton_branch_for_empty_branching() {
+        let specs = branched_node_specs_from_models(
+            [
+                PlannedModel {
+                    kind: ModelKind::Ingestor,
+                    identifier: named("orders_ingestor"),
+                    model: nervix_models::Model::Ingestor(CreateIngestor {
+                        name: named("orders_ingestor"),
+                        output_routes: (ProcessorOutputs::single(named("orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(OutputBranch::Unbranched),
+                        decode_using_codec: named("orders_codec"),
+                        timestamp_source: None,
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_client"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                        },
+                        general_error_policy: GeneralErrorPolicy::Log,
+
+                        filter_where: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_orders"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_orders"),
+                        from: ProcessorInputs::single(named("orders")),
+                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: processor_branched_by("orders", &[]),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        assert_eq!(specs.entrypoints[0].identifier, named("orders_ingestor"));
+        assert_eq!(specs.entrypoints[0].root_relay, named("orders"));
+        assert_eq!(specs.entrypoints[0].branch, None);
+        assert_eq!(specs.entrypoints[0].branch_ttl, None);
+        assert_eq!(specs.processors.len(), 1);
+        assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
+        assert_eq!(specs.processors[0].branch_ttl, None);
+        assert_eq!(specs.processors[0].branch, None);
+        assert_eq!(specs.processors[0].branch_max_instances, None);
+    }
+
+    #[test]
+    fn branched_processor_specs_do_not_require_an_entrypoint() {
+        let specs = branched_node_specs_from_models(
+            [
+                PlannedModel {
+                    kind: ModelKind::Relay,
+                    identifier: named("orders"),
+                    model: nervix_models::Model::Relay(CreateRelay {
+                        name: named("orders"),
+                        schema: named("order_event"),
+                        buffer: nonzero!(1usize),
+                        branching: RelayBranching::unbranched(),
+                        materialized_state: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::Deduplicator,
+                    identifier: named("dedup_orders"),
+                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                        name: named("dedup_orders"),
+                        from: ProcessorInputs::single(named("orders")),
+                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: BranchSelection::unbranched(),
+                        deduplicate_on: vec![expression("input.order_id")],
+                        max_time: "10m".to_string(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert!(specs.entrypoints.is_empty());
+        assert_eq!(specs.processors.len(), 1);
+        assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
+        assert_eq!(specs.processors[0].spec.input_relays, vec![named("orders")]);
+        assert_eq!(specs.processors[0].branch_ttl, None);
+    }
+
+    #[test]
+    fn branched_wasm_processor_specs_preserve_global_error_policy() {
+        let specs = branched_node_specs_from_models(
+            [
+                PlannedModel {
+                    kind: ModelKind::Relay,
+                    identifier: named("orders"),
+                    model: nervix_models::Model::Relay(CreateRelay {
+                        name: named("orders"),
+                        schema: named("order_event"),
+                        buffer: nonzero!(1usize),
+                        branching: RelayBranching::unbranched(),
+                        materialized_state: None,
+                    }),
+                },
+                PlannedModel {
+                    kind: ModelKind::WasmProcessor,
+                    identifier: named("filter_orders"),
+                    model: nervix_models::Model::WasmProcessor(CreateWasmProcessor {
+                        name: named("filter_orders"),
+                        from: ProcessorInputs::single(named("orders")),
+                        output_routes: ProcessorOutputs::single(named("filtered_orders")),
+                        branched_by: BranchSelection::unbranched(),
+                        resource: named("filter_resource"),
+                        resource_version: None,
+                        file: "filter.wasm".to_string(),
+                        limits: nervix_models::WasmProcessorLimits {
+                            max_fuel: nonzero!(1_000_000_000u64),
+                            max_memory_bytes: nonzero!(67_108_864u64),
+                        },
+                        global_error_policy: GeneralErrorPolicy::Ignore,
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.processors.len(), 1);
+        assert_eq!(
+            specs.processors[0].spec.error_policies.general,
+            GeneralErrorPolicy::Ignore
+        );
+        assert_eq!(
+            specs.processors[0].spec.error_policies.message,
+            MessageErrorPolicy::Log
+        );
+    }
+
+    #[test]
+    fn branched_node_specs_include_reingestor_with_declared_branching() {
+        let specs = branched_node_specs_from_models(
+            [
+                branch_model("tenant", "tenant_notifications", &["tenant"]),
+                PlannedModel {
+                    kind: ModelKind::Reingestor,
+                    identifier: named("tenant_partition"),
+                    model: nervix_models::Model::Reingestor(CreateReingestor {
+                        name: named("tenant_partition"),
+                        from: ProcessorInputs::single(named("notifications")),
+                        output_routes: (ProcessorOutputs::single(named("tenant_notifications")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_branch(branched_by("tenant_notifications", &["tenant"])),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                },
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(specs.entrypoints.len(), 1);
+        assert_eq!(specs.entrypoints[0].identifier, named("tenant_partition"));
+        assert_eq!(
+            specs.entrypoints[0].root_relay,
+            named("tenant_notifications")
         );
     }
 }

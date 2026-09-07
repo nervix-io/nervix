@@ -35,7 +35,7 @@ TEST_DIRECTORIES = frozenset({"tests", "benches", "examples"})
 
 # In-crate test files. They still count toward file size, because a test file that has grown past
 # `LARGE_FILE_LINES` is split like any other, but their bodies never hold a production count up.
-TEST_FILE_SUFFIXES = ("/tests.rs", "_tests.rs")
+TEST_FILE_SUFFIXES = ("/tests.rs", "_tests.rs", "/test_fixtures.rs")
 
 # The parser is an edge dependency: only the language crate itself, the client tools, and the
 # session adapter may name it. Everything else consumes Models.

@@ -378,6 +378,9 @@ impl ClickHouseEmitter {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::ClientConfigEntry;
+    use tokio::time::Duration;
+
     use super::*;
 
     fn client_config(
@@ -489,5 +492,25 @@ mod tests {
             matches!(result.0, ClickHouseError::TimedOut),
             "unexpected ClickHouse insert error: {result:?}"
         );
+    }
+
+    #[test]
+    fn clickhouse_client_config_validates_tls_ca_file() {
+        let error = match emitters::clickhouse::ClickHouseEmitter::client_from_config(&[
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "https://127.0.0.1:8124".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: "/tmp/nervix-missing-clickhouse-ca.pem".to_string(),
+            },
+        ]) {
+            Ok(_) => panic!("missing ClickHouse TLS CA should fail"),
+            Err(error) => error,
+        };
+        let error = format!("{error:?}");
+
+        assert!(error.contains("TLS CA certificate"));
     }
 }

@@ -525,3 +525,72 @@ impl PrometheusIngestor {
         Ok(datetime.to_rfc3339())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use nervix_models::Timestamp;
+
+    use super::*;
+
+    #[test]
+    fn prometheus_helpers_render_payload_and_validate_inputs() {
+        let sample = ingestors::prometheus::PrometheusVectorResult {
+            metric: BTreeMap::from([("source".to_string(), "local".to_string())]),
+            value: (1_735_782_245.25, "12.5".to_string()),
+        };
+
+        let timestamp =
+            ingestors::prometheus::PrometheusIngestor::timestamp_to_rfc3339(sample.value.0)
+                .expect("valid ts");
+        assert!(timestamp.starts_with("2025-"));
+
+        let payload = ingestors::prometheus::PrometheusIngestor::sample_payload(&sample)
+            .expect("must render");
+        let value: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
+        assert_eq!(value["source"], "local");
+        assert_eq!(value["value"], 12.5);
+        assert_eq!(value["timestamp"], timestamp);
+
+        let bad_value = ingestors::prometheus::PrometheusVectorResult {
+            metric: BTreeMap::new(),
+            value: (1.0, "NaN".to_string()),
+        };
+        assert!(ingestors::prometheus::PrometheusIngestor::sample_payload(&bad_value).is_err());
+        assert!(
+            ingestors::prometheus::PrometheusIngestor::timestamp_to_rfc3339(f64::INFINITY).is_err()
+        );
+    }
+
+    #[test]
+    fn prometheus_query_time_keeps_every_nanosecond_digit() {
+        let render = |unix_nanos: i64| {
+            ingestors::prometheus::PrometheusIngestor::query_time_seconds(
+                Timestamp::from_unix_nanos(unix_nanos),
+            )
+        };
+
+        assert_eq!(render(1_788_765_595_123_456_789), "1788765595.123456789");
+        assert_ne!(
+            render(1_788_765_595_123_456_789),
+            render(1_788_765_595_123_456_790)
+        );
+        assert_eq!(render(0), "0.000000000");
+        assert_eq!(render(-500_000_000), "-0.500000000");
+        assert_eq!(render(-1_500_000_000), "-1.500000000");
+    }
+
+    #[test]
+    fn prometheus_query_url_uses_url_parser_for_path_and_query() {
+        let url = ingestors::prometheus::PrometheusIngestor::query_url(
+            "http://prometheus:9090/base/?stale=true",
+            vec![("query".to_string(), "vector(1)".to_string())],
+        )
+        .expect("must build url");
+        assert_eq!(
+            url.as_str(),
+            "http://prometheus:9090/base/api/v1/query?query=vector%281%29"
+        );
+    }
+}

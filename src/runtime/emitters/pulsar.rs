@@ -317,6 +317,7 @@ mod tests {
         error::ConnectionError as PulsarConnectionError,
         message::proto::ServerError as PulsarServerError,
     };
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -349,5 +350,71 @@ mod tests {
         assert_eq!(connection.max_retries, 0);
         assert_eq!(operation.max_retries, Some(0));
         assert!(!operation.allow_retry(0));
+    }
+
+    #[test]
+    fn pulsar_tls_options_load_certificate_chain_and_flags() {
+        let tempdir = tempdir().expect("tempdir should be created");
+        let ca_path = tempdir.path().join("ca.pem");
+        std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
+
+        let options = emitters::pulsar::PulsarEmitter::tls_options_from_config(&[
+            ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: ca_path.display().to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_allow_insecure_connection".to_string(),
+                value: "true".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_hostname_verification_enabled".to_string(),
+                value: "false".to_string(),
+            },
+        ])
+        .expect("pulsar tls options should load")
+        .expect("tls options should be present");
+
+        assert_eq!(
+            options
+                .certificate_chain
+                .expect("certificate chain should be present"),
+            b"test-ca".to_vec()
+        );
+        assert!(options.allow_insecure_connection);
+        assert!(!options.tls_hostname_verification_enabled);
+    }
+
+    #[test]
+    fn pulsar_tls_options_reject_client_auth_material() {
+        let error = emitters::pulsar::PulsarEmitter::tls_options_from_config(&[
+            ClientConfigEntry {
+                key: "tls_cert_file".to_string(),
+                value: "/tmp/client.crt".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_key_file".to_string(),
+                value: "/tmp/client.key".to_string(),
+            },
+        ])
+        .expect_err("pulsar mTLS material should be rejected");
+        let error = format!("{error:?}");
+
+        assert!(error.contains("tls_cert_file"));
+        assert!(error.contains("tls_key_file"));
+    }
+
+    #[test]
+    fn pulsar_tls_options_reject_invalid_boolean_values() {
+        let error =
+            emitters::pulsar::PulsarEmitter::tls_options_from_config(&[ClientConfigEntry {
+                key: "tls_allow_insecure_connection".to_string(),
+                value: "maybe".to_string(),
+            }])
+            .expect_err("invalid pulsar tls boolean should be rejected");
+        let error = format!("{error:?}");
+
+        assert!(error.contains("tls_allow_insecure_connection"));
+        assert!(error.contains("maybe"));
     }
 }

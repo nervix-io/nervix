@@ -11,12 +11,11 @@
 use std::sync::atomic::Ordering;
 
 use ahash::{HashMap, HashMapExt};
-use meticulous::OptionExt as _;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use triomphe::Arc;
 
-use super::NodeQuiesceCounters;
+use super::*;
 
 #[derive(Debug)]
 struct ForceFlushParticipantState {
@@ -299,6 +298,82 @@ impl Drop for DomainForceFlushCompletion {
             self.coordinator
                 .release_claim(self.participant, self.generation);
         }
+    }
+}
+
+impl Runtime {
+    pub(in crate::runtime) fn tracked_ack_root(
+        &self,
+        domain: &DomainName,
+    ) -> (AckSet, AckCompletion) {
+        let tracker = self
+            .inner
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        AckSet::tracked_root(tracker)
+    }
+
+    pub(in crate::runtime) fn tracked_ingestor_ack_root(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> (AckSet, AckCompletion) {
+        let domain_tracker = self
+            .inner
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        let ingestor_tracker = self
+            .inner
+            .in_flight_by_ingestor
+            .entry(DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        AckSet::tracked_roots(vec![domain_tracker, ingestor_tracker])
+    }
+
+    pub fn domain_outstanding_work(&self, domain: &DomainName) -> usize {
+        self.inner
+            .in_flight_by_domain
+            .get(domain)
+            .map_or(0, |tracker| tracker.outstanding())
+    }
+
+    pub(in crate::runtime) fn force_flush_participant(
+        &self,
+        domain: &DomainName,
+        counters: Arc<NodeQuiesceCounters>,
+    ) -> DomainForceFlushParticipant {
+        let coordinator = self
+            .inner
+            .force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(DomainForceFlush::new)
+            .clone();
+        DomainForceFlush::subscribe(&coordinator, Some(counters))
+    }
+
+    pub fn force_flush_domain(&self, domain: &DomainName) -> u64 {
+        self.inner
+            .force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(DomainForceFlush::new)
+            .request()
+    }
+
+    pub fn force_flush_domain_if_idle(&self, domain: &DomainName) -> u64 {
+        self.inner
+            .force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(DomainForceFlush::new)
+            .request_if_idle()
     }
 }
 
