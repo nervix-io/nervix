@@ -5,10 +5,11 @@ use nervix_models::{AckMode, AlterReingestor, CreateReingestor, CreateStatement}
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, alter_op_separator, alter_reingestor_operation,
-        completion_context, filter_where_clause, flushed_ingestor_outputs, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
-        reingestor_name, reingestor_ref, suggest_from, suggestions_from_errors, tok,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_op_separator,
+        alter_reingestor_operation, completion_context, filter_where_clause,
+        flushed_ingestor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
+        lex_input, materialized_state_dependencies, reingestor_name, reingestor_ref, suggest_from,
+        suggestions_from_errors, tok,
     },
 };
 
@@ -94,13 +95,21 @@ pub fn parse_alter_reingestor_tokens(
 pub fn parse_create_reingestor(
     input: &str,
 ) -> Result<CreateStatement<CreateReingestor>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_reingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_reingestor(input: &str) -> Result<AlterReingestor, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_reingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -111,7 +120,7 @@ pub fn suggest_create_reingestor(input: &str, cursor: usize) -> Vec<String> {
 
 pub fn suggest_alter_reingestor(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let (_, _, tokens) = match lex_input(&source) {
+    let LexedInput { tokens, .. } = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

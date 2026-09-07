@@ -5,8 +5,8 @@ use nervix_models::{CreateStatement, CreateVhost, VhostTlsResource};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, hostname_lit, if_not_exists_clause, into_parse_error, kw,
-        lex_input, resource_ref, suggest_from, tok, vhost_name,
+        LexedInput, ParseError, ParseFromSourceError, hostname_lit, if_not_exists_clause,
+        into_parse_error, kw, lex_input, resource_ref, suggest_from, tok, vhost_name,
     },
 };
 
@@ -69,7 +69,11 @@ pub fn parse_create_vhost_tokens(
 pub fn parse_create_vhost(
     input: &str,
 ) -> Result<CreateStatement<CreateVhost>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_vhost_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

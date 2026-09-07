@@ -826,13 +826,32 @@ impl IcebergEmitter {
         let accepted_rows = u64::try_from(actual_accepted_rows).map_err(|error| {
             Report::new(IcebergEmitterError::MapBatch).attach_printable(error.to_string())
         })?;
-        let (path, staged_bytes, accepted_rows) = match accepted {
+        /// The staged file this flush wrote, if any rows survived validation.
+        struct StagedFlush {
+            path: Option<PathBuf>,
+            bytes: u64,
+            rows: u64,
+        }
+
+        let StagedFlush {
+            path,
+            bytes: staged_bytes,
+            rows: accepted_rows,
+        } = match accepted {
             Some(batch) => {
                 let path = self.next_staged_path();
-                let staged_bytes = Self::write_ipc_batch(path.clone(), batch).await?;
-                (Some(path), staged_bytes, accepted_rows)
+                let bytes = Self::write_ipc_batch(path.clone(), batch).await?;
+                StagedFlush {
+                    path: Some(path),
+                    bytes,
+                    rows: accepted_rows,
+                }
             }
-            None => (None, 0, 0),
+            None => StagedFlush {
+                path: None,
+                bytes: 0,
+                rows: 0,
+            },
         };
         let domain_timestamp = self
             .pending_batches
@@ -846,7 +865,8 @@ impl IcebergEmitter {
             .flat_map(|batch| batch.acks)
             .collect::<Vec<_>>();
         let mut accepted_acks = Vec::with_capacity(usize::try_from(accepted_rows).unwrap_or(0));
-        for (row, ((metadata, key), acks)) in metadata.into_iter().zip(keys).zip(acks).enumerate() {
+        for (row, (sidecars, acks)) in metadata.into_iter().zip(keys).zip(acks).enumerate() {
+            let (metadata, key) = sidecars;
             if let Some(error) = rejected_errors[row].take() {
                 self.rejected_records.push_back(IcebergRejectedRecord {
                     batch: input_batch.clone(),

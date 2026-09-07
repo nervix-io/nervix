@@ -5,8 +5,8 @@ use nervix_models::DescribeReingestor;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, reingestor_ref,
-        suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input,
+        reingestor_ref, suggest_from, tok,
     },
 };
 
@@ -35,7 +35,11 @@ pub fn parse_describe_reingestor_tokens(
 }
 
 pub fn parse_describe_reingestor(input: &str) -> Result<DescribeReingestor, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_reingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

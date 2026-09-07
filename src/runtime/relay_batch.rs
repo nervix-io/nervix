@@ -64,12 +64,15 @@ pub(super) struct RelayRecordBatchReorderFailure {
     pub(super) batch: RelayRecordBatch,
 }
 
-type UnkeyedRelayBatchParts = (
-    Arc<RuntimeRecordBatch>,
-    Vec<RuntimeRecordMetadata>,
-    Vec<Option<BranchKey>>,
-    Vec<AckSet>,
-);
+/// A relay batch taken apart into the Arrow batch and the per-row sidecars that travel with it.
+/// The branch keys come along so a caller that concatenates batches keeps every row's key, which
+/// is why this is not simply the batch plus metadata.
+pub(super) struct UnkeyedRelayBatchParts {
+    pub(super) batch: Arc<RuntimeRecordBatch>,
+    pub(super) metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) keys: Vec<Option<BranchKey>>,
+    pub(super) acks: Vec<AckSet>,
+}
 
 impl RelayRecordBatch {
     pub(super) fn runtime_row(&self, row: usize) -> Result<RuntimeRow, String> {
@@ -261,7 +264,12 @@ impl RelayRecordBatch {
     }
 
     pub(super) fn into_unkeyed_parts(self) -> UnkeyedRelayBatchParts {
-        (self.batch, self.metadata, self.keys, self.acks)
+        UnkeyedRelayBatchParts {
+            batch: self.batch,
+            metadata: self.metadata,
+            keys: self.keys,
+            acks: self.acks,
+        }
     }
 
     pub(super) fn into_reordered(

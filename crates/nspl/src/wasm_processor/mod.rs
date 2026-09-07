@@ -8,7 +8,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, byte_size_lit,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, byte_size_lit,
         filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
         kw_phrase2, lex_input, materialized_state_dependencies, message_error_policy, relay_ref,
         resource_ref, set_or_where_route_construction, string_lit, suggest_from, tok, u64_value,
@@ -195,7 +195,11 @@ pub fn parse_create_wasm_processor_tokens(
 pub fn parse_create_wasm_processor(
     input: &str,
 ) -> Result<CreateStatement<CreateWasmProcessor>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_wasm_processor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

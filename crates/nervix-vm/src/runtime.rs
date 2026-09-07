@@ -850,25 +850,40 @@ fn execute_program_with_selection_in_context_sync(
         None
     };
 
-    let (columns, row_errors, selected_rows) = if let Some(predicate) = global_predicate.as_ref() {
+    /// The program output after the global filter has been applied, which narrows the columns and
+    /// the per-row errors together with the selection that says which input rows survived.
+    struct FilteredOutput {
+        columns: Vec<TypedArray>,
+        row_errors: RowErrors,
+        selected_rows: RowSelection,
+    }
+
+    let filtered = if let Some(predicate) = global_predicate.as_ref() {
         let selected = selected_rows(predicate);
         for invocation in &mut invocations {
             invocation.arguments =
                 filter_columns(&invocation.arguments, predicate, selected.len())?;
         }
-        let filtered_errors = row_errors.select_rows(&selected);
-        (
-            filter_columns(&columns, predicate, selected.len())?,
-            filtered_errors,
-            RowSelection::Selected(selected),
-        )
+        FilteredOutput {
+            columns: filter_columns(&columns, predicate, selected.len())?,
+            row_errors: row_errors.select_rows(&selected),
+            selected_rows: RowSelection::Selected(selected),
+        }
     } else {
-        (columns, row_errors, RowSelection::All(batch.row_count()))
+        FilteredOutput {
+            columns,
+            row_errors,
+            selected_rows: RowSelection::All(batch.row_count()),
+        }
     };
 
     Ok(ExecutionResult {
-        batch: TypedBatch::with_errors(program.output_schema.clone(), columns, row_errors)?,
-        selected_rows,
+        batch: TypedBatch::with_errors(
+            program.output_schema.clone(),
+            filtered.columns,
+            filtered.row_errors,
+        )?,
+        selected_rows: filtered.selected_rows,
         invocations,
     })
 }

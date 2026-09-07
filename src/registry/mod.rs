@@ -4198,7 +4198,7 @@ impl ActiveGraph {
         }
     }
 
-    pub fn edges(&self) -> Vec<(ModelName, ModelName, EdgeKind)> {
+    pub fn edges(&self) -> Vec<ActiveEdge> {
         self.graph
             .edge_references()
             .map(|edge| {
@@ -4214,7 +4214,11 @@ impl ActiveGraph {
                     .verified("this endpoint comes from an edge of the same graph")
                     .identifier
                     .clone();
-                (from, to, *edge.weight())
+                ActiveEdge {
+                    from,
+                    to,
+                    kind: *edge.weight(),
+                }
             })
             .collect()
     }
@@ -4258,9 +4262,17 @@ impl ActiveGraph {
     }
 
     fn schema_fingerprint_for_index(&self, index: NodeIndex) -> [u8; 32] {
+        /// One schema model that a node's fingerprint covers, encoded so the hash reflects the
+        /// exact stored shape rather than the order the graph walk reached it in.
+        struct FingerprintedSchema {
+            kind: ModelKind,
+            identifier: ModelName,
+            encoded: Vec<u8>,
+        }
+
         let mut pending = vec![index];
         let mut visited = HashSet::default();
-        let mut schemas = Vec::new();
+        let mut schemas = Vec::<FingerprintedSchema>::new();
 
         while let Some(index) = pending.pop() {
             if !visited.insert(index) {
@@ -4275,14 +4287,14 @@ impl ActiveGraph {
             | Model::WireCborSchema(_)
             | Model::WireAvroSchema(_) = node.config.as_ref()
             {
-                schemas.push((
-                    node.kind,
-                    node.identifier.clone(),
-                    serde_json::to_vec(node.config.as_ref()).assured(
+                schemas.push(FingerprintedSchema {
+                    kind: node.kind,
+                    identifier: node.identifier.clone(),
+                    encoded: serde_json::to_vec(node.config.as_ref()).assured(
                         "registry models are plain serde structures with string keys, which \
                          serde_json always encodes",
                     ),
-                ));
+                });
             }
             pending.extend(
                 self.graph
@@ -4293,19 +4305,19 @@ impl ActiveGraph {
             );
         }
         schemas.sort_by(|left, right| {
-            left.0
+            left.kind
                 .as_str()
-                .cmp(right.0.as_str())
-                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+                .cmp(right.kind.as_str())
+                .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
         });
 
         let mut hasher = blake3::Hasher::new();
-        for (kind, identifier, encoded) in schemas {
-            hasher.update(kind.as_str().as_bytes());
+        for schema in schemas {
+            hasher.update(schema.kind.as_str().as_bytes());
             hasher.update(&[0]);
-            hasher.update(identifier.as_str().as_bytes());
+            hasher.update(schema.identifier.as_str().as_bytes());
             hasher.update(&[0]);
-            hasher.update(&encoded);
+            hasher.update(&schema.encoded);
             hasher.update(&[0]);
         }
         *hasher.finalize().as_bytes()
@@ -4391,30 +4403,28 @@ impl ActiveGraph {
                     .verified("this index came from the same graph, which is not modified here")
                     .clone();
                 let depth = schedulable_depth(&self.graph, index, &mut depth_cache);
-                (index, node, depth)
+                PlacementCandidate { index, node, depth }
             })
             .collect::<Vec<_>>();
-        nodes.sort_by(
-            |(left_index, left_node, left_depth), (right_index, right_node, right_depth)| {
-                left_depth
-                    .cmp(right_depth)
-                    .then_with(|| left_node.kind.as_str().cmp(right_node.kind.as_str()))
-                    .then_with(|| {
-                        left_node
-                            .identifier
-                            .as_str()
-                            .cmp(right_node.identifier.as_str())
-                    })
-                    .then_with(|| left_index.index().cmp(&right_index.index()))
-            },
-        );
+        nodes.sort_by(|left, right| {
+            left.depth
+                .cmp(&right.depth)
+                .then_with(|| left.node.kind.as_str().cmp(right.node.kind.as_str()))
+                .then_with(|| {
+                    left.node
+                        .identifier
+                        .as_str()
+                        .cmp(right.node.identifier.as_str())
+                })
+                .then_with(|| left.index.index().cmp(&right.index.index()))
+        });
         let index_by_key = nodes
             .iter()
-            .map(|(index, node, _)| (node.key(), *index))
+            .map(|candidate| (candidate.node.key(), candidate.index))
             .collect::<HashMap<_, _>>();
 
         let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
-        for (index, node, _) in nodes {
+        for PlacementCandidate { index, node, .. } in nodes {
             let key = node.key();
             let group_index = placement.group_by_member.get(&key).copied();
             let mut assigned_nodes = if let Some(existing) =
@@ -4658,6 +4668,34 @@ const fn dataflow_edge_kind(kind: EdgeKind) -> DataflowEdgeKind {
         EdgeKind::CorrelationTimeout => DataflowEdgeKind::CorrelationTimeout,
         EdgeKind::MessageError => DataflowEdgeKind::MessageError,
     }
+}
+
+/// How well one cluster node suits the entity being placed. The field order is the order the
+/// candidates are ranked in: placement policy first, then operator preference, then the lightest
+/// load, then how far the node sits from the round-robin cursor, with the node name breaking ties.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct AssignmentCandidate {
+    placement_order: isize,
+    preferred_order: usize,
+    load: Reverse<usize>,
+    round_robin_distance: Reverse<usize>,
+    node_id: ClusterNodeName,
+}
+
+/// One graph node awaiting placement, ordered by how deep in the dataflow it sits so upstream
+/// nodes are assigned before the nodes that read from them.
+struct PlacementCandidate {
+    index: NodeIndex,
+    node: ActiveNode,
+    depth: usize,
+}
+
+/// One edge of an active graph, named by the models it joins and what the dependency means.
+#[derive(Debug, Clone)]
+pub struct ActiveEdge {
+    pub from: ModelName,
+    pub to: ModelName,
+    pub kind: EdgeKind,
 }
 
 #[derive(Debug, Clone)]
@@ -5179,23 +5217,37 @@ fn validate_otel_mapping_contract(
     attributes: &[OtelValueMapping],
     resource: &[OtelValueMapping],
 ) -> Result<(), String> {
-    let (signal_label, allowed, required, delta) = match signal {
-        OtelSignal::Logs => (
-            "LOGS",
-            &[
+    /// The `VALUES` contract one OTEL signal imposes: what it may name, what it must name, and
+    /// whether delta temporality adds `start_time` to the required keys.
+    struct SignalContract {
+        label: &'static str,
+        allowed: &'static [&'static str],
+        required: &'static [&'static str],
+        delta: bool,
+    }
+
+    let SignalContract {
+        label: signal_label,
+        allowed,
+        required,
+        delta,
+    } = match signal {
+        OtelSignal::Logs => SignalContract {
+            label: "LOGS",
+            allowed: &[
                 "time",
                 "severity_text",
                 "severity_number",
                 "body",
                 "trace_id",
                 "span_id",
-            ][..],
-            &["time", "body"][..],
-            false,
-        ),
-        OtelSignal::Traces => (
-            "TRACES",
-            &[
+            ],
+            required: &["time", "body"],
+            delta: false,
+        },
+        OtelSignal::Traces => SignalContract {
+            label: "TRACES",
+            allowed: &[
                 "trace_id",
                 "span_id",
                 "parent_span_id",
@@ -5205,26 +5257,26 @@ fn validate_otel_mapping_contract(
                 "end_time",
                 "status_code",
                 "status_message",
-            ][..],
-            &["trace_id", "span_id", "name", "start_time", "end_time"][..],
-            false,
-        ),
+            ],
+            required: &["trace_id", "span_id", "name", "start_time", "end_time"],
+            delta: false,
+        },
         OtelSignal::Metric(metric) => match metric.kind {
-            OtelMetricKind::Gauge => (
-                "METRIC GAUGE",
-                &["time", "start_time", "value"][..],
-                &["time", "value"][..],
-                false,
-            ),
-            OtelMetricKind::Sum { temporality, .. } => (
-                "METRIC SUM",
-                &["time", "start_time", "value"][..],
-                &["time", "value"][..],
-                temporality == OtelAggregationTemporality::Delta,
-            ),
-            OtelMetricKind::Histogram { temporality } => (
-                "METRIC HISTOGRAM",
-                &[
+            OtelMetricKind::Gauge => SignalContract {
+                label: "METRIC GAUGE",
+                allowed: &["time", "start_time", "value"],
+                required: &["time", "value"],
+                delta: false,
+            },
+            OtelMetricKind::Sum { temporality, .. } => SignalContract {
+                label: "METRIC SUM",
+                allowed: &["time", "start_time", "value"],
+                required: &["time", "value"],
+                delta: temporality == OtelAggregationTemporality::Delta,
+            },
+            OtelMetricKind::Histogram { temporality } => SignalContract {
+                label: "METRIC HISTOGRAM",
+                allowed: &[
                     "time",
                     "start_time",
                     "count",
@@ -5233,10 +5285,10 @@ fn validate_otel_mapping_contract(
                     "explicit_bounds",
                     "min",
                     "max",
-                ][..],
-                &["time", "count", "bucket_counts", "explicit_bounds"][..],
-                temporality == OtelAggregationTemporality::Delta,
-            ),
+                ],
+                required: &["time", "count", "bucket_counts", "explicit_bounds"],
+                delta: temporality == OtelAggregationTemporality::Delta,
+            },
         },
     };
 
@@ -5339,8 +5391,10 @@ fn validate_sqs_fifo_group_expression(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", input_schema),
         writable_binding_for_internal_schema("output", &output_schema),
@@ -5944,8 +5998,10 @@ fn effective_wasm_output_filter_map_schema(
     }
 
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let Some((_first_input_relay, _first_input_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -6124,8 +6180,10 @@ fn validate_window_route_where(
             })
         })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![writable_binding_for_internal_schema(
         "output",
         output_schema,
@@ -6285,18 +6343,16 @@ impl AssignmentPlanner<'_> {
             .cluster_nodes
             .iter()
             .enumerate()
-            .map(|(position, node_id)| {
-                (
-                    placement_order.get(node_id).copied().unwrap_or(0),
-                    preferred_order.get(node_id).copied().unwrap_or(0),
-                    Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
-                    Reverse(
-                        (position + self.cluster_nodes.len()
-                            - (*self.next_assignment % self.cluster_nodes.len()))
-                            % self.cluster_nodes.len(),
-                    ),
-                    node_id.clone(),
-                )
+            .map(|(position, node_id)| AssignmentCandidate {
+                placement_order: placement_order.get(node_id).copied().unwrap_or(0),
+                preferred_order: preferred_order.get(node_id).copied().unwrap_or(0),
+                load: Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
+                round_robin_distance: Reverse(
+                    (position + self.cluster_nodes.len()
+                        - (*self.next_assignment % self.cluster_nodes.len()))
+                        % self.cluster_nodes.len(),
+                ),
+                node_id: node_id.clone(),
             })
             .collect::<Vec<_>>();
         ordered_nodes.sort_unstable();
@@ -6305,7 +6361,7 @@ impl AssignmentPlanner<'_> {
         ordered_nodes
             .into_iter()
             .take(self.assignment_slots())
-            .map(|(_, _, _, _, node_id)| node_id)
+            .map(|candidate| candidate.node_id)
             .collect()
     }
 
@@ -8153,8 +8209,10 @@ fn validate_where_program_for_scoped_internal_schemas(
     })?;
 
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let Some((_first_relay, first_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -8239,8 +8297,10 @@ fn effective_processor_output_filter_map_schema(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
 
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", first_schema),
@@ -8388,8 +8448,10 @@ fn effective_emitter_filter_map_schema(
     }
 
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut body_bindings = if codec_route {
         vec![
             readonly_binding_for_internal_schema("input", input_schema),
@@ -8478,10 +8540,22 @@ fn lookup_hash_map_bindings(mut fields: Vec<(String, ArrowDataType)>) -> Vec<Com
     )]
 }
 
-type LookupHashMapRewriteResult = (
-    nervix_nspl::vm_program::SpannedNode<Program>,
-    Vec<(String, ArrowDataType)>,
-);
+/// A rewritten program together with the internal fields its `LOOKUP_HASH_MAP` calls now read
+/// from, which the compiler binds as an extra input namespace.
+struct LookupHashMapRewriteResult {
+    program: nervix_nspl::vm_program::SpannedNode<Program>,
+    fields: Vec<(String, ArrowDataType)>,
+}
+
+/// One `LOOKUP_HASH_MAP` call lifted out of a program: which hash map and field it reads, the key
+/// expression it looks up, and the internal field the rewritten program reads the result from.
+struct LookupHashMapCallSite {
+    lookup: LookupName,
+    lookup_field: FieldName,
+    key: Expr,
+    generated_field: String,
+    data_type: ArrowDataType,
+}
 
 fn rewrite_lookup_hash_map_program(
     domain: &DomainName,
@@ -8490,7 +8564,7 @@ fn rewrite_lookup_hash_map_program(
     parsed: &nervix_nspl::vm_program::SpannedNode<Program>,
 ) -> Result<LookupHashMapRewriteResult, Report<RegistryError>> {
     let mut next_field = 0usize;
-    let mut calls = Vec::<(LookupName, FieldName, Expr, String, ArrowDataType)>::new();
+    let mut calls = Vec::<LookupHashMapCallSite>::new();
     let mut rewrite = |expr: &SpannedExpr| {
         rewrite_lookup_hash_map_expr(
             domain,
@@ -8534,9 +8608,9 @@ fn rewrite_lookup_hash_map_program(
     };
     let fields = calls
         .into_iter()
-        .map(|(_, _, _, generated_field, data_type)| (generated_field, data_type))
+        .map(|call| (call.generated_field, call.data_type))
         .collect();
-    Ok((program, fields))
+    Ok(LookupHashMapRewriteResult { program, fields })
 }
 
 fn rewrite_lookup_hash_map_expr(
@@ -8544,7 +8618,7 @@ fn rewrite_lookup_hash_map_expr(
     identifier: &ModelName,
     models: &HashMap<RegistryKey, Model>,
     expr: &SpannedExpr,
-    calls: &mut Vec<(LookupName, FieldName, Expr, String, ArrowDataType)>,
+    calls: &mut Vec<LookupHashMapCallSite>,
     next_field: &mut usize,
 ) -> Result<SpannedExpr, Report<RegistryError>> {
     let inner = match &expr.inner {
@@ -8636,23 +8710,21 @@ fn rewrite_lookup_hash_map_expr(
                 // compared without its source spans.
                 let key = args[1].inner.clone();
                 let data_type = arrow_data_type_for_parse_as(&schema_field.ty);
-                let existing = calls
-                    .iter()
-                    .find(|(call_lookup, call_field, call_key, _, _)| {
-                        call_lookup == &lookup && call_field == &lookup_field && call_key == &key
-                    });
-                let generated_field = if let Some((_, _, _, generated_field, _)) = existing {
-                    generated_field.clone()
+                let existing = calls.iter().find(|call| {
+                    call.lookup == lookup && call.lookup_field == lookup_field && call.key == key
+                });
+                let generated_field = if let Some(existing) = existing {
+                    existing.generated_field.clone()
                 } else {
                     let generated_field = format!("value_{}", *next_field);
                     *next_field += 1;
-                    calls.push((
-                        lookup.clone(),
+                    calls.push(LookupHashMapCallSite {
+                        lookup: lookup.clone(),
                         lookup_field,
                         key,
-                        generated_field.clone(),
+                        generated_field: generated_field.clone(),
                         data_type,
-                    ));
+                    });
                     generated_field
                 };
                 Expr::InternalFieldRef(InternalFieldRef {
@@ -9048,8 +9120,10 @@ fn effective_ingestor_output_filter_map_schema(
         }));
     }
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
 
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", input_schema),
@@ -9828,7 +9902,7 @@ fn ensure_inferencer_input_mappings(
                 ),
             })
         })?;
-        let Some((_field, actual_type, actual_nullable)) = inferred.first() else {
+        let Some(inferred) = inferred.first() else {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -9836,7 +9910,7 @@ fn ensure_inferencer_input_mappings(
             }));
         };
         let expected_type = arrow_data_type_for_parse_as(&mapping.schema.message_type());
-        if actual_type != &expected_type || *actual_nullable {
+        if inferred.data_type != expected_type || inferred.nullable {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -9844,8 +9918,8 @@ fn ensure_inferencer_input_mappings(
                     "inference input '{}' requires {:?} non-null, found {:?}{}",
                     mapping.tensor,
                     expected_type,
-                    actual_type,
-                    if *actual_nullable {
+                    inferred.data_type,
+                    if inferred.nullable {
                         " nullable"
                     } else {
                         " non-null"
@@ -9883,8 +9957,10 @@ fn validate_inferencer_output_filter_map(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
         readonly_binding_for_internal_schema("generated", &inner_output_schema),
         writable_binding_for_internal_schema("output", output_schema),
@@ -10181,8 +10257,10 @@ fn ensure_output_branch(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", input_schema),
         readonly_binding_for_internal_schema("output", output_schema),

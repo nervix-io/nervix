@@ -605,7 +605,22 @@ struct EncodedBrokerRecord {
     acks: AckSet,
 }
 
-pub(super) type BrokerRecordPosition = (usize, usize);
+impl EncodedBrokerRecord {
+    const fn position(&self) -> BrokerRecordPosition {
+        BrokerRecordPosition {
+            batch_index: self.batch_index,
+            row_index: self.row_index,
+        }
+    }
+}
+
+/// Where one record sits in a publish call: which of the emitter's batches it came from and which
+/// row of that batch it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BrokerRecordPosition {
+    pub(super) batch_index: usize,
+    pub(super) row_index: usize,
+}
 
 pub(super) struct RejectedEmitterRecord {
     pub(super) position: BrokerRecordPosition,
@@ -670,7 +685,13 @@ impl PerRecordPublishOutcome {
                 match rows.get(*row) {
                     Some(Ok(_)) => filtered_chunk.push(*row),
                     Some(Err(error)) => {
-                        self.reject_structured((batch_index, *row), error.clone());
+                        self.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.clone(),
+                        );
                     }
                     None => {
                         return Err(Report::new(EmitterRuntimeError::EncodeBatch)
@@ -1155,8 +1176,8 @@ fn compile_sql_values_program(
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred_fields
             .into_iter()
-            .map(|(field, data_type, nullable)| {
-                arrow_schema::Field::new(field, data_type, nullable)
+            .map(|inferred| {
+                arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
             })
             .collect::<Vec<_>>(),
     ));
@@ -2930,7 +2951,10 @@ async fn encode_broker_records(
                 Ok(payload) => payload,
                 Err(error) => {
                     rejected.push(RejectedEmitterRecord {
-                        position: (batch_index, row_index),
+                        position: BrokerRecordPosition {
+                            batch_index,
+                            row_index,
+                        },
                         reason: format!(
                             "emitter '{}' failed to encode record: {error}",
                             context.emitter.as_str()
@@ -2964,7 +2988,11 @@ async fn finish_per_record_publish(
         rejected,
         infrastructure_error,
     } = outcome;
-    for (batch_index, row_index) in delivered {
+    for BrokerRecordPosition {
+        batch_index,
+        row_index,
+    } in delivered
+    {
         let batch = batches.get_mut(batch_index).ok_or_else(|| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
                 "broker confirmation references missing emitter batch {batch_index}"
@@ -2989,7 +3017,10 @@ async fn finish_rejected_records(
 ) -> EmitterRuntimeResult<()> {
     for rejected in rejected {
         tokio::task::consume_budget().await;
-        let (batch_index, row_index) = rejected.position;
+        let BrokerRecordPosition {
+            batch_index,
+            row_index,
+        } = rejected.position;
         let error = if let Some(error) = rejected.structured_error {
             error
         } else {

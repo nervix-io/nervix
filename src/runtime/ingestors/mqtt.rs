@@ -72,13 +72,29 @@ impl MqttIngestor {
             });
         }
 
-        let (topic, instances, mode) = match &ingestor.source {
+        /// The parts of an MQTT ingest source this task drives, taken from the model once so the
+        /// rest of startup reads named values rather than re-matching the source.
+        struct MqttSource {
+            topic: String,
+            instances: u64,
+            mode: MqttIngestMode,
+        }
+
+        let MqttSource {
+            topic,
+            instances,
+            mode,
+        } = match &ingestor.source {
             IngestSource::Mqtt {
                 topic,
                 instances,
                 mode,
                 ..
-            } => (topic.clone(), *instances, mode.clone()),
+            } => MqttSource {
+                topic: topic.clone(),
+                instances: *instances,
+                mode: mode.clone(),
+            },
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),

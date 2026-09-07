@@ -375,10 +375,7 @@ impl RelayInteractionInputs {
             .collect()
     }
 
-    fn poll_recv(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<(usize, RelayRecordBatch, Option<NodeQuiesceWorkGuard>)>> {
+    fn poll_recv(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Option<ReceivedBatch>> {
         let source_count = self.sources.len();
         let mut open = false;
         let quiesce_counters = self.quiesce_counters.clone();
@@ -395,7 +392,11 @@ impl RelayInteractionInputs {
             {
                 Poll::Ready(Some((batch, work))) => {
                     self.receive_cursor = (index + 1) % source_count;
-                    return Poll::Ready(Some((index, batch, work)));
+                    return Poll::Ready(Some(ReceivedBatch {
+                        source: index,
+                        batch,
+                        work,
+                    }));
                 }
                 Poll::Ready(None) => source.closed = true,
                 Poll::Pending => {}
@@ -715,11 +716,14 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 ),
                 Selected::Wake => return Ok(self.work(RelayInteractionEvent::Wake)),
                 Selected::CollectionDue => {}
-                Selected::Input(Some((source, batch, work))) => {
-                    if let Some((relay, batch)) = self.inputs.accept(source, batch)? {
-                        return Ok(
-                            self.work_with(RelayInteractionEvent::Batch { relay, batch }, work)
-                        );
+                Selected::Input(Some(received)) => {
+                    if let Some((relay, batch)) =
+                        self.inputs.accept(received.source, received.batch)?
+                    {
+                        return Ok(self.work_with(
+                            RelayInteractionEvent::Batch { relay, batch },
+                            received.work,
+                        ));
                     }
                 }
                 Selected::Input(None) => {
@@ -842,7 +846,15 @@ enum Selected<C> {
     ForceFlush(Result<DomainForceFlushCompletion, ()>),
     Wake,
     CollectionDue,
-    Input(Option<(usize, RelayRecordBatch, Option<NodeQuiesceWorkGuard>)>),
+    Input(Option<ReceivedBatch>),
+}
+
+/// A batch dequeued from one of a node's inputs, with the quiesce work it already owns. The work
+/// guard travels with the batch so quiesce accounting never has a gap between dequeue and handling.
+struct ReceivedBatch {
+    source: usize,
+    batch: RelayRecordBatch,
+    work: Option<NodeQuiesceWorkGuard>,
 }
 
 async fn recv_optional_command<C>(commands: &mut Option<mpsc::Receiver<C>>) -> Option<C> {
@@ -1955,12 +1967,12 @@ mod tests {
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
-        let (_, _, work) = std::future::poll_fn(|cx| inputs.poll_recv(cx))
+        let received = std::future::poll_fn(|cx| inputs.poll_recv(cx))
             .await
             .expect("ready input must dequeue");
         assert_eq!(inputs.pending_snapshot(), [0]);
         assert_eq!(counters.outstanding_work(), 1);
-        drop(work);
+        drop(received.work);
         assert_eq!(counters.outstanding_work(), 0);
     }
 
@@ -1979,17 +1991,17 @@ mod tests {
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
-        let (source, batch, work) = std::future::poll_fn(|cx| inputs.poll_recv(cx))
+        let received = std::future::poll_fn(|cx| inputs.poll_recv(cx))
             .await
             .expect("ready input must dequeue");
         assert!(
             inputs
-                .accept(source, batch)
+                .accept(received.source, received.batch)
                 .expect("collection must accept batch")
                 .is_none()
         );
         assert_eq!(counters.outstanding_work(), 2);
-        drop(work);
+        drop(received.work);
         assert_eq!(counters.outstanding_work(), 1);
     }
 

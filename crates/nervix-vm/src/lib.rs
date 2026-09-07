@@ -7,10 +7,10 @@ mod semantics;
 
 pub use batch::{TypedArray, TypedBatch};
 pub use compiler::{
-    CompileBinding, CompileNamespace, CompileOptions, OutputMode, SchemaSensitivity, UdfParameter,
-    UdfSignature, UdfSignatures, compile_program, compile_program_for_bindings,
-    compile_program_for_bindings_with_sensitivity, compile_program_for_relay,
-    compile_program_for_relays, compile_program_with_options,
+    CompileBinding, CompileNamespace, CompileOptions, InferredSetField, OutputMode,
+    SchemaSensitivity, UdfParameter, UdfSignature, UdfSignatures, compile_program,
+    compile_program_for_bindings, compile_program_for_bindings_with_sensitivity,
+    compile_program_for_relay, compile_program_for_relays, compile_program_with_options,
     compile_program_with_options_for_bindings,
     compile_program_with_options_for_bindings_with_sensitivity,
     compile_program_with_options_for_relay, compile_program_with_options_for_relays,

@@ -3886,76 +3886,85 @@ mod tests {
         })
     }
 
-    fn primitive_array_cases() -> Vec<(&'static str, ParseAsType, Vec<RuntimeValue>, Vec<JsonValue>)>
-    {
+    /// One primitive element type covered by the array and vector round-trip tests: the field
+    /// name prefix it uses, its declared type, the runtime values it carries, and the JSON those
+    /// values encode to.
+    struct PrimitiveArrayCase {
+        name: &'static str,
+        ty: ParseAsType,
+        values: Vec<RuntimeValue>,
+        json: Vec<JsonValue>,
+    }
+
+    fn primitive_array_cases() -> Vec<PrimitiveArrayCase> {
         vec![
-            (
-                "u8",
-                ParseAsType::U8,
-                vec![RuntimeValue::U8(1), RuntimeValue::U8(2)],
-                vec![JsonValue::from(1), JsonValue::from(2)],
-            ),
-            (
-                "i8",
-                ParseAsType::I8,
-                vec![RuntimeValue::I8(-1), RuntimeValue::I8(2)],
-                vec![JsonValue::from(-1), JsonValue::from(2)],
-            ),
-            (
-                "u16",
-                ParseAsType::U16,
-                vec![RuntimeValue::U16(10), RuntimeValue::U16(20)],
-                vec![JsonValue::from(10), JsonValue::from(20)],
-            ),
-            (
-                "i16",
-                ParseAsType::I16,
-                vec![RuntimeValue::I16(-10), RuntimeValue::I16(20)],
-                vec![JsonValue::from(-10), JsonValue::from(20)],
-            ),
-            (
-                "u32",
-                ParseAsType::U32,
-                vec![RuntimeValue::U32(100), RuntimeValue::U32(200)],
-                vec![JsonValue::from(100), JsonValue::from(200)],
-            ),
-            (
-                "i32",
-                ParseAsType::I32,
-                vec![RuntimeValue::I32(-100), RuntimeValue::I32(200)],
-                vec![JsonValue::from(-100), JsonValue::from(200)],
-            ),
-            (
-                "u64",
-                ParseAsType::U64,
-                vec![RuntimeValue::U64(1000), RuntimeValue::U64(2000)],
-                vec![JsonValue::from(1000), JsonValue::from(2000)],
-            ),
-            (
-                "i64",
-                ParseAsType::I64,
-                vec![RuntimeValue::I64(-1000), RuntimeValue::I64(2000)],
-                vec![JsonValue::from(-1000), JsonValue::from(2000)],
-            ),
-            (
-                "bool",
-                ParseAsType::Bool,
-                vec![RuntimeValue::Bool(true), RuntimeValue::Bool(false)],
-                vec![JsonValue::from(true), JsonValue::from(false)],
-            ),
-            (
-                "string",
-                ParseAsType::String,
-                vec![
+            PrimitiveArrayCase {
+                name: "u8",
+                ty: ParseAsType::U8,
+                values: vec![RuntimeValue::U8(1), RuntimeValue::U8(2)],
+                json: vec![JsonValue::from(1), JsonValue::from(2)],
+            },
+            PrimitiveArrayCase {
+                name: "i8",
+                ty: ParseAsType::I8,
+                values: vec![RuntimeValue::I8(-1), RuntimeValue::I8(2)],
+                json: vec![JsonValue::from(-1), JsonValue::from(2)],
+            },
+            PrimitiveArrayCase {
+                name: "u16",
+                ty: ParseAsType::U16,
+                values: vec![RuntimeValue::U16(10), RuntimeValue::U16(20)],
+                json: vec![JsonValue::from(10), JsonValue::from(20)],
+            },
+            PrimitiveArrayCase {
+                name: "i16",
+                ty: ParseAsType::I16,
+                values: vec![RuntimeValue::I16(-10), RuntimeValue::I16(20)],
+                json: vec![JsonValue::from(-10), JsonValue::from(20)],
+            },
+            PrimitiveArrayCase {
+                name: "u32",
+                ty: ParseAsType::U32,
+                values: vec![RuntimeValue::U32(100), RuntimeValue::U32(200)],
+                json: vec![JsonValue::from(100), JsonValue::from(200)],
+            },
+            PrimitiveArrayCase {
+                name: "i32",
+                ty: ParseAsType::I32,
+                values: vec![RuntimeValue::I32(-100), RuntimeValue::I32(200)],
+                json: vec![JsonValue::from(-100), JsonValue::from(200)],
+            },
+            PrimitiveArrayCase {
+                name: "u64",
+                ty: ParseAsType::U64,
+                values: vec![RuntimeValue::U64(1000), RuntimeValue::U64(2000)],
+                json: vec![JsonValue::from(1000), JsonValue::from(2000)],
+            },
+            PrimitiveArrayCase {
+                name: "i64",
+                ty: ParseAsType::I64,
+                values: vec![RuntimeValue::I64(-1000), RuntimeValue::I64(2000)],
+                json: vec![JsonValue::from(-1000), JsonValue::from(2000)],
+            },
+            PrimitiveArrayCase {
+                name: "bool",
+                ty: ParseAsType::Bool,
+                values: vec![RuntimeValue::Bool(true), RuntimeValue::Bool(false)],
+                json: vec![JsonValue::from(true), JsonValue::from(false)],
+            },
+            PrimitiveArrayCase {
+                name: "string",
+                ty: ParseAsType::String,
+                values: vec![
                     RuntimeValue::String("prod".to_string()),
                     RuntimeValue::String("api".to_string()),
                 ],
-                vec![JsonValue::from("prod"), JsonValue::from("api")],
-            ),
-            (
-                "datetime",
-                ParseAsType::Datetime,
-                vec![
+                json: vec![JsonValue::from("prod"), JsonValue::from("api")],
+            },
+            PrimitiveArrayCase {
+                name: "datetime",
+                ty: ParseAsType::Datetime,
+                values: vec![
                     RuntimeValue::Datetime(
                         DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
                             .expect("valid timestamp"),
@@ -3965,39 +3974,40 @@ mod tests {
                             .expect("valid timestamp"),
                     ),
                 ],
-                vec![
+                json: vec![
                     JsonValue::from("2025-01-02T03:04:05Z"),
                     JsonValue::from("2025-01-02T03:04:06Z"),
                 ],
-            ),
-            (
-                "f32",
-                ParseAsType::F32,
-                vec![
+            },
+            PrimitiveArrayCase {
+                name: "f32",
+                ty: ParseAsType::F32,
+                values: vec![
                     RuntimeValue::F32(OrderedFloat(1.25)),
                     RuntimeValue::F32(OrderedFloat(2.5)),
                 ],
-                vec![JsonValue::from(1.25), JsonValue::from(2.5)],
-            ),
-            (
-                "f64",
-                ParseAsType::F64,
-                vec![
+                json: vec![JsonValue::from(1.25), JsonValue::from(2.5)],
+            },
+            PrimitiveArrayCase {
+                name: "f64",
+                ty: ParseAsType::F64,
+                values: vec![
                     RuntimeValue::F64(OrderedFloat(10.25)),
                     RuntimeValue::F64(OrderedFloat(20.5)),
                 ],
-                vec![JsonValue::from(10.25), JsonValue::from(20.5)],
-            ),
+                json: vec![JsonValue::from(10.25), JsonValue::from(20.5)],
+            },
         ]
     }
 
     fn primitive_arrays_schema() -> CreateSchema {
         let mut fields = Vec::new();
-        for (name, ty, _, _) in primitive_array_cases() {
+        for case in primitive_array_cases() {
+            let name = case.name;
             fields.push(SchemaField {
                 name: named(&format!("{name}_array")),
                 ty: ParseAsType::Array {
-                    element: Box::new(ty.clone()),
+                    element: Box::new(case.ty.clone()),
                     len: 2,
                 },
                 optional: false,
@@ -4006,7 +4016,7 @@ mod tests {
             fields.push(SchemaField {
                 name: named(&format!("{name}_vec")),
                 ty: ParseAsType::Vec {
-                    element: Box::new(ty),
+                    element: Box::new(case.ty),
                 },
                 optional: false,
                 sensitive: false,
@@ -4169,18 +4179,23 @@ mod tests {
 
     fn primitive_arrays_record() -> RuntimeRow {
         let mut fields = Vec::new();
-        for (name, _, values, _) in primitive_array_cases() {
-            fields.push((format!("{name}_array"), RuntimeValue::Array(values.clone())));
-            fields.push((format!("{name}_vec"), RuntimeValue::Vec(values)));
+        for case in primitive_array_cases() {
+            let name = case.name;
+            fields.push((
+                format!("{name}_array"),
+                RuntimeValue::Array(case.values.clone()),
+            ));
+            fields.push((format!("{name}_vec"), RuntimeValue::Vec(case.values)));
         }
         test_runtime_row(fields)
     }
 
     fn primitive_arrays_json_payload() -> Vec<u8> {
         let mut object = JsonMap::new();
-        for (name, _, _, values) in primitive_array_cases() {
-            object.insert(format!("{name}_array"), JsonValue::Array(values.clone()));
-            object.insert(format!("{name}_vec"), JsonValue::Array(values));
+        for case in primitive_array_cases() {
+            let name = case.name;
+            object.insert(format!("{name}_array"), JsonValue::Array(case.json.clone()));
+            object.insert(format!("{name}_vec"), JsonValue::Array(case.json));
         }
         serde_json::to_vec(&JsonValue::Object(object)).expect("valid json")
     }

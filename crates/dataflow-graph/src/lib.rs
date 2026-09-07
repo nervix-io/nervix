@@ -138,6 +138,15 @@ pub enum DataflowNodeStatus {
     Error,
 }
 
+/// How one graph node is currently doing: whether it is healthy, what went wrong when it is not,
+/// and how long it will wait before reconnecting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DataflowNodeHealth {
+    pub status: DataflowNodeStatus,
+    pub detail: Option<String>,
+    pub reconnect_wait_millis: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataflowEdge {
     pub source: String,

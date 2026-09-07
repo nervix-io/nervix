@@ -217,7 +217,7 @@ impl MqttEmitter {
                 confirmation.acks.ack_alive();
             }
             record.acks.ack_alive();
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             if let MqttPublishingMode::Qos0 = self.mode {
                 match client.try_publish(
                     topic.as_str(),
@@ -428,19 +428,28 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut pending = VecDeque::from([
             PendingMqttConfirmation {
-                position: (0, 0),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 0,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(std::future::pending()),
             },
             PendingMqttConfirmation {
-                position: (0, 1),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 1,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(async { Ok(()) }),
             },
             PendingMqttConfirmation {
-                position: (0, 2),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 2,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(async {
@@ -450,7 +459,10 @@ mod tests {
                 }),
             },
             PendingMqttConfirmation {
-                position: (0, 3),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 3,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(async { Err(PublishNoticeError::SessionReset) }),
@@ -461,9 +473,15 @@ mod tests {
         MqttEmitter::harvest_ready_after_oldest_failure(&mut pending, &mut outcome);
 
         assert_eq!(pending.len(), 1, "only the unresolved oldest must remain");
-        assert_eq!(outcome.delivered, vec![(0, 1)]);
+        assert_eq!(
+            outcome.delivered,
+            vec![BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 1,
+            }]
+        );
         assert_eq!(outcome.rejected.len(), 1);
-        assert_eq!(outcome.rejected[0].position, (0, 2));
+        assert_eq!(outcome.rejected[0].position.row_index, 2);
         assert!(outcome.infrastructure_error.is_none());
     }
 

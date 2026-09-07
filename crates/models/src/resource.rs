@@ -113,9 +113,19 @@ pub struct ResourceNodeStatus {
     pub error: Option<String>,
 }
 
+/// The version counter of one declared resource. Resources are domain-owned, so the counter is
+/// keyed by the owning domain as well as the resource name, and the field order is the order the
+/// catalog is sorted and searched by.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ResourceVersionCounter {
+    pub domain: DomainName,
+    pub identifier: ResourceName,
+    pub next_version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResourceVersionStatus {
-    pub next_version_by_resource: SortedVec<(DomainName, ResourceName, u64)>,
+    pub next_version_by_resource: SortedVec<ResourceVersionCounter>,
     pub versions: SortedVec<ResourceVersion>,
     pub replicas: SortedVec<ResourceNodeStatus>,
 }
@@ -129,12 +139,12 @@ impl ResourceVersionStatus {
         domain: &DomainName,
         identifier: &ResourceName,
     ) -> Result<usize, usize> {
-        self.next_version_by_resource
-            .binary_search_by(|(known_domain, known_identifier, _)| {
-                known_domain
-                    .cmp(domain)
-                    .then_with(|| known_identifier.cmp(identifier))
-            })
+        self.next_version_by_resource.binary_search_by(|counter| {
+            counter
+                .domain
+                .cmp(domain)
+                .then_with(|| counter.identifier.cmp(identifier))
+        })
     }
 
     /// Returns the next version the named resource would receive in `domain`, which is `None`
@@ -144,7 +154,7 @@ impl ResourceVersionStatus {
         let index = self.resource_slot(domain, identifier).ok()?;
         self.next_version_by_resource
             .get(index)
-            .map(|(_, _, next_version)| *next_version)
+            .map(|counter| counter.next_version)
     }
 
     /// Returns the highest installed version of the named resource in `domain`, which is `None`

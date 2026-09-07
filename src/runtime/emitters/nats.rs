@@ -160,7 +160,7 @@ impl NatsEmitter {
         let mut queued = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let headers = if record.headers.is_empty() {
                 None
             } else {
@@ -215,7 +215,7 @@ impl NatsEmitter {
         let mut pending: VecDeque<PendingNatsConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let publish = async {
                 if record.headers.is_empty() {
                     jetstream

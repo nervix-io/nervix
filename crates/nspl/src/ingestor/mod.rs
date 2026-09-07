@@ -11,7 +11,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_timeout, alter_ingestor_route_body,
+        LexedInput, ParseError, ParseFromSourceError, ack_timeout, alter_ingestor_route_body,
         alter_op_separator, boxed_choice, byte_size_lit, channel_ref, client_ref, codec_ref,
         consumer_group_ref, duration_lit, endpoint_ref, field_ref, filter_where_clause,
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
@@ -876,7 +876,11 @@ pub fn parse_create_ingestor_tokens(
 pub fn parse_create_ingestor(
     input: &str,
 ) -> Result<CreateStatement<CreateIngestor>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_ingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -893,7 +897,11 @@ pub fn parse_alter_ingestor_tokens(tokens: &[Token]) -> Result<AlterIngestor, Ve
 }
 
 pub fn parse_alter_ingestor(input: &str) -> Result<AlterIngestor, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_ingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

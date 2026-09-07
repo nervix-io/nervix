@@ -52,7 +52,7 @@ macro_rules! suggest_from {
         let (source, prefix) = $crate::parser_support::completion_context(input, cursor);
 
         let offer = |source: &str| match $crate::parser_support::lex_input(source) {
-            Ok((_, _, tokens)) => {
+            Ok($crate::parser_support::LexedInput { tokens, .. }) => {
                 let out = $parser
                     .then_ignore(chumsky::prelude::end())
                     .parse(tokens.as_slice());
@@ -1778,9 +1778,16 @@ fn parse_name_excluding_reserved<'src, N: Clone + 'static>(
         .boxed()
 }
 
-pub fn lex_input(
-    input: &str,
-) -> Result<(String, Vec<SpannedToken>, Vec<Token>), ParseFromSourceError> {
+/// One lexed statement, kept together because every grammar entry point needs all three views of
+/// it: the original source for diagnostics, the spanned tokens for mapping token spans back onto
+/// that source, and the bare tokens the parser consumes.
+pub struct LexedInput {
+    pub source: String,
+    pub spanned_tokens: Vec<SpannedToken>,
+    pub tokens: Vec<Token>,
+}
+
+pub fn lex_input(input: &str) -> Result<LexedInput, ParseFromSourceError> {
     let source = input.to_string();
     let spanned_tokens = lex(input).map_err(|errs| ParseFromSourceError::Lex {
         source: source.clone(),
@@ -1798,7 +1805,11 @@ pub fn lex_input(
         .map(|t| t.token.clone())
         .collect::<Vec<_>>();
 
-    Ok((source, spanned_tokens, tokens))
+    Ok(LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    })
 }
 
 pub fn into_parse_error(
@@ -2070,8 +2081,8 @@ mod tests {
     use chumsky::prelude::*;
 
     use super::{
-        ParseError, current_word_prefix, format_parse_error, into_parse_error, kw, lex_input,
-        schema_ref, suggestions_from_errors, token_span_to_source_span,
+        LexedInput, ParseError, current_word_prefix, format_parse_error, into_parse_error, kw,
+        lex_input, schema_ref, suggestions_from_errors, token_span_to_source_span,
     };
     use crate::lexer::Identifier;
 
@@ -2088,7 +2099,7 @@ mod tests {
 
     #[test]
     fn suggestions_filter_by_prefix_but_keep_reference_placeholders() {
-        let (_, _, tokens) = lex_input("").expect("lex should succeed");
+        let LexedInput { tokens, .. } = lex_input("").expect("lex should succeed");
         let output = choice((
             kw(Identifier::Create),
             kw(Identifier::Client),
@@ -2105,8 +2116,11 @@ mod tests {
 
     #[test]
     fn into_parse_error_maps_parse_spans_back_to_source() {
-        let (source, spanned_tokens, tokens) =
-            lex_input("create kafka").expect("lex should succeed");
+        let LexedInput {
+            source,
+            spanned_tokens,
+            tokens,
+        } = lex_input("create kafka").expect("lex should succeed");
         let output = kw(Identifier::Create)
             .ignore_then(kw(Identifier::Json))
             .then_ignore(end())
@@ -2131,7 +2145,8 @@ mod tests {
 
     #[test]
     fn token_span_to_source_span_handles_empty_and_out_of_bounds_ranges() {
-        let (_, spanned_tokens, _) = lex_input("create json").expect("lex should succeed");
+        let LexedInput { spanned_tokens, .. } =
+            lex_input("create json").expect("lex should succeed");
 
         assert_eq!(token_span_to_source_span(0..0, &[], 42), 0..0);
         assert_eq!(

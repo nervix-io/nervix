@@ -5,8 +5,8 @@ use nervix_models::{CreateResource, CreateStatement};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, if_not_exists_clause, into_parse_error, kw, lex_input,
-        resource_ref, suggest_from,
+        LexedInput, ParseError, ParseFromSourceError, if_not_exists_clause, into_parse_error, kw,
+        lex_input, resource_ref, suggest_from,
     },
 };
 
@@ -39,7 +39,11 @@ pub fn parse_create_resource_tokens(
 pub fn parse_create_resource(
     input: &str,
 ) -> Result<CreateStatement<CreateResource>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_resource_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

@@ -42,7 +42,7 @@ pub use remote::{
 };
 pub use resource::{
     ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceVersion,
-    ResourceVersionKey, ResourceVersionStatus,
+    ResourceVersionCounter, ResourceVersionKey, ResourceVersionStatus,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,

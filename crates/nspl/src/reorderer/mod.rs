@@ -7,12 +7,12 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, alter_expression_list, alter_op_separator,
-        alter_processor_operation, branch_selection, completion_context, duration_lit,
-        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies,
-        render_vm_program_tokens, reorderer_name, reorderer_ref, suggest_from,
-        suggestions_from_errors, tok, vm_program_error_message,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
+        alter_op_separator, alter_processor_operation, branch_selection, completion_context,
+        duration_lit, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, render_vm_program_tokens, reorderer_name, reorderer_ref,
+        suggest_from, suggestions_from_errors, tok, vm_program_error_message,
     },
 };
 
@@ -163,13 +163,21 @@ pub fn parse_alter_reorderer_tokens(
 pub fn parse_create_reorderer(
     input: &str,
 ) -> Result<CreateStatement<CreateReorderer>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_reorderer_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_reorderer(input: &str) -> Result<AlterReorderer, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_reorderer_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -180,7 +188,7 @@ pub fn suggest_create_reorderer(input: &str, cursor: usize) -> Vec<String> {
 
 pub fn suggest_alter_reorderer(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let (_, _, tokens) = match lex_input(&source) {
+    let LexedInput { tokens, .. } = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

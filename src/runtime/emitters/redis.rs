@@ -96,9 +96,9 @@ impl RedisEmitter {
             )
             .await;
             match published {
-                Ok(_) => outcome.deliver((record.batch_index, record.row_index)),
+                Ok(_) => outcome.deliver(record.position()),
                 Err(error) if Self::is_record_failure(&error) => outcome.reject(
-                    (record.batch_index, record.row_index),
+                    record.position(),
                     format!("Redis rejected emitted record: {error}"),
                 ),
                 Err(error) => {

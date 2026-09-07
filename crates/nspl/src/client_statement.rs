@@ -10,8 +10,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, completion_context, domain_name, into_parse_error, kw,
-        lex_input, suggestions_from_errors, tok,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, domain_name,
+        into_parse_error, kw, lex_input, suggestions_from_errors, tok,
     },
 };
 
@@ -143,7 +143,11 @@ pub fn client_command_parser<'src>()
 }
 
 pub fn parse_use_domain(input: &str) -> Result<DomainName, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = use_domain_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -165,7 +169,11 @@ pub fn parse_upload_resource_query(input: &str) -> Result<UploadResource, ParseF
 }
 
 pub fn parse_client_statement(input: &str) -> Result<ClientStatement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = client_command_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -200,7 +208,7 @@ pub fn parse_client_statements(input: &str) -> Result<Vec<ClientStatement>, Pars
 pub fn parse_client_statement_sources(
     input: &str,
 ) -> Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
-    let (_, spanned_tokens, _) = lex_input(input)?;
+    let LexedInput { spanned_tokens, .. } = lex_input(input)?;
     let mut statements = Vec::new();
     let mut segment_start: Option<usize> = None;
 
@@ -283,7 +291,7 @@ fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let (_, _, tokens) = match lex_input(&source) {
+    let LexedInput { tokens, .. } = match lex_input(&source) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };

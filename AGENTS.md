@@ -298,6 +298,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   total complexity or isolates a real boundary.
 - Model internal special cases with typed variants or internal-only structures, never magic or
   reserved user-visible identifiers that can collide with user-defined names.
+- Avoid tuples beyond a trivial local pair, nested tuples, and tuples whose shape is whatever the
+  construction site happened to produce. Returns of three or more elements, map keys and values,
+  accumulators threaded through iterator chains, and channel payloads carrying several unrelated
+  values are named structs with named fields, declared inside the function when their use does not
+  leave that scope and at module level when it crosses functions. A type alias for a tuple is not
+  a name for its elements; declare the struct instead.
 - Use semantic typed errors. Domain error enums use `thiserror`, contextual propagation uses
   `error-stack`, and `anyhow` is limited to boundaries where callers cannot make semantic choices.
   Do not introduce `String` as a domain error type.
