@@ -601,7 +601,7 @@ use crate::{
         UploadResourceRequest, UploadResourceResponse,
         session_service_server::{SessionService, SessionServiceServer},
     },
-    resource::{ResourceEntryType, ResourceManifestEntry, ResourceStore},
+    resource::{ResourceEntryContent, ResourceManifestEntry, ResourceStore},
     runtime::{
         CompiledProgramWithMaterializedInterest, EntityGateLease, IngestMessageHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
@@ -12070,18 +12070,13 @@ impl SessionServiceImpl {
     }
 
     fn format_resource_manifest_entry(entry: &ResourceManifestEntry) -> String {
-        let entry_type = match entry.entry_type {
-            ResourceEntryType::File => "file",
-            ResourceEntryType::Directory => "directory",
-        };
-        let checksum = if entry.checksum.is_empty() {
-            "-"
-        } else {
-            entry.checksum.as_str()
+        let (entry_type, size, checksum) = match &entry.content {
+            ResourceEntryContent::File { size, checksum } => ("file", *size, checksum.as_str()),
+            ResourceEntryContent::Directory => ("directory", 0, "-"),
         };
         format!(
             "  - type={} path={} size={} checksum={}",
-            entry_type, entry.path, entry.size, checksum
+            entry_type, entry.path, size, checksum
         )
     }
 

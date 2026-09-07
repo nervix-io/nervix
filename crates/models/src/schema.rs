@@ -8,13 +8,6 @@ use thiserror::Error;
 use crate::{FieldName, SchemaName, WireSchemaName};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WireSchemaDefinition {
-    Json(CreateWireSchema<JsonType>),
-    Cbor(CreateWireSchema<CborType>),
-    Avro(CreateWireSchema<AvroType>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSchema {
     pub name: SchemaName,
     pub fields: Vec<SchemaField>,

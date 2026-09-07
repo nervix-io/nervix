@@ -593,16 +593,21 @@ pub struct StoredCreateClientSyslog {
 pub struct StoredCreateCodec {
     pub name: String,
     pub wire_format: StoredCodecWireFormat,
-    pub wire_schema: Option<String>,
     pub schema: String,
     pub encoding_rules: Vec<StoredCodecEncodingRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredCodecWireFormat {
-    Json,
-    Cbor,
-    Avro,
+    Json {
+        wire_schema: String,
+    },
+    Cbor {
+        wire_schema: String,
+    },
+    Avro {
+        wire_schema: String,
+    },
     JaqNative {
         format: StoredCodecJaqFormat,
         transformations: StoredCodecJaqTransformations,
@@ -3135,7 +3140,6 @@ impl From<CreateCodec> for StoredCreateCodec {
         Self {
             name: value.name.to_string(),
             wire_format: value.wire_format.into(),
-            wire_schema: value.wire_schema.map(|wire_schema| wire_schema.to_string()),
             schema: value.schema.to_string(),
             encoding_rules: value.encoding_rules.into_iter().map(Into::into).collect(),
         }
@@ -3149,11 +3153,6 @@ impl TryFrom<StoredCreateCodec> for CreateCodec {
         Ok(Self {
             name: CodecName::parse(&value.name)?,
             wire_format: value.wire_format.try_into()?,
-            wire_schema: value
-                .wire_schema
-                .as_deref()
-                .map(WireSchemaName::parse)
-                .transpose()?,
             schema: SchemaName::parse(&value.schema)?,
             encoding_rules: value
                 .encoding_rules
@@ -3167,9 +3166,15 @@ impl TryFrom<StoredCreateCodec> for CreateCodec {
 impl From<CodecWireFormat> for StoredCodecWireFormat {
     fn from(value: CodecWireFormat) -> Self {
         match value {
-            CodecWireFormat::Json => Self::Json,
-            CodecWireFormat::Cbor => Self::Cbor,
-            CodecWireFormat::Avro => Self::Avro,
+            CodecWireFormat::Json { wire_schema } => Self::Json {
+                wire_schema: wire_schema.to_string(),
+            },
+            CodecWireFormat::Cbor { wire_schema } => Self::Cbor {
+                wire_schema: wire_schema.to_string(),
+            },
+            CodecWireFormat::Avro { wire_schema } => Self::Avro {
+                wire_schema: wire_schema.to_string(),
+            },
             CodecWireFormat::JaqNative {
                 format,
                 transformations,
@@ -3188,9 +3193,15 @@ impl TryFrom<StoredCodecWireFormat> for CodecWireFormat {
 
     fn try_from(value: StoredCodecWireFormat) -> Result<Self, Self::Error> {
         Ok(match value {
-            StoredCodecWireFormat::Json => Self::Json,
-            StoredCodecWireFormat::Cbor => Self::Cbor,
-            StoredCodecWireFormat::Avro => Self::Avro,
+            StoredCodecWireFormat::Json { wire_schema } => Self::Json {
+                wire_schema: WireSchemaName::parse(&wire_schema)?,
+            },
+            StoredCodecWireFormat::Cbor { wire_schema } => Self::Cbor {
+                wire_schema: WireSchemaName::parse(&wire_schema)?,
+            },
+            StoredCodecWireFormat::Avro { wire_schema } => Self::Avro {
+                wire_schema: WireSchemaName::parse(&wire_schema)?,
+            },
             StoredCodecWireFormat::JaqNative {
                 format,
                 transformations,
@@ -5596,7 +5607,6 @@ mod tests {
             Model::Codec(CreateCodec {
                 name: named("syslog_codec"),
                 wire_format: CodecWireFormat::Syslog,
-                wire_schema: None,
                 schema: named("events"),
                 encoding_rules: Vec::new(),
             }),

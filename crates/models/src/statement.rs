@@ -1106,7 +1106,6 @@ impl Model {
 pub struct CreateCodec {
     pub name: CodecName,
     pub wire_format: CodecWireFormat,
-    pub wire_schema: Option<WireSchemaName>,
     pub schema: SchemaName,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub encoding_rules: Vec<CodecEncodingRule>,
@@ -1136,9 +1135,15 @@ pub enum CodecJaqFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodecWireFormat {
-    Json,
-    Cbor,
-    Avro,
+    Json {
+        wire_schema: WireSchemaName,
+    },
+    Cbor {
+        wire_schema: WireSchemaName,
+    },
+    Avro {
+        wire_schema: WireSchemaName,
+    },
     Syslog,
     JaqNative {
         format: CodecJaqFormat,
@@ -1148,18 +1153,57 @@ pub enum CodecWireFormat {
 }
 
 impl CodecWireFormat {
-    pub const fn wire_schema_kind(&self) -> Option<ModelKind> {
+    /// The wire schema this format reads, as one reference whose kind and identifier are chosen
+    /// together. Formats that carry their own decoding contract name no wire schema at all.
+    pub fn wire_schema_reference(&self) -> Option<NodeRef> {
         match self {
-            Self::Json => Some(ModelKind::WireJsonSchema),
-            Self::Cbor => Some(ModelKind::WireCborSchema),
-            Self::Avro => Some(ModelKind::WireAvroSchema),
+            Self::Json { wire_schema } => Some(NodeRef::new(
+                ModelKind::WireJsonSchema,
+                ModelName::from(wire_schema),
+            )),
+            Self::Cbor { wire_schema } => Some(NodeRef::new(
+                ModelKind::WireCborSchema,
+                ModelName::from(wire_schema),
+            )),
+            Self::Avro { wire_schema } => Some(NodeRef::new(
+                ModelKind::WireAvroSchema,
+                ModelName::from(wire_schema),
+            )),
             Self::Syslog | Self::JaqNative { .. } | Self::Protobuf(_) => None,
+        }
+    }
+
+    /// Pairs this format with the wire schema `lookup` holds for it. Formats that carry their own
+    /// decoding contract resolve without consulting the lookup at all.
+    pub fn resolve<'a, L>(&'a self, lookup: &'a L) -> Result<ResolvedCodecWireFormat<'a>, L::Error>
+    where
+        L: WireSchemaLookup,
+    {
+        match self {
+            Self::Json { wire_schema } => lookup
+                .json_wire_schema(wire_schema)
+                .map(ResolvedCodecWireFormat::Json),
+            Self::Cbor { wire_schema } => lookup
+                .cbor_wire_schema(wire_schema)
+                .map(ResolvedCodecWireFormat::Cbor),
+            Self::Avro { wire_schema } => lookup
+                .avro_wire_schema(wire_schema)
+                .map(ResolvedCodecWireFormat::Avro),
+            Self::Syslog => Ok(ResolvedCodecWireFormat::Syslog),
+            Self::JaqNative {
+                format,
+                transformations,
+            } => Ok(ResolvedCodecWireFormat::JaqNative {
+                format: *format,
+                transformations,
+            }),
+            Self::Protobuf(config) => Ok(ResolvedCodecWireFormat::Protobuf(config)),
         }
     }
 
     pub fn supports_decoding(&self) -> bool {
         match self {
-            Self::Json | Self::Cbor | Self::Avro | Self::Syslog => true,
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
             Self::JaqNative {
                 transformations, ..
             }
@@ -1171,7 +1215,7 @@ impl CodecWireFormat {
 
     pub fn supports_encoding(&self) -> bool {
         match self {
-            Self::Json | Self::Cbor | Self::Avro | Self::Syslog => true,
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
             Self::JaqNative {
                 transformations, ..
             }
@@ -1180,6 +1224,41 @@ impl CodecWireFormat {
             }) => transformations.on_emitting.is_some(),
         }
     }
+}
+
+/// A codec's wire format with the wire schema it names already looked up. Resolving into one
+/// variant is what keeps a format and a wire schema of another kind from travelling together, so
+/// validation and compilation read the definition their format actually describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedCodecWireFormat<'a> {
+    Json(&'a CreateJsonWireSchema),
+    Cbor(&'a CreateCborWireSchema),
+    Avro(&'a CreateAvroWireSchema),
+    Syslog,
+    JaqNative {
+        format: CodecJaqFormat,
+        transformations: &'a CodecJaqTransformations,
+    },
+    Protobuf(&'a CodecProtobufConfig),
+}
+
+/// Where the wire schema a codec's format names is found.
+///
+/// One method per schemaful wire format keeps the pairing in the type system: a JSON codec can
+/// only ask for a JSON wire schema, so no store can answer a format with a definition of another
+/// kind and no caller has to check that it did not.
+pub trait WireSchemaLookup {
+    /// Why a named wire schema could not be produced.
+    type Error;
+
+    fn json_wire_schema(&self, name: &WireSchemaName)
+    -> Result<&CreateJsonWireSchema, Self::Error>;
+
+    fn cbor_wire_schema(&self, name: &WireSchemaName)
+    -> Result<&CreateCborWireSchema, Self::Error>;
+
+    fn avro_wire_schema(&self, name: &WireSchemaName)
+    -> Result<&CreateAvroWireSchema, Self::Error>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

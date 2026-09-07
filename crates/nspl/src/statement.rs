@@ -625,8 +625,9 @@ mod tests {
             }
             2 => Model::Codec(CreateCodec {
                 name: g.name(),
-                wire_format: CodecWireFormat::Json,
-                wire_schema: Some(g.name()),
+                wire_format: CodecWireFormat::Json {
+                    wire_schema: g.name(),
+                },
                 schema: g.name(),
                 encoding_rules: Vec::new(),
             }),

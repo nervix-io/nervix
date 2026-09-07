@@ -1055,7 +1055,7 @@ pub(super) async fn evaluate_output_branch_program(
             let array = result.batch.column(column_index).to_array_ref();
             let value = runtime_value_from_arrow_array(
                 array.as_ref(),
-                &parse_as_type_from_arrow(field.data_type())?,
+                &parse_as_type_from_arrow(field.data_type()).map_err(|error| error.to_string())?,
                 false,
                 output_row,
                 field.name(),

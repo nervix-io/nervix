@@ -39,8 +39,8 @@ use crate::{
     ResourceName, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
     SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry,
     SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName, UnaryOperator,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
-    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
+    ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -1069,16 +1069,6 @@ impl AlterIngestor {
     }
 }
 
-impl WireSchemaDefinition {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        match self {
-            Self::Json(schema) => wire_schema_to_nspl("JSON", schema),
-            Self::Cbor(schema) => wire_schema_to_nspl("CBOR", schema),
-            Self::Avro(schema) => wire_schema_to_nspl("AVRO", schema),
-        }
-    }
-}
-
 pub fn alter_json_wire_schema_to_canonical_nspl(
     alter: &AlterWireSchema<JsonType>,
 ) -> Result<String, CanonicalNsplError> {
@@ -1714,84 +1704,57 @@ fn jaq_program_list_to_nspl(programs: &[String]) -> String {
 
 impl CreateCodec {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let (wire, transformations) =
-            match &self.wire_format {
-                CodecWireFormat::Json => {
-                    let wire_schema = self.wire_schema.as_ref().ok_or_else(|| {
-                        CanonicalNsplError::InvalidCodec {
-                            reason: "JSON codec is missing wire schema reference".to_string(),
-                        }
-                    })?;
-                    (
-                        format!("WIRE JSON SCHEMA {}", wire_schema.as_str()),
-                        String::new(),
-                    )
+        let (wire, transformations) = match &self.wire_format {
+            CodecWireFormat::Json { wire_schema } => (
+                format!("WIRE JSON SCHEMA {}", wire_schema.as_str()),
+                String::new(),
+            ),
+            CodecWireFormat::Cbor { wire_schema } => (
+                format!("WIRE CBOR SCHEMA {}", wire_schema.as_str()),
+                String::new(),
+            ),
+            CodecWireFormat::Avro { wire_schema } => (
+                format!("WIRE AVRO SCHEMA {}", wire_schema.as_str()),
+                String::new(),
+            ),
+            CodecWireFormat::Syslog => {
+                if !self.encoding_rules.is_empty() {
+                    return Err(CanonicalNsplError::InvalidCodec {
+                        reason: "SYSLOG codec must not declare encoding rules".to_string(),
+                    });
                 }
-                CodecWireFormat::Cbor => {
-                    let wire_schema = self.wire_schema.as_ref().ok_or_else(|| {
-                        CanonicalNsplError::InvalidCodec {
-                            reason: "CBOR codec is missing wire schema reference".to_string(),
-                        }
-                    })?;
-                    (
-                        format!("WIRE CBOR SCHEMA {}", wire_schema.as_str()),
-                        String::new(),
-                    )
-                }
-                CodecWireFormat::Avro => {
-                    let wire_schema = self.wire_schema.as_ref().ok_or_else(|| {
-                        CanonicalNsplError::InvalidCodec {
-                            reason: "AVRO codec is missing wire schema reference".to_string(),
-                        }
-                    })?;
-                    (
-                        format!("WIRE AVRO SCHEMA {}", wire_schema.as_str()),
-                        String::new(),
-                    )
-                }
-                CodecWireFormat::Syslog => {
-                    if self.wire_schema.is_some() {
-                        return Err(CanonicalNsplError::InvalidCodec {
-                            reason: "SYSLOG codec must not reference a wire schema".to_string(),
-                        });
-                    }
-                    if !self.encoding_rules.is_empty() {
-                        return Err(CanonicalNsplError::InvalidCodec {
-                            reason: "SYSLOG codec must not declare encoding rules".to_string(),
-                        });
-                    }
-                    ("SYSLOG".to_string(), String::new())
-                }
-                CodecWireFormat::JaqNative {
-                    format,
-                    transformations,
-                } => (
-                    format.as_ref().to_string(),
-                    codec_jaq_transformations_to_nspl(transformations)?,
-                ),
-                CodecWireFormat::Protobuf(config) => {
-                    let version = config
-                        .resource_version
-                        .map(|version| format!(" VERSION {version}"))
-                        .unwrap_or_default();
-                    let protobuf_config = config
-                        .config
-                        .iter()
-                        .map(kafka_entry_to_nspl)
-                        .collect::<Result<Vec<_>, _>>()?
-                        .join(", ");
-                    (
-                        format!(
-                            "PROTOBUF USING RESOURCE {}{} CONFIG {{{}}} MESSAGE {}",
-                            config.resource.as_str(),
-                            version,
-                            protobuf_config,
-                            string_literal(&config.message)
-                        ),
-                        codec_jaq_transformations_to_nspl(&config.transformations)?,
-                    )
-                }
-            };
+                ("SYSLOG".to_string(), String::new())
+            }
+            CodecWireFormat::JaqNative {
+                format,
+                transformations,
+            } => (
+                format.as_ref().to_string(),
+                codec_jaq_transformations_to_nspl(transformations)?,
+            ),
+            CodecWireFormat::Protobuf(config) => {
+                let version = config
+                    .resource_version
+                    .map(|version| format!(" VERSION {version}"))
+                    .unwrap_or_default();
+                let protobuf_config = config
+                    .config
+                    .iter()
+                    .map(kafka_entry_to_nspl)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ");
+                (
+                    format!(
+                        "PROTOBUF USING RESOURCE {}{} CONFIG {{{}}} MESSAGE {}",
+                        config.resource.as_str(),
+                        version,
+                        protobuf_config,
+                        string_literal(&config.message)
+                    ),
+                    codec_jaq_transformations_to_nspl(&config.transformations)?,
+                )
+            }
+        };
         let encoding_rules = if self.encoding_rules.is_empty() {
             String::new()
         } else {
@@ -4122,8 +4085,7 @@ mod tests {
         RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
         SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
         SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-        WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
-        expression_to_nspl,
+        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode, expression_to_nspl,
     };
 
     fn named<N>(raw: &str) -> N
@@ -4222,7 +4184,7 @@ mod tests {
 
     #[test]
     fn renders_wire_schema_canonical() {
-        let schema = WireSchemaDefinition::Avro(CreateWireSchema {
+        let schema = Model::WireAvroSchema(CreateWireSchema {
             name: named("latency"),
             strictness: Default::default(),
             fields: vec![
@@ -4346,7 +4308,7 @@ mod tests {
 
     #[test]
     fn renders_json_wire_schema_canonical() {
-        let schema = WireSchemaDefinition::Json(CreateWireSchema {
+        let schema = Model::WireJsonSchema(CreateWireSchema {
             name: named("payload"),
             strictness: Default::default(),
             fields: vec![
@@ -4371,7 +4333,7 @@ mod tests {
 
     #[test]
     fn renders_loose_cbor_wire_schema_canonical() {
-        let schema = WireSchemaDefinition::Cbor(CreateWireSchema {
+        let schema = Model::WireCborSchema(CreateWireSchema {
             name: named("payload"),
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
@@ -4398,7 +4360,7 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let wire = WireSchemaDefinition::Json(CreateWireSchema {
+        let wire = Model::WireJsonSchema(CreateWireSchema {
             name: named("payload"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -4674,8 +4636,9 @@ mod tests {
 
         let codec = CreateCodec {
             name: named("orders_codec"),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(named("orders_wire")),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named("orders_wire"),
+            },
             schema: named("orders"),
             encoding_rules: Vec::new(),
         };
@@ -4687,7 +4650,6 @@ mod tests {
         let syslog_codec = CreateCodec {
             name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
-            wire_schema: None,
             schema: named("syslog_event"),
             encoding_rules: Vec::new(),
         };
@@ -4698,8 +4660,9 @@ mod tests {
 
         let codec_with_encoding = CreateCodec {
             name: named("orders_codec"),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(named("orders_wire")),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named("orders_wire"),
+            },
             schema: named("orders"),
             encoding_rules: vec![CodecEncodingRule {
                 field: named("created_at"),
@@ -4722,7 +4685,6 @@ mod tests {
                     on_emitting: Some("{payload: .}".to_string()),
                 },
             },
-            wire_schema: None,
             schema: named("orders"),
             encoding_rules: Vec::new(),
         };
@@ -4741,7 +4703,6 @@ mod tests {
                     on_emitting: None,
                 },
             },
-            wire_schema: None,
             schema: named("orders"),
             encoding_rules: Vec::new(),
         };
@@ -4760,7 +4721,6 @@ mod tests {
                     on_emitting: Some(".".to_string()),
                 },
             },
-            wire_schema: None,
             schema: named("orders"),
             encoding_rules: Vec::new(),
         };
@@ -4785,7 +4745,6 @@ mod tests {
                     on_emitting: Some("{payload: .}".to_string()),
                 },
             }),
-            wire_schema: None,
             schema: named("orders"),
             encoding_rules: Vec::new(),
         };

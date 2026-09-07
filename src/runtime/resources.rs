@@ -131,7 +131,7 @@ impl Runtime {
         domain: &DomainName,
         codec: &CreateCodec,
         schema: Arc<CompiledSchema>,
-        wire_schema: Option<&WireSchemaDefinition>,
+        wire_format: ResolvedCodecWireFormat<'_>,
     ) -> Result<Arc<CompiledCodec>, RuntimeError> {
         let protobuf_descriptor = if let CodecWireFormat::Protobuf(config) = &codec.wire_format {
             let build_error = |reason: String| RuntimeError::BuildDomainExecution {
@@ -152,7 +152,7 @@ impl Runtime {
             None
         };
 
-        compile_codec_with_protobuf(codec, schema, wire_schema, protobuf_descriptor).map_err(
+        compile_codec_with_protobuf(codec, schema, wire_format, protobuf_descriptor).map_err(
             |err| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: err.to_string(),

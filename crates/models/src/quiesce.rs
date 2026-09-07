@@ -2460,8 +2460,9 @@ mod catch_all_kind_tests {
     fn codec() -> CreateCodec {
         CreateCodec {
             name: named("event_codec"),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(named("event_wire")),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named("event_wire"),
+            },
             schema: named("event"),
             encoding_rules: Vec::new(),
         }

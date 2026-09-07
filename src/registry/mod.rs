@@ -45,17 +45,18 @@ use nervix_models::{
     AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
     AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchName, BranchSelection, CborType,
     ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat,
-    CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
-    CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
-    CreateWireSchema, DomainName, DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType,
-    Expression, FieldName, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
+    CorrelationTimeoutAction, CreateAvroWireSchema, CreateBranch, CreateCborWireSchema,
+    CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateLookup, CreatePlacement,
+    CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, DomainName,
+    DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType, Expression, FieldName,
+    IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
     MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
     ModelChangeAspect, ModelKind, ModelName, NodeRef, OtelAggregationTemporality, OtelMetricKind,
     OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementName,
-    PlacementPolicy, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayName, RouteConstruction,
-    ScheduledNode, ScheduledNodes, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup,
-    VhostName, WireSchemaDefinition,
+    PlacementPolicy, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayName,
+    ResolvedCodecWireFormat, RouteConstruction, ScheduledNode, ScheduledNodes, SchemaField,
+    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaLookup, WireSchemaName,
 };
 use nervix_nspl::{
     vm_program::{
@@ -2115,22 +2116,9 @@ impl DomainState {
                     )?;
                 }
                 Model::Codec(codec) => {
-                    if let Some(wire_schema_identifier) = codec.wire_schema.as_ref() {
-                        let wire_schema = expect_kind(
-                            domain,
-                            identifier,
-                            models,
-                            &indices,
-                            wire_schema_identifier,
-                            codec.wire_format.wire_schema_kind().ok_or_else(|| {
-                                Report::new(RegistryError::InvalidModel {
-                                    domain: domain.as_str().to_string(),
-                                    identifier: identifier.as_str().to_string(),
-                                    reason: "codec wire format cannot reference a wire schema"
-                                        .to_string(),
-                                })
-                            })?,
-                        )?;
+                    if let Some(reference) = codec.wire_format.wire_schema_reference() {
+                        let wire_schema =
+                            expect_node(domain, identifier, models, &indices, &reference)?;
                         graph.add_edge(wire_schema, source, EdgeKind::RequiredBy);
                     }
                     let schema = expect_kind(
@@ -2145,24 +2133,16 @@ impl DomainState {
 
                     let schema_model =
                         expect_schema_model(domain, identifier, models, &codec.schema)?;
-                    let wire_schema_model = codec
-                        .wire_schema
-                        .as_ref()
-                        .map(|wire_schema| {
-                            expect_wire_schema_model(
-                                domain,
-                                identifier,
-                                models,
-                                &codec.wire_format,
-                                wire_schema,
-                            )
-                        })
-                        .transpose()?;
+                    let wire_schemas = DomainModelWireSchemas {
+                        domain,
+                        identifier,
+                        models,
+                    };
+                    let wire_format = codec.wire_format.resolve(&wire_schemas)?;
                     ensure_codec_schema_compatibility(
                         domain,
                         identifier,
-                        &codec.wire_format,
-                        wire_schema_model.as_ref(),
+                        wire_format,
                         schema_model,
                         &codec.encoding_rules,
                     )?;
@@ -6585,19 +6565,33 @@ fn expect_kind(
     referenced: impl Into<ModelName>,
     expected_kind: ModelKind,
 ) -> Result<NodeIndex, Report<RegistryError>> {
-    let referenced = referenced.into();
-    let referenced_key = NodeRef::new(expected_kind, referenced.clone());
-    models.get(&referenced_key).ok_or_else(|| {
+    expect_node(
+        domain,
+        identifier,
+        models,
+        indices,
+        &NodeRef::new(expected_kind, referenced),
+    )
+}
+
+fn expect_node(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &HashMap<NodeRef, Model>,
+    indices: &HashMap<NodeRef, NodeIndex>,
+    referenced: &NodeRef,
+) -> Result<NodeIndex, Report<RegistryError>> {
+    models.get(referenced).ok_or_else(|| {
         Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            expected_kind: expected_kind.as_str(),
-            reference: referenced.as_str().to_string(),
+            expected_kind: referenced.kind.as_str(),
+            reference: referenced.identifier.as_str().to_string(),
         })
     })?;
 
     Ok(*indices
-        .get(&referenced_key)
+        .get(referenced)
         .verified("the reference was resolved above, and every resolved model has an index"))
 }
 
@@ -7489,44 +7483,75 @@ fn expect_schema_model<'a>(
     }
 }
 
-fn expect_wire_schema_model(
-    domain: &DomainName,
-    identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
-    wire_format: &CodecWireFormat,
-    referenced: impl Into<ModelName>,
-) -> Result<WireSchemaDefinition, Report<RegistryError>> {
-    let referenced = referenced.into();
-    let Some(kind) = wire_format.wire_schema_kind() else {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec wire format cannot reference a wire schema".to_string(),
-        }));
-    };
-    match (kind, models.get(&NodeRef::new(kind, referenced.clone()))) {
-        (ModelKind::WireJsonSchema, Some(Model::WireJsonSchema(schema))) => {
-            Ok(WireSchemaDefinition::Json(schema.clone()))
+/// The wire schemas of a domain's proposed configuration, as a codec's format looks them up.
+///
+/// The reference the format names is resolved against the store the whole configuration is
+/// validated from, and the format decides which kind is read, so a codec never sees a wire schema
+/// of another kind.
+struct DomainModelWireSchemas<'a> {
+    domain: &'a DomainName,
+    identifier: &'a ModelName,
+    models: &'a HashMap<NodeRef, Model>,
+}
+
+impl<'a> DomainModelWireSchemas<'a> {
+    fn require<T>(
+        &self,
+        kind: ModelKind,
+        referenced: &WireSchemaName,
+        extract: impl Fn(&'a Model) -> Option<&'a CreateWireSchema<T>>,
+    ) -> Result<&'a CreateWireSchema<T>, Report<RegistryError>> {
+        match self.models.get(&NodeRef::new(kind, referenced.clone())) {
+            Some(model) => extract(model).ok_or_else(|| {
+                Report::new(RegistryError::InvalidReferenceKind {
+                    domain: self.domain.as_str().to_string(),
+                    identifier: self.identifier.as_str().to_string(),
+                    expected_kind: kind.as_str(),
+                    reference: referenced.as_str().to_string(),
+                    actual_kind: model.kind().as_str(),
+                })
+            }),
+            None => Err(Report::new(RegistryError::MissingReference {
+                domain: self.domain.as_str().to_string(),
+                identifier: self.identifier.as_str().to_string(),
+                expected_kind: kind.as_str(),
+                reference: referenced.as_str().to_string(),
+            })),
         }
-        (ModelKind::WireCborSchema, Some(Model::WireCborSchema(schema))) => {
-            Ok(WireSchemaDefinition::Cbor(schema.clone()))
-        }
-        (ModelKind::WireAvroSchema, Some(Model::WireAvroSchema(schema))) => {
-            Ok(WireSchemaDefinition::Avro(schema.clone()))
-        }
-        (_, Some(model)) => Err(Report::new(RegistryError::InvalidReferenceKind {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: kind.as_str(),
-            reference: referenced.as_str().to_string(),
-            actual_kind: model.kind().as_str(),
-        })),
-        (_, None) => Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: kind.as_str(),
-            reference: referenced.as_str().to_string(),
-        })),
+    }
+}
+
+impl WireSchemaLookup for DomainModelWireSchemas<'_> {
+    type Error = Report<RegistryError>;
+
+    fn json_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<&CreateJsonWireSchema, Self::Error> {
+        self.require(ModelKind::WireJsonSchema, name, |model| match model {
+            Model::WireJsonSchema(schema) => Some(schema),
+            _ => None,
+        })
+    }
+
+    fn cbor_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<&CreateCborWireSchema, Self::Error> {
+        self.require(ModelKind::WireCborSchema, name, |model| match model {
+            Model::WireCborSchema(schema) => Some(schema),
+            _ => None,
+        })
+    }
+
+    fn avro_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<&CreateAvroWireSchema, Self::Error> {
+        self.require(ModelKind::WireAvroSchema, name, |model| match model {
+            Model::WireAvroSchema(schema) => Some(schema),
+            _ => None,
+        })
     }
 }
 
@@ -11039,12 +11064,11 @@ fn format_branched_by(branched_by: &[FieldName]) -> String {
 fn ensure_codec_schema_compatibility(
     domain: &DomainName,
     identifier: &ModelName,
-    wire_format: &CodecWireFormat,
-    wire_schema: Option<&WireSchemaDefinition>,
+    wire_format: ResolvedCodecWireFormat<'_>,
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
 ) -> Result<(), Report<RegistryError>> {
-    let rfc3339_fields = if let CodecWireFormat::Syslog = wire_format {
+    let rfc3339_fields = if let ResolvedCodecWireFormat::Syslog = wire_format {
         if !encoding_rules.is_empty() {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
@@ -11056,180 +11080,83 @@ fn ensure_codec_schema_compatibility(
     } else {
         ensure_supported_codec_encoding_rules(domain, identifier, schema, encoding_rules)?
     };
-    match (wire_format, wire_schema) {
-        (CodecWireFormat::Syslog, None) => ensure_syslog_field_contract(domain, identifier, schema),
-        (CodecWireFormat::Syslog, Some(_)) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "SYSLOG codec must not reference a wire schema".to_string(),
-        })),
-        (CodecWireFormat::Json, Some(WireSchemaDefinition::Json(json))) => {
-            ensure_wire_field_set_matches(
-                domain,
-                identifier,
-                &json
-                    .fields
-                    .iter()
-                    .map(|field| WireFieldCompatibility {
-                        name: field.name.as_str(),
-                        optional: field.optional,
-                        wire_type: field.ty.as_ref().to_string(),
-                        compatibility: WireTypeCompatibility::Json(field.ty),
-                    })
-                    .collect::<Vec<_>>(),
-                schema,
-                "json",
-                &rfc3339_fields,
-            )
-        }
-        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Cbor(cbor))) => {
-            ensure_wire_field_set_matches(
-                domain,
-                identifier,
-                &cbor
-                    .fields
-                    .iter()
-                    .map(|field| WireFieldCompatibility {
-                        name: field.name.as_str(),
-                        optional: field.optional,
-                        wire_type: field.ty.as_ref().to_string(),
-                        compatibility: WireTypeCompatibility::Json(field.ty),
-                    })
-                    .collect::<Vec<_>>(),
-                schema,
-                "cbor",
-                &rfc3339_fields,
-            )
-        }
-        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Avro(avro))) => {
-            ensure_wire_field_set_matches(
-                domain,
-                identifier,
-                &avro
-                    .fields
-                    .iter()
-                    .map(|field| WireFieldCompatibility {
-                        name: field.name.as_str(),
-                        optional: field.optional,
-                        wire_type: field.ty.as_ref().to_string(),
-                        compatibility: WireTypeCompatibility::Avro(field.ty),
-                    })
-                    .collect::<Vec<_>>(),
-                schema,
-                "avro",
-                &rfc3339_fields,
-            )
-        }
-        (
-            CodecWireFormat::JaqNative {
-                transformations, ..
-            },
-            None,
-        ) if transformations.has_any() => Ok(()),
-        (CodecWireFormat::Protobuf(config), None) if config.transformations.has_any() => Ok(()),
-        (
-            CodecWireFormat::JaqNative {
-                transformations, ..
-            },
-            None,
-        ) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: if transformations.has_any() {
-                "JAQ-native codec is invalid".to_string()
+    match wire_format {
+        ResolvedCodecWireFormat::Syslog => ensure_syslog_field_contract(domain, identifier, schema),
+        ResolvedCodecWireFormat::Json(json) => ensure_wire_field_set_matches(
+            domain,
+            identifier,
+            &json
+                .fields
+                .iter()
+                .map(|field| WireFieldCompatibility {
+                    name: field.name.as_str(),
+                    optional: field.optional,
+                    wire_type: field.ty.as_ref().to_string(),
+                    compatibility: WireTypeCompatibility::Json(field.ty),
+                })
+                .collect::<Vec<_>>(),
+            schema,
+            "json",
+            &rfc3339_fields,
+        ),
+        ResolvedCodecWireFormat::Cbor(cbor) => ensure_wire_field_set_matches(
+            domain,
+            identifier,
+            &cbor
+                .fields
+                .iter()
+                .map(|field| WireFieldCompatibility {
+                    name: field.name.as_str(),
+                    optional: field.optional,
+                    wire_type: field.ty.as_ref().to_string(),
+                    compatibility: WireTypeCompatibility::Json(field.ty),
+                })
+                .collect::<Vec<_>>(),
+            schema,
+            "cbor",
+            &rfc3339_fields,
+        ),
+        ResolvedCodecWireFormat::Avro(avro) => ensure_wire_field_set_matches(
+            domain,
+            identifier,
+            &avro
+                .fields
+                .iter()
+                .map(|field| WireFieldCompatibility {
+                    name: field.name.as_str(),
+                    optional: field.optional,
+                    wire_type: field.ty.as_ref().to_string(),
+                    compatibility: WireTypeCompatibility::Avro(field.ty),
+                })
+                .collect::<Vec<_>>(),
+            schema,
+            "avro",
+            &rfc3339_fields,
+        ),
+        ResolvedCodecWireFormat::JaqNative {
+            transformations, ..
+        } => {
+            if transformations.has_any() {
+                Ok(())
             } else {
-                "JAQ-native codec must declare a JAQ transformation".to_string()
-            },
-        })),
-        (CodecWireFormat::Json, Some(WireSchemaDefinition::Avro(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares JSON wire format but references an avro wire schema"
-                    .to_string(),
-            }))
+                Err(Report::new(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
+                }))
+            }
         }
-        (CodecWireFormat::Json, Some(WireSchemaDefinition::Cbor(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares JSON wire format but references a cbor wire schema"
-                    .to_string(),
-            }))
+        ResolvedCodecWireFormat::Protobuf(config) => {
+            if config.transformations.has_any() {
+                Ok(())
+            } else {
+                Err(Report::new(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: "protobuf codec must declare a JAQ transformation".to_string(),
+                }))
+            }
         }
-        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Json(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares CBOR wire format but references a json wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Avro(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares CBOR wire format but references an avro wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Json(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares AVRO wire format but references a json wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Cbor(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares AVRO wire format but references a cbor wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Json, None) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec declares JSON wire format but does not reference a json wire schema"
-                .to_string(),
-        })),
-        (CodecWireFormat::Cbor, None) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec declares CBOR wire format but does not reference a cbor wire schema"
-                .to_string(),
-        })),
-        (CodecWireFormat::Avro, None) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec declares AVRO wire format but does not reference an avro wire schema"
-                .to_string(),
-        })),
-        (CodecWireFormat::JaqNative { .. }, Some(_)) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "JAQ-native codec must not reference a wire schema".to_string(),
-            }))
-        }
-        (CodecWireFormat::Protobuf(config), None) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: if config.transformations.has_any() {
-                    "protobuf codec is invalid".to_string()
-                } else {
-                    "protobuf codec must declare a JAQ transformation".to_string()
-                },
-            }))
-        }
-        (CodecWireFormat::Protobuf(_), Some(_)) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "protobuf codec must not reference a wire schema".to_string(),
-        })),
     }
 }
 
@@ -11934,8 +11861,9 @@ mod tests {
     fn codec(name: &str, schema: &str) -> Model {
         Model::Codec(CreateCodec {
             name: CodecName::parse(name).expect("valid identifier"),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(WireSchemaName::parse("event_wire").expect("valid identifier")),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: WireSchemaName::parse("event_wire").expect("valid identifier"),
+            },
             schema: SchemaName::parse(schema).expect("valid identifier"),
             encoding_rules: Vec::new(),
         })
@@ -11945,7 +11873,6 @@ mod tests {
         Model::Codec(CreateCodec {
             name: named(name),
             wire_format: CodecWireFormat::Syslog,
-            wire_schema: None,
             schema: named(schema),
             encoding_rules: Vec::new(),
         })
@@ -11965,8 +11892,9 @@ mod tests {
     fn avro_codec(name: &str, wire_schema: &str, schema: &str) -> Model {
         Model::Codec(CreateCodec {
             name: named(name),
-            wire_format: CodecWireFormat::Avro,
-            wire_schema: Some(named(wire_schema)),
+            wire_format: CodecWireFormat::Avro {
+                wire_schema: named(wire_schema),
+            },
             schema: named(schema),
             encoding_rules: Vec::new(),
         })
@@ -11987,7 +11915,6 @@ mod tests {
                     on_emitting: on_emitting.map(str::to_string),
                 },
             },
-            wire_schema: None,
             schema: named(schema),
             encoding_rules: Vec::new(),
         })
@@ -12014,7 +11941,6 @@ mod tests {
                     on_emitting: on_emitting.map(str::to_string),
                 },
             }),
-            wire_schema: None,
             schema: named(schema),
             encoding_rules: Vec::new(),
         })
@@ -12028,8 +11954,9 @@ mod tests {
     ) -> Model {
         Model::Codec(CreateCodec {
             name: named(name),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(named(wire_schema)),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named(wire_schema),
+            },
             schema: named(schema),
             encoding_rules: vec![CodecEncodingRule {
                 field: named(field),
@@ -13652,7 +13579,9 @@ mod tests {
         let Model::Codec(mut replacement) = codec("event_codec", "event_schema") else {
             unreachable!("codec helper must build a codec model");
         };
-        replacement.wire_schema = Some(named("event_wire_v2"));
+        replacement.wire_format = CodecWireFormat::Json {
+            wire_schema: named("event_wire_v2"),
+        };
         let planned = registry
             .plan_mutations(
                 &domain,

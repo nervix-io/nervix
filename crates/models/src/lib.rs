@@ -64,8 +64,8 @@ pub use resource::{
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
     AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,
-    CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField, WireSchemaDefinition,
-    WireSchemaField, WireSchemaStrictness,
+    CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField, WireSchemaField,
+    WireSchemaStrictness,
 };
 pub use statement::{
     AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterDomain,
@@ -111,14 +111,15 @@ pub use statement::{
     PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
     RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, Relocation,
     RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, RetryPolicy, S3ConfigEntry, ScheduledNode, ScheduledNodes,
-    SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
-    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UploadResource, VhostTlsResource,
-    WasmProcessorLimits, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    RelocationSelection, ResolvedCodecWireFormat, RetryPolicy, S3ConfigEntry, ScheduledNode,
+    ScheduledNodes, SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowPlacements,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsConfigEntry, SqsFifoGroup, SqsIngestMode, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry,
+    UncordonNode, UploadResource, VhostTlsResource, WasmProcessorLimits, WebsocketsConfigEntry,
+    WebsocketsIngestMode, WindowBound, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode,
+    default_relay_buffer,
 };
 pub use timestamp::Timestamp;
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

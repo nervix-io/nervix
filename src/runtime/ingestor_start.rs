@@ -639,8 +639,9 @@ mod tests {
                             ModelName::from(&codec),
                             nervix_models::Model::Codec(CreateCodec {
                                 name: codec.clone(),
-                                wire_format: CodecWireFormat::Json,
-                                wire_schema: Some(wire_schema.clone()),
+                                wire_format: CodecWireFormat::Json {
+                                    wire_schema: wire_schema.clone(),
+                                },
                                 schema: schema.clone(),
                                 encoding_rules: Vec::new(),
                             }),
@@ -787,8 +788,9 @@ mod tests {
                             ModelName::from(&codec),
                             nervix_models::Model::Codec(CreateCodec {
                                 name: codec.clone(),
-                                wire_format: CodecWireFormat::Json,
-                                wire_schema: Some(wire_schema.clone()),
+                                wire_format: CodecWireFormat::Json {
+                                    wire_schema: wire_schema.clone(),
+                                },
                                 schema: schema.clone(),
                                 encoding_rules: Vec::new(),
                             }),
