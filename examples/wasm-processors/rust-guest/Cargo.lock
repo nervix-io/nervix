@@ -361,6 +361,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "meticulous",
  "nervix-wasm-protocol",
  "thiserror",
 ]

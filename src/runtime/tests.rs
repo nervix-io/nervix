@@ -1971,6 +1971,8 @@ fn wasm_contiguous_input_reference_shares_source_buffers() {
     let source_data = ack_map[&1].input_batch.batch().column(0).to_data();
     let output_data = outputs[0].batch.batch().column(0).to_data();
 
+    // The offset pointer is only compared, never read, so `wrapping_add` is the defined way to
+    // compute it without claiming the provenance that `add` requires.
     assert_eq!(
         output_data.buffers()[0].as_ptr(),
         source_data.buffers()[0]
@@ -4901,7 +4903,7 @@ async fn deduplicator_snapshot_task_persists_dirty_state_on_interval() {
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
-    let expected_lsm = state.current_lsm.load(Ordering::SeqCst);
+    let expected_lsm = state.current_lsm.current();
 
     wait_for_persisted_runtime_state_lsm(&runtime, &placement, expected_lsm).await;
     assert_eq!(
@@ -4946,7 +4948,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
 
     runtime.update_materialized_stream_last_by_timestamp(&state, &None, &record);
 
-    assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
+    assert_eq!(state.current_lsm.current(), 1);
     assert!(state.dirty.load(Ordering::SeqCst));
     assert_eq!(state.last_persisted_lsm.load(Ordering::SeqCst), 0);
     assert!(
@@ -5567,7 +5569,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
-    let lsm = state.current_lsm.load(Ordering::SeqCst);
+    let lsm = state.current_lsm.current();
 
     let first = runtime
         .handle_state_sync_request(&placement, 0)
@@ -5601,7 +5603,7 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
     let key = super::DeduplicatorKey::new(vec![super::ReorderKeyPart::Utf8("txn-1".to_string())]);
     assert!(state.reserve_new_key(key.clone(), seen_at, max_time));
     assert!(!state.reserve_new_key(key, seen_at, max_time));
-    assert_eq!(state.current_lsm.load(Ordering::SeqCst), 1);
+    assert_eq!(state.current_lsm.current(), 1);
 }
 
 #[test]
@@ -11419,7 +11421,12 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
     assert_eq!(program.key_count, 1);
     assert_eq!(
         program.key_column_offset,
-        output.batch.columns().len().saturating_sub(1)
+        output
+            .batch
+            .columns()
+            .len()
+            .checked_sub(1)
+            .expect("the generated batch must hold at least one column")
     );
     assert_eq!(
         super::reorder_key_part(output.batch.column(program.key_column_offset), 0),

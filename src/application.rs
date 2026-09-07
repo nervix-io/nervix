@@ -285,11 +285,15 @@ fn emitter_publishing_drain_status_envelope(
 
 impl std::fmt::Display for DrainOutstanding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let total = self
-            .active_ingestors
-            .saturating_add(self.active_generators)
-            .saturating_add(self.outstanding_acks)
-            .saturating_add(self.buffered_emitter_messages);
+        let total = [
+            self.active_ingestors,
+            self.active_generators,
+            self.outstanding_acks,
+            self.buffered_emitter_messages,
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .assured("every count totals work items this cluster already holds in memory");
         if let Some(node) = &self.node {
             write!(
                 formatter,
@@ -1225,9 +1229,11 @@ fn response_with_status(status: StatusCode) -> HyperResponse<Empty<Bytes>> {
 fn endpoint_rejection_response(retry_after: Option<Duration>) -> HyperResponse<Empty<Bytes>> {
     let mut response = HyperResponse::builder().status(StatusCode::SERVICE_UNAVAILABLE);
     if let Some(retry_after) = retry_after {
+        // `Retry-After` is whole seconds, so a sub-second remainder rounds the wait up.
         let seconds = retry_after
             .as_secs()
-            .saturating_add(u64::from(retry_after.subsec_nanos() > 0));
+            .checked_add(u64::from(retry_after.subsec_nanos() > 0))
+            .assured("a Duration's whole seconds leave room for the rounding increment");
         response = response.header(RETRY_AFTER, seconds.to_string());
     }
     response.body(empty_body()).assured(
@@ -4113,7 +4119,9 @@ impl SessionService for SessionServiceImpl {
             file.write_all(&chunk)
                 .await
                 .map_err(|_| Status::internal("failed to write upload resource chunk"))?;
-            total_received = total_received.saturating_add(u64::try_from(chunk.len()).unwrap_or(0));
+            total_received = total_received
+                .checked_add(u64::try_from(chunk.len()).unwrap_or(0))
+                .ok_or_else(|| Status::invalid_argument("upload resource archive is too large"))?;
         }
         file.flush()
             .await
@@ -5246,9 +5254,11 @@ impl SessionServiceImpl {
         if live_nodes.is_empty() {
             return None;
         }
+        // Wrapping is the meaning here: this is a string hash, so the multiply-and-add mixer
+        // is defined modulo the word size and every bit that falls off is intended to.
         let mut hash: usize = 0;
         for byte in domain_id.as_str().bytes() {
-            hash = hash.wrapping_mul(131).wrapping_add(byte as usize);
+            hash = hash.wrapping_mul(131).wrapping_add(usize::from(byte));
         }
         live_nodes.get(hash % live_nodes.len()).cloned()
     }
@@ -8531,7 +8541,9 @@ impl SessionServiceImpl {
                     let _ = parse_start_point(&start.start)?;
                     domain.status = DomainStatus::Running;
                     domain.last_start = start.start.clone();
-                    domain.start_version = domain.start_version.saturating_add(1);
+                    domain.start_version = domain.start_version.checked_add(1).assured(
+                        "a domain cannot be started 2^64 times in the lifetime of a cluster",
+                    );
                 }
                 Statement::StopDomain(_) => {
                     let domain = domains
@@ -8890,12 +8902,11 @@ impl SessionServiceImpl {
         let mut completed_model_mutation = false;
         for result in transaction.commit_results() {
             tokio::task::consume_budget().await;
-            let Some(statements) = transaction.statements.get(
-                result.first_statement
-                    ..result
-                        .first_statement
-                        .saturating_add(result.statement_count),
-            ) else {
+            let Some(statements) = result
+                .first_statement
+                .checked_add(result.statement_count)
+                .and_then(|end| transaction.statements.get(result.first_statement..end))
+            else {
                 return Err(format!(
                     "transaction '{}' has invalid recorded commit progress",
                     transaction.id
@@ -8943,7 +8954,9 @@ impl SessionServiceImpl {
         quiesce_level: Option<QuiesceLevel>,
         effect: Option<TransactionStepEffect>,
     ) -> Result<ReplicatedTransaction, String> {
-        let next_statement = first_statement.saturating_add(statement_count);
+        let next_statement = first_statement
+            .checked_add(statement_count)
+            .assured("a recorded commit step counts statements of the transaction it belongs to");
         let completion = if result.success {
             (next_statement == transaction.statements.len())
                 .then_some(TransactionOutcome::Committed)
@@ -9212,7 +9225,10 @@ impl SessionServiceImpl {
                                     wall_started_at,
                                     logical_start,
                                     time_rate: time_rate.clone(),
-                                    start_version: domain.start_version.saturating_add(1),
+                                    start_version: domain.start_version.checked_add(1).assured(
+                                        "a domain cannot be started 2^64 times in the lifetime of \
+                                         a cluster",
+                                    ),
                                 });
                             }
                             (
@@ -9307,7 +9323,9 @@ impl SessionServiceImpl {
                 self.broadcast_error(format!(
                     "failed to reconcile runtime after transaction '{}' step {}: {error}",
                     transaction.id,
-                    statement_index.saturating_add(1)
+                    statement_index
+                        .checked_add(1)
+                        .assured("the index names a statement of a transaction held in memory")
                 ));
             }
             if let Some(handoff) = ownership_handoff.take() {
@@ -10852,7 +10870,9 @@ impl SessionServiceImpl {
                     "failed to flush temporary uploaded file".to_string(),
                 )
             })?;
-            file_count = file_count.saturating_add(1);
+            file_count = file_count
+                .checked_add(1)
+                .assured("the files counted here were each written to the local filesystem");
         }
         if file_count == 0 {
             return Err((
@@ -11403,7 +11423,10 @@ impl SessionServiceImpl {
                     self.domain_clock_reconciliations.insert(
                         domain_id.clone(),
                         DomainClockReconciliation {
-                            start_version: domain.start_version.saturating_add(1),
+                            start_version: domain.start_version.checked_add(1).assured(
+                                "a domain cannot be started 2^64 times in the lifetime of a \
+                                 cluster",
+                            ),
                             running: true,
                         },
                     );
@@ -12301,7 +12324,9 @@ impl SessionServiceImpl {
                     handled_this_iteration = true;
                     break;
                 }
-                moved = moved.saturating_add(planned_moves.len());
+                moved = moved
+                    .checked_add(planned_moves.len())
+                    .assured("the moves counted here are schedule entries held in memory");
                 let activation_error = self.apply_current_cluster_state().await.err();
                 for ownership_move in &planned_moves {
                     if activation_error.is_none() {
@@ -13242,7 +13267,10 @@ impl SessionServiceImpl {
             {
                 return Ok(());
             }
-            next_schedule.rebalance_epoch = existing_schedule.rebalance_epoch.saturating_add(1);
+            next_schedule.rebalance_epoch = existing_schedule
+                .rebalance_epoch
+                .checked_add(1)
+                .assured("a cluster cannot observe 2^64 partition rebalances");
         }
         ingestor_node.kafka_partition_schedule = Some(next_schedule);
         self.consensus
@@ -15741,15 +15769,20 @@ async fn user_credentials(name: UserName, password: String) -> Result<UserCreden
     })
 }
 
-fn add_scaled_duration_to_timestamp(base: Timestamp, delta: Duration, scale: u64) -> Timestamp {
+/// `base` advanced by `delta` repeated `scale` times, or `None` when a domain has run long
+/// enough that the result leaves the representable timestamp range.
+fn add_scaled_duration_to_timestamp(
+    base: Timestamp,
+    delta: Duration,
+    scale: u64,
+) -> Option<Timestamp> {
     let scaled_nanos = delta
         .as_nanos()
-        .saturating_mul(u128::from(scale))
-        .min(i64::MAX as u128) as i64;
+        .checked_mul(u128::from(scale))
+        .and_then(|nanos| i64::try_from(nanos).ok())?;
     base.into_datetime()
         .checked_add_signed(TimeDelta::nanoseconds(scaled_nanos))
         .map(Timestamp::from)
-        .unwrap_or(base)
 }
 
 fn logical_timestamp_at_wall_time(
@@ -15950,7 +15983,9 @@ fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStat
             } => ReportedOutcome {
                 state: ApiTransactionState::Failed,
                 error: error.clone(),
-                failing_step: u64::try_from(failing_step.saturating_add(1)).ok(),
+                failing_step: failing_step
+                    .checked_add(1)
+                    .and_then(|step| u64::try_from(step).ok()),
             },
             TransactionOutcome::Reverted => {
                 ReportedOutcome::without_error(ApiTransactionState::Reverted)
@@ -17163,11 +17198,22 @@ async fn run_domain_clock(
         }
 
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        let next_logical = add_scaled_duration_to_timestamp(
+        let Some(next_logical) = add_scaled_duration_to_timestamp(
             clock.logical_start,
             period,
-            clock.next_tick_id.saturating_sub(1),
-        );
+            clock
+                .next_tick_id
+                .checked_sub(1)
+                .assured("a domain clock's tick ids start at one and only ever advance"),
+        ) else {
+            warn!(
+                domain = domain_id.as_str(),
+                period = domain.config.period,
+                next_tick_id = clock.next_tick_id,
+                "domain clock has run past the representable timestamp range"
+            );
+            break;
+        };
         let reached_logical =
             logical_timestamp_at_wall_time(&clock, current_timestamp(), time_rate);
 
@@ -17233,11 +17279,22 @@ async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &DomainN
         }
 
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        let next_logical = add_scaled_duration_to_timestamp(
+        let Some(next_logical) = add_scaled_duration_to_timestamp(
             clock.logical_start,
             period,
-            clock.next_tick_id.saturating_sub(1),
-        );
+            clock
+                .next_tick_id
+                .checked_sub(1)
+                .assured("a domain clock's tick ids start at one and only ever advance"),
+        ) else {
+            warn!(
+                domain = domain_id.as_str(),
+                period = domain.config.period,
+                next_tick_id = clock.next_tick_id,
+                "domain clock has run past the representable timestamp range"
+            );
+            break;
+        };
         let reached_logical =
             logical_timestamp_at_wall_time(&clock, current_timestamp(), time_rate);
 
@@ -17263,7 +17320,10 @@ async fn emit_domain_tick(
         wall_clock,
         duration_ms,
     };
-    clock.next_tick_id = clock.next_tick_id.saturating_add(1);
+    clock.next_tick_id = clock
+        .next_tick_id
+        .checked_add(1)
+        .assured("a domain clock cannot emit 2^64 ticks in the lifetime of a cluster");
     service
         .domain_clocks
         .insert(domain_id.clone(), clock.clone());
@@ -19656,9 +19716,21 @@ mod tests {
                 .expect("registry should open"),
         );
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(64000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(65000u16.saturating_add(id));
-        let raft_addr = test_addr(49500u16.saturating_add(id));
+        let grpc_addr = test_addr(
+            64000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            65000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            49500u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
@@ -22769,9 +22841,21 @@ mod tests {
                 .expect("registry should open"),
         );
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(51000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(52000u16.saturating_add(id));
-        let raft_addr = test_addr(53000u16.saturating_add(id));
+        let grpc_addr = test_addr(
+            51000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            52000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            53000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
@@ -22960,9 +23044,21 @@ mod tests {
                 .expect("registry should open"),
         );
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(61000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(62000u16.saturating_add(id));
-        let raft_addr = test_addr(63000u16.saturating_add(id));
+        let grpc_addr = test_addr(
+            61000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            62000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            63000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
@@ -23140,9 +23236,21 @@ mod tests {
                 .expect("registry should open"),
         );
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(61000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(62000u16.saturating_add(id));
-        let raft_addr = test_addr(63000u16.saturating_add(id));
+        let grpc_addr = test_addr(
+            61000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            62000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            63000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
@@ -23330,9 +23438,21 @@ mod tests {
         );
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
         let expected_leader = test_node_name(id);
-        let grpc_addr = test_addr(61000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(62000u16.saturating_add(id));
-        let raft_addr = test_addr(63000u16.saturating_add(id));
+        let grpc_addr = test_addr(
+            61000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            62000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            63000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(

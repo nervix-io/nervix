@@ -728,7 +728,12 @@ fn split_metric_and_value(
         }
         match character {
             '"' => quoted = true,
-            '{' => braces = braces.saturating_add(1),
+            '{' => {
+                braces = braces
+                    .checked_add(1)
+                    .assured("the braces counted here belong to one line held in memory");
+            }
+            // An unbalanced closing brace belongs to no label set, so the depth stays at zero.
             '}' => braces = braces.saturating_sub(1),
             character if character.is_whitespace() && braces == 0 => {
                 let value = line[index..].trim();

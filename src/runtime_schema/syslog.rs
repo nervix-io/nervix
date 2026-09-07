@@ -4,6 +4,7 @@ use arrow_array::{
     builder::{StringBuilder, TimestampNanosecondBuilder, UInt8Builder},
 };
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
+use meticulous::OptionExt as _;
 use nervix_models::{CreateCodec, ParseAsType};
 
 use super::{
@@ -419,7 +420,10 @@ fn parse_rfc5424_timestamp(
 ) -> Result<DateTime<FixedOffset>, CodecError> {
     let bytes = value.as_bytes();
     let zone_start = if bytes.last() == Some(&b'Z') {
-        bytes.len().saturating_sub(1)
+        bytes
+            .len()
+            .checked_sub(1)
+            .verified("a trailing byte means the value holds at least one byte")
     } else if bytes.len() >= 6
         && matches!(bytes[bytes.len() - 6], b'+' | b'-')
         && bytes[bytes.len() - 3] == b':'

@@ -11,5 +11,6 @@ workspace = true
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
+meticulous = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 thiserror = { workspace = true }

@@ -955,6 +955,7 @@ impl BenchmarkRunner {
             let backlog_messages =
                 self.backlog_messages(observed.since(plan.baseline)?, accepted_messages)?;
             peak_backlog_messages = peak_backlog_messages.max(backlog_messages);
+            // A backlog past the configured ceiling leaves no room for another cycle.
             let available_cycles = self
                 .args
                 .max_backlog_messages

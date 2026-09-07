@@ -269,6 +269,17 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   it, or make the invariant hold in the type. Never invent a guarantee to retire a panic site.
 - A build script is the exception that stays a panic: a failed code generation is a real build
   failure, so it panics with its cause rather than claiming a guarantee it does not have.
+- Prefer checked arithmetic and handle the overflow case explicitly. `saturating_*` and
+  `wrapping_*` are correct only where saturation or wrapping is the meaning of the computation
+  itself, such as a clamped backpressure budget, a bounded retry delay, or a hash mixer, and the
+  site says which. They are never a way to avoid deciding what overflow means.
+- Everywhere else compute with `checked_*` and classify the overflow exactly as any other panic
+  site is classified: an operand bound that holds by construction takes `assured` or `verified`
+  with the bound as its reason, and an overflow that a caller, a payload, or a configured limit can
+  actually reach is a typed error.
+- Bare `+`, `-`, and `*` wrap silently in release builds, so they are checked arithmetic in debug
+  only. Sizes, offsets, counters, capacities, and timestamps derived from untrusted or unbounded
+  values use the checked form and say what bounds them.
 
 ## Engineering Conventions
 
@@ -397,12 +408,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   `docs/src` and should be read from there rather than restated in the skill.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
-  casts, bare `unwrap` and `expect`, `Result<_, String>`, signatures returning a Nervix error
-  without `Report`, node identities carried as `String`, struct fields gated on
-  `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
-  in the data plane, and CI fails when a count is above `debt-baseline.json`. A change may lower a
-  count and never raise one. When a count falls, run `just ratchet --update` and commit the
-  baseline in the same change; `just ratchet --show <count>` lists the sites behind one count.
+  casts, bare `unwrap` and `expect`, `saturating_*` and `wrapping_*` calls outside the time API,
+  `Result<_, String>`, signatures returning a Nervix error without `Report`, node identities
+  carried as `String`, struct fields gated on `cfg(feature = "testing")`, parser references outside
+  the language edges, and `Model` references in the data plane, and CI fails when a count is above
+  `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run
+  `just ratchet --update` and commit the baseline in the same change; `just ratchet --show <count>`
+  lists the sites behind one count.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
   benchmarks, cache troubleshooting, or retries.

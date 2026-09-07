@@ -7,6 +7,7 @@
 
 use std::{cell::UnsafeCell, ops::Range, panic::AssertUnwindSafe};
 
+use meticulous::OptionExt as _;
 use nervix_wasm_protocol::GuestSnapshot;
 
 use crate::{
@@ -278,8 +279,14 @@ pub fn process_batch<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) 
             return Err(GuestError::NotInitialized);
         }
         let input = InputBatch::from_envelope_bytes(core.read_buffer(ptr, size)?)?;
-        core.processed_batches = core.processed_batches.saturating_add(1);
-        core.processed_rows = core.processed_rows.saturating_add(input.row_count());
+        core.processed_batches = core
+            .processed_batches
+            .checked_add(1)
+            .assured("a guest cannot process 2^64 batches in the lifetime of an instance");
+        core.processed_rows = core
+            .processed_rows
+            .checked_add(input.row_count())
+            .assured("a guest cannot process 2^64 rows in the lifetime of an instance");
         let mut ctx = core.guest_context()?;
         slot.with(|instance| {
             let Some(instance) = instance.as_mut() else {

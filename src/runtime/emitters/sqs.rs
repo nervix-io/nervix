@@ -41,6 +41,9 @@ impl PreparedSqsRecord {
         group_id: Result<Option<String>, String>,
         acks: AckSet,
     ) -> Result<Self, String> {
+        const ENCODED_IN_MEMORY: &str =
+            "every term counts bytes of a record this node already holds in memory";
+
         let body = String::from_utf8(payload)
             .map_err(|_| "SQS message body is not valid UTF-8".to_string())?;
         if !SqsEmitter::has_valid_message_characters(&body) {
@@ -68,17 +71,24 @@ impl PreparedSqsRecord {
         }
         let encoded_bytes = body
             .len()
-            .saturating_add(
+            .checked_add(
                 attributes
                     .iter()
                     .map(|(name, value)| {
                         name.len()
-                            .saturating_add(value.data_type().len())
-                            .saturating_add(value.string_value().map(str::len).unwrap_or_default())
+                            .checked_add(value.data_type().len())
+                            .and_then(|size| {
+                                size.checked_add(
+                                    value.string_value().map(str::len).unwrap_or_default(),
+                                )
+                            })
+                            .assured(ENCODED_IN_MEMORY)
                     })
-                    .fold(0_usize, usize::saturating_add),
+                    .try_fold(0_usize, usize::checked_add)
+                    .assured(ENCODED_IN_MEMORY),
             )
-            .saturating_add(group_id.as_ref().map_or(0, String::len));
+            .and_then(|size| size.checked_add(group_id.as_ref().map_or(0, String::len)))
+            .assured(ENCODED_IN_MEMORY);
         if encoded_bytes > SQS_MAX_REQUEST_BYTES {
             return Err(format!(
                 "SQS record is {encoded_bytes} bytes; the protocol limit is 256 KiB"
@@ -314,7 +324,11 @@ impl SqsEmitter {
         for record in records {
             let would_exceed_count = current.len() == SQS_MAX_BATCH_ENTRIES;
             let would_exceed_bytes = !current.is_empty()
-                && current_bytes.saturating_add(record.encoded_bytes) > SQS_MAX_REQUEST_BYTES;
+                && record.encoded_bytes
+                    > SQS_MAX_REQUEST_BYTES.checked_sub(current_bytes).verified(
+                        "PreparedSqsRecord::new rejects a record above the request limit, so a \
+                         chunk's running total never passes it",
+                    );
             let would_repeat_fifo_group = record
                 .group_id
                 .as_ref()
@@ -324,7 +338,9 @@ impl SqsEmitter {
                 current_bytes = 0;
                 current_fifo_groups.clear();
             }
-            current_bytes = current_bytes.saturating_add(record.encoded_bytes);
+            current_bytes = current_bytes
+                .checked_add(record.encoded_bytes)
+                .assured("both counts total bytes of records this node already holds in memory");
             if let Some(group) = record.group_id.as_ref() {
                 current_fifo_groups.insert(group.clone());
             }

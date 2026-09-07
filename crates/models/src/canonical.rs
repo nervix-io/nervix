@@ -104,9 +104,9 @@ impl Clause {
             Self::Aligned { head, items } => {
                 // Continuations line up under the first item, one indentation past the keyword.
                 let continuation = " ".repeat(indent + head.len() + 1);
-                let last = items.len().saturating_sub(1);
+                let last = items.len().checked_sub(1);
                 for (index, item) in items.iter().enumerate() {
-                    let comma = if index == last { "" } else { "," };
+                    let comma = if Some(index) == last { "" } else { "," };
                     let prefix = if index == 0 {
                         format!("{pad}{head} ")
                     } else {

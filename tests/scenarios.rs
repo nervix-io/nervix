@@ -12583,7 +12583,8 @@ async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
             .await
             .expect("failed to count MySQL insert commands")
             .unwrap_or(0)
-            .saturating_sub(baseline);
+            .checked_sub(baseline)
+            .expect("the MySQL command log only grows while a scenario runs");
         if observed_rows == expected_rows && recorded_commands >= expected_commands {
             drop(conn);
             pool.disconnect()

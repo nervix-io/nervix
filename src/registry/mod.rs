@@ -6314,11 +6314,23 @@ impl AssignmentPlanner<'_> {
         u64::from_le_bytes(seed)
     }
 
+    /// How many nodes one entity is assigned to: its primary plus its configured replicas.
+    ///
+    /// `replica_count` is an operator-supplied number with no upper bound, so it is clamped to
+    /// the cluster before the primary slot is added. Both callers select from a list no longer
+    /// than the cluster, so the clamp cannot change which nodes they pick.
+    fn assignment_slots(&self) -> usize {
+        self.replica_count
+            .min(self.cluster_nodes.len())
+            .checked_add(1)
+            .assured("a replica count clamped to the cluster leaves room for the primary slot")
+    }
+
     #[cfg(feature = "testing")]
     fn random_assignment(&self, members: &[RegistryKey]) -> Vec<ClusterNodeName> {
         let mut nodes = self.cluster_nodes.to_vec();
         fastrand::Rng::with_seed(self.random_schedule_seed_for(members)).shuffle(&mut nodes);
-        nodes.truncate(self.replica_count.saturating_add(1));
+        nodes.truncate(self.assignment_slots());
         nodes
     }
 
@@ -6348,7 +6360,7 @@ impl AssignmentPlanner<'_> {
         *self.next_assignment += 1;
         ordered_nodes
             .into_iter()
-            .take(self.replica_count.saturating_add(1))
+            .take(self.assignment_slots())
             .map(|candidate| candidate.node_id)
             .collect()
     }

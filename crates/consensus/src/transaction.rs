@@ -1,3 +1,4 @@
+use meticulous::OptionExt as _;
 use nervix_models::{
     DomainClockState, DomainName, DomainSchedule, DomainStartPoint, DomainState, QuiesceLevel,
     ResourceName, Statement, Timestamp, UserName,
@@ -150,7 +151,8 @@ impl ReplicatedTransaction {
             TransactionState::Committing(progress) => self
                 .statements
                 .len()
-                .saturating_sub(progress.next_statement),
+                .checked_sub(progress.next_statement)
+                .verified("commit progress never runs past the statements it commits"),
             TransactionState::Finished(_) => 0,
         }
     }
@@ -228,10 +230,13 @@ impl ReplicatedTransaction {
                 limit: limits.max_statements,
             });
         }
-        let next_source_bytes = self
+        // A statement whose bytes cannot even be added to the queued total is past any
+        // configured limit, so it reports as the same admission failure.
+        let admitted = self
             .queued_source_bytes
-            .saturating_add(statement.source_bytes());
-        if next_source_bytes > limits.max_source_bytes {
+            .checked_add(statement.source_bytes())
+            .is_some_and(|next| next <= limits.max_source_bytes);
+        if !admitted {
             return Err(TransactionMutationError::SourceByteLimit {
                 id: self.id.clone(),
                 limit: limits.max_source_bytes,
@@ -251,9 +256,13 @@ impl ReplicatedTransaction {
         self.validate_queue_admission(owner, domain, &statement, limits)?;
         let next_source_bytes = self
             .queued_source_bytes
-            .saturating_add(statement.source_bytes());
+            .checked_add(statement.source_bytes())
+            .verified("the admission check above rejected a statement that does not fit");
         self.last_activity_at = at;
-        self.statement_count = self.statement_count.saturating_add(1);
+        self.statement_count = self
+            .statement_count
+            .checked_add(1)
+            .verified("the admission check above bounds the count by the statement limit");
         self.queued_source_bytes = next_source_bytes;
         self.statements.push(statement);
         Ok(())
@@ -326,7 +335,7 @@ impl ReplicatedTransaction {
             });
         }
         if result.first_statement != expected_next_statement
-            || result.statement_count != next_statement.saturating_sub(expected_next_statement)
+            || Some(result.statement_count) != next_statement.checked_sub(expected_next_statement)
         {
             return Err(TransactionMutationError::InvalidStepResult {
                 id: self.id.clone(),

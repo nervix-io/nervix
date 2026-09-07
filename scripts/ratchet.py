@@ -321,6 +321,29 @@ def count_bare_unwrap_and_expect(files: Sequence[RustFile]) -> list[Site]:
     return sites
 
 
+# `saturating_duration_since` is `Instant`'s query for "how long since, or zero if it has not
+# happened yet". It answers a question about time rather than choosing what an overflow means, so
+# it is not what this count is about.
+_CLAMPED_ARITHMETIC = re.compile(
+    r"\.\s*(?:saturating|wrapping)_(?!duration_since\b)[a-z_0-9]+\s*\("
+)
+
+
+def count_clamped_arithmetic(files: Sequence[RustFile]) -> list[Site]:
+    """Count `saturating_*` and `wrapping_*` calls.
+
+    Each remaining call has to be one whose saturation or wrapping is the meaning of the
+    computation, said so at the site. Everything else is checked arithmetic with the overflow
+    classified, so this count only falls.
+    """
+
+    sites: list[Site] = []
+    for file in product_files(files):
+        for match in _CLAMPED_ARITHMETIC.finditer(file.product):
+            sites.append(file.site(match.start(), file.source_line(match.start())))
+    return sites
+
+
 _RESULT = re.compile(r"\bResult\s*<")
 
 
@@ -472,6 +495,11 @@ COUNTS: tuple[Count, ...] = (
         "bare_unwrap_and_expect",
         "bare `unwrap()` and `expect()` calls",
         count_bare_unwrap_and_expect,
+    ),
+    Count(
+        "clamped_arithmetic",
+        "`saturating_*` and `wrapping_*` calls outside the time API",
+        count_clamped_arithmetic,
     ),
     Count(
         "result_string_errors",

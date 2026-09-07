@@ -593,6 +593,15 @@ impl Runtime {
         self.domain_drain_timeout
     }
 
+    /// How long a branch task is given to stop: the configured drain timeout plus the grace it
+    /// needs to finish the flush already in progress.
+    fn branch_task_stop_timeout(&self) -> Duration {
+        // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks
+        // to wait for as long as the process runs, and no grace can extend that further.
+        self.domain_drain_timeout
+            .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+    }
+
     pub fn entity_gate_deadline(&self) -> Duration {
         self.entity_gate_deadline
     }
@@ -670,7 +679,9 @@ impl Runtime {
             });
             let mut producer_count = 0usize;
             let all_producers_move = producers.fold(true, |all_move, node| {
-                producer_count = producer_count.saturating_add(1);
+                producer_count = producer_count
+                    .checked_add(1)
+                    .assured("the producers counted here are graph nodes held in memory");
                 all_move
                     && affected.contains(&RegistryEntity {
                         kind: node.kind,
@@ -752,11 +763,19 @@ impl Runtime {
             if !self.ingestors.contains_key(&key) {
                 continue;
             }
-            if self.engage_ingestor_quiesce(domain, &IngestorName::from(ingestor), quiesce_cause)
-                && let Some(mut hold) = self.entity_gate_holds.get_mut(&hold_key)
+            if let Some(control) =
+                self.engage_ingestor_quiesce(domain, &IngestorName::from(ingestor), quiesce_cause)
             {
-                hold.quiesced_ingestors
-                    .push((IngestorName::from(ingestor), quiesce_cause));
+                match self.entity_gate_holds.get_mut(&hold_key) {
+                    Some(mut hold) => hold.quiesced_ingestors.push(QuiescedIngestorHold {
+                        ingestor: IngestorName::from(ingestor),
+                        cause: quiesce_cause,
+                        control,
+                    }),
+                    // The gate this quiesce belongs to is already gone, so nothing will release
+                    // it later; undo it here instead of leaving the ingestor quiesced forever.
+                    None => control.release(quiesce_cause),
+                }
             }
         }
         self.force_flush_domain(domain);
@@ -823,37 +842,33 @@ impl Runtime {
         operation_id: u64,
         domain: &DomainName,
     ) -> Result<(), String> {
+        // Taking the hold out of the map is what makes this release exclusive: the entity gate
+        // is released both by an explicit request and by its deadline task, and only the caller
+        // that removes the hold may release the reasons it engaged.
         let hold_key = EntityGateHoldKey {
             domain: domain.clone(),
             operation_id,
         };
-        let Some(quiesced_ingestors) = entity_gate_holds
-            .get(&hold_key)
-            .map(|hold| hold.quiesced_ingestors.clone())
-        else {
+        let Some((_, hold)) = entity_gate_holds.remove(&hold_key) else {
             return Ok(());
         };
-        for (ingestor, cause) in &quiesced_ingestors {
+        for quiesced in &hold.quiesced_ingestors {
             tokio::task::consume_budget().await;
-            let key = RuntimeKey::new(domain.clone(), ingestor.clone());
-            if let Some(control) = ingestor_quiescence.get(&key).map(|control| control.clone()) {
-                control.release(*cause);
-                info!(
-                    domain = domain.as_str(),
-                    ingestor = ingestor.as_str(),
-                    cause = cause.as_str(),
-                    "ingestor left quiesce"
-                );
-            }
+            quiesced.control.release(quiesced.cause);
+            info!(
+                domain = domain.as_str(),
+                ingestor = quiesced.ingestor.as_str(),
+                cause = quiesced.cause.as_str(),
+                "ingestor left quiesce"
+            );
+            let key = RuntimeKey::new(domain.clone(), quiesced.ingestor.clone());
             if !ingestors.contains_key(&key)
                 && let Some((_, control)) = ingestor_quiescence.remove(&key)
             {
                 control.terminate();
             }
         }
-        if let Some((_, hold)) = entity_gate_holds.remove(&hold_key) {
-            hold.gates.release();
-        }
+        hold.gates.release();
         Ok(())
     }
 
@@ -900,7 +915,9 @@ impl Runtime {
                 } else {
                     0
                 };
-                quiesce_work.saturating_add(emitter_work)
+                quiesce_work
+                    .checked_add(emitter_work)
+                    .assured("both counts total work items this node already holds in memory")
             })
             .sum();
         let mut outstanding_acks = 0;
@@ -1213,15 +1230,15 @@ impl Runtime {
             .map(|control| control.clone())
     }
 
+    /// Engages one quiesce reason and returns the control it was engaged on, so the caller can
+    /// release that same control rather than whichever one the ingestor holds later.
     fn engage_ingestor_quiesce(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
         cause: IngestorQuiesceCause,
-    ) -> bool {
-        let Some(control) = self.ingestor_quiesce_control(domain, ingestor) else {
-            return false;
-        };
+    ) -> Option<Arc<IngestorQuiesceControl>> {
+        let control = self.ingestor_quiesce_control(domain, ingestor)?;
         control.engage(cause);
         info!(
             domain = domain.as_str(),
@@ -1229,7 +1246,7 @@ impl Runtime {
             cause = cause.as_str(),
             "ingestor entered quiesce"
         );
-        true
+        Some(control)
     }
 
     fn release_ingestor_quiesce(
@@ -1805,7 +1822,7 @@ impl Runtime {
                     continue;
                 }
                 found = true;
-                latest_lsm = latest_lsm.max(state.current_lsm.load(Ordering::SeqCst));
+                latest_lsm = latest_lsm.max(state.current_lsm.current());
                 if let Some(requested) = placement.branch_key.as_ref() {
                     let key = Some(requested.clone());
                     if let Some(entry) = self.visible_materialized_stream_remote_entry(
@@ -1849,7 +1866,7 @@ impl Runtime {
         if let Some(state) = self.replicated_materialized_stream_states.get(placement) {
             let entries = self.visible_materialized_stream_remote_entries(placement, &state)?;
             let snapshot = PersistedRuntimeStateEntry {
-                lsm: state.current_lsm.load(Ordering::SeqCst),
+                lsm: state.current_lsm.current(),
                 schema_fingerprint: placement.schema_fingerprint,
                 payload: encode_materialized_stream_snapshot_entries(&entries)
                     .map_err(|error| error.to_string())?,
@@ -2525,7 +2542,7 @@ impl Runtime {
                         _ = sleep(poll_interval) => {}
                     }
                 }
-                let after_lsm = state.current_lsm.load(Ordering::SeqCst);
+                let after_lsm = state.current_lsm.current();
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
@@ -2598,7 +2615,7 @@ impl Runtime {
                         _ = sleep(poll_interval) => {}
                     }
                 }
-                let after_lsm = state.current_lsm.load(Ordering::SeqCst);
+                let after_lsm = state.current_lsm.current();
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
@@ -2672,7 +2689,7 @@ impl Runtime {
                         _ = sleep(poll_interval) => {}
                     }
                 }
-                let after_lsm = state.current_lsm.load(Ordering::SeqCst);
+                let after_lsm = state.current_lsm.current();
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
@@ -2763,8 +2780,11 @@ impl Runtime {
                 entry.ticks.lock().clear();
             }
         }
-        self.domain_status_changed
-            .send_modify(|version| *version = version.wrapping_add(1));
+        self.domain_status_changed.send_modify(|version| {
+            *version = version
+                .checked_add(1)
+                .assured("a node cannot apply 2^64 domain status changes");
+        });
     }
 
     pub(in crate::runtime) fn tracked_ack_root(
@@ -4790,9 +4810,11 @@ impl Runtime {
                     node: &ModelName::from(ingestor),
                     physical_node_id: physical_node_id.as_ref(),
                     messages: 1,
-                    bytes: bytes_per_row.saturating_add(u64::from(
-                        u64::try_from(row).unwrap_or(u64::MAX) < extra_bytes,
-                    )),
+                    bytes: bytes_per_row
+                        .checked_add(u64::from(
+                            u64::try_from(row).unwrap_or(u64::MAX) < extra_bytes,
+                        ))
+                        .assured("a per-row byte share plus one remainder byte fits in u64"),
                     domain_timestamp: Some(*event_timestamp),
                 });
         }
@@ -5726,18 +5748,15 @@ impl Runtime {
                     None
                 };
                 if let Some(task) = previous {
-                    task.stop(
-                        self.domain_drain_timeout()
-                            .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
-                    )
-                    .await
-                    .map_err(|reason| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "failed to drain relay '{}' before reassignment: {reason}",
-                            entity.identifier.as_str()
-                        ),
-                    })?;
+                    task.stop(self.branch_task_stop_timeout())
+                        .await
+                        .map_err(|reason| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "failed to drain relay '{}' before reassignment: {reason}",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
                 }
             }
             let previous_tasks = if let Some(mut execution) = self.executions.get_mut(domain) {
@@ -8533,9 +8552,17 @@ impl Runtime {
         let mut retry_after = Vec::new();
         for binding in &bindings {
             match binding.quiesce.endpoint_admission() {
-                Ok(()) => outcome.accepted = outcome.accepted.saturating_add(1),
+                Ok(()) => {
+                    outcome.accepted = outcome
+                        .accepted
+                        .checked_add(1)
+                        .assured("the bindings counted here are endpoint routes held in memory");
+                }
                 Err(duration) => {
-                    outcome.rejected = outcome.rejected.saturating_add(1);
+                    outcome.rejected = outcome
+                        .rejected
+                        .checked_add(1)
+                        .assured("the bindings counted here are endpoint routes held in memory");
                     retry_after.push(duration);
                 }
             }
@@ -8590,21 +8617,33 @@ impl Runtime {
             );
             match binding.quiesce.intake(0, payload, true) {
                 IngestorQuiesceIntake::Dispatch(payload) => {
-                    outcome.accepted = outcome.accepted.saturating_add(1);
+                    outcome.accepted = outcome
+                        .accepted
+                        .checked_add(1)
+                        .assured("the bindings counted here are endpoint routes held in memory");
                     self.dispatch_endpoint_binding(binding, payload, protocol)
                         .await;
                 }
                 IngestorQuiesceIntake::Buffered => {
-                    outcome.accepted = outcome.accepted.saturating_add(1);
+                    outcome.accepted = outcome
+                        .accepted
+                        .checked_add(1)
+                        .assured("the bindings counted here are endpoint routes held in memory");
                 }
                 IngestorQuiesceIntake::Dropped => {
-                    outcome.rejected = outcome.rejected.saturating_add(1);
+                    outcome.rejected = outcome
+                        .rejected
+                        .checked_add(1)
+                        .assured("the bindings counted here are endpoint routes held in memory");
                     retry_after.push(None);
                 }
                 IngestorQuiesceIntake::Rejected {
                     retry_after: binding_retry_after,
                 } => {
-                    outcome.rejected = outcome.rejected.saturating_add(1);
+                    outcome.rejected = outcome
+                        .rejected
+                        .checked_add(1)
+                        .assured("the bindings counted here are endpoint routes held in memory");
                     retry_after.push(binding_retry_after);
                 }
             }
@@ -8830,7 +8869,7 @@ impl Runtime {
             if state.dirty.load(Ordering::SeqCst) {
                 dirty_count += 1;
             }
-            let current_lsm = state.current_lsm.load(Ordering::SeqCst);
+            let current_lsm = state.current_lsm.current();
             if !state.replica_quorum_satisfied(current_lsm) {
                 pending_replica_count += 1;
             }
@@ -13055,11 +13094,14 @@ impl Runtime {
         let mut quiesced = 0;
         for key in ingestors {
             tokio::task::consume_budget().await;
-            if self.engage_ingestor_quiesce(
-                &key.domain,
-                &IngestorName::from(&key.identifier),
-                IngestorQuiesceCause::MemoryPressure,
-            ) {
+            if self
+                .engage_ingestor_quiesce(
+                    &key.domain,
+                    &IngestorName::from(&key.identifier),
+                    IngestorQuiesceCause::MemoryPressure,
+                )
+                .is_some()
+            {
                 quiesced += 1;
             }
         }
@@ -13276,13 +13318,7 @@ impl Runtime {
         let _ = execution.shutdown.send(true);
         for (relay, task) in execution.relay_owner_tasks {
             tokio::task::consume_budget().await;
-            if let Err(reason) = task
-                .stop(
-                    self.domain_drain_timeout()
-                        .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
-                )
-                .await
-            {
+            if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
                 warn!(
                     domain = domain.as_str(),
                     relay = relay.as_str(),
@@ -13317,8 +13353,7 @@ impl Runtime {
                 domain,
                 Some(&IngestorName::from(&entity.identifier)),
                 "scheduled emitter",
-                self.domain_drain_timeout()
-                    .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
+                self.branch_task_stop_timeout(),
             )
             .await;
         }

@@ -390,7 +390,9 @@ fn stored_placement_schema(
             "runtime state key has no domain separator".to_string(),
         )
     })?;
-    let state_offset = domain_end.saturating_add(1);
+    let state_offset = domain_end
+        .checked_add(1)
+        .verified("the separator position is an index into this key");
     let state = match key.get(state_offset) {
         Some(0) => RuntimeStateKind::BranchAggregated,
         Some(1) => RuntimeStateKind::Correlator,
@@ -406,11 +408,13 @@ fn stored_placement_schema(
             )));
         }
     };
-    let kind_start = state_offset.saturating_add(2);
-    let kind_end = key[kind_start..]
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|offset| kind_start.saturating_add(offset))
+    let kind_start = state_offset
+        .checked_add(2)
+        .verified("the state-kind byte position is an index into this key");
+    let kind_end = key
+        .get(kind_start..)
+        .and_then(|rest| rest.iter().position(|byte| *byte == 0))
+        .and_then(|offset| kind_start.checked_add(offset))
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has no model-kind separator".to_string(),
@@ -426,11 +430,13 @@ fn stored_placement_schema(
             "runtime state key has an invalid model kind".to_string(),
         )
     })?;
-    let identifier_start = kind_end.saturating_add(1);
-    let identifier_end = key[identifier_start..]
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|offset| identifier_start.saturating_add(offset))
+    let identifier_start = kind_end
+        .checked_add(1)
+        .verified("the model-kind separator position is an index into this key");
+    let identifier_end = key
+        .get(identifier_start..)
+        .and_then(|rest| rest.iter().position(|byte| *byte == 0))
+        .and_then(|offset| identifier_start.checked_add(offset))
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has no identifier separator".to_string(),
@@ -446,9 +452,12 @@ fn stored_placement_schema(
             "runtime state key has an invalid identifier".to_string(),
         )
     })?;
-    let fingerprint_start = identifier_end.saturating_add(1);
-    let fingerprint = key
-        .get(fingerprint_start..fingerprint_start.saturating_add(32))
+    let fingerprint_start = identifier_end
+        .checked_add(1)
+        .verified("the identifier separator position is an index into this key");
+    let fingerprint = fingerprint_start
+        .checked_add(32)
+        .and_then(|fingerprint_end| key.get(fingerprint_start..fingerprint_end))
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has a truncated schema fingerprint".to_string(),
@@ -462,4 +471,28 @@ fn stored_placement_schema(
         identifier,
         schema_fingerprint,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stored key is bytes read back from the database, so decoding one that ends inside the
+    /// state-kind prefix must report a decode error rather than index past the key.
+    #[test]
+    fn truncated_state_key_reports_a_decode_error() {
+        let mut key = b"acme".to_vec();
+        key.push(0);
+        key.push(RuntimeStateKind::Deduplicator as u8);
+
+        let error = stored_placement_schema(&key)
+            .err()
+            .expect("a key that ends inside the state-kind prefix must not decode");
+
+        assert!(
+            matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
+                if message.contains("model-kind separator")),
+            "unexpected error for a truncated state key: {error:?}"
+        );
+    }
 }

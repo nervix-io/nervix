@@ -5,7 +5,10 @@ use dashmap::DashMap;
 use nervix_models::ClusterNodeName;
 use tokio::sync::Notify;
 
-use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement};
+use super::{
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    lsm_sequence::LsmSequence,
+};
 
 #[derive(Debug)]
 pub(super) struct ReplicatedWasmProcessorState {
@@ -13,7 +16,7 @@ pub(super) struct ReplicatedWasmProcessorState {
     pub(super) required_replica_acks: usize,
     pub(super) replica_nodes: Vec<ClusterNodeName>,
     snapshot: parking_lot::Mutex<Vec<u8>>,
-    pub(super) current_lsm: AtomicU64,
+    pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
     pub(super) replica_progress: DashMap<String, u64, RandomState>,
@@ -40,7 +43,7 @@ impl ReplicatedWasmProcessorState {
             required_replica_acks,
             replica_nodes,
             snapshot: parking_lot::Mutex::new(snapshot),
-            current_lsm: AtomicU64::new(current_lsm),
+            current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
             replica_progress: DashMap::default(),
@@ -59,10 +62,7 @@ impl ReplicatedWasmProcessorState {
     ) -> Result<(u64, Vec<u8>), RuntimePersistenceError> {
         let payload = guest_state.clone();
         *self.snapshot.lock() = guest_state;
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         Ok((lsm, payload))
     }
@@ -72,7 +72,7 @@ impl ReplicatedWasmProcessorState {
     ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
         let snapshot = self.snapshot.lock().clone();
         Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.load(Ordering::SeqCst),
+            lsm: self.current_lsm.current(),
             schema_fingerprint: self.placement.schema_fingerprint,
             payload: snapshot,
         })
@@ -157,6 +157,6 @@ mod tests {
             .expect("state should initialize from persisted payload");
 
         assert_eq!(state.restore_guest_state(), Some(vec![9, 8, 7]));
-        assert_eq!(state.current_lsm.load(Ordering::SeqCst), 7);
+        assert_eq!(state.current_lsm.current(), 7);
     }
 }

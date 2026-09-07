@@ -83,10 +83,14 @@ impl TestParallelism {
         Self { available_cpus }
     }
 
-    pub const fn max_concurrent_scenarios(self, concurrency_factor: NonZeroUsize) -> usize {
+    pub fn max_concurrent_scenarios(self, concurrency_factor: NonZeroUsize) -> usize {
         self.available_cpus
             .get()
-            .saturating_mul(concurrency_factor.get())
+            .checked_mul(concurrency_factor.get())
+            .assured(
+                "the test command line supplies a small scenario multiplier, not a value near \
+                 usize::MAX",
+            )
     }
 
     pub const fn tokio_worker_threads(self) -> usize {

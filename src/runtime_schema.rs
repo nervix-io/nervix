@@ -807,7 +807,7 @@ impl RuntimeRecordBatch {
             if selections
                 .iter()
                 .enumerate()
-                .all(|(offset, (_, row))| *row == start.saturating_add(offset))
+                .all(|(offset, (_, row))| Some(*row) == start.checked_add(offset))
             {
                 if start == 0 && row_count == sources[0].batch.num_rows() {
                     return Ok(sources[0].clone());
@@ -825,7 +825,10 @@ impl RuntimeRecordBatch {
                 let mut output =
                     MutableArrayData::new(source_data.iter().collect(), false, row_count);
                 for (source, row) in &selections {
-                    output.extend(*source, *row, (*row).saturating_add(1));
+                    let end = row
+                        .checked_add(1)
+                        .verified("the selection names a row of a batch held in memory");
+                    output.extend(*source, *row, end);
                 }
                 make_array(output.freeze())
             })
@@ -2111,7 +2114,9 @@ impl<'a> ArrowCodecValue<'a> {
                         self.field
                     )
                 })?;
-                let end = start.saturating_add(*len as usize);
+                let end = start
+                    .checked_add(*len as usize)
+                    .verified("the offset and length address one fixed-size list already decoded");
                 Ok(ArrowCodecSequence {
                     codec: self.codec,
                     array: array.values().as_ref(),

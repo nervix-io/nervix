@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
-    StateReplicationRoles,
+    StateReplicationRoles, lsm_sequence::LsmSequence,
 };
 use crate::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
 
@@ -22,7 +22,7 @@ pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) placement: RuntimeStatePlacement,
     roles: parking_lot::RwLock<StateReplicationRoles>,
     pub(super) physical_node_id: ClusterNodeName,
-    pub(super) current_lsm: AtomicU64,
+    pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
     pub(super) replica_progress: DashMap<String, u64, RandomState>,
@@ -57,7 +57,7 @@ impl ReplicatedBranchAggregatedState {
             placement,
             roles: parking_lot::RwLock::new(StateReplicationRoles::owned_by(primary_node)),
             physical_node_id,
-            current_lsm: AtomicU64::new(current_lsm),
+            current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
             replica_progress: DashMap::default(),
@@ -74,10 +74,7 @@ impl ReplicatedBranchAggregatedState {
     }
 
     pub(super) fn mark_metrics_updated(&self) -> u64 {
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         lsm
     }
@@ -95,7 +92,7 @@ impl ReplicatedBranchAggregatedState {
             ),
         };
         Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.load(Ordering::SeqCst),
+            lsm: self.current_lsm.current(),
             schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_branch_aggregated_snapshot(&snapshot)?,
         })
@@ -115,7 +112,7 @@ impl ReplicatedBranchAggregatedState {
             &self.physical_node_id,
             snapshot.metrics,
         );
-        self.current_lsm.store(lsm, Ordering::SeqCst);
+        self.current_lsm.adopt(lsm);
         self.dirty.store(true, Ordering::SeqCst);
         self.replication_notify.notify_waiters();
         Ok(())
@@ -126,7 +123,7 @@ impl ReplicatedBranchAggregatedState {
         metrics: &RuntimeMetrics,
         snapshot: PersistedRuntimeStateEntry,
     ) -> Result<(), RuntimePersistenceError> {
-        let current_lsm = self.current_lsm.load(Ordering::SeqCst);
+        let current_lsm = self.current_lsm.current();
         if snapshot.lsm <= current_lsm
             && metrics.has_global_target_measurements(
                 &self.placement.domain,
@@ -144,7 +141,7 @@ impl ReplicatedBranchAggregatedState {
             &self.physical_node_id,
             decoded.metrics,
         );
-        self.current_lsm.store(snapshot.lsm, Ordering::SeqCst);
+        self.current_lsm.adopt(snapshot.lsm);
         self.last_persisted_lsm
             .store(snapshot.lsm, Ordering::SeqCst);
         self.dirty.store(false, Ordering::SeqCst);

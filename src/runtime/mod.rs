@@ -143,6 +143,7 @@ mod http_client;
 mod inferencer;
 mod ingestors;
 mod kafka_offset_state;
+mod lsm_sequence;
 mod materialized_state;
 mod message_error_delivery;
 mod planning;
@@ -529,6 +530,33 @@ struct IngestorQuiesceBuffer {
     bytes: usize,
 }
 
+impl IngestorQuiesceBuffer {
+    /// The bytes this buffer may still admit before it reaches `max_size`.
+    ///
+    /// Admission is expressed as a remaining budget rather than a projected total so that a
+    /// payload is never sized against a sum that could leave `usize`. Saturation is the meaning
+    /// here: altering an ingestor may lower `max_size` under an already filled buffer, and such a
+    /// buffer has no room left until it drains.
+    fn remaining_capacity(&self, max_size: usize) -> usize {
+        max_size.saturating_sub(self.bytes)
+    }
+
+    fn admit(&mut self, payload: BufferedIngestPayload, payload_bytes: usize) {
+        self.bytes = self
+            .bytes
+            .checked_add(payload_bytes)
+            .assured("both operands count bytes of payloads this node already holds in memory");
+        self.payloads.push_back(payload);
+    }
+
+    fn release(&mut self, payload_bytes: usize) {
+        self.bytes = self
+            .bytes
+            .checked_sub(payload_bytes)
+            .verified("the released payload's bytes were added when it was admitted");
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum IngestorQuiesceIntake {
     Dispatch(BufferedIngestPayload),
@@ -614,10 +642,16 @@ impl IngestorQuiesceControl {
         let mut reasons = self.reasons.write();
         match cause {
             IngestorQuiesceCause::EntityHold => {
-                reasons.entity_holds = reasons.entity_holds.saturating_add(1);
+                reasons.entity_holds = reasons.entity_holds.checked_add(1).assured(
+                    "a quiesce reason is held once per live entity hold, which is bounded by the \
+                     entities resident on this node",
+                );
             }
             IngestorQuiesceCause::OwnershipHandoff => {
-                reasons.ownership_handoffs = reasons.ownership_handoffs.saturating_add(1);
+                reasons.ownership_handoffs = reasons.ownership_handoffs.checked_add(1).assured(
+                    "a quiesce reason is held once per live ownership handoff, which is bounded \
+                     by the entities resident on this node",
+                );
             }
             IngestorQuiesceCause::DomainPause => reasons.domain_pause = true,
             IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = true,
@@ -631,10 +665,17 @@ impl IngestorQuiesceControl {
             let mut reasons = self.reasons.write();
             match cause {
                 IngestorQuiesceCause::EntityHold => {
-                    reasons.entity_holds = reasons.entity_holds.saturating_sub(1);
+                    reasons.entity_holds = reasons.entity_holds.checked_sub(1).verified(
+                        "the entity gate hold that engaged this control is released once, by the \
+                         one caller that took it out of the hold map",
+                    );
                 }
                 IngestorQuiesceCause::OwnershipHandoff => {
-                    reasons.ownership_handoffs = reasons.ownership_handoffs.saturating_sub(1);
+                    reasons.ownership_handoffs =
+                        reasons.ownership_handoffs.checked_sub(1).verified(
+                            "the entity gate hold that engaged this control is released once, by \
+                             the one caller that took it out of the hold map",
+                        );
                 }
                 IngestorQuiesceCause::DomainPause => reasons.domain_pause = false,
                 IngestorQuiesceCause::MemoryPressure => reasons.memory_pressure = false,
@@ -758,13 +799,11 @@ impl IngestorQuiesceControl {
                 let payload_bytes = payload.byte_len();
                 let mut buffers = self.buffers.lock();
                 let buffer = buffers.entry(instance).or_default();
-                if payload_bytes > max_size || buffer.bytes.saturating_add(payload_bytes) > max_size
-                {
+                if payload_bytes > buffer.remaining_capacity(max_size) {
                     self.record_rejected(1);
                     return IngestorQuiesceIntake::Rejected { retry_after: None };
                 }
-                buffer.bytes = buffer.bytes.saturating_add(payload_bytes);
-                buffer.payloads.push_back(payload);
+                buffer.admit(payload, payload_bytes);
                 self.buffered_records.fetch_add(1, Ordering::Relaxed);
                 self.buffered_bytes
                     .fetch_add(payload_bytes, Ordering::Relaxed);
@@ -781,23 +820,22 @@ impl IngestorQuiesceControl {
                     return IngestorQuiesceIntake::Dropped;
                 }
                 if overflow == IngestQuiesceOverflow::DropNewest
-                    && buffer.bytes.saturating_add(payload_bytes) > max_size
+                    && payload_bytes > buffer.remaining_capacity(max_size)
                 {
                     self.record_dropped(1);
                     return IngestorQuiesceIntake::Dropped;
                 }
-                while buffer.bytes.saturating_add(payload_bytes) > max_size {
+                while payload_bytes > buffer.remaining_capacity(max_size) {
                     let Some(dropped) = buffer.payloads.pop_front() else {
                         break;
                     };
-                    buffer.bytes = buffer.bytes.saturating_sub(dropped.byte_len());
+                    buffer.release(dropped.byte_len());
                     self.buffered_records.fetch_sub(1, Ordering::Relaxed);
                     self.buffered_bytes
                         .fetch_sub(dropped.byte_len(), Ordering::Relaxed);
                     self.record_dropped(1);
                 }
-                buffer.bytes = buffer.bytes.saturating_add(payload_bytes);
-                buffer.payloads.push_back(payload);
+                buffer.admit(payload, payload_bytes);
                 self.buffered_records.fetch_add(1, Ordering::Relaxed);
                 self.buffered_bytes
                     .fetch_add(payload_bytes, Ordering::Relaxed);
@@ -841,7 +879,7 @@ impl IngestorQuiesceControl {
         let mut buffers = self.buffers.lock();
         let buffer = buffers.get_mut(&instance)?;
         let payload = buffer.payloads.pop_front()?;
-        buffer.bytes = buffer.bytes.saturating_sub(payload.byte_len());
+        buffer.release(payload.byte_len());
         self.buffered_records.fetch_sub(1, Ordering::Relaxed);
         self.buffered_bytes
             .fetch_sub(payload.byte_len(), Ordering::Relaxed);
@@ -1098,9 +1136,14 @@ impl EntityDrainStatus {
     }
 
     pub fn outstanding_work(&self) -> usize {
-        self.buffered_relay_batches
-            .saturating_add(self.node_work_items)
-            .saturating_add(self.outstanding_acks)
+        [
+            self.buffered_relay_batches,
+            self.node_work_items,
+            self.outstanding_acks,
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .assured("every count totals work items this node already holds in memory")
     }
 }
 
@@ -1116,7 +1159,16 @@ pub(crate) struct EntityGateLease<'a> {
 
 struct EntityAlterHold {
     gates: EntityGateHold,
-    quiesced_ingestors: Vec<(IngestorName, IngestorQuiesceCause)>,
+    /// The quiesce this hold engaged, holding the control it engaged rather than a name to look
+    /// up again. An ingestor that is dropped and rebuilt gets a fresh control with zero counts,
+    /// so releasing by name could decrement a control that was never engaged.
+    quiesced_ingestors: Vec<QuiescedIngestorHold>,
+}
+
+struct QuiescedIngestorHold {
+    ingestor: IngestorName,
+    cause: IngestorQuiesceCause,
+    control: Arc<IngestorQuiesceControl>,
 }
 
 #[derive(Debug, Default)]
@@ -1130,17 +1182,24 @@ struct NodeQuiesceCounters {
 
 impl NodeQuiesceCounters {
     fn outstanding_work(&self) -> usize {
-        self.mailbox_and_in_flight
-            .load(Ordering::Acquire)
-            .saturating_add(self.collected_inputs.load(Ordering::Acquire))
-            .saturating_add(self.pending_materialized.load(Ordering::Acquire))
-            .saturating_add(self.output_buffers.load(Ordering::Acquire))
-            .saturating_add(self.force_flushes.load(Ordering::Acquire))
+        [
+            self.mailbox_and_in_flight.load(Ordering::Acquire),
+            self.collected_inputs.load(Ordering::Acquire),
+            self.pending_materialized.load(Ordering::Acquire),
+            self.output_buffers.load(Ordering::Acquire),
+            self.force_flushes.load(Ordering::Acquire),
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .assured("every count totals work items this node already holds in memory")
     }
 
     fn outstanding_work_for(&self, purpose: EntityGatePurpose) -> usize {
         let outstanding = self.outstanding_work();
         if purpose == EntityGatePurpose::OwnershipHandoff {
+            // The counters are read one at a time, so a materialized wait resolved between the
+            // two loads can leave the subtrahend above the total. An ownership handoff that
+            // observes that raced pair has no non-materialized work left to wait for.
             outstanding.saturating_sub(self.pending_materialized.load(Ordering::Acquire))
         } else {
             outstanding
@@ -1324,10 +1383,15 @@ impl DomainDrainStatus {
     }
 
     pub fn outstanding_work(&self) -> usize {
-        self.active_ingestors
-            .saturating_add(self.active_generators)
-            .saturating_add(self.outstanding_acks)
-            .saturating_add(self.buffered_emitter_messages)
+        [
+            self.active_ingestors,
+            self.active_generators,
+            self.outstanding_acks,
+            self.buffered_emitter_messages,
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .assured("every count totals work items this node already holds in memory")
     }
 }
 
@@ -2837,13 +2901,15 @@ impl RelayConsumerFanout {
     fn runtime_consumer_buffer_len(&self) -> usize {
         self.attached_runtime_consumers
             .len()
-            .saturating_add(self.detached_runtime_consumers.len())
+            .checked_add(self.detached_runtime_consumers.len())
+            .assured("both counts are lengths of collections this node holds in memory")
     }
 
     fn outstanding_work_len(&self) -> usize {
         self.owner_pending_batches
             .load(Ordering::Acquire)
-            .saturating_add(self.runtime_consumer_buffer_len())
+            .checked_add(self.runtime_consumer_buffer_len())
+            .assured("both counts total batches this node already holds in memory")
     }
 
     fn runtime_consumer_broadcast_for_mode(
@@ -3410,6 +3476,8 @@ impl RuntimeReconnectBackoff {
 
     pub(in crate::runtime) fn take_next_delay(&mut self) -> Duration {
         let delay = self.next;
+        // Saturation is the policy here: the backoff doubles until it reaches the configured
+        // ceiling and stays there, so a doubling that leaves `Duration` clamps to that ceiling.
         self.next = self.next.saturating_mul(2).min(self.max);
         delay
     }
@@ -5313,7 +5381,10 @@ impl RelayProcessorNode {
                 );
                 return;
             }
-            self.applied_generation = self.applied_generation.saturating_add(1);
+            self.applied_generation = self
+                .applied_generation
+                .checked_add(1)
+                .assured("a processor cannot apply 2^64 configuration refreshes");
         }
         self.last_graph = graph;
     }
@@ -6279,7 +6350,9 @@ impl RelayProcessorNode {
                             })
                             .collect::<Vec<_>>();
                         let sequence = *arrival_sequence;
-                        *arrival_sequence = arrival_sequence.saturating_add(1);
+                        *arrival_sequence = arrival_sequence
+                            .checked_add(1)
+                            .assured("a reorderer cannot admit 2^64 rows in one branch");
                         row_ordering.push(ReordererRowOrder {
                             key,
                             arrival_sequence: sequence,
@@ -7556,12 +7629,16 @@ fn wasm_instance_next_deadline(
         let Ok(delay_nanos) = i64::try_from(request.delay.as_nanos()) else {
             continue;
         };
-        let deadline = Timestamp::from_unix_nanos(
-            request
-                .requested_at
-                .unix_nanos()
-                .saturating_add(delay_nanos),
-        );
+        let Some(deadline) = request
+            .requested_at
+            .unix_nanos()
+            .checked_add(delay_nanos)
+            .map(Timestamp::from_unix_nanos)
+        else {
+            // A guest-requested delay can run past the representable timestamp range. Such a
+            // request has no deadline this clock can reach, so it never becomes the next one.
+            continue;
+        };
         next_deadline = match next_deadline {
             Some(current) => Some(current.min(deadline)),
             None => Some(deadline),
@@ -8510,7 +8587,10 @@ impl IngestorRouteTask {
                         estimated_bytes: 0,
                         flush_at: Instant::now() + self.template.flush_policy.interval(),
                     });
-            pending.estimated_bytes = pending.estimated_bytes.saturating_add(estimated_bytes);
+            pending.estimated_bytes = pending
+                .estimated_bytes
+                .checked_add(estimated_bytes)
+                .assured("both counts estimate bytes of batches this node already holds");
             pending.batches.push(batch);
             if self
                 .template
@@ -11434,7 +11514,11 @@ fn compile_processor_output_filter_map_program(
             .inner
             .set
             .len()
-            .saturating_sub(construction.assignments.len())
+            .checked_sub(construction.assignments.len())
+            .verified(
+                "a compiled construction lists one set operation per inherited field before its \
+                 assignments",
+            )
     };
     let set_operations = (0..parsed.inner.set.len())
         .map(|index| {
@@ -11865,7 +11949,11 @@ pub(crate) fn compile_emitter_filter_map_program(
             .inner
             .set
             .len()
-            .saturating_sub(emitter.construction.assignments.len())
+            .checked_sub(emitter.construction.assignments.len())
+            .verified(
+                "a compiled construction lists one set operation per inherited field before its \
+                 assignments",
+            )
     } else {
         0
     };
@@ -13692,7 +13780,11 @@ fn compile_ingestor_filter_map_program(
         .inner
         .set
         .len()
-        .saturating_sub(construction.assignments.len());
+        .checked_sub(construction.assignments.len())
+        .verified(
+            "a compiled construction lists one set operation per inherited field before its \
+             assignments",
+        );
     let set_operations = (0..parsed.inner.set.len())
         .map(|index| {
             if index < inherited_count {
@@ -16286,8 +16378,12 @@ impl WindowAggregateAccumulator {
                     "linear histogram accumulator is missing delayed removed value".to_string(),
                 );
             }
-            *count -= 1;
-            *total = total.saturating_sub(1);
+            *count = count
+                .checked_sub(1)
+                .verified("the check above returned for a bucket that holds no value");
+            *total = total.checked_sub(1).verified(
+                "the bucket count checked above is non-zero, and the total sums every bucket",
+            );
         }
         Ok(())
     }
@@ -16312,7 +16408,9 @@ impl WindowAggregateAccumulator {
         self.purge_expired(timestamp)?;
         match self {
             Self::Counter { count } => {
-                *count = count.saturating_add(1);
+                *count = count
+                    .checked_add(1)
+                    .assured("a window cannot admit 2^64 rows before they expire");
                 Ok(())
             }
             Self::Sequence { values } => {
@@ -16344,8 +16442,12 @@ impl WindowAggregateAccumulator {
                     .ok_or_else(|| "PERCENTILE_LINEAR_HISTOGRAM requires a value".to_string())?;
                 let value = runtime_value_to_f64(&value)?;
                 let bucket = linear_histogram_bucket(value, *min, *max, *width, buckets.len())?;
-                buckets[bucket] = buckets[bucket].saturating_add(1);
-                *total = total.saturating_add(1);
+                buckets[bucket] = buckets[bucket]
+                    .checked_add(1)
+                    .assured("a window cannot admit 2^64 rows before they expire");
+                *total = total
+                    .checked_add(1)
+                    .assured("a window cannot admit 2^64 rows before they expire");
                 Ok(())
             }
             Self::Sum { total } => {
@@ -16370,7 +16472,9 @@ impl WindowAggregateAccumulator {
         self.purge_expired(removal_time)?;
         match self {
             Self::Counter { count } => {
-                *count = count.saturating_sub(1);
+                *count = count
+                    .checked_sub(1)
+                    .verified("a row is only removed from the window that admitted it");
                 Ok(())
             }
             Self::Sequence { values } => {
@@ -16410,8 +16514,13 @@ impl WindowAggregateAccumulator {
                             "linear histogram accumulator is missing removed value".to_string()
                         );
                     }
-                    *count -= 1;
-                    *total = total.saturating_sub(1);
+                    *count = count
+                        .checked_sub(1)
+                        .verified("the check above returned for a bucket that holds no value");
+                    *total = total.checked_sub(1).verified(
+                        "the bucket count checked above is non-zero, and the total sums every \
+                         bucket",
+                    );
                     return Ok(());
                 }
                 delayed_removals.push_back(LinearHistogramDelayedRemoval {
@@ -16592,7 +16701,10 @@ impl WindowProcessorState {
             message,
             aggregate_inputs: inputs,
         });
-        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .assured("a window cannot admit 2^64 rows in one branch");
         Ok(())
     }
 
@@ -16808,7 +16920,9 @@ fn decrement_runtime_value_count(
     let Some(count) = counts.get_mut(&key) else {
         return Err("sorted accumulator is missing removed window value".to_string());
     };
-    *count -= 1;
+    *count = count
+        .checked_sub(1)
+        .verified("the map drops an entry when its count reaches zero");
     if *count == 0 {
         counts.remove(&key);
     }
@@ -16961,7 +17075,10 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 message: format!("function '{}' is not a window aggregate", function.as_str()),
             });
         };
-        let accumulator_id = self.demand_offset.saturating_add(invocation.demand_id);
+        let accumulator_id = self
+            .demand_offset
+            .checked_add(invocation.demand_id)
+            .assured("both index into the accumulators this program already holds in memory");
         let accumulator = self.accumulators.get(accumulator_id).ok_or_else(|| {
             nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
@@ -18917,7 +19034,9 @@ fn wasm_envelope_from_relay_batch(
     let input_batch = Arc::new(batch.batch.clone());
     for (input_row, (metadata, acks)) in batch.metadata.iter().zip(batch.acks.iter()).enumerate() {
         let token = *next_ack_token;
-        *next_ack_token = next_ack_token.saturating_add(1);
+        *next_ack_token = next_ack_token
+            .checked_add(1)
+            .assured("a branch instance cannot issue 2^64 ACK tokens");
         rows.push(WasmOutputRow {
             tokens: vec![WasmAckToken(token)],
             source_token: Some(WasmAckToken(token)),
@@ -19413,7 +19532,9 @@ impl WasmOutputValidator<'_> {
         if consumed != ipc.len() {
             return Err(invalid(format!(
                 "IPC stream has {} trailing bytes",
-                ipc.len().saturating_sub(consumed)
+                ipc.len()
+                    .checked_sub(consumed)
+                    .verified("the reader consumed a prefix of this same buffer")
             )));
         }
         if batches.len() != 1 {
@@ -19550,7 +19671,7 @@ impl WasmOutputValidator<'_> {
             let contiguous = sources
                 .iter()
                 .enumerate()
-                .all(|(offset, source)| source.input_row == start.saturating_add(offset));
+                .all(|(offset, source)| Some(source.input_row) == start.checked_add(offset));
             if contiguous {
                 return Ok(array.slice(start, sources.len()));
             }

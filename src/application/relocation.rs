@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, PlacementPolicy,
     PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy,
@@ -489,7 +490,14 @@ fn planned_relocation_schedule(
                 assigned_nodes.push(candidate);
             }
         }
-        assigned_nodes.truncate(replica_slots.saturating_add(1));
+        // `replica_slots` is an operator-supplied replica count with no upper bound, so it is
+        // clamped to what the loop above could have collected before the primary slot is added.
+        assigned_nodes.truncate(
+            replica_slots
+                .min(assigned_nodes.len())
+                .checked_add(1)
+                .assured("a slot count clamped to a collected list leaves room for the primary"),
+        );
         node.primary_node = Some(destination.clone());
         node.assigned_nodes = assigned_nodes;
     }
