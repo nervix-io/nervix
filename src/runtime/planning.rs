@@ -843,7 +843,7 @@ fn parse_branch_max_instances_setting(
 
 fn resolve_branch_relay_templates(
     branch_relay_ids: HashSet<RelayName>,
-    model_index: &HashMap<RegistryEntity, Model>,
+    model_index: &HashMap<NodeRef, Model>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<
@@ -856,7 +856,7 @@ fn resolve_branch_relay_templates(
     let materialized_streams = branch_relay_ids
         .iter()
         .filter_map(|relay| {
-            match model_index.get(&RegistryEntity {
+            match model_index.get(&NodeRef {
                 kind: ModelKind::Relay,
                 identifier: ModelName::from(relay),
             }) {
@@ -870,7 +870,7 @@ fn resolve_branch_relay_templates(
     let relays = branch_relay_ids
         .into_iter()
         .map(|relay| {
-            match model_index.get(&RegistryEntity {
+            match model_index.get(&NodeRef {
                 kind: ModelKind::Relay,
                 identifier: ModelName::from(&relay),
             }) {
@@ -902,7 +902,7 @@ fn resolve_branch_relay_templates(
 
 pub(in crate::runtime) fn materialize_ingestor_route_template(
     spec: &BranchedIngestorSpec,
-    model_index: &HashMap<RegistryEntity, Model>,
+    model_index: &HashMap<NodeRef, Model>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<IngestorRouteTemplate, String> {
@@ -947,7 +947,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
 
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
-    model_index: &HashMap<RegistryEntity, Model>,
+    model_index: &HashMap<NodeRef, Model>,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,

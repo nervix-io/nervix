@@ -15,11 +15,11 @@ use crate::{
     ClusterNodeName, CodecName, CollectionName, ConsumerGroupName, CorrelatorName,
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf,
     DeduplicatorName, DomainName, EmitterName, EndpointName, FieldName, GeneratorName,
-    InferencerName, IngestorName, JsonType, JunctionName, LookupName, ModelName, ParseAsType,
-    PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
-    ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName,
-    TableName, Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    InferencerName, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
+    ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName,
+    RelayName, ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName,
+    SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
+    WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -996,6 +996,11 @@ impl Model {
             Self::WindowProcessor(model) => Some(&model.output_routes),
             _ => None,
         }
+    }
+
+    /// How this model is addressed: the kind it is and the name it carries, together.
+    pub fn node_ref(&self) -> NodeRef {
+        NodeRef::new(self.kind(), self.name())
     }
 
     pub fn name(&self) -> ModelName {
@@ -3692,7 +3697,7 @@ impl FromIterator<DomainSchedule> for ClusterSchedule {
 
 /// A domain's scheduled nodes, in the order the registry emitted them and keyed by runtime node
 /// identity so callers resolve a node by kind and identifier without scanning the sequence.
-pub type ScheduledNodes = IndexMap<PlacementRuntimeNode, ScheduledNode>;
+pub type ScheduledNodes = IndexMap<NodeRef, ScheduledNode>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainSchedule {
@@ -3720,21 +3725,9 @@ impl DomainSchedule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PlacementRuntimeNode {
-    pub kind: ModelKind,
-    pub identifier: ModelName,
-}
-
-impl PlacementRuntimeNode {
-    pub fn new(kind: ModelKind, identifier: ModelName) -> Self {
-        Self { kind, identifier }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementGroupSchedule {
-    pub members: Vec<PlacementRuntimeNode>,
+    pub members: Vec<NodeRef>,
     pub primary_node: Option<ClusterNodeName>,
 }
 
@@ -3785,8 +3778,8 @@ pub struct ScheduledNode {
 impl ScheduledNode {
     /// The runtime node this scheduled entry configures. Kind and identifier together name a node
     /// in a domain, and this is the key its schedule is stored under.
-    pub fn identity(&self) -> PlacementRuntimeNode {
-        PlacementRuntimeNode::new(self.kind, self.identifier.clone())
+    pub fn identity(&self) -> NodeRef {
+        NodeRef::new(self.kind, self.identifier.clone())
     }
 
     fn executes_on_every_cluster_node(&self) -> bool {

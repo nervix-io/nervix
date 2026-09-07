@@ -5,12 +5,11 @@ use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use meticulous::OptionExt as _;
 pub(crate) use nervix_interconnect::RuntimeStateKind;
-use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
+use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName, NodeRef};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 
 use super::BranchKey;
-use crate::registry::RegistryEntity;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
@@ -313,7 +312,7 @@ impl RuntimeStateStore {
     pub fn purge_stale_schema_fingerprints(
         &self,
         domain: &DomainName,
-        current: &HashMap<RegistryEntity, [u8; 32]>,
+        current: &HashMap<NodeRef, [u8; 32]>,
     ) -> Result<(), Report<RuntimePersistenceError>> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
@@ -325,7 +324,7 @@ impl RuntimeStateStore {
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
             let stored = stored_placement_schema(&key)?;
             let mut expected = current
-                .get(&RegistryEntity {
+                .get(&NodeRef {
                     kind: stored.kind,
                     identifier: stored.identifier,
                 })

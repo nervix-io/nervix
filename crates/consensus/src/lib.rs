@@ -271,17 +271,18 @@ openraft::declare_raft_types!(
 );
 
 pub type NervixRaft = Raft<TypeConfig, StdArc<FjallStore>>;
-pub type NodeId = ClusterNodeName;
 pub type Node = BasicNode;
 pub type LogIdOf = LogId<CommittedLeaderIdOf<TypeConfig>>;
 pub type VoteOf = Vote<LeaderIdOf<TypeConfig>>;
-pub type StoredMembershipOf = StoredMembership<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>;
-pub type SnapshotOf = Snapshot<CommittedLeaderIdOf<TypeConfig>, NodeId, Node, Cursor<Vec<u8>>>;
+pub type StoredMembershipOf =
+    StoredMembership<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>;
+pub type SnapshotOf =
+    Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, Cursor<Vec<u8>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotRelayHeader {
     pub vote: VoteOf,
-    pub meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+    pub meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
 }
 
 pub const RAFT_APPEND_ENTRIES_PATH: &str = "/raft/append-entries";
@@ -378,7 +379,7 @@ impl StateMachineData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredSnapshotData {
-    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
     data: Vec<u8>,
 }
 
@@ -505,17 +506,17 @@ impl ConsensusHandle {
                 let transition = RaftTransition {
                     state: format!("{:?}", metrics.state),
                     term: metrics.current_term,
-                    leader: metrics
-                        .current_leader
-                        .as_ref()
-                        .map_or_else(|| "(none)".to_string(), ClusterNodeName::to_string),
+                    leader: metrics.current_leader.clone(),
                 };
                 if last_transition.as_ref() != Some(&transition) {
                     let summary = format!(
                         "raft transition: state={} leader={} term={} last_log_index={} \
                          last_applied={}",
                         transition.state,
-                        transition.leader,
+                        transition
+                            .leader
+                            .as_ref()
+                            .map_or("(none)", ClusterNodeName::as_str),
                         transition.term,
                         metrics.last_log_index.unwrap_or_default(),
                         metrics
@@ -1366,7 +1367,7 @@ impl ConsensusHandle {
     pub async fn install_full_snapshot(
         &self,
         vote: VoteOf,
-        meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+        meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
         snapshot: Vec<u8>,
     ) -> Result<SnapshotResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
         self.raft
@@ -1395,7 +1396,7 @@ pub struct NetworkClient {
 impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     type Network = NetworkClient;
 
-    async fn new_client(&mut self, _target: NodeId, node: &Node) -> Self::Network {
+    async fn new_client(&mut self, _target: ClusterNodeName, node: &Node) -> Self::Network {
         Self::Network {
             target: node.addr.clone(),
             http_client: self.http_client.clone(),
@@ -1753,7 +1754,7 @@ impl RaftLogReader<TypeConfig> for StdArc<FjallStore> {
                 continue;
             }
             out.push(decode::<
-                Entry<CommittedLeaderIdOf<TypeConfig>, ConsensusCommand, NodeId, Node>,
+                Entry<CommittedLeaderIdOf<TypeConfig>, ConsensusCommand, ClusterNodeName, Node>,
             >(value.as_ref())?);
         }
         out.sort_by_key(|entry| entry.log_id.index);
@@ -1772,8 +1773,12 @@ impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
         let mut last_log_id = self.read_last_purged().await?;
         for item in self.inner.logs.iter() {
             let (_, value) = item.into_inner().map_err(io_error)?;
-            let entry: Entry<CommittedLeaderIdOf<TypeConfig>, ConsensusCommand, NodeId, Node> =
-                decode(value.as_ref())?;
+            let entry: Entry<
+                CommittedLeaderIdOf<TypeConfig>,
+                ConsensusCommand,
+                ClusterNodeName,
+                Node,
+            > = decode(value.as_ref())?;
             last_log_id = Some(entry.log_id);
         }
 
@@ -1917,7 +1922,7 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
 
     async fn install_snapshot(
         &mut self,
-        meta: &SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+        meta: &SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
         snapshot: Cursor<Vec<u8>>,
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
@@ -2559,7 +2564,7 @@ fn apply_transaction_step_effect(
 struct RaftTransition {
     state: String,
     term: u64,
-    leader: String,
+    leader: Option<ClusterNodeName>,
 }
 
 fn ensure_resource_catalog(

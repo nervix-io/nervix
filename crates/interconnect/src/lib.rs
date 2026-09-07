@@ -11,9 +11,9 @@ use dashmap::DashMap;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use nervix_models::{
     ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
-    LookupName, ModelKind, ModelName, RelayName, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
-    ResourceName, SubscriptionBinding, Timestamp,
+    LookupName, ModelKind, ModelName, NodeRef, RelayName, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeElementValue, RemoteRuntimeField,
+    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, ResourceName, SubscriptionBinding, Timestamp,
 };
 use rand_core::OsRng;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -339,12 +339,6 @@ pub struct DomainDrainStatusResponse {
     pub result: Result<DomainDrainStatusEnvelope, String>,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EntityReference {
-    pub kind: ModelKind,
-    pub identifier: ModelName,
-}
-
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EntityGatePurpose {
     ModelAlteration,
@@ -366,7 +360,7 @@ pub struct EntityGateRequest {
     pub operation_id: u64,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
-    pub affected_entities: Vec<EntityReference>,
+    pub affected_entities: Vec<NodeRef>,
     pub purpose: EntityGatePurpose,
     pub deadline_millis: u64,
     pub reason: String,
@@ -391,7 +385,7 @@ pub struct EntityDrainStatusRequest {
     pub correlation_id: u64,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
-    pub affected_entities: Vec<EntityReference>,
+    pub affected_entities: Vec<NodeRef>,
     pub purpose: EntityGatePurpose,
 }
 

@@ -1,15 +1,15 @@
-use nervix_models::{DomainSchedule, DynamicModelUpdate, ModelKind, QuiesceLevel, ScheduledNode};
+use nervix_models::{
+    DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, QuiesceLevel, ScheduledNode,
+};
 use sorted_vec::SortedSet;
-
-use crate::registry::RegistryEntity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ScheduleDelta {
     Unchanged,
     Dynamic(Vec<DynamicModelUpdate>),
     EntitySwap {
-        entities: Vec<RegistryEntity>,
-        reassignments: Vec<RegistryEntity>,
+        entities: Vec<NodeRef>,
+        reassignments: Vec<NodeRef>,
         dynamic_updates: Vec<DynamicModelUpdate>,
     },
     Rebuild,
@@ -32,10 +32,7 @@ impl ScheduleDelta {
                 return Self::Rebuild;
             };
             if !existing_node.has_same_assignment_as(desired_node) {
-                reassignments.push(RegistryEntity {
-                    kind: desired_node.kind,
-                    identifier: desired_node.identifier.clone(),
-                });
+                reassignments.push(desired_node.identity());
             }
             let aspects = existing_node
                 .config
@@ -70,10 +67,7 @@ impl ScheduleDelta {
                     updates.extend(aspects.dynamic_updates().iter().cloned());
                 }
                 QuiesceLevel::EntityPause => {
-                    entities.push(RegistryEntity {
-                        kind: desired_node.kind,
-                        identifier: desired_node.identifier.clone(),
-                    });
+                    entities.push(desired_node.identity());
                     updates.extend(aspects.dynamic_updates().iter().cloned());
                 }
                 QuiesceLevel::DomainPause => return Self::Rebuild,
@@ -145,9 +139,9 @@ mod tests {
         AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction,
         CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
         EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy,
-        IngestSource, Literal, Model, ModelKind, ModelName, OutputBranch, OutputFlushPolicy,
-        PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-        RetryPolicy, RouteConstruction, ScheduledNode,
+        IngestSource, Literal, Model, ModelKind, ModelName, NodeRef, OutputBranch,
+        OutputFlushPolicy, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode,
     };
 
     use super::ScheduleDelta;
@@ -330,7 +324,7 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&existing, &structural),
             ScheduleDelta::EntitySwap {
-                entities: vec![crate::registry::RegistryEntity {
+                entities: vec![NodeRef {
                     kind: ModelKind::Junction,
                     identifier: named("route_events"),
                 }],
@@ -425,7 +419,7 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&existing, &swapped),
             ScheduleDelta::EntitySwap {
-                entities: vec![crate::registry::RegistryEntity {
+                entities: vec![NodeRef {
                     kind: ModelKind::Emitter,
                     identifier: named("event_sink"),
                 }],
@@ -447,7 +441,7 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![crate::registry::RegistryEntity {
+                reassignments: vec![NodeRef {
                     kind: ModelKind::Ingestor,
                     identifier: named("event_source"),
                 }],
@@ -469,7 +463,7 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![crate::registry::RegistryEntity {
+                reassignments: vec![NodeRef {
                     kind: ModelKind::Ingestor,
                     identifier: named("event_source"),
                 }],
@@ -518,7 +512,7 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![crate::registry::RegistryEntity {
+                reassignments: vec![NodeRef {
                     kind: ModelKind::Ingestor,
                     identifier: named("event_source"),
                 }],
@@ -544,7 +538,7 @@ mod tests {
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::EntitySwap {
                 entities: Vec::new(),
-                reassignments: vec![crate::registry::RegistryEntity {
+                reassignments: vec![NodeRef {
                     kind: ModelKind::Ingestor,
                     identifier: named("event_source"),
                 }],

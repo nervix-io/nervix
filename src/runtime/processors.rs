@@ -1220,7 +1220,7 @@ pub(super) struct WindowBounds {
 
 pub(super) struct WindowFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
-    pub(super) node_kind: &'a str,
+    pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branch: &'a mut BranchRuntime,
@@ -1231,7 +1231,7 @@ pub(super) struct WindowFlushContext<'a> {
 pub(super) struct JunctionFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
-    pub(super) node_kind: &'a str,
+    pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) input_relays: &'a [RelayName],
@@ -1244,7 +1244,7 @@ pub(super) struct JunctionFlushContext<'a> {
 pub(super) struct InferencerFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
-    pub(super) node_kind: &'a str,
+    pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
@@ -1262,7 +1262,7 @@ pub(super) struct InferencerFlushContext<'a> {
 pub(super) struct WasmFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
-    pub(super) node_kind: &'a str,
+    pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) input_relays: &'a [RelayName],

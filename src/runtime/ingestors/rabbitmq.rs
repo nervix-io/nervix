@@ -39,7 +39,8 @@ impl RabbitMqIngestor {
         client: CreateClientRabbitMq,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
@@ -365,7 +366,7 @@ impl RabbitMqIngestor {
                                                         } else {
                                                             task_runtime.handle_general_error_for_acks(
                                                                 &task_domain,
-                                                                "ingestor",
+                                                                ModelKind::Ingestor,
                                                                 &task_ingestor,
                                                                 &task_error_policies,
                                                                 std::iter::once(&acks),

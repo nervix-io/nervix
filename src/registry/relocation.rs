@@ -7,15 +7,13 @@
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    Model, PlacementName, PlacementPolicy, PlacementRuntimeNode, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    Model, NodeRef, PlacementName, PlacementPolicy, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection,
 };
 use strum::AsRefStr;
 use thiserror::Error;
 
-use super::{
-    ActiveGraph, RegistryKey, ResolvedPlacementPair, placement_runtime_node, registry_key_cmp,
-};
+use super::{ActiveGraph, ResolvedPlacementPair};
 
 /// Why a runtime node is part of the unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
@@ -32,8 +30,8 @@ pub enum RelocationMemberReason {
 /// One `FROM`/`TO` endpoint pair of a corridor selection and what it covered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelocationCoverage {
-    pub source: PlacementRuntimeNode,
-    pub destination: PlacementRuntimeNode,
+    pub source: NodeRef,
+    pub destination: NodeRef,
     pub connected: bool,
     pub covered: usize,
 }
@@ -42,7 +40,7 @@ pub struct RelocationCoverage {
 /// carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelocationUnitMember {
-    pub runtime_node: PlacementRuntimeNode,
+    pub runtime_node: NodeRef,
     pub group: usize,
     pub strategy: RelocationPreferenceStrategy,
     pub reason: RelocationMemberReason,
@@ -53,8 +51,8 @@ pub struct RelocationUnitMember {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelocationPreference {
     pub policy: PlacementPolicy,
-    pub left: PlacementRuntimeNode,
-    pub right: PlacementRuntimeNode,
+    pub left: NodeRef,
+    pub right: NodeRef,
     pub winning_rules: Vec<PlacementName>,
     pub from_domain_default: bool,
 }
@@ -95,7 +93,7 @@ pub enum RelocationPlanError {
 /// A hard group while the unit is being built.
 #[derive(Debug, Clone)]
 struct UnitGroup {
-    members: Vec<RegistryKey>,
+    members: Vec<NodeRef>,
     strategy: RelocationPreferenceStrategy,
     reason: RelocationMemberReason,
 }
@@ -142,11 +140,11 @@ impl ActiveGraph {
 
         let placement = self.placement.effective(default_policy);
 
-        let hard_group = |key: &RegistryKey| -> Vec<RegistryKey> {
+        let hard_group = |key: &NodeRef| -> Vec<NodeRef> {
             match placement.group_by_member.get(key) {
                 Some(group_index) => {
                     let mut members = placement.require_groups[*group_index].clone();
-                    members.sort_by(registry_key_cmp);
+                    members.sort();
                     members
                 }
                 None => vec![key.clone()],
@@ -201,7 +199,7 @@ impl ActiveGraph {
                     .members
                     .iter()
                     .map(move |member| RelocationUnitMember {
-                        runtime_node: placement_runtime_node(member),
+                        runtime_node: member.clone(),
                         group: index + 1,
                         strategy: group.strategy,
                         reason: if group.reason == RelocationMemberReason::Selected
@@ -229,8 +227,8 @@ impl ActiveGraph {
         &self,
         domain: &nervix_models::DomainName,
         member: &RelocationMember,
-    ) -> Result<RegistryKey, RelocationPlanError> {
-        let key = RegistryKey::new(member.kind, member.name.clone());
+    ) -> Result<NodeRef, RelocationPlanError> {
+        let key = NodeRef::new(member.kind, member.name.clone());
         let Some(node) = self.node(member.kind, &member.name) else {
             return Err(RelocationPlanError::UnknownRuntimeNode {
                 domain: domain.as_str().to_string(),
@@ -254,7 +252,7 @@ impl ActiveGraph {
         domain: &nervix_models::DomainName,
         from: &[RelocationMember],
         to: &[RelocationMember],
-    ) -> Result<(Vec<RegistryKey>, Vec<RelocationCoverage>), RelocationPlanError> {
+    ) -> Result<(Vec<NodeRef>, Vec<RelocationCoverage>), RelocationPlanError> {
         let mut selected = Vec::new();
         let mut coverage = Vec::new();
         let mut connected_pairs = 0usize;
@@ -278,8 +276,8 @@ impl ActiveGraph {
                     }
                 }
                 coverage.push(RelocationCoverage {
-                    source: placement_runtime_node(&source_key),
-                    destination: placement_runtime_node(&destination_key),
+                    source: source_key.clone(),
+                    destination: destination_key.clone(),
                     connected,
                     covered: endpoint.corridor.len(),
                 });
@@ -288,7 +286,7 @@ impl ActiveGraph {
         if connected_pairs == 0 {
             return Err(RelocationPlanError::DisconnectedCorridor);
         }
-        selected.sort_by(registry_key_cmp);
+        selected.sort();
         Ok((selected, coverage))
     }
 
@@ -296,11 +294,11 @@ impl ActiveGraph {
     fn capture_preferred_groups(
         &self,
         placement: &super::EffectivePlacementPlan,
-        hard_group: &impl Fn(&RegistryKey) -> Vec<RegistryKey>,
-        override_by_key: &HashMap<RegistryKey, Vec<RelocationPreferenceStrategy>>,
+        hard_group: &impl Fn(&NodeRef) -> Vec<NodeRef>,
+        override_by_key: &HashMap<NodeRef, Vec<RelocationPreferenceStrategy>>,
         default_strategy: RelocationPreferenceStrategy,
         groups: &mut Vec<UnitGroup>,
-        group_by_member: &mut HashMap<RegistryKey, usize>,
+        group_by_member: &mut HashMap<NodeRef, usize>,
     ) -> Result<(), RelocationPlanError> {
         loop {
             let mut candidates = Vec::new();
@@ -332,16 +330,15 @@ impl ActiveGraph {
                 return Ok(());
             }
             candidates.sort_by(|left, right| {
-                registry_key_cmp(
-                    left.first().verified(
+                left.first()
+                    .verified(
                         "the empty-candidates branch above already returned and a group is never \
                          built empty",
-                    ),
-                    right.first().verified(
+                    )
+                    .cmp(right.first().verified(
                         "the empty-candidates branch above already returned and a group is never \
                          built empty",
-                    ),
-                )
+                    ))
             });
 
             let mut joined = false;
@@ -377,9 +374,9 @@ impl ActiveGraph {
     /// the unit.
     fn separated_from_unit(
         placement: &super::EffectivePlacementPlan,
-        candidate: &[RegistryKey],
+        candidate: &[NodeRef],
         groups: &[UnitGroup],
-        group_by_member: &HashMap<RegistryKey, usize>,
+        group_by_member: &HashMap<NodeRef, usize>,
     ) -> bool {
         placement.pairs.iter().any(|(pair, resolved)| {
             if resolved.policy != PlacementPolicy::SuggestSeparation {
@@ -399,8 +396,8 @@ impl ActiveGraph {
     /// A hard group carries one strategy, because it cannot be moved in pieces and its
     /// preferences are one set.
     fn group_strategy(
-        members: &[RegistryKey],
-        override_by_key: &HashMap<RegistryKey, Vec<RelocationPreferenceStrategy>>,
+        members: &[NodeRef],
+        override_by_key: &HashMap<NodeRef, Vec<RelocationPreferenceStrategy>>,
         default_strategy: RelocationPreferenceStrategy,
     ) -> Result<RelocationPreferenceStrategy, RelocationPlanError> {
         let mut chosen = None;
@@ -429,7 +426,7 @@ impl ActiveGraph {
     /// Every effective soft preference with at least one endpoint in the unit.
     fn unit_preferences(
         pairs: &HashMap<super::PlacementPair, ResolvedPlacementPair>,
-        group_by_member: &HashMap<RegistryKey, usize>,
+        group_by_member: &HashMap<NodeRef, usize>,
     ) -> Vec<RelocationPreference> {
         let mut preferences = pairs
             .iter()
@@ -442,8 +439,8 @@ impl ActiveGraph {
             })
             .map(|(pair, resolved)| RelocationPreference {
                 policy: resolved.policy,
-                left: placement_runtime_node(&pair.left),
-                right: placement_runtime_node(&pair.right),
+                left: pair.left.clone(),
+                right: pair.right.clone(),
                 winning_rules: resolved.winning_rules.clone(),
                 from_domain_default: resolved.from_domain_default,
             })
@@ -459,10 +456,7 @@ impl ActiveGraph {
     }
 }
 
-fn relocation_runtime_node_cmp(
-    left: &PlacementRuntimeNode,
-    right: &PlacementRuntimeNode,
-) -> std::cmp::Ordering {
+fn relocation_runtime_node_cmp(left: &NodeRef, right: &NodeRef) -> std::cmp::Ordering {
     left.kind
         .as_str()
         .cmp(right.kind.as_str())

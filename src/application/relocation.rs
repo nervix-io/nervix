@@ -9,9 +9,8 @@ use std::collections::BTreeSet;
 
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, PlacementPolicy,
-    PlacementRuntimeNode, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy,
-    ScheduledNode,
+    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
+    QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode,
 };
 
 use super::{
@@ -26,7 +25,7 @@ use crate::{
 
 /// One unit member with the assignment the relocation gives it.
 struct RelocationPlanMember {
-    runtime_node: PlacementRuntimeNode,
+    runtime_node: NodeRef,
     group: usize,
     strategy: RelocationPreferenceStrategy,
     reason: RelocationMemberReason,
@@ -320,14 +319,7 @@ impl SessionServiceImpl {
             QuiesceLevel::Dynamic
         };
         let gated_relays = if let QuiesceLevel::EntityPause = level {
-            let affected = moved
-                .iter()
-                .map(|node| crate::registry::RegistryEntity {
-                    kind: node.kind,
-                    identifier: node.identifier.clone(),
-                })
-                .collect::<Vec<_>>();
-            Runtime::ownership_handoff_relays_for_schedule(current, &affected)
+            Runtime::ownership_handoff_relays_for_schedule(current, &moved)
         } else {
             Vec::new()
         };
@@ -443,7 +435,7 @@ fn planned_relocation_schedule(
     current: &DomainSchedule,
     desired: &DomainSchedule,
     destination: &ClusterNodeName,
-    moved: &[PlacementRuntimeNode],
+    moved: &[NodeRef],
     replica_count: usize,
     schedulable_nodes: &BTreeSet<ClusterNodeName>,
     live_nodes: &BTreeSet<ClusterNodeName>,
@@ -518,7 +510,7 @@ fn planned_relocation_schedule(
 fn unsatisfied_preference_lines(
     unit: &RelocationUnit,
     schedule: &DomainSchedule,
-    context: &[PlacementRuntimeNode],
+    context: &[NodeRef],
 ) -> Vec<String> {
     let mut context = context.to_vec();
     for preference in &unit.preferences {
@@ -568,7 +560,7 @@ fn unsatisfied_preference_lines(
 fn relocation_member_owner<'a>(
     domain: &DomainName,
     schedule: &'a DomainSchedule,
-    member: &PlacementRuntimeNode,
+    member: &NodeRef,
     live_nodes: &BTreeSet<ClusterNodeName>,
 ) -> Result<&'a ClusterNodeName, String> {
     let Some(node) = schedule.nodes.get(member) else {
@@ -653,8 +645,8 @@ mod tests {
         )
     }
 
-    fn member(name: &str) -> PlacementRuntimeNode {
-        PlacementRuntimeNode::new(
+    fn member(name: &str) -> NodeRef {
+        NodeRef::new(
             ModelKind::Junction,
             ModelName::try_from(name).expect("test name must be a model name"),
         )

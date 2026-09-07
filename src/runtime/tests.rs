@@ -28,12 +28,12 @@ use nervix_models::{
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
     InferencerTensorSchema, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
     IngestTimestampSource, IngestorName, JsonType, MessageErrorCode, MessageErrorOperation,
-    MessageErrorPolicy, ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, OutputBranch,
-    ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    RelayBranching, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField,
-    SqsFifoGroup, StructuredMessageError, Timestamp, WindowBound, WireSchemaField,
-    ZeroMqIngestMode,
+    MessageErrorPolicy, ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, NodeRef,
+    OutputBranch, ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayBranching, RelayName, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy,
+    ScheduledNode, SchemaField, SqsFifoGroup, StructuredMessageError, Timestamp, WindowBound,
+    WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_nspl::window_processor::aggregate::lower_window_assignments;
 use nervix_wasm::{
@@ -183,7 +183,7 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
         (&iceberg, 5_usize),
     ] {
         runtime.emitter_buffers.insert(
-            super::RuntimeKey::new(domain.clone(), emitter.clone()),
+            super::DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
             Arc::new(AtomicUsize::new(pending_messages)),
         );
     }
@@ -244,7 +244,7 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
         status.emitter_publishing[2].emitter.clone(),
     ]
     .into_iter()
-    .map(|identifier| crate::registry::RegistryEntity {
+    .map(|identifier| NodeRef {
         kind: ModelKind::Emitter,
         identifier: ModelName::from(&identifier),
     })
@@ -754,7 +754,7 @@ async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let ingestor = named::<IngestorName>("source");
-    let key = super::RuntimeKey::new(domain.clone(), ingestor.clone());
+    let key = super::DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let stopped = Arc::new(AtomicBool::new(false));
     let task_stopped = stopped.clone();
@@ -3054,11 +3054,11 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
     runtime.relay_boundary_fanouts.insert(
-        super::RuntimeKey::new(domain.clone(), relay.clone()),
+        super::DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
         fanout,
     );
 
-    let key = super::RuntimeKey::new(domain.clone(), ingestor.clone());
+    let key = super::DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let stopped = StdArc::new(AtomicBool::new(false));
     let task_stopped = stopped.clone();
@@ -3079,7 +3079,7 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
         test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
     );
 
-    let affected = crate::registry::RegistryEntity {
+    let affected = NodeRef {
         kind: ModelKind::Ingestor,
         identifier: ModelName::from(&ingestor.clone()),
     };
@@ -3141,7 +3141,7 @@ async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
     runtime.relay_boundary_fanouts.insert(
-        super::RuntimeKey::new(domain.clone(), relay.clone()),
+        super::DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
         fanout,
     );
 
@@ -3631,7 +3631,11 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
     assert!(
         !runtime
             .ingestors
-            .contains_key(&super::RuntimeKey::new(domain.clone(), ingestor.clone())),
+            .contains_key(&super::DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone()
+            )),
         "failed scheduled ingestor start must not leave an ingestor runtime"
     );
     let describe_error = runtime
@@ -3794,7 +3798,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
         .expect("test schedule must contain its emitter");
     emitter_node.primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
     emitter_node.assigned_nodes = vec![ClusterNodeName::parse("node-2").expect("valid name")];
-    let entity = crate::registry::RegistryEntity {
+    let entity = NodeRef {
         kind: ModelKind::Emitter,
         identifier: ModelName::from(&emitter.name),
     };
@@ -3847,11 +3851,10 @@ fn ownership_handoff_keeps_internal_moved_group_relays_open() {
         ],
         Vec::new(),
     );
-    let affected =
-        ["corridor_source", "corridor_sink"].map(|name| crate::registry::RegistryEntity {
-            kind: ModelKind::Junction,
-            identifier: named(name),
-        });
+    let affected = ["corridor_source", "corridor_sink"].map(|name| NodeRef {
+        kind: ModelKind::Junction,
+        identifier: named(name),
+    });
 
     assert_eq!(
         super::Runtime::entity_pause_relays_for_schedule(&schedule, &affected),
@@ -3939,7 +3942,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         )
         .await
         .expect("scheduled deduplicator must build");
-    let entity = crate::registry::RegistryEntity {
+    let entity = NodeRef {
         kind: ModelKind::Deduplicator,
         identifier: ModelName::from(&processor),
     };
@@ -3971,14 +3974,10 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         .get(&domain)
         .expect("domain execution must remain installed");
     assert_eq!(execution.schedule, desired);
-    assert!(
-        execution
-            .node_tasks
-            .contains_key(&crate::registry::RegistryEntity {
-                kind: ModelKind::Deduplicator,
-                identifier: ModelName::from(&processor),
-            })
-    );
+    assert!(execution.node_tasks.contains_key(&NodeRef {
+        kind: ModelKind::Deduplicator,
+        identifier: ModelName::from(&processor),
+    }));
 }
 
 #[tokio::test]
@@ -4069,7 +4068,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         panic!("scheduled processor must contain a deduplicator model");
     };
     config.mode = AckMode::Detached;
-    let entity = crate::registry::RegistryEntity {
+    let entity = NodeRef {
         kind: ModelKind::Deduplicator,
         identifier: ModelName::from(&processor),
     };
@@ -4081,7 +4080,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
 
     let installed = runtime
         .state_schema_fingerprints
-        .get(&super::RuntimeStateSchemaKey::new(
+        .get(&super::DomainNodeRef::node_in(
             domain,
             ModelKind::Deduplicator,
             ModelName::from(&processor),
@@ -4246,9 +4245,10 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         );
     let now = super::current_timestamp();
     let dequeued_work = || {
-        super::NodeQuiesceWorkGuard::begin(
-            runtime.node_quiesce_counters(&domain, named::<ModelName>("dedup_users")),
-        )
+        super::NodeQuiesceWorkGuard::begin(runtime.node_quiesce_counters(
+            &domain,
+            NodeRef::new(ModelKind::Deduplicator, named::<ModelName>("dedup_users")),
+        ))
     };
     let branch_batch = |user_id: i64, tenant: &str| {
         super::RelayRecordBatch::from_messages(
@@ -4392,7 +4392,8 @@ fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
             input_relay,
             quiesce_test_batch(),
         ));
-    let counters = runtime.node_quiesce_counters(&domain, &processor);
+    let counters =
+        runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
     let mut gauges = super::BranchQuiesceGauges::new(counters.clone());
 
     gauges.observe(&branch, &processor);
@@ -4402,7 +4403,7 @@ fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
     let status = runtime.entity_drain_status(
         &domain,
         &[],
-        &[crate::registry::RegistryEntity {
+        &[NodeRef {
             kind: ModelKind::Junction,
             identifier: processor.clone(),
         }],
@@ -4414,7 +4415,7 @@ fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
     let handoff_status = runtime.entity_drain_status(
         &domain,
         &[],
-        &[crate::registry::RegistryEntity {
+        &[NodeRef {
             kind: ModelKind::Junction,
             identifier: processor,
         }],
@@ -4497,12 +4498,12 @@ fn required_wait_ack_does_not_block_ownership_handoff_drain_status() {
     let ingestor = named::<IngestorName>("orders_source");
     let tracker = Arc::new(AckRootTracker::default());
     runtime.in_flight_by_ingestor.insert(
-        super::RuntimeKey::new(domain.clone(), ingestor.clone()),
+        super::DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
         tracker.clone(),
     );
     let (acks, _completion) = AckSet::tracked_root(tracker);
     let _required_wait = acks.required_wait_guard();
-    let affected = [crate::registry::RegistryEntity {
+    let affected = [NodeRef {
         kind: ModelKind::Ingestor,
         identifier: ModelName::from(&ingestor),
     }];
@@ -4526,7 +4527,7 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let services = test_relay_boundary_services();
     let _owner_receiver = services.activate_owner_buffer();
     runtime.relay_boundary_fanouts.insert(
-        super::RuntimeKey::new(domain.clone(), relay.clone()),
+        super::DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
         services.fanout.clone(),
     );
     services
@@ -4601,7 +4602,8 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
     let processor = named::<ModelName>("route_orders");
     let input_relay = named::<RelayName>("orders");
     let template = junction_branch_template(processor.as_str(), input_relay.as_str());
-    let counters = runtime.node_quiesce_counters(&domain, &processor);
+    let counters =
+        runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
     let (input_tx, mut input_rx) = mpsc::channel(1);
     let (stop_tx, _stop_rx) = mpsc::channel(1);
     let task = tokio::spawn(std::future::pending::<()>());
@@ -4728,11 +4730,25 @@ async fn processor_handoff_drains_ready_batches_from_every_input() {
     assert!(handoffs.iter().any(|handoff| handoff.key == beta));
     assert_eq!(
         runtime
-            .node_quiesce_counters(&domain, &processor)
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor))
             .outstanding_work(),
         0
     );
     drop(shutdown_tx);
+}
+
+#[test]
+fn quiesce_counters_belong_to_one_node_not_to_a_shared_identifier() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let shared = named::<ModelName>("orders");
+    let relay = runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &shared));
+    let emitter = runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Emitter, &shared));
+
+    let _work = super::NodeQuiesceWorkGuard::begin(relay.clone());
+
+    assert_eq!(relay.outstanding_work(), 1);
+    assert_eq!(emitter.outstanding_work(), 0);
 }
 
 #[tokio::test]
@@ -5064,7 +5080,7 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
         .purge_stale_schema_fingerprints(
             &base.domain,
             &HashMap::from_iter([(
-                crate::registry::RegistryEntity {
+                NodeRef {
                     kind: base.kind,
                     identifier: base.identifier.clone(),
                 },
@@ -6633,7 +6649,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
     assert!(state.entries.contains_key(&beta));
     assert_eq!(
         runtime
-            .node_quiesce_counters(&domain, &relay)
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay))
             .outstanding_work(),
         0
     );
@@ -9970,7 +9986,7 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
     );
     assert_eq!(
         runtime
-            .node_quiesce_counters(&domain, &reingestor)
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor))
             .output_buffers
             .load(Ordering::Acquire),
         0,
