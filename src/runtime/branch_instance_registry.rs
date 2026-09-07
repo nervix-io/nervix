@@ -109,7 +109,11 @@ where
                 entry.state.clone()
             };
             self.bump_version();
-            let last_index = self.entries.len().saturating_sub(1);
+            let last_index = self
+                .entries
+                .len()
+                .checked_sub(1)
+                .verified("the entry looked up above is still in the map");
             if index != last_index {
                 self.entries.move_index(index, last_index);
             }
@@ -203,7 +207,10 @@ where
     }
 
     fn bump_version(&mut self) {
-        self.version = self.version.saturating_add(1);
+        self.version = self
+            .version
+            .checked_add(1)
+            .assured("a registry cannot record 2^64 branch instance changes");
     }
 }
 
@@ -223,6 +230,7 @@ mod tests {
         time::Duration,
     };
 
+    use meticulous::OptionExt as _;
     use nervix_models::Timestamp;
     use triomphe::Arc;
 
@@ -247,7 +255,12 @@ mod tests {
     }
 
     fn timestamp(seconds: i64, nanos: u32) -> Timestamp {
-        Timestamp::from_unix_nanos(seconds.saturating_mul(1_000_000_000) + i64::from(nanos))
+        Timestamp::from_unix_nanos(
+            seconds
+                .checked_mul(1_000_000_000)
+                .and_then(|nanos_part| nanos_part.checked_add(i64::from(nanos)))
+                .assured("the test timestamps are small second counts"),
+        )
     }
 
     #[test]

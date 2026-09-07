@@ -74,7 +74,8 @@ impl EmitterBufferedMessages {
         self.reported.store(
             self.generic
                 .load(Ordering::Acquire)
-                .saturating_add(self.iceberg.load(Ordering::Acquire)),
+                .checked_add(self.iceberg.load(Ordering::Acquire))
+                .assured("both counts total messages this node already holds in memory"),
             Ordering::Release,
         );
     }
@@ -422,6 +423,12 @@ struct EmitterPublishBatch {
     delivered: Vec<bool>,
 }
 
+/// The bound every byte estimate in this module relies on: each term counts bytes of a batch,
+/// header, or group identifier this node already holds in memory, so their total is bounded by the
+/// address space those values occupy.
+const BYTES_IN_MEMORY: &str =
+    "every term counts bytes of a value this node already holds in memory";
+
 impl EmitterPublishBatch {
     fn from_batch(batch: RelayRecordBatch) -> Self {
         let row_count = batch.batch.batch().num_rows();
@@ -470,7 +477,7 @@ impl EmitterPublishBatch {
     fn estimated_bytes(&self) -> u64 {
         self.batch
             .estimated_bytes()
-            .saturating_add(
+            .checked_add(
                 self.headers
                     .iter()
                     .flatten()
@@ -478,11 +485,14 @@ impl EmitterPublishBatch {
                     .map(|(name, value)| {
                         u64::try_from(name.len())
                             .unwrap_or(u64::MAX)
-                            .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
+                            .checked_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
+                            .assured(BYTES_IN_MEMORY)
                     })
-                    .fold(0_u64, u64::saturating_add),
+                    .try_fold(0_u64, u64::checked_add)
+                    .assured(BYTES_IN_MEMORY),
             )
-            .saturating_add(
+            .assured(BYTES_IN_MEMORY)
+            .checked_add(
                 self.sqs_message_groups
                     .iter()
                     .map(|group| match group {
@@ -491,8 +501,10 @@ impl EmitterPublishBatch {
                         }
                         Ok(None) => 0,
                     })
-                    .fold(0_u64, u64::saturating_add),
+                    .try_fold(0_u64, u64::checked_add)
+                    .assured(BYTES_IN_MEMORY),
             )
+            .assured(BYTES_IN_MEMORY)
     }
 
     fn headers_for_row(&self, row: usize) -> Option<&EmitterHeaders> {
@@ -816,8 +828,11 @@ impl PublishReport {
 
     fn merge(self, other: Self) -> Self {
         Self {
-            messages: self.messages.saturating_add(other.messages),
-            bytes: self.bytes.saturating_add(other.bytes),
+            messages: self
+                .messages
+                .checked_add(other.messages)
+                .assured("both counts total messages this node already published"),
+            bytes: self.bytes.checked_add(other.bytes).assured(BYTES_IN_MEMORY),
             domain_timestamp: self.domain_timestamp.max(other.domain_timestamp),
         }
     }
@@ -893,8 +908,14 @@ impl EmitterBatchBuffer {
         let Some(flush_policy) = self.flush_policy else {
             return Err(Report::new(EmitterRuntimeError::FlushPolicyNotInitialized));
         };
-        self.pending_messages = self.pending_messages.saturating_add(batch.message_count());
-        self.pending_bytes = self.pending_bytes.saturating_add(batch.estimated_bytes());
+        self.pending_messages = self
+            .pending_messages
+            .checked_add(batch.message_count())
+            .assured("both counts total messages this emitter already holds in memory");
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
         self.update_buffered_messages();
         if self.flush_at.is_none() {
@@ -4857,7 +4878,8 @@ mod tests {
         .expect("headers must align");
         let expected_bytes = first
             .estimated_bytes()
-            .saturating_add(second.estimated_bytes());
+            .checked_add(second.estimated_bytes())
+            .assured("the two test batches are far smaller than the u64 byte range");
 
         assert!(!buffer.push(first).expect("first batch must buffer"));
         assert_eq!(buffer.pending_messages, 1);

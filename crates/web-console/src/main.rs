@@ -2633,7 +2633,11 @@ fn GraphPanel(
             if topology_key_state.get_untracked().as_ref() != Some(&next_key) {
                 topology_key_state.set(Some(next_key));
                 topology_graph_state.set(Some(graph.clone()));
-                topology_render_count.update(|count| *count = count.saturating_add(1));
+                topology_render_count.update(|count| {
+                    *count = count
+                        .checked_add(1)
+                        .assured("a console session cannot render 2^64 topologies");
+                });
             }
         } else {
             topology_key_state.set(None);
@@ -3925,6 +3929,7 @@ impl CommandHistory {
             return None;
         }
         let next_position = if let Some(position) = self.position {
+            // Stepping back from the oldest entry stays on it.
             position.saturating_sub(1)
         } else {
             self.draft = current;

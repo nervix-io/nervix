@@ -11,6 +11,7 @@
 use std::sync::atomic::Ordering;
 
 use ahash::{HashMap, HashMapExt};
+use meticulous::OptionExt as _;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use triomphe::Arc;
@@ -58,7 +59,10 @@ impl DomainForceFlush {
         counters: Option<Arc<NodeQuiesceCounters>>,
     ) -> DomainForceFlushParticipant {
         let mut state = coordinator.state.lock();
-        state.next_participant = state.next_participant.wrapping_add(1);
+        state.next_participant = state
+            .next_participant
+            .checked_add(1)
+            .assured("a domain cannot register 2^64 force-flush participants");
         let participant = state.next_participant;
         let pending_generation = state.active_generation;
         if pending_generation.is_some()
@@ -106,10 +110,10 @@ impl DomainForceFlush {
         if only_if_idle && let Some(generation) = state.active_generation {
             return generation;
         }
-        state.generation = state.generation.wrapping_add(1);
-        if state.generation == 0 {
-            state.generation = 1;
-        }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .assured("a domain cannot run 2^64 force flushes");
         let generation = state.generation;
         state.active_generation = Some(generation);
         for participant in state.participants.values_mut() {
@@ -498,11 +502,12 @@ mod tests {
     }
 
     #[test]
-    fn generation_rollover_skips_the_reserved_zero_generation() {
+    fn generations_start_at_one_and_never_repeat() {
         let coordinator = DomainForceFlush::new();
-        coordinator.state.lock().generation = u64::MAX;
 
         assert_eq!(coordinator.request(), 1);
+        assert_eq!(coordinator.request(), 2);
+        assert_eq!(coordinator.request(), 3);
     }
 
     #[test]

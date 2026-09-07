@@ -239,7 +239,10 @@ impl MessageErrorRouteTask {
                     estimated_bytes: 0,
                     flush_at: checked_add_duration_to_timestamp(now, self.flush_policy.interval()),
                 });
-        pending.estimated_bytes = pending.estimated_bytes.saturating_add(estimated_bytes);
+        pending.estimated_bytes = pending
+            .estimated_bytes
+            .checked_add(estimated_bytes)
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         pending.deliveries.push(delivery);
         if self
             .flush_policy
@@ -445,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn buffered_message_error_refreshes_source_ack_before_flush_deadline() {
-        let interval = REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(4);
+        let interval = REMOTE_ACK_ALIVE_INTERVAL * 4;
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
         );
@@ -468,7 +471,7 @@ mod tests {
 
         assert_eq!(
             tokio::time::timeout(
-                REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(2),
+                REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )
             .await
@@ -508,7 +511,7 @@ mod tests {
 
         assert_eq!(
             tokio::time::timeout(
-                REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(2),
+                REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )
             .await

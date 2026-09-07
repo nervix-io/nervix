@@ -61,7 +61,10 @@ impl Processor for EvenRowFilter {
         ctx: &mut GuestContext<'_>,
         input: InputBatch,
     ) -> Result<(), GuestError> {
-        self.processed_batches = self.processed_batches.saturating_add(1);
+        self.processed_batches = self
+            .processed_batches
+            .checked_add(1)
+            .expect("a guest cannot process 2^64 batches in the lifetime of an instance");
         ctx.domain_time();
         ctx.request_timeout(FLUSH_TIMEOUT)?;
         match first_i32_value(&input)? {
@@ -89,7 +92,10 @@ impl Processor for EvenRowFilter {
         }
         self.flush_pending(ctx)?;
         self.pending_start_row = self.processed_rows;
-        self.processed_rows = self.processed_rows.saturating_add(input.row_count());
+        self.processed_rows = self
+            .processed_rows
+            .checked_add(input.row_count())
+            .expect("a guest cannot process 2^64 rows in the lifetime of an instance");
         self.pending = Some(input);
         if self.processed_batches.is_multiple_of(FLUSH_EVERY_BATCHES) {
             self.flush_pending(ctx)?;
@@ -193,7 +199,9 @@ fn filter_even_rows(
             .downcast_ref::<Int32Array>()
             .ok_or_else(int32_input_error)?;
         for row in 0..values.len() {
-            next_row = next_row.saturating_add(1);
+            next_row = next_row
+                .checked_add(1)
+                .expect("the rows counted here belong to one batch held in memory");
             if next_row.is_multiple_of(2) && values.is_valid(row) {
                 selected_values.push(values.value(row));
                 selected_rows.push(acks.rows.get(input_row).cloned().unwrap_or_default());

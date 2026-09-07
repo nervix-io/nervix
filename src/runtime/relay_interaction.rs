@@ -195,9 +195,15 @@ impl RelayInputCollection {
             self.branch_order.push(key.clone());
         }
         let collection = self.pending.entry(key.clone()).or_default();
-        collection.bytes = collection.bytes.saturating_add(batch.estimated_bytes());
+        collection.bytes = collection
+            .bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         collection.batches.push(batch);
-        self.pending_batches = self.pending_batches.saturating_add(1);
+        self.pending_batches = self
+            .pending_batches
+            .checked_add(1)
+            .assured("the pending batches counted here are already held in memory");
         if let Some(counters) = &self.quiesce_counters {
             counters
                 .collected_inputs
@@ -254,7 +260,8 @@ impl RelayInputCollection {
         self.branch_order.retain(|candidate| candidate != key);
         self.pending_batches = self
             .pending_batches
-            .saturating_sub(collection.batches.len());
+            .checked_sub(collection.batches.len())
+            .verified("every batch in this collection raised the pending count when it arrived");
         if let Some(counters) = &self.quiesce_counters {
             counters.collected_inputs.fetch_sub(
                 collection.batches.len(),
@@ -416,7 +423,9 @@ impl RelayInteractionInputs {
                 .try_recv_with_quiesce(quiesce_counters.as_ref())
             {
                 Ok((batch, work)) => {
-                    remaining[index] = remaining[index].saturating_sub(1);
+                    remaining[index] = remaining[index]
+                        .checked_sub(1)
+                        .verified("this loop skips a source whose remaining cut is already empty");
                     self.receive_cursor = (index + 1) % source_count;
                     return ReadyInput::Batch(index, batch, work);
                 }
@@ -2117,7 +2126,10 @@ mod tests {
         let (first_acks, first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
         let first = batch_with(1, None, first_acks);
-        let max_batch_size = first.estimated_bytes().saturating_add(1);
+        let max_batch_size = first
+            .estimated_bytes()
+            .checked_add(1)
+            .assured("a test batch is far smaller than the u64 byte range");
         let mut collection = RelayInputCollection::new(
             Some(RuntimeInputCollectPolicy {
                 interval: tokio::time::Duration::from_secs(60),

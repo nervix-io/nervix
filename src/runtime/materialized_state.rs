@@ -10,7 +10,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     BranchKey, PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
-    StateReplicationRoles,
+    StateReplicationRoles, lsm_sequence::LsmSequence,
 };
 use crate::runtime_schema::{RuntimeRow, RuntimeValue};
 
@@ -31,7 +31,7 @@ pub(super) struct ReplicatedMaterializedRelayState {
     schema: StdArc<arrow_schema::Schema>,
     roles: parking_lot::RwLock<StateReplicationRoles>,
     pub(super) entries: DashMap<Option<BranchKey>, RuntimeRow, RandomState>,
-    pub(super) current_lsm: AtomicU64,
+    pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
 }
@@ -63,7 +63,7 @@ impl ReplicatedMaterializedRelayState {
             schema,
             roles: parking_lot::RwLock::new(StateReplicationRoles::owned_by(primary_node)),
             entries,
-            current_lsm: AtomicU64::new(current_lsm),
+            current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
         })
@@ -91,7 +91,7 @@ impl ReplicatedMaterializedRelayState {
                     .map_err(RuntimePersistenceError::DecodeState)?,
             );
         }
-        self.current_lsm.store(lsm, Ordering::SeqCst);
+        self.current_lsm.adopt(lsm);
         self.dirty.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -100,7 +100,7 @@ impl ReplicatedMaterializedRelayState {
         &self,
     ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
         Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.load(Ordering::SeqCst),
+            lsm: self.current_lsm.current(),
             schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_materialized_stream_snapshot(&self.entries)?,
         })
@@ -120,20 +120,14 @@ impl ReplicatedMaterializedRelayState {
             return None;
         }
         self.entries.insert(key.clone(), record.clone());
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         Some(lsm)
     }
 
     pub(super) fn remove_key(&self, key: &Option<BranchKey>) -> Option<u64> {
         self.entries.remove(key)?;
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         Some(lsm)
     }

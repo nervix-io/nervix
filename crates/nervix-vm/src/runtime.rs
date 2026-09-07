@@ -3135,10 +3135,13 @@ fn execute_pad(
         }
         let missing = target_len - source_len;
         result.clear();
+        // The reservation is only a hint: a requested pad width that cannot be sized in
+        // `usize` leaves the buffer to grow as the fill is written.
         result.reserve(
-            source
-                .len()
-                .saturating_add(missing.saturating_mul(fill.len())),
+            missing
+                .checked_mul(fill.len())
+                .and_then(|padding| source.len().checked_add(padding))
+                .unwrap_or(source.len()),
         );
         if pad_left {
             result.extend(fill.chars().cycle().take(missing));
@@ -3154,7 +3157,13 @@ fn execute_pad(
 
 fn execute_md5(input: &StringArray) -> StringArray {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut builder = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(32));
+    let mut builder = StringBuilder::with_capacity(
+        input.len(),
+        input
+            .len()
+            .checked_mul(32)
+            .assured("a fixed width per row of a batch this node already holds in memory"),
+    );
     let mut digest_text = String::with_capacity(32);
     for row in 0..input.len() {
         if input.is_null(row) {
@@ -3477,7 +3486,12 @@ fn execute_substr(
             Some(value) => Some(integral_value_at(value, row)?.unwrap_or(0)),
             None => None,
         };
-        let begin = usize::try_from(start.saturating_sub(1).max(0)).unwrap_or(usize::MAX);
+        // SQL positions count from one, so a start at or before the first position begins at
+        // the start of the string.
+        let begin = start
+            .checked_sub(1)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .unwrap_or(0);
         let length = length.map(|value| usize::try_from(value.max(0)).unwrap_or(usize::MAX));
         builder.append_value(string_substr(input.value(row), begin, length));
     }
@@ -3532,7 +3546,12 @@ fn execute_to_hex_values(
     row_count: usize,
     mut value_at: impl FnMut(usize) -> Option<u64>,
 ) -> StringArray {
-    let mut builder = StringBuilder::with_capacity(row_count, row_count.saturating_mul(16));
+    let mut builder = StringBuilder::with_capacity(
+        row_count,
+        row_count
+            .checked_mul(16)
+            .assured("a fixed width per row of a batch this node already holds in memory"),
+    );
     let mut formatted = String::with_capacity(16);
     for row in 0..row_count {
         let Some(value) = value_at(row) else {
@@ -3752,7 +3771,11 @@ fn display_values_as_utf8<T>(len: usize, values: impl Iterator<Item = Option<T>>
 where
     T: fmt::Display,
 {
-    let mut builder = StringBuilder::with_capacity(len, len.saturating_mul(8));
+    let mut builder = StringBuilder::with_capacity(
+        len,
+        len.checked_mul(8)
+            .assured("a fixed width per row of a batch this node already holds in memory"),
+    );
     for value in values {
         let Some(value) = value else {
             builder.append_null();

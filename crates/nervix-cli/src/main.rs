@@ -385,6 +385,8 @@ fn complete_local_upload_paths(
         .map(|hint| hint.value.as_str())
         .filter(|hint| !hint.is_empty() || line[..pos.min(line.len())].contains(" VERSION '"))
         .or_else(|| upload_resource_path_fragment(line, pos))?;
+    // The suggested fragment may be longer than the text typed so far, in which case the
+    // replacement span starts at the beginning of the line.
     let span_start = pos.saturating_sub(path_fragment.len());
     let path = Path::new(path_fragment);
     let (base_dir, partial_name) = if path_fragment.is_empty() {

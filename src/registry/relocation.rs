@@ -268,7 +268,9 @@ impl ActiveGraph {
                     .endpoint_analysis(source_key.clone(), destination_key.clone());
                 let connected = !endpoint.corridor.is_empty();
                 if connected {
-                    connected_pairs = connected_pairs.saturating_add(1);
+                    connected_pairs = connected_pairs
+                        .checked_add(1)
+                        .assured("the pairs counted here are graph endpoints held in memory");
                 }
                 for covered in &endpoint.corridor {
                     if !selected.contains(covered) {

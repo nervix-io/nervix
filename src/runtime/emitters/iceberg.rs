@@ -356,8 +356,9 @@ impl IcebergEmitter {
         rejected_records: usize,
     ) -> usize {
         let records = pending_rows
-            .saturating_add(staged_rows)
-            .saturating_add(u64::try_from(rejected_records).unwrap_or(u64::MAX));
+            .checked_add(staged_rows)
+            .and_then(|rows| rows.checked_add(u64::try_from(rejected_records).unwrap_or(u64::MAX)))
+            .assured("every count totals rows this emitter already holds in memory");
         usize::try_from(records).unwrap_or(usize::MAX)
     }
 
@@ -672,8 +673,14 @@ impl IcebergEmitter {
             acks: batch.acks,
             domain_timestamp,
         });
-        self.pending_rows = self.pending_rows.saturating_add(rows);
-        self.pending_bytes = self.pending_bytes.saturating_add(bytes);
+        self.pending_rows = self
+            .pending_rows
+            .checked_add(rows)
+            .assured("both counts total rows this emitter already holds in memory");
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(bytes)
+            .assured("both counts estimate bytes of batches this emitter already holds");
         self.update_buffered_messages();
         if self.flush_at.is_none() {
             self.flush_at = Some(Instant::now() + self.flush_policy.interval());
@@ -862,8 +869,14 @@ impl IcebergEmitter {
                 acks: accepted_acks,
                 domain_timestamp,
             });
-            self.staged_rows = self.staged_rows.saturating_add(accepted_rows);
-            self.staged_bytes = self.staged_bytes.saturating_add(staged_bytes);
+            self.staged_rows = self
+                .staged_rows
+                .checked_add(accepted_rows)
+                .assured("both counts total rows this emitter already staged on disk");
+            self.staged_bytes = self
+                .staged_bytes
+                .checked_add(staged_bytes)
+                .assured("both counts total bytes this emitter already staged on disk");
         }
         self.pending_rows = 0;
         self.pending_bytes = 0;
@@ -1112,7 +1125,10 @@ impl IcebergEmitter {
     }
 
     fn next_staged_path(&mut self) -> PathBuf {
-        self.pending_sequence = self.pending_sequence.saturating_add(1);
+        self.pending_sequence = self
+            .pending_sequence
+            .checked_add(1)
+            .assured("an emitter cannot stage 2^64 batches in the lifetime of a node");
         self.staging_dir
             .path()
             .join(format!("batch-{}.arrow", self.pending_sequence))
@@ -1287,7 +1303,10 @@ impl IcebergEmitterClient {
         self.refresh_table().await?;
         let location_generator = DefaultLocationGenerator::new(self.table.metadata())
             .change_context(IcebergEmitterError::Commit)?;
-        self.data_file_sequence = self.data_file_sequence.saturating_add(1);
+        self.data_file_sequence = self
+            .data_file_sequence
+            .checked_add(1)
+            .assured("an emitter cannot commit 2^64 data files in the lifetime of a node");
         let file_name_generator = DefaultFileNameGenerator::new(
             format!("{}-{}", self.file_name_prefix, self.data_file_sequence),
             None,
@@ -1673,10 +1692,6 @@ mod tests {
     #[test]
     fn iceberg_drain_count_includes_pending_staged_and_rejected_records() {
         assert_eq!(IcebergEmitter::buffered_message_count(2, 3, 4), 9);
-        assert_eq!(
-            IcebergEmitter::buffered_message_count(u64::MAX, u64::MAX, usize::MAX),
-            usize::MAX
-        );
     }
 
     #[test]

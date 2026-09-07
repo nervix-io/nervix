@@ -2037,7 +2037,10 @@ fn apply_consensus_command(
         } => {
             if let Some(domain) = state.domains.get_mut(domain_id) {
                 domain.status = DomainStatus::Running;
-                domain.start_version = domain.start_version.saturating_add(1);
+                domain.start_version = domain
+                    .start_version
+                    .checked_add(1)
+                    .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
                 domain.last_start = start.clone();
                 domain.clock = clock.clone();
                 changes.domains_changed = true;
@@ -2516,7 +2519,10 @@ fn apply_transaction_step_effect(
         } => {
             if let Some(domain) = state.domains.get_mut(domain_id) {
                 domain.status = DomainStatus::Running;
-                domain.start_version = domain.start_version.saturating_add(1);
+                domain.start_version = domain
+                    .start_version
+                    .checked_add(1)
+                    .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
                 domain.last_start = start.clone();
                 domain.clock = clock.clone();
                 changes.domains_changed = true;
@@ -2570,7 +2576,9 @@ fn advance_resource_version(
     match resource_catalog_slot(resources, domain, identifier) {
         Ok(index) => {
             resources.next_version_by_resource.mutate_vec(|entries| {
-                entries[index].2 = entries[index].2.saturating_add(1);
+                entries[index].2 = entries[index].2.checked_add(1).assured(
+                    "a resource cannot be replaced 2^64 times in the lifetime of a cluster",
+                );
             });
         }
         Err(index) => {
@@ -2649,6 +2657,7 @@ mod tests {
     use std::{io::Cursor, sync::Arc as StdArc};
 
     use fjall::Database;
+    use meticulous::OptionExt as _;
     use nervix_models::{
         DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
         DomainStatus, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
@@ -2968,7 +2977,10 @@ mod tests {
                     owner: owner.clone(),
                     domain: domain_id.clone(),
                     at: nervix_models::Timestamp::from_unix_nanos(
-                        i64::try_from(at).unwrap_or_default().saturating_add(2),
+                        i64::try_from(at)
+                            .unwrap_or_default()
+                            .checked_add(2)
+                            .assured("the test clock counts from zero"),
                     ),
                     statement: Box::new(TransactionStatement {
                         source: "statement".to_string(),

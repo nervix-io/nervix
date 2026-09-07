@@ -1671,7 +1671,9 @@ impl Cluster {
                 && leader_status.raft_state.as_deref() == Some("Leader")
             {
                 if stable_leader.as_deref() == Some(leader_id.as_str()) {
-                    stable_count = stable_count.saturating_add(1);
+                    stable_count = stable_count
+                        .checked_add(1)
+                        .expect("a leader is polled a bounded number of times");
                 } else {
                     stable_leader = Some(leader_id.clone());
                     stable_count = 1;

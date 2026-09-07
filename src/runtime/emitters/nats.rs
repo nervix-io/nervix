@@ -118,15 +118,20 @@ impl NatsEmitter {
         attempts: usize,
         connected_once: bool,
     ) -> Duration {
-        if !connected_once && attempts <= 1 {
+        // The client counts reconnect attempts from one. The first attempt after a connection
+        // that never succeeded retries immediately; from the first delayed attempt onward each
+        // further attempt doubles the configured backoff.
+        let first_delayed_attempt = if connected_once { 1 } else { 2 };
+        let Some(retries) = attempts.checked_sub(first_delayed_attempt) else {
             return Duration::ZERO;
-        }
-        let retries = attempts.saturating_sub(if connected_once { 1 } else { 2 });
+        };
         let mut delay = policy.backoff;
         for _ in 0..retries {
             if delay >= policy.max_backoff {
                 return policy.max_backoff;
             }
+            // Saturation is the policy here: the backoff doubles until it reaches the configured
+            // ceiling and stays there, so a doubling that leaves `Duration` clamps to it too.
             delay = delay.saturating_mul(2).min(policy.max_backoff);
         }
         delay

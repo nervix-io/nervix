@@ -644,7 +644,11 @@ impl StreamFrameDecoder {
     fn read_capacity(&self) -> Result<usize, SyslogFrameError> {
         let cap = self
             .max_message_size
-            .saturating_add(MAX_OCTET_COUNT_DIGITS + 1);
+            .checked_add(MAX_OCTET_COUNT_DIGITS + 1)
+            .ok_or(SyslogFrameError::OversizedBufferedFrame {
+                maximum: self.max_message_size,
+            })?;
+        // The buffer is filled to at most `cap` bytes, so a longer one has no room left.
         let remaining = cap.saturating_sub(self.bytes.len());
         if remaining == 0 {
             Err(SyslogFrameError::OversizedBufferedFrame {
@@ -696,8 +700,12 @@ impl StreamFrameDecoder {
                 maximum: self.max_message_size,
             });
         }
-        let payload_start = delimiter + 1;
-        let frame_end = payload_start.saturating_add(length);
+        let payload_start = delimiter
+            .checked_add(1)
+            .verified("the delimiter position is an index into the buffered bytes");
+        let frame_end = payload_start
+            .checked_add(length)
+            .verified("the octet count checked above is at most the maximum message size");
         if self.bytes.len() < frame_end {
             return Ok(None);
         }
@@ -711,7 +719,8 @@ impl StreamFrameDecoder {
             let pending_payload_size = self
                 .bytes
                 .len()
-                .saturating_sub(usize::from(self.bytes.last() == Some(&b'\r')));
+                .checked_sub(usize::from(self.bytes.last() == Some(&b'\r')))
+                .verified("a trailing carriage return means the buffer holds at least one byte");
             if pending_payload_size > self.max_message_size {
                 return Err(SyslogFrameError::OversizedNonTransparentFrame {
                     maximum: self.max_message_size,

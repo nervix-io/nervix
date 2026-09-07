@@ -344,6 +344,8 @@ mod tests {
         let steps = if cfg!(miri) { 2_000 } else { 50_000 };
 
         for step in 0..steps {
+            // Wrapping is the meaning here: this is a linear congruential generator, whose
+            // recurrence is defined modulo 2^64.
             random = random
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);

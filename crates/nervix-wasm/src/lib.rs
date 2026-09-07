@@ -11,6 +11,7 @@ use std::{
 
 use bytes::Bytes;
 use flatbuffers::{Allocator, FlatBufferBuilder};
+use meticulous::OptionExt as _;
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
@@ -59,12 +60,13 @@ pub enum WasmProcessorError {
     #[error("wasm guest exhausted MAX FUEL {limit} during {operation}")]
     FuelExhausted { limit: u64, operation: &'static str },
     #[error(
-        "wasm guest exceeded MAX MEMORY {limit} bytes during {operation} (linear-memory total \
-         would be {desired} bytes)"
+        "wasm guest exceeded MAX MEMORY {limit} bytes during {operation} (growing linear memory \
+         by {growth} bytes past the {allocated} bytes already allocated)"
     )]
     MemoryLimitExceeded {
         limit: u64,
-        desired: u64,
+        allocated: u64,
+        growth: u64,
         operation: &'static str,
     },
     #[error("missing required export '{0}'")]
@@ -114,9 +116,10 @@ impl WasmProcessorError {
 }
 
 #[derive(Debug, Error)]
-#[error("guest linear memory total of {desired} bytes exceeds {limit} bytes")]
+#[error("growing guest linear memory by {growth} bytes past {allocated} exceeds {limit} bytes")]
 struct GuestMemoryLimitExceeded {
-    desired: usize,
+    allocated: usize,
+    growth: usize,
     limit: usize,
 }
 
@@ -147,24 +150,35 @@ impl ResourceLimiter for GuestMemoryLimiter {
         // Wasmtime calls `memory_grow_failed` synchronously after a permitted growth fails. If
         // another growth begins, the preceding one therefore succeeded and needs no rollback.
         self.pending_growth_bytes = 0;
-        let growth_bytes = desired.saturating_sub(current);
-        let desired_total = self.allocated_memory_bytes.saturating_add(growth_bytes);
-        if desired_total > self.max_memory_bytes {
-            Err(wasmtime::Error::new(GuestMemoryLimitExceeded {
-                desired: desired_total,
+        let growth_bytes = desired
+            .checked_sub(current)
+            .assured("wasmtime only asks to grow a memory to a size at or above its current one");
+        // Admission is a remaining budget rather than a projected total, so a growth request is
+        // never sized against a sum that could leave `usize`.
+        let remaining = self
+            .max_memory_bytes
+            .checked_sub(self.allocated_memory_bytes)
+            .verified("every permitted growth left the allocated total at or below the limit");
+        if growth_bytes > remaining {
+            return Err(wasmtime::Error::new(GuestMemoryLimitExceeded {
+                allocated: self.allocated_memory_bytes,
+                growth: growth_bytes,
                 limit: self.max_memory_bytes,
-            }))
-        } else {
-            self.allocated_memory_bytes = desired_total;
-            self.pending_growth_bytes = growth_bytes;
-            Ok(true)
+            }));
         }
+        self.allocated_memory_bytes = self
+            .allocated_memory_bytes
+            .checked_add(growth_bytes)
+            .verified("the remaining-budget check above bounds this sum by the configured limit");
+        self.pending_growth_bytes = growth_bytes;
+        Ok(true)
     }
 
     fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
         self.allocated_memory_bytes = self
             .allocated_memory_bytes
-            .saturating_sub(self.pending_growth_bytes);
+            .checked_sub(self.pending_growth_bytes)
+            .verified("the growth being rolled back was added to this total when it was permitted");
         self.pending_growth_bytes = 0;
         Ok(())
     }
@@ -194,7 +208,8 @@ fn wasm_limit_error(
         .downcast_ref::<GuestMemoryLimitExceeded>()
         .map(|exceeded| WasmProcessorError::MemoryLimitExceeded {
             limit: u64::try_from(exceeded.limit).unwrap_or(u64::MAX),
-            desired: u64::try_from(exceeded.desired).unwrap_or(u64::MAX),
+            allocated: u64::try_from(exceeded.allocated).unwrap_or(u64::MAX),
+            growth: u64::try_from(exceeded.growth).unwrap_or(u64::MAX),
             operation,
         })
 }
@@ -479,20 +494,55 @@ impl From<&ParseAsType> for WasmProcessorType {
     }
 }
 
+/// A serialized-size estimate for one guest protocol message, in bytes.
+///
+/// Every term is the length of a value already resident in memory or a fixed per-element overhead
+/// constant, so the running total is bounded by the address space those values already occupy. An
+/// estimate that leaves `usize` was therefore built from something other than the message about to
+/// be encoded, which is an invariant violation and not a size worth clamping.
+#[derive(Clone, Copy, Debug, Default)]
+struct CapacityHint(usize);
+
+impl CapacityHint {
+    const OVERFLOW: &'static str =
+        "a serialized-size estimate only sums lengths of values already held in memory";
+
+    const fn of(bytes: usize) -> Self {
+        Self(bytes)
+    }
+
+    fn plus(self, bytes: usize) -> Self {
+        Self(self.0.checked_add(bytes).assured(Self::OVERFLOW))
+    }
+
+    fn plus_all(self, bytes: impl IntoIterator<Item = usize>) -> Self {
+        bytes.into_iter().fold(self, Self::plus)
+    }
+
+    fn plus_each(self, count: usize, bytes_each: usize) -> Self {
+        self.plus(count.checked_mul(bytes_each).assured(Self::OVERFLOW))
+    }
+
+    const fn bytes(self) -> usize {
+        self.0
+    }
+}
+
 impl WasmBranchInit {
     fn serialized_capacity_hint(&self) -> usize {
-        self.domain_name
-            .len()
-            .saturating_add(self.domain_type.len())
-            .saturating_add(self.branch_key.as_ref().map_or(0, Vec::len))
-            .saturating_add(self.input_schema.serialized_capacity_hint())
-            .saturating_add(
+        const BRANCH_INIT_OVERHEAD: usize = 512;
+
+        CapacityHint::of(self.domain_name.len())
+            .plus(self.domain_type.len())
+            .plus(self.branch_key.as_ref().map_or(0, Vec::len))
+            .plus(self.input_schema.serialized_capacity_hint())
+            .plus_all(
                 self.output_schemas
                     .iter()
-                    .map(WasmProcessorSchema::serialized_capacity_hint)
-                    .fold(0_usize, usize::saturating_add),
+                    .map(WasmProcessorSchema::serialized_capacity_hint),
             )
-            .saturating_add(512)
+            .plus(BRANCH_INIT_OVERHEAD)
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::BranchInit {
@@ -512,10 +562,16 @@ impl WasmBranchInit {
 
 impl WasmProcessorSchema {
     fn serialized_capacity_hint(&self) -> usize {
-        self.fields
-            .iter()
-            .map(WasmProcessorField::serialized_capacity_hint)
-            .fold(self.name.len().saturating_add(96), usize::saturating_add)
+        const SCHEMA_OVERHEAD: usize = 96;
+
+        CapacityHint::of(self.name.len())
+            .plus(SCHEMA_OVERHEAD)
+            .plus_all(
+                self.fields
+                    .iter()
+                    .map(WasmProcessorField::serialized_capacity_hint),
+            )
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::ProcessorSchema {
@@ -532,10 +588,12 @@ impl WasmProcessorSchema {
 
 impl WasmProcessorField {
     fn serialized_capacity_hint(&self) -> usize {
-        self.name
-            .len()
-            .saturating_add(self.ty.serialized_capacity_hint())
-            .saturating_add(64)
+        const FIELD_OVERHEAD: usize = 64;
+
+        CapacityHint::of(self.name.len())
+            .plus(self.ty.serialized_capacity_hint())
+            .plus(FIELD_OVERHEAD)
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::ProcessorField {
@@ -549,11 +607,13 @@ impl WasmProcessorField {
 
 impl WasmProcessorType {
     fn serialized_capacity_hint(&self) -> usize {
+        const TYPE_OVERHEAD: usize = 64;
+
         match self {
-            Self::Array { element, .. } | Self::Vec { element } => {
-                64_usize.saturating_add(element.serialized_capacity_hint())
-            }
-            _ => 64,
+            Self::Array { element, .. } | Self::Vec { element } => CapacityHint::of(TYPE_OVERHEAD)
+                .plus(element.serialized_capacity_hint())
+                .bytes(),
+            _ => TYPE_OVERHEAD,
         }
     }
 
@@ -793,24 +853,25 @@ impl WasmEnvelope {
             Self::Input {
                 arrow_ipc_batch,
                 acks,
-            } => arrow_ipc_batch
-                .len()
-                .saturating_add(acks.serialized_capacity_hint())
-                .saturating_add(ROOT_OVERHEAD),
+            } => CapacityHint::of(arrow_ipc_batch.len())
+                .plus(acks.serialized_capacity_hint())
+                .plus(ROOT_OVERHEAD)
+                .bytes(),
             Self::Output {
                 generated_arrow_ipc_batch,
                 outputs,
-            } => outputs.iter().fold(
-                generated_arrow_ipc_batch
-                    .len()
-                    .saturating_add(ROOT_OVERHEAD),
-                |size, output| {
-                    size.saturating_add(output.output_relay.len())
-                        .saturating_add(output.columns.len().saturating_mul(COLUMN_OVERHEAD))
-                        .saturating_add(output.acks.serialized_capacity_hint())
-                        .saturating_add(ROUTED_OUTPUT_OVERHEAD)
-                },
-            ),
+            } => outputs
+                .iter()
+                .fold(
+                    CapacityHint::of(generated_arrow_ipc_batch.len()).plus(ROOT_OVERHEAD),
+                    |size, output| {
+                        size.plus(output.output_relay.len())
+                            .plus_each(output.columns.len(), COLUMN_OVERHEAD)
+                            .plus(output.acks.serialized_capacity_hint())
+                            .plus(ROUTED_OUTPUT_OVERHEAD)
+                    },
+                )
+                .bytes(),
         }
     }
 
@@ -892,32 +953,36 @@ impl WasmAckSidecar {
         const SIDECAR_OVERHEAD: usize = 128;
         const SET_OVERHEAD: usize = 64;
 
-        let token_count = self
-            .rows
-            .iter()
-            .map(|row| row.tokens.len())
-            .chain(self.acked.iter().map(|set| set.tokens.len()))
-            .chain(self.nacked.iter().map(|set| set.tokens.len()))
-            .chain(self.message_errors.iter().map(|set| set.tokens.len()))
-            .fold(0_usize, usize::saturating_add);
-        let set_count = self
-            .rows
-            .len()
-            .saturating_add(self.acked.len())
-            .saturating_add(self.nacked.len())
-            .saturating_add(self.message_errors.len());
-        let reason_bytes = self
-            .nacked
-            .iter()
-            .map(|set| set.reason.len())
-            .chain(self.message_errors.iter().map(|set| set.reason.len()))
-            .fold(0_usize, usize::saturating_add);
+        let token_count = CapacityHint::default()
+            .plus_all(
+                self.rows
+                    .iter()
+                    .map(|row| row.tokens.len())
+                    .chain(self.acked.iter().map(|set| set.tokens.len()))
+                    .chain(self.nacked.iter().map(|set| set.tokens.len()))
+                    .chain(self.message_errors.iter().map(|set| set.tokens.len())),
+            )
+            .bytes();
+        let set_count = CapacityHint::of(self.rows.len())
+            .plus(self.acked.len())
+            .plus(self.nacked.len())
+            .plus(self.message_errors.len())
+            .bytes();
+        let reason_bytes = CapacityHint::default()
+            .plus_all(
+                self.nacked
+                    .iter()
+                    .map(|set| set.reason.len())
+                    .chain(self.message_errors.iter().map(|set| set.reason.len())),
+            )
+            .bytes();
 
-        token_count
-            .saturating_mul(std::mem::size_of::<u64>())
-            .saturating_add(set_count.saturating_mul(SET_OVERHEAD))
-            .saturating_add(reason_bytes)
-            .saturating_add(SIDECAR_OVERHEAD)
+        CapacityHint::default()
+            .plus_each(token_count, std::mem::size_of::<u64>())
+            .plus_each(set_count, SET_OVERHEAD)
+            .plus(reason_bytes)
+            .plus(SIDECAR_OVERHEAD)
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::AckSidecar {
@@ -1106,7 +1171,10 @@ impl BranchStore {
             return ERR_INVALID_SIZE.into();
         };
         let handle = WasmTimeoutHandle(self.next_timeout_handle);
-        self.next_timeout_handle = self.next_timeout_handle.saturating_add(1);
+        self.next_timeout_handle = self
+            .next_timeout_handle
+            .checked_add(1)
+            .assured("a guest cannot request 2^64 timeouts within one branch instance");
         self.timeout_requests.push(WasmTimeoutRequest {
             handle,
             requested_at: self.now(),
@@ -1429,11 +1497,13 @@ impl WasmBranchInstance {
         let mut pending = Vec::new();
         let mut due = Vec::new();
         for request in std::mem::take(&mut self.store.data_mut().timeout_requests) {
-            let deadline = request
-                .requested_at
-                .unix_nanos()
-                .saturating_add(i64::try_from(request.delay.as_nanos()).unwrap_or(i64::MAX));
-            if deadline <= now.unix_nanos() {
+            // A guest may ask for a delay that runs past the representable timestamp range. Such
+            // a request has no deadline this clock can reach, so it stays pending forever rather
+            // than becoming due immediately.
+            let deadline = i64::try_from(request.delay.as_nanos())
+                .ok()
+                .and_then(|delay| request.requested_at.unix_nanos().checked_add(delay));
+            if deadline.is_some_and(|deadline| deadline <= now.unix_nanos()) {
                 due.push(request);
             } else {
                 pending.push(request);
@@ -1563,10 +1633,13 @@ impl WasmBranchInstance {
                         limit: self.max_guest_buffer_bytes,
                     });
                 }
+                // Doubling is a growth policy rather than an exact size: the target is clamped
+                // to the configured guest buffer limit, so a doubling that leaves `usize` clamps
+                // to that same limit.
                 let growth_target = capacity
-                    .saturating_mul(2)
-                    .max(bytes.len())
-                    .min(self.max_guest_buffer_bytes);
+                    .checked_mul(2)
+                    .unwrap_or(self.max_guest_buffer_bytes)
+                    .clamp(bytes.len(), self.max_guest_buffer_bytes);
                 let ptr = self.allocate_guest_buffer(growth_target).await?;
                 self.memory
                     .write(&mut self.store, ptr as usize, bytes)
@@ -3674,7 +3747,8 @@ mod tests {
             error,
             WasmProcessorError::MemoryLimitExceeded {
                 limit: 131_072,
-                desired: 196_608,
+                allocated: 131_072,
+                growth: 65_536,
                 operation: "nervix_process_batch"
             }
         ));
@@ -3706,7 +3780,8 @@ mod tests {
             error,
             WasmProcessorError::MemoryLimitExceeded {
                 limit: 65_536,
-                desired: 131_072,
+                allocated: 0,
+                growth: 131_072,
                 operation: "module instantiation"
             }
         ));

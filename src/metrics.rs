@@ -7,7 +7,7 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
     BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
@@ -1130,7 +1130,10 @@ struct AggregatedCounterSummary {
 
 impl AggregatedCounterSummary {
     fn add(&mut self, summary: CounterSummary) {
-        self.value = self.value.saturating_add(summary.value);
+        self.value = self
+            .value
+            .checked_add(summary.value)
+            .assured("both totals count events this cluster already observed");
         self.wall_rate_per_sec += summary.wall_rate_per_sec;
         self.domain_rate_per_sec =
             add_optional_metric(self.domain_rate_per_sec, summary.domain_rate_per_sec);
@@ -1919,7 +1922,10 @@ impl RuntimeMetrics {
         match self.branch_instance_references.entry(metric_key) {
             Entry::Occupied(mut entry) => {
                 let references = entry.get_mut();
-                references.count = references.count.saturating_add(1);
+                references.count = references
+                    .count
+                    .checked_add(1)
+                    .assured("the references counted here are branch instances held in memory");
                 references.eviction_reason = None;
             }
             Entry::Vacant(entry) => {
@@ -3569,9 +3575,20 @@ fn add_dataflow_statistics(target: &mut DataflowStatistics, source: DataflowStat
     target.messages_per_second += source.messages_per_second;
     target.bytes_per_second += source.bytes_per_second;
     target.batches_per_second += source.batches_per_second;
-    target.messages_total = target.messages_total.saturating_add(source.messages_total);
-    target.bytes_total = target.bytes_total.saturating_add(source.bytes_total);
-    target.batches_total = target.batches_total.saturating_add(source.batches_total);
+    const OBSERVED_TOTALS: &str = "both totals count dataflow this cluster already observed";
+
+    target.messages_total = target
+        .messages_total
+        .checked_add(source.messages_total)
+        .assured(OBSERVED_TOTALS);
+    target.bytes_total = target
+        .bytes_total
+        .checked_add(source.bytes_total)
+        .assured(OBSERVED_TOTALS);
+    target.batches_total = target
+        .batches_total
+        .checked_add(source.batches_total)
+        .assured(OBSERVED_TOTALS);
     target.relay_buffer_capacity =
         max_optional_u64(target.relay_buffer_capacity, source.relay_buffer_capacity);
     target.relay_buffer_len_p50 =
@@ -3936,7 +3953,8 @@ mod tests {
         assert!(
             messages
                 .distinct_values()
-                .saturating_mul(std::mem::size_of::<u64>())
+                .checked_mul(std::mem::size_of::<u64>())
+                .assured("a histogram's distinct value count is bounded by its configured buckets")
                 <= MAX_INTERNAL_BUCKET_BYTES,
             "messages_per_batch histogram count storage is too large: {} values",
             messages.distinct_values()
@@ -3946,7 +3964,8 @@ mod tests {
         assert!(
             relay_buffer
                 .distinct_values()
-                .saturating_mul(std::mem::size_of::<u64>())
+                .checked_mul(std::mem::size_of::<u64>())
+                .assured("a histogram's distinct value count is bounded by its configured buckets")
                 <= MAX_INTERNAL_BUCKET_BYTES,
             "relay_buffer_len histogram count storage is too large: {} values",
             relay_buffer.distinct_values()

@@ -3,6 +3,7 @@ use std::{ops::Range, sync::Arc};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use meticulous::OptionExt as _;
 use nervix_wasm_protocol::{
     AckSidecar, Envelope, EnvelopeRef, OutputColumnRef, ProcessorType, ProtocolError, RoutedOutput,
 };
@@ -69,9 +70,14 @@ impl InputBatch {
     }
 
     pub fn row_count(&self) -> u64 {
-        self.batches.iter().fold(0_u64, |rows, batch| {
-            rows.saturating_add(batch.num_rows() as u64)
-        })
+        self.batches
+            .iter()
+            .try_fold(0_u64, |rows, batch| {
+                u64::try_from(batch.num_rows())
+                    .ok()
+                    .and_then(|batch_rows| rows.checked_add(batch_rows))
+            })
+            .assured("the rows counted here belong to batches this guest already holds in memory")
     }
 }
 

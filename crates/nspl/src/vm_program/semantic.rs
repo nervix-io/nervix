@@ -1,5 +1,6 @@
 use ahash_compile_time::{HashSet, HashSetExt};
 use arrow_schema::{DataType, Schema, TimeUnit};
+use meticulous::OptionExt as _;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator as ModelBinaryOperator,
     CaseBranch as ModelCaseBranch, Expression as ModelExpression, FieldReference, FieldScope,
@@ -661,7 +662,10 @@ pub fn lower_route_construction(
     let operation_count = construction.assignments.len()
         + usize::from(construction.where_clause.is_some())
         + construction.invocations.len();
-    let span: Span = (0..operation_count.saturating_add(1)).into();
+    let span: Span = (0..operation_count
+        .checked_add(1)
+        .assured("the operations counted here belong to one construction held in memory"))
+        .into();
     let set = construction
         .assignments
         .iter()

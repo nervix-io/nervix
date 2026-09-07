@@ -349,6 +349,8 @@ mod tests {
                 return 0;
             }
             let b = self.bytes[self.index % self.bytes.len()];
+            // Wrapping is the meaning here: this cursor only ever indexes modulo the seed length,
+            // so a fuzz run long enough to wrap it simply starts the seed over.
             self.index = self.index.wrapping_add(1);
             b
         }

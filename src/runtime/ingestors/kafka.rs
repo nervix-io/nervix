@@ -198,7 +198,10 @@ impl KafkaIngestor {
 
                     if current_partitions != observed_partitions {
                         observed_partitions = current_partitions.clone();
-                        let rebalance_epoch = rebalance_tx.borrow().saturating_add(1);
+                        let rebalance_epoch = rebalance_tx
+                            .borrow()
+                            .checked_add(1)
+                            .assured("an ingestor cannot observe 2^64 partition rebalances");
                         let _ = rebalance_tx.send(rebalance_epoch);
                         info!(
                             domain = task_domain.as_str(),

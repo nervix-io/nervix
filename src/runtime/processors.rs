@@ -1,6 +1,7 @@
 use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
+use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction,
     CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ErrorPolicies, FieldName,
@@ -356,7 +357,10 @@ impl RuntimeInputCollector {
     }
 
     pub(super) fn push(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
-        self.pending_bytes = self.pending_bytes.saturating_add(batch.estimated_bytes());
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
         self.deadline.get_or_insert_with(|| {
             super::checked_add_duration_to_timestamp(now, self.policy.interval)
@@ -1043,7 +1047,10 @@ impl ReordererOutputBuffer {
         row_order: Arc<Vec<ReordererRowOrder>>,
         received_at: Timestamp,
     ) {
-        self.estimated_bytes = self.estimated_bytes.saturating_add(batch.estimated_bytes());
+        self.estimated_bytes = self
+            .estimated_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(ReordererPendingBatch {
             received_at,
             row_order,
@@ -1157,7 +1164,10 @@ pub(super) struct InferencerOutputBuffer {
 
 impl InferencerOutputBuffer {
     pub(super) fn push(&mut self, batch: RelayRecordBatch) {
-        self.estimated_bytes = self.estimated_bytes.saturating_add(batch.estimated_bytes());
+        self.estimated_bytes = self
+            .estimated_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
     }
 

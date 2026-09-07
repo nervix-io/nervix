@@ -411,7 +411,11 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
     }
 
     fn batch_shape(&self, slice_shape: &[usize], batch_size: usize) -> Result<Vec<usize>, String> {
-        let expected_slice_rank = self.dimensions.len().saturating_sub(1);
+        let expected_slice_rank = self
+            .dimensions
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| "batched tensor schema has no dimensions".to_string())?;
         if slice_shape.len() != expected_slice_rank {
             return Err(format!(
                 "tensor slice rank {} does not match declared rank {}",
@@ -521,7 +525,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
                 "batched tensor slice contains {actual} values, expected {expected_slice_len}"
             ));
         }
-        let mut joined = Vec::with_capacity(expected_slice_len.saturating_mul(slices.len()));
+        let joined_len = expected_slice_len
+            .checked_mul(slices.len())
+            .ok_or_else(|| "batched tensor joined element count overflowed".to_string())?;
+        let mut joined = Vec::with_capacity(joined_len);
         for outer_index in 0..outer {
             for slice in slices {
                 let start = outer_index * inner;
@@ -543,7 +550,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             .ok_or_else(|| "batched tensor schema has no BATCH axis".to_string())?;
         let outer = shape[..batch_axis].iter().product::<usize>();
         let inner = shape[batch_axis + 1..].iter().product::<usize>();
-        let expected = outer.saturating_mul(batch_size).saturating_mul(inner);
+        let expected = outer
+            .checked_mul(batch_size)
+            .and_then(|count| count.checked_mul(inner))
+            .ok_or_else(|| "batched tensor output element count overflowed".to_string())?;
         if values.len() != expected {
             return Err(format!(
                 "batched output contains {} values, expected {}",
@@ -551,7 +561,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
                 expected
             ));
         }
-        let mut slices = vec![Vec::with_capacity(outer.saturating_mul(inner)); batch_size];
+        let slice_len = outer
+            .checked_mul(inner)
+            .ok_or_else(|| "batched tensor slice element count overflowed".to_string())?;
+        let mut slices = vec![Vec::with_capacity(slice_len); batch_size];
         for outer_index in 0..outer {
             for (batch_index, slice) in slices.iter_mut().enumerate() {
                 let start = (outer_index * batch_size + batch_index) * inner;

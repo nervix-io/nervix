@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
+use meticulous::OptionExt as _;
 use serde::{Deserialize, Deserializer, de};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -300,7 +301,9 @@ impl LoadShape {
                 keys_per_cycle,
                 copies_per_key,
                 ..
-            } => keys_per_cycle.saturating_mul(*copies_per_key),
+            } => keys_per_cycle.checked_mul(*copies_per_key).verified(
+                "validate rejects a load shape whose cycle exceeds the supported message count",
+            ),
         }
     }
 
@@ -316,14 +319,18 @@ impl LoadShape {
     /// Records the measured path owes for `cycles` complete cycles.
     #[must_use]
     pub fn expected_output_records(&self, cycles: u64) -> u64 {
-        cycles.saturating_mul(self.output_records_per_cycle())
+        cycles
+            .checked_mul(self.output_records_per_cycle())
+            .assured("a run cannot complete more cycles than its message budget allows")
     }
 
     /// Input messages `records` output records account for, used as the live backlog signal while
     /// load is being generated.
     #[must_use]
     pub fn input_messages_for_output_records(&self, records: u64) -> u64 {
-        (records / self.output_records_per_cycle()).saturating_mul(self.messages_per_cycle())
+        (records / self.output_records_per_cycle())
+            .checked_mul(self.messages_per_cycle())
+            .assured("the records counted here were produced by this same run")
     }
 
     fn validate(&self) -> Result<(), String> {

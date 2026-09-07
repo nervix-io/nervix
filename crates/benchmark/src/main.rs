@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
+use meticulous::OptionExt as _;
 use nervix_benchmark::{
     AbArm, AbSummary, BenchmarkCatalog, BenchmarkDependency, BenchmarkRunFailure,
     BenchmarkSuiteReport, ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape,
@@ -1250,11 +1251,16 @@ async fn run_load_driver(
     }
     fs::write(&go_file, b"go\n")?;
 
+    const COMPLETION_GRACE_SECONDS: u64 = 30;
+
     let completion_timeout = Duration::from_secs(
         resolved
-            .duration_seconds
-            .saturating_add(resolved.wait_timeout.as_secs().saturating_mul(4))
-            .saturating_add(30),
+            .wait_timeout
+            .as_secs()
+            .checked_mul(4)
+            .and_then(|wait| wait.checked_add(resolved.duration_seconds))
+            .and_then(|total| total.checked_add(COMPLETION_GRACE_SECONDS))
+            .assured("a benchmark run is configured in seconds, far below the u64 second range"),
     );
     let completion_deadline = tokio::time::Instant::now() + completion_timeout;
     let status = loop {

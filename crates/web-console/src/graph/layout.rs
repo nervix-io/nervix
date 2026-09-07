@@ -723,6 +723,8 @@ impl<'a> Builder<'a> {
 
     /// Column x positions, widening each gutter to hold the edges and badges that cross it.
     fn assign_columns_x(&mut self) {
+        // One gutter sits between each adjacent pair of columns, so a graph with no columns
+        // has no gutters.
         let mut lanes = vec![0_usize; self.columns.len().saturating_sub(1)];
         for segment in &self.segments {
             let gutter = self.slots[segment.from].column;
