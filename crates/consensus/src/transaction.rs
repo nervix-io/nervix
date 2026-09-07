@@ -1,3 +1,4 @@
+use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use nervix_models::{
     DomainClockState, DomainName, DomainSchedule, DomainStartPoint, DomainState, QuiesceLevel,
@@ -14,7 +15,7 @@ pub struct TransactionStatement {
 
 impl TransactionStatement {
     pub fn source_bytes(&self) -> u64 {
-        u64::try_from(self.source.len()).unwrap_or(u64::MAX)
+        self.source.len().arch_into()
     }
 }
 

@@ -1,5 +1,6 @@
 use std::sync::Arc as StdArc;
 
+use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
@@ -502,7 +503,7 @@ impl RelayRecordBatch {
     }
 
     pub(super) fn message_count(&self) -> u64 {
-        u64::try_from(self.batch.batch().num_rows()).unwrap_or(u64::MAX)
+        self.batch.batch().num_rows().arch_into()
     }
 
     pub(super) fn arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
@@ -634,6 +635,7 @@ pub(super) fn build_stream_record_batch_preserving_acks(
 mod tests {
     use std::{cell::Cell, sync::Arc as StdArc};
 
+    use meticulous::ResultExt as _;
     use nervix_models::{
         CreateSchema, FieldName, ModelName, ParseAsType, SchemaField, SchemaName, Timestamp,
     };
@@ -679,10 +681,12 @@ mod tests {
                     row,
                     RuntimeRecordMetadata::from_ingested_at_watermarks(
                         Timestamp::from_unix_nanos(
-                            i64::try_from(row).expect("test row must fit i64"),
+                            i64::try_from(row)
+                                .assured("the test fixture allocates fewer than i64::MAX rows"),
                         ),
                         Timestamp::from_unix_nanos(
-                            i64::try_from(row).expect("test row must fit i64"),
+                            i64::try_from(row)
+                                .assured("the test fixture allocates fewer than i64::MAX rows"),
                         ),
                     ),
                 )

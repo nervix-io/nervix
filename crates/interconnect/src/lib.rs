@@ -7,8 +7,10 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use dashmap::DashMap;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use meticulous::ResultExt as _;
 use nervix_models::{
     ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
     LookupName, ModelKind, ModelName, RelayName, RemoteAckRegistration, RemoteAckResolution,
@@ -1173,8 +1175,14 @@ where
     W: AsyncWrite + Unpin,
 {
     let bytes = encode_wire_envelope(envelope)?;
+    let frame_size = u32::try_from(bytes.len()).map_err(|_| {
+        TransportError::Encode(format!(
+            "wire envelope length {} exceeds u32::MAX",
+            bytes.len()
+        ))
+    })?;
     writer
-        .write_u32(bytes.len() as u32)
+        .write_u32(frame_size)
         .await
         .map_err(TransportError::Io)?;
     writer.write_all(&bytes).await.map_err(TransportError::Io)?;
@@ -1188,7 +1196,11 @@ async fn read_wire_envelope<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let frame_size = reader.read_u32().await.map_err(TransportError::Io)? as usize;
+    let frame_size = reader
+        .read_u32()
+        .await
+        .map_err(TransportError::Io)?
+        .arch_into();
     if frame_size > max_frame_bytes {
         return Err(TransportError::FrameTooLarge {
             size: frame_size,
@@ -1689,8 +1701,7 @@ impl<'a> WireCursor<'a> {
     }
 
     fn read_len(&mut self) -> Result<usize, TransportError> {
-        usize::try_from(self.read_u32()?)
-            .map_err(|_| TransportError::Decode("wire length does not fit usize".to_string()))
+        Ok(self.read_u32()?.arch_into())
     }
 
     fn read_bytes(&mut self) -> Result<&'a [u8], TransportError> {
@@ -1846,7 +1857,9 @@ impl<'a> WireCursor<'a> {
 fn introduction_message(node_id: &ClusterNodeName) -> Vec<u8> {
     let node_id = node_id.as_str();
     let mut data = Vec::with_capacity(4 + node_id.len());
-    data.extend_from_slice(&(node_id.len() as u32).to_be_bytes());
+    let node_id_len = u32::try_from(node_id.len())
+        .assured("ClusterNodeName validation bounds every node identifier below u32::MAX bytes");
+    data.extend_from_slice(&node_id_len.to_be_bytes());
     data.extend_from_slice(node_id.as_bytes());
     data
 }

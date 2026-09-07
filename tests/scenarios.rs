@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use arch_into::ArchInto as _;
 use arrow_array::{
     Array, BooleanArray, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
     TimestampMicrosecondArray, UInt64Array,
@@ -36,6 +37,7 @@ use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalog, RestCatalogBuilder,
 };
 use iceberg_storage_opendal::OpenDalStorageFactory;
+use meticulous::ResultExt as _;
 use mongodb::{
     Client as MongoDbClient,
     bson::{Bson as MongoDbBson, Document as MongoDbDocument, doc as mongodb_doc},
@@ -2083,8 +2085,7 @@ async fn given_transaction_source_byte_limit_is_configured(
         world.cluster.is_none(),
         "transaction source byte limit must be configured before cluster startup"
     );
-    world.cluster_config.transaction_max_source_bytes =
-        u64::try_from(limit).expect("transaction source byte limit must fit u64");
+    world.cluster_config.transaction_max_source_bytes = limit.arch_into();
 }
 
 #[given(expr = "the concurrent transaction limit is configured as {int}")]
@@ -4817,8 +4818,9 @@ async fn when_browser_viewport_is_resized(world: &mut ScenarioWorld, width: usiz
         .as_ref()
         .expect("a browser page must be opened before viewport changes");
     page.set_viewport_size(Viewport {
-        width: width as u32,
-        height: height as u32,
+        width: u32::try_from(width).assured("browser viewport widths in cucumber features fit u32"),
+        height: u32::try_from(height)
+            .assured("browser viewport heights in cucumber features fit u32"),
     })
     .await
     .expect("browser viewport must be resizable");
@@ -5440,7 +5442,7 @@ async fn then_selector_contains_text_for_milliseconds(
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_millis(duration_milliseconds as u64);
+    let deadline = Instant::now() + Duration::from_millis(duration_milliseconds.arch_into());
     loop {
         tokio::task::consume_budget().await;
         let texts = locator
@@ -9291,7 +9293,8 @@ async fn given_kafka_topic_exists_with_partitions(
     partitions: usize,
 ) {
     let topic = expand_placeholders(world, &topic);
-    let partitions = i32::try_from(partitions).expect("partition count must fit i32");
+    let partitions =
+        i32::try_from(partitions).assured("Kafka partition counts in cucumber features fit i32");
     world
         .cluster()
         .ensure_kafka_topic_partitions(&topic, partitions)
@@ -10027,7 +10030,8 @@ async fn when_kafka_message_is_published_to_partition(
     #[step] step: &Step,
 ) {
     let topic = expand_placeholders(world, &topic);
-    let partition = i32::try_from(partition).expect("partition id must fit i32");
+    let partition =
+        i32::try_from(partition).assured("Kafka partition ids in cucumber features fit i32");
     let payload = expand_placeholders(world, docstring(step));
     world
         .cluster()
@@ -10045,7 +10049,8 @@ async fn when_kafka_message_with_headers_is_published_to_partition(
     #[step] step: &Step,
 ) {
     let topic = expand_placeholders(world, &topic);
-    let partition = i32::try_from(partition).expect("partition id must fit i32");
+    let partition =
+        i32::try_from(partition).assured("Kafka partition ids in cucumber features fit i32");
     let payload = expand_placeholders(world, docstring(step));
     let headers = headers
         .split(',')
@@ -10071,7 +10076,8 @@ async fn when_kafka_topic_partition_count_is_changed_to(
     partitions: usize,
 ) {
     let topic = expand_placeholders(world, &topic);
-    let partitions = i32::try_from(partitions).expect("partition count must fit i32");
+    let partitions =
+        i32::try_from(partitions).assured("Kafka partition counts in cucumber features fit i32");
     world
         .cluster()
         .ensure_kafka_topic_partitions(&topic, partitions)
@@ -10086,7 +10092,8 @@ async fn when_kafka_topic_is_reset_to_partitions(
     partitions: usize,
 ) {
     let topic = expand_placeholders(world, &topic);
-    let partitions = i32::try_from(partitions).expect("partition count must fit i32");
+    let partitions =
+        i32::try_from(partitions).assured("Kafka partition counts in cucumber features fit i32");
     world
         .cluster()
         .reset_kafka_topic_partitions(&topic, partitions)
@@ -11196,7 +11203,8 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_to_partition_y
     let duration =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
-    let partition = i32::try_from(partition).expect("partition id must fit i32");
+    let partition =
+        i32::try_from(partition).assured("Kafka partition ids in cucumber features fit i32");
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
@@ -13593,8 +13601,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
                     message.payload
                 )
             });
-        let expected_u64 =
-            u64::try_from(expected_sequence).expect("expected sequence must fit u64");
+        let expected_u64 = expected_sequence.arch_into();
         assert_eq!(
             actual_sequence,
             expected_u64,

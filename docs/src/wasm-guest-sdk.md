@@ -95,9 +95,12 @@ impl Processor for SeverityBucketer {
         }
 
         let mut output = OutputEnvelope::new();
-        let bucket =
-            output.add_generated_column(Arc::new(StringArray::from(buckets)) as ArrayRef, false);
-        let input_fields = ctx.branch().input_schema().fields.len() as u32;
+        let bucket = output.add_generated_column(
+            Arc::new(StringArray::from(buckets)) as ArrayRef,
+            false,
+        );
+        let input_fields = u32::try_from(ctx.branch().input_schema().fields.len())
+            .map_err(|_| GuestError::InvalidSize)?;
         let mut columns = (0..input_fields)
             .map(|column_index| OutputColumnRef::Input { column_index })
             .collect::<Vec<_>>();

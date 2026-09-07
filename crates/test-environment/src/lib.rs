@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use tempfile::{TempDir, tempdir, tempdir_in};
 use testcontainers::{
@@ -1794,7 +1795,8 @@ fn dependency_configuration_hash(role: &str) -> String {
     hasher.update(&[0]);
     hasher.update(DEPENDENCY_CONFIGURATION_SOURCE);
     for file in DEPENDENCY_CONFIGURATION_FILES {
-        hasher.update(&(file.len() as u64).to_le_bytes());
+        let file_len: u64 = file.len().arch_into();
+        hasher.update(&file_len.to_le_bytes());
         hasher.update(file);
     }
     hasher.finalize().to_hex().to_string()

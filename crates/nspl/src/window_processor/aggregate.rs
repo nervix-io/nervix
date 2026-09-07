@@ -603,7 +603,8 @@ fn linear_histogram_config<'src>(
         )
     })?;
     Ok(WindowLinearHistogramConfig {
-        buckets: buckets as usize,
+        buckets: usize::try_from(buckets)
+            .verified("the bucket count was checked to be a positive i64 above"),
         min,
         max,
         delay,

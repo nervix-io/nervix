@@ -2097,9 +2097,7 @@ impl DomainState {
                             reason: "WASM processor MAX FUEL must be greater than zero".to_string(),
                         }));
                     }
-                    if processor.limits.max_memory_bytes == 0
-                        || usize::try_from(processor.limits.max_memory_bytes).is_err()
-                    {
+                    if processor.limits.max_memory_bytes == 0 {
                         return Err(Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),

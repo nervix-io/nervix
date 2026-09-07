@@ -10,7 +10,7 @@ use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
@@ -326,7 +326,8 @@ fn App() -> impl IntoView {
             suggestions.set(Vec::new());
             return;
         }
-        let cursor = value.len() as u32;
+        let cursor = u32::try_from(value.len())
+            .assured("WebAssembly linear memory limits input lengths to u32");
         let request = nervix_proto::SessionRequest {
             request: Some(nervix_proto::session_request::Request::Suggest(
                 nervix_proto::SuggestRequest {
@@ -1663,8 +1664,10 @@ fn is_domainless_server_command(command: &str) -> bool {
 }
 
 fn diagnostic_line(query: &str, diagnostic: nervix_proto::Diagnostic) -> TermLine {
-    let span_start = diagnostic.span_start as usize;
-    let span_end = diagnostic.span_end as usize;
+    let span_start = usize::try_from(diagnostic.span_start)
+        .assured("supported browser and test targets have at least 32-bit pointers");
+    let span_end = usize::try_from(diagnostic.span_end)
+        .assured("supported browser and test targets have at least 32-bit pointers");
     if span_start < span_end && span_end <= query.len() {
         TermLine::output(format!(
             "- {} at {}..{}: {}",
