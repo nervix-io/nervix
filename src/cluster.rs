@@ -1,3 +1,14 @@
+//! Who is in the cluster, and how to reach them.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Gossip membership: the node's advertised addresses, the peer set, liveness, and the
+//!   UDP socket bound before gossip starts so the port is claimed once.
+//! - **Depends on.** `chitchat`, the vocabulary's node names, and the gossip view types
+//!   consensus reconciles membership from.
+//! - **Must not know.** Domains, graphs, schedules or the runtime. Membership is the whole answer
+//!   it gives.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, io,

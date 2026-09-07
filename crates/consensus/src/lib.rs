@@ -1,3 +1,13 @@
+//! Raft replication of the control-plane state a Nervix cluster agrees on.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The log store, the state machine over the replicated state, snapshotting, leadership
+//!   observation, and the HTTP network between peers.
+//! - **Depends on.** The vocabulary for the state it replicates, and `fjall` for storage.
+//! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
+//!   and scheduling belong above; this crate agrees on values and hands them back.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Cursor},

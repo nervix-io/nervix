@@ -30,6 +30,14 @@
 //!
 //! nervix_wasm_sdk::export_processor!(Passthrough);
 //! ```
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** The complete guest half of the ABI: the reusable linear-memory buffer, envelope
+//!   encoding and decoding, the emit queue, error latching, panic conversion and snapshot plumbing.
+//! - **Depends on.** `nervix-wasm-protocol` and Arrow.
+//! - **Must not know.** The host, the server, the Models or NSPL. It is compiled into user guests
+//!   and ships on its own.
 
 pub mod abi;
 mod context;

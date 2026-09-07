@@ -1,4 +1,5 @@
 [package]
+description = "Authenticated node-to-node transport for Nervix clusters: TLS, framing, backpressure and envelopes"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-interconnect"

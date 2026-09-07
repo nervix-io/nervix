@@ -1,3 +1,13 @@
+//! The external services the Nervix test and benchmark suites run against.
+//!
+//! Outside the layer order: a harness. It may name any layer, and no product code may name it.
+//!
+//! - **Owns.** Container lifecycle, the addresses and TLS material a run is given, and the
+//!   parallelism budget it is allowed.
+//! - **Depends on.** Container and process management.
+//! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
+//!   are always provisioned explicitly, never as a side effect of the product starting.
+
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},

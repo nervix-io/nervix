@@ -1,5 +1,6 @@
 [package]
 build = "build.rs"
+description = "The Nervix server: registry, runtime, control plane and the session, HTTP and cluster edges"
 edition.workspace = true
 name = "nervix-server"
 version.workspace = true

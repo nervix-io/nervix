@@ -2,6 +2,14 @@
 //!
 //! Decoding first produces verified borrowed views. Large Arrow IPC vectors stay
 //! borrowed from the FlatBuffer until a caller explicitly asks for an owned model.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The FlatBuffers schema of the ABI, its encoders, its verified decoders, and the
+//!   borrowed views decoding produces.
+//! - **Depends on.** `flatbuffers`.
+//! - **Must not know.** Anything in Nervix, deliberately. Guests link this crate, so a Model or a
+//!   name type named here would pull the server's vocabulary into every guest.
 
 use flatbuffers::{Allocator, FlatBufferBuilder, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};

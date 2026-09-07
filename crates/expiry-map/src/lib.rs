@@ -1,3 +1,13 @@
+//! A hash-indexed map that keeps its values in a caller-defined expiration order.
+//!
+//! Layer: primitives.
+//!
+//! - **Owns.** The map: hash lookup, the intrusive order, and the pointer discipline that keeps the
+//!   two views of an entry consistent.
+//! - **Depends on.** The standard library, `ahash`, `intrusive-collections` and `triomphe`.
+//! - **Must not know.** What expires, or why. The caller decides the order; the map holds no clock,
+//!   no branch and no Nervix type.
+
 use std::{borrow::Borrow, fmt, hash::Hash, ptr};
 
 use ahash::HashMap;

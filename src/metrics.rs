@@ -1,3 +1,18 @@
+//! Every series a node records into, and the registry they are exported through.
+//!
+//! Layer: engines and infrastructure, with an edge inside it.
+//!
+//! - **Owns.** The counters, gauges and histograms a node records, their per-domain and
+//!   per-branch aggregation, the snapshot branch-aggregated state replicates, and the Prometheus
+//!   registry and encoder that expose them.
+//! - **Depends on.** The vocabulary for the names it labels with, and the dataflow-graph
+//!   description for the statistics it fills in.
+//! - **Must not know.** How the values it records were produced. It is handed observations and
+//!   never reaches back into the runtime for more.
+//!
+//! This module breaks its own contract: recording is infrastructure the data plane calls inward,
+//! but the Prometheus exposition beside it is an edge. The two separate when the crate does.
+
 use std::{
     cmp::Ordering,
     collections::VecDeque,

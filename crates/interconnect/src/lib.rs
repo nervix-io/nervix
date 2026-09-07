@@ -1,3 +1,17 @@
+//! The authenticated transport between Nervix nodes.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Mutual-TLS connections, Ed25519 peer authentication, framing, backpressure,
+//!   reconnect, and the envelope set nodes exchange, including relay payload carriage.
+//! - **Depends on.** The vocabulary for the names and values an envelope carries.
+//! - **Must not know.** Why a message is sent. It has no view of domains, graphs, schedules or the
+//!   runtime.
+//!
+//! This crate breaks its own contract: it names one request and one response type per cross-node
+//! query, and leaves correlation, timeout and cancellation to each caller instead of owning them
+//! once behind a single typed request primitive.
+
 use std::{
     hash::RandomState,
     io,

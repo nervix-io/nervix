@@ -1,3 +1,21 @@
+//! What one node executes.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** Relay boundaries and their fan-out, branch-local processor tasks, ingestor and
+//!   emitter connectors, compiled programs, materialized state, deduplication, reordering, windows,
+//!   correlation, generators, in-flight acknowledgement tracking, node-owned state persistence and
+//!   replication, and the entities that bind listening ports.
+//! - **Depends on.** The engines — the VM, the UDF and WASM hosts, codecs, the interconnect, the
+//!   state and resource stores — the vocabulary, and the registry's `ActiveGraph` as its input.
+//! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
+//!   run and runs it.
+//!
+//! This module breaks its own contract twice. It reads Models directly rather than consuming a
+//! planned execution, and it names `nervix_nspl::vm_program` to lower routes the registry has
+//! already lowered once. A planner between the control state and the runtime, and one shared VM
+//! frontend, close both; `just ratchet` counts what is left.
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},

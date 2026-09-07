@@ -1,3 +1,16 @@
+//! The Nervix expression VM: compile an expression program once, execute it over Arrow batches.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The instruction IR and its register layout, compilation into it, the semantics of
+//!   every operator, cast and builtin, and execution over a typed batch with per-row error masks.
+//! - **Depends on.** The vocabulary.
+//! - **Must not know.** Relays, branches, connectors, schedules or the registry. It runs one
+//!   program against the bindings it was handed.
+//!
+//! This crate breaks its own contract: it names `nervix_nspl::vm_program` for its own AST, spans
+//! and function names, so an engine depends on the language layer above it.
+
 mod batch;
 mod compiler;
 mod error;

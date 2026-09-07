@@ -1,5 +1,6 @@
 [package]
 default-run = "nervix-benchmark"
+description = "Benchmark harness that runs Nervix and comparable systems under a shared load definition and compares the results"
 edition = "2024"
 license-file = "../../LICENSE.md"
 name = "nervix-benchmark"

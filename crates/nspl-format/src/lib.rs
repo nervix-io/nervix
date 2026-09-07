@@ -3,6 +3,14 @@
 //! Formatting parses a file into statements, renders each one canonically, and reproduces the
 //! comments and blank lines that parsing discards. The result is verified by reparsing before it
 //! is returned, so a rendering defect surfaces as a refusal rather than as a rewritten file.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** Canonical rendering of a source file, the comments and blank lines parsing discards,
+//!   and the reparse that turns a rendering defect into a refusal.
+//! - **Depends on.** The language layer — an edge may name the parser — and the vocabulary's
+//!   canonical rendering of a Model.
+//! - **Must not know.** The server. Formatting is source in, source out.
 
 pub mod diagnostics;
 pub mod document;

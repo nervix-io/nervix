@@ -1,4 +1,5 @@
 [package]
+description = "Raft replication of Nervix control-plane state: log store, state machine, snapshots and the peer network"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-consensus"

@@ -1,3 +1,18 @@
+//! The NSPL language: source text in, Models out.
+//!
+//! Layer: language, which is an edge dependency only. The language crate itself, the formatter, the
+//! client tools and the session adapter may name the parser; every other layer consumes Models.
+//!
+//! - **Owns.** The lexer, the composed statement grammar, the completion expectations derived from
+//!   it, diagnostics with source spans, and the lowering of parsed source into Models.
+//! - **Depends on.** The vocabulary.
+//! - **Must not know.** The registry, the runtime, the control plane or any engine. Parsing
+//!   produces a Model and stops.
+//!
+//! This crate breaks its own contract: `vm_program`, the frontend of the expression VM, lives here,
+//! so `nervix-vm` and `nervix-roto` reach into the language layer for their own IR vocabulary. That
+//! frontend belongs to the VM.
+
 pub mod branch;
 pub mod client;
 #[cfg(feature = "client")]

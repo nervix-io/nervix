@@ -1,3 +1,14 @@
+//! A client session against a Nervix server.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** Connecting to the session service, TLS selection, submitting statements, transaction
+//!   state, completion suggestions, subscription streams and resource upload.
+//! - **Depends on.** The proto wire types, the language layer — an edge may name the parser, and
+//!   this one does so for client-side parsing and completion — and the vocabulary.
+//! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
+//!   it learns arrives over the session API.
+
 use std::{
     collections::VecDeque,
     fmt,

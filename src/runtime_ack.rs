@@ -1,3 +1,14 @@
+//! The acknowledgement tree one node keeps in memory while work is outstanding.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** The root tracker per ingestor and per domain, the sets a batch fans out into, the
+//!   guard that holds a message waiting on materialized state, and the outcome each root resolves
+//!   to.
+//! - **Depends on.** The standard library and `triomphe`.
+//! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
+//!   hot-path memory that is never persisted.
+
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;

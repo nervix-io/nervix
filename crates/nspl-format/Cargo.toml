@@ -1,4 +1,5 @@
 [package]
+description = "Canonical formatter for NSPL source files"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-nspl-format"

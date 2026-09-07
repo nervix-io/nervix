@@ -1,3 +1,14 @@
+//! The interactive terminal client for Nervix.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** The REPL: key bindings, the completion menu, rendered diagnostics, output formatting
+//!   and the shell-facing command surface.
+//! - **Depends on.** `nervix-client-core`, the language layer for completion and local statement
+//!   parsing, and the vocabulary.
+//! - **Must not know.** The server. It speaks the session API through the client core and nothing
+//!   else.
+
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
