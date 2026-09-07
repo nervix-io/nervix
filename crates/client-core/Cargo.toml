@@ -22,6 +22,7 @@ nervix-nspl = { workspace = true, features = ["client"] }
 nervix-proto = { workspace = true, features = ["client"] }
 prost = { workspace = true }
 rustls = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "fs",

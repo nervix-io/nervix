@@ -16,7 +16,6 @@
 //! frontend used by both closes it.
 
 mod relocation;
-mod stored;
 
 use std::{
     cmp::{Ordering, Reverse},
@@ -79,7 +78,6 @@ use petgraph::{
 pub use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
-pub use stored::StoredModelVersioned;
 use thiserror::Error;
 use tracing::{info, warn};
 use triomphe::Arc;
@@ -122,13 +120,6 @@ pub enum RegistryError {
     ReadValue,
     #[error("failed to deserialize model")]
     DeserializeValue,
-    #[error(
-        "stored emitter definition has no publishing MODE; recreate the emitter with an explicit \
-         MODE"
-    )]
-    EmitterPublishingModeMissing,
-    #[error("failed to convert stored model")]
-    ModelConversion,
     #[error("failed to decode key")]
     DecodeKey,
     #[error("failed to persist model batch")]
@@ -6445,10 +6436,7 @@ impl ModelStorage {
             return Ok(None);
         };
 
-        let envelope = deserialize_value(raw.as_ref())?;
-
-        let model = Model::try_from(envelope).change_context(RegistryError::ModelConversion)?;
-        Ok(Some(model))
+        deserialize_value(raw.as_ref()).map(Some)
     }
 
     fn list_identifiers(
@@ -6508,15 +6496,13 @@ impl ModelStorage {
             let key: ModelKeyOwned =
                 storekey::deserialize(&raw_key).change_context(RegistryError::DecodeKey)?;
 
-            let envelope = deserialize_value(raw_value.as_ref())?;
-            let model = Model::try_from(envelope).change_context(RegistryError::ModelConversion)?;
+            let model = deserialize_value(raw_value.as_ref())?;
 
-            let domain =
-                DomainName::parse(&key.domain).change_context(RegistryError::ModelConversion)?;
+            let domain = DomainName::parse(&key.domain).change_context(RegistryError::DecodeKey)?;
             let kind = ModelKind::from_str(&key.kind)
-                .map_err(|_| Report::new(RegistryError::ModelConversion))?;
+                .map_err(|_| Report::new(RegistryError::DecodeKey))?;
             let identifier =
-                ModelName::parse(&key.identifier).change_context(RegistryError::ModelConversion)?;
+                ModelName::parse(&key.identifier).change_context(RegistryError::DecodeKey)?;
 
             records.push(StoredModelRecord {
                 domain,
@@ -6558,23 +6544,14 @@ fn encode_key(
 }
 
 fn serialize_value(model: &Model) -> Result<Vec<u8>, Report<RegistryError>> {
-    let stored = StoredModelVersioned::from(model.clone());
-    rkyv::to_bytes::<rkyv::rancor::Error>(&stored)
+    rkyv::to_bytes::<rkyv::rancor::Error>(model)
         .map(|bytes| bytes.to_vec())
         .change_context(RegistryError::SerializeValue)
 }
 
-fn deserialize_value(bytes: &[u8]) -> Result<StoredModelVersioned, Report<RegistryError>> {
-    match rkyv::from_bytes::<StoredModelVersioned, rkyv::rancor::Error>(bytes) {
-        Ok(stored) => Ok(stored),
-        Err(current_error) => match stored::decode_pre_publishing_mode_model(bytes) {
-            Some(stored::PrePublishingModeStoredDecode::Model(stored)) => Ok(*stored),
-            Some(stored::PrePublishingModeStoredDecode::EmitterWithoutMode) => {
-                Err(Report::new(RegistryError::EmitterPublishingModeMissing))
-            }
-            None => Err(current_error).change_context(RegistryError::DeserializeValue),
-        },
-    }
+fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
+    rkyv::from_bytes::<Model, rkyv::rancor::Error>(bytes)
+        .change_context(RegistryError::DeserializeValue)
 }
 
 fn expect_kind(
@@ -11686,8 +11663,8 @@ mod tests {
     use super::SchedulerMode;
     use super::{
         CreateSignalingProtocol, DataflowGraphCounts, ModelStorage, PlacementTopology, Registry,
-        RegistryError, RegistryMutation, Report, RuntimeChange, deserialize_value,
-        ensure_signaling_protocol_is_valid, validate_emitter_publishing_contract,
+        RegistryError, RegistryMutation, Report, RuntimeChange, ensure_signaling_protocol_is_valid,
+        validate_emitter_publishing_contract,
     };
 
     fn temp_db_path() -> PathBuf {
@@ -12709,42 +12686,6 @@ mod tests {
         )
         .expect_err("DELTA metric streams without start_time must be rejected");
         assert!(format!("{error:#}").contains("DELTA VALUES requires key 'start_time'"));
-    }
-
-    #[test]
-    fn archived_pre_publishing_mode_emitter_requires_recreation() {
-        let fixture =
-            include_bytes!("../../tests/fixtures/registry/emitter-before-publishing-modes.rkyv");
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(fixture.len());
-        aligned.extend_from_slice(fixture);
-
-        let error = deserialize_value(&aligned)
-            .expect_err("an authentic archived emitter without MODE must not load");
-        assert_eq!(
-            error.current_context(),
-            &RegistryError::EmitterPublishingModeMissing
-        );
-        assert!(format!("{error:#}").contains("recreate the emitter with an explicit MODE"));
-    }
-
-    #[test]
-    fn archived_pre_publishing_mode_non_emitter_remains_readable() {
-        let fixture =
-            include_bytes!("../../tests/fixtures/registry/schema-before-publishing-modes.rkyv");
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(fixture.len());
-        aligned.extend_from_slice(fixture);
-
-        let stored = deserialize_value(&aligned)
-            .expect("an unchanged model from the prior outer archive must remain readable");
-        let model = Model::try_from(stored).expect("the archived schema must remain valid");
-        assert!(matches!(
-            model,
-            Model::Schema(CreateSchema { ref name, ref fields })
-                if name.as_str() == "events"
-                    && fields.len() == 1
-                    && fields[0].name.as_str() == "seq"
-                    && fields[0].ty == ParseAsType::I64
-        ));
     }
 
     #[test]

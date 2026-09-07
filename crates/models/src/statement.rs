@@ -369,6 +369,9 @@ pub struct DomainConfig {
     Hash,
     Serialize,
     Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
     Default,
     AsRefStr,
     strum::Display,
@@ -724,7 +727,9 @@ pub enum SubscriptionLiteral {
     Bool(bool),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreatePlacement {
     pub name: PlacementName,
     pub from: Vec<ModelName>,
@@ -845,54 +850,92 @@ fn deduplicate_identifiers(identifiers: &mut Vec<ModelName>) {
     });
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Model {
-    Schema(CreateSchema),
-    WireJsonSchema(CreateJsonWireSchema),
-    WireCborSchema(CreateCborWireSchema),
-    WireAvroSchema(CreateAvroWireSchema),
-    Codec(CreateCodec),
-    ClientKafka(CreateClientKafka),
-    ClientPulsar(CreateClientPulsar),
-    ClientHttp(CreateClientHttp),
-    ClientSentry(CreateClientSentry),
-    ClientOtel(CreateClientOtel),
-    ClientPrometheus(CreateClientPrometheus),
-    ClientMqtt(CreateClientMqtt),
-    ClientNats(CreateClientNats),
-    ClientRabbitMq(CreateClientRabbitMq),
-    ClientRedis(CreateClientRedis),
-    ClientZeroMq(CreateClientZeroMq),
-    ClientSqs(CreateClientSqs),
-    ClientWebsockets(CreateClientWebsockets),
-    ClientSyslog(CreateClientSyslog),
-    ClientClickHouse(CreateClientClickHouse),
-    ClientPostgres(CreateClientPostgres),
-    ClientMySql(CreateClientMySql),
-    ClientMongoDb(CreateClientMongoDb),
-    ClientS3(CreateClientS3),
-    ClientGcs(CreateClientGcs),
-    ClientAzureBlob(CreateClientAzureBlob),
-    ClientIcebergRest(CreateClientIcebergRest),
-    Vhost(CreateVhost),
-    Branch(CreateBranch),
-    Endpoint(CreateEndpoint),
-    SignalingProtocol(CreateSignalingProtocol),
-    Generator(CreateGenerator),
-    Inferencer(CreateInferencer),
-    WasmProcessor(CreateWasmProcessor),
-    Ingestor(CreateIngestor),
-    Reingestor(CreateReingestor),
-    Relay(CreateRelay),
-    Lookup(CreateLookup),
-    Junction(CreateJunction),
-    Deduplicator(CreateDeduplicator),
-    Correlator(CreateCorrelator),
-    Reorderer(CreateReorderer),
-    WindowProcessor(CreateWindowProcessor),
-    Emitter(CreateEmitter),
-    Placement(CreatePlacement),
-    Udf(CreateUdf),
+macro_rules! declare_models {
+    ($($Variant:ident($Model:ty) => $Kind:ident, $client_label:expr;)+) => {
+        #[derive(
+            Debug,
+            Clone,
+            PartialEq,
+            Eq,
+            Serialize,
+            Deserialize,
+            Archive,
+            RkyvSerialize,
+            RkyvDeserialize,
+        )]
+        pub enum Model {
+            $($Variant($Model),)+
+        }
+
+        impl Model {
+            pub fn kind(&self) -> ModelKind {
+                match self {
+                    $(Self::$Variant(_) => ModelKind::$Kind,)+
+                }
+            }
+
+            pub fn name(&self) -> ModelName {
+                match self {
+                    $(Self::$Variant(model) => (&model.name).into(),)+
+                }
+            }
+
+            pub fn client_type_label(&self) -> Option<&'static str> {
+                match self {
+                    $(Self::$Variant(_) => $client_label,)+
+                }
+            }
+        }
+    };
+}
+
+declare_models! {
+    Schema(CreateSchema) => Schema, None;
+    WireJsonSchema(CreateJsonWireSchema) => WireJsonSchema, None;
+    WireCborSchema(CreateCborWireSchema) => WireCborSchema, None;
+    WireAvroSchema(CreateAvroWireSchema) => WireAvroSchema, None;
+    Codec(CreateCodec) => Codec, None;
+    ClientKafka(CreateClientKafka) => Client, Some("KAFKA");
+    ClientPulsar(CreateClientPulsar) => Client, Some("PULSAR");
+    ClientHttp(CreateClientHttp) => Client, Some("HTTP");
+    ClientSentry(CreateClientSentry) => Client, Some("SENTRY");
+    ClientOtel(CreateClientOtel) => Client, Some("OTEL");
+    ClientPrometheus(CreateClientPrometheus) => Client, Some("PROMETHEUS");
+    ClientMqtt(CreateClientMqtt) => Client, Some("MQTT");
+    ClientNats(CreateClientNats) => Client, Some("NATS");
+    ClientRabbitMq(CreateClientRabbitMq) => Client, Some("RABBITMQ");
+    ClientRedis(CreateClientRedis) => Client, Some("REDIS");
+    ClientZeroMq(CreateClientZeroMq) => Client, Some("ZEROMQ");
+    ClientSqs(CreateClientSqs) => Client, Some("SQS");
+    ClientWebsockets(CreateClientWebsockets) => Client, Some("WEBSOCKETS");
+    ClientSyslog(CreateClientSyslog) => Client, Some("SYSLOG");
+    ClientClickHouse(CreateClientClickHouse) => Client, Some("CLICKHOUSE");
+    ClientPostgres(CreateClientPostgres) => Client, Some("POSTGRES");
+    ClientMySql(CreateClientMySql) => Client, Some("MYSQL");
+    ClientMongoDb(CreateClientMongoDb) => Client, Some("MONGODB");
+    ClientS3(CreateClientS3) => Client, Some("S3");
+    ClientGcs(CreateClientGcs) => Client, Some("GCS");
+    ClientAzureBlob(CreateClientAzureBlob) => Client, Some("AZURE_BLOB");
+    ClientIcebergRest(CreateClientIcebergRest) => Client, Some("ICEBERG_REST");
+    Vhost(CreateVhost) => Vhost, None;
+    Branch(CreateBranch) => Branch, None;
+    Endpoint(CreateEndpoint) => Endpoint, None;
+    SignalingProtocol(CreateSignalingProtocol) => SignalingProtocol, None;
+    Generator(CreateGenerator) => Generator, None;
+    Inferencer(CreateInferencer) => Inferencer, None;
+    WasmProcessor(CreateWasmProcessor) => WasmProcessor, None;
+    Ingestor(CreateIngestor) => Ingestor, None;
+    Reingestor(CreateReingestor) => Reingestor, None;
+    Relay(CreateRelay) => Relay, None;
+    Lookup(CreateLookup) => Lookup, None;
+    Junction(CreateJunction) => Junction, None;
+    Deduplicator(CreateDeduplicator) => Deduplicator, None;
+    Correlator(CreateCorrelator) => Correlator, None;
+    Reorderer(CreateReorderer) => Reorderer, None;
+    WindowProcessor(CreateWindowProcessor) => WindowProcessor, None;
+    Emitter(CreateEmitter) => Emitter, None;
+    Placement(CreatePlacement) => Placement, None;
+    Udf(CreateUdf) => Udf, None;
 }
 
 impl Model {
@@ -901,57 +944,6 @@ impl Model {
             ingestor.source.executes_on_every_cluster_node()
         } else {
             false
-        }
-    }
-
-    pub fn kind(&self) -> ModelKind {
-        match self {
-            Self::Schema(_) => ModelKind::Schema,
-            Self::WireJsonSchema(_) => ModelKind::WireJsonSchema,
-            Self::WireCborSchema(_) => ModelKind::WireCborSchema,
-            Self::WireAvroSchema(_) => ModelKind::WireAvroSchema,
-            Self::Codec(_) => ModelKind::Codec,
-            Self::ClientKafka(_)
-            | Self::ClientPulsar(_)
-            | Self::ClientHttp(_)
-            | Self::ClientSentry(_)
-            | Self::ClientOtel(_)
-            | Self::ClientPrometheus(_)
-            | Self::ClientMqtt(_)
-            | Self::ClientNats(_)
-            | Self::ClientRabbitMq(_)
-            | Self::ClientRedis(_)
-            | Self::ClientZeroMq(_)
-            | Self::ClientSqs(_)
-            | Self::ClientWebsockets(_)
-            | Self::ClientSyslog(_)
-            | Self::ClientClickHouse(_)
-            | Self::ClientPostgres(_)
-            | Self::ClientMySql(_)
-            | Self::ClientMongoDb(_)
-            | Self::ClientS3(_)
-            | Self::ClientGcs(_)
-            | Self::ClientAzureBlob(_)
-            | Self::ClientIcebergRest(_) => ModelKind::Client,
-            Self::Vhost(_) => ModelKind::Vhost,
-            Self::Branch(_) => ModelKind::Branch,
-            Self::Endpoint(_) => ModelKind::Endpoint,
-            Self::SignalingProtocol(_) => ModelKind::SignalingProtocol,
-            Self::Generator(_) => ModelKind::Generator,
-            Self::Inferencer(_) => ModelKind::Inferencer,
-            Self::WasmProcessor(_) => ModelKind::WasmProcessor,
-            Self::Ingestor(_) => ModelKind::Ingestor,
-            Self::Reingestor(_) => ModelKind::Reingestor,
-            Self::Relay(_) => ModelKind::Relay,
-            Self::Lookup(_) => ModelKind::Lookup,
-            Self::Junction(_) => ModelKind::Junction,
-            Self::Deduplicator(_) => ModelKind::Deduplicator,
-            Self::Correlator(_) => ModelKind::Correlator,
-            Self::Reorderer(_) => ModelKind::Reorderer,
-            Self::WindowProcessor(_) => ModelKind::WindowProcessor,
-            Self::Emitter(_) => ModelKind::Emitter,
-            Self::Placement(_) => ModelKind::Placement,
-            Self::Udf(_) => ModelKind::Udf,
         }
     }
 
@@ -998,111 +990,11 @@ impl Model {
     pub fn node_ref(&self) -> NodeRef {
         NodeRef::new(self.kind(), self.name())
     }
-
-    pub fn name(&self) -> ModelName {
-        match self {
-            Self::Schema(v) => (&v.name).into(),
-            Self::WireJsonSchema(v) => (&v.name).into(),
-            Self::WireCborSchema(v) => (&v.name).into(),
-            Self::WireAvroSchema(v) => (&v.name).into(),
-            Self::Codec(v) => (&v.name).into(),
-            Self::ClientKafka(v) => (&v.name).into(),
-            Self::ClientPulsar(v) => (&v.name).into(),
-            Self::ClientHttp(v) => (&v.name).into(),
-            Self::ClientSentry(v) => (&v.name).into(),
-            Self::ClientOtel(v) => (&v.name).into(),
-            Self::ClientPrometheus(v) => (&v.name).into(),
-            Self::ClientMqtt(v) => (&v.name).into(),
-            Self::ClientNats(v) => (&v.name).into(),
-            Self::ClientRabbitMq(v) => (&v.name).into(),
-            Self::ClientRedis(v) => (&v.name).into(),
-            Self::ClientZeroMq(v) => (&v.name).into(),
-            Self::ClientSqs(v) => (&v.name).into(),
-            Self::ClientWebsockets(v) => (&v.name).into(),
-            Self::ClientSyslog(v) => (&v.name).into(),
-            Self::ClientClickHouse(v) => (&v.name).into(),
-            Self::ClientPostgres(v) => (&v.name).into(),
-            Self::ClientMySql(v) => (&v.name).into(),
-            Self::ClientMongoDb(v) => (&v.name).into(),
-            Self::ClientS3(v) => (&v.name).into(),
-            Self::ClientGcs(v) => (&v.name).into(),
-            Self::ClientAzureBlob(v) => (&v.name).into(),
-            Self::ClientIcebergRest(v) => (&v.name).into(),
-            Self::Vhost(v) => (&v.name).into(),
-            Self::Branch(v) => (&v.name).into(),
-            Self::Endpoint(v) => (&v.name).into(),
-            Self::SignalingProtocol(v) => (&v.name).into(),
-            Self::Generator(v) => (&v.name).into(),
-            Self::Inferencer(v) => (&v.name).into(),
-            Self::WasmProcessor(v) => (&v.name).into(),
-            Self::Ingestor(v) => (&v.name).into(),
-            Self::Reingestor(v) => (&v.name).into(),
-            Self::Relay(v) => (&v.name).into(),
-            Self::Lookup(v) => (&v.name).into(),
-            Self::Junction(v) => (&v.name).into(),
-            Self::Deduplicator(v) => (&v.name).into(),
-            Self::Correlator(v) => (&v.name).into(),
-            Self::Reorderer(v) => (&v.name).into(),
-            Self::WindowProcessor(v) => (&v.name).into(),
-            Self::Emitter(v) => (&v.name).into(),
-            Self::Placement(v) => (&v.name).into(),
-            Self::Udf(v) => (&v.name).into(),
-        }
-    }
-
-    pub fn client_type_label(&self) -> Option<&'static str> {
-        match self {
-            Self::ClientKafka(_) => Some("KAFKA"),
-            Self::ClientPulsar(_) => Some("PULSAR"),
-            Self::ClientHttp(_) => Some("HTTP"),
-            Self::ClientSentry(_) => Some("SENTRY"),
-            Self::ClientOtel(_) => Some("OTEL"),
-            Self::ClientPrometheus(_) => Some("PROMETHEUS"),
-            Self::ClientMqtt(_) => Some("MQTT"),
-            Self::ClientNats(_) => Some("NATS"),
-            Self::ClientRabbitMq(_) => Some("RABBITMQ"),
-            Self::ClientRedis(_) => Some("REDIS"),
-            Self::ClientZeroMq(_) => Some("ZEROMQ"),
-            Self::ClientSqs(_) => Some("SQS"),
-            Self::ClientWebsockets(_) => Some("WEBSOCKETS"),
-            Self::ClientSyslog(_) => Some("SYSLOG"),
-            Self::ClientClickHouse(_) => Some("CLICKHOUSE"),
-            Self::ClientPostgres(_) => Some("POSTGRES"),
-            Self::ClientMySql(_) => Some("MYSQL"),
-            Self::ClientMongoDb(_) => Some("MONGODB"),
-            Self::ClientS3(_) => Some("S3"),
-            Self::ClientGcs(_) => Some("GCS"),
-            Self::ClientAzureBlob(_) => Some("AZURE_BLOB"),
-            Self::ClientIcebergRest(_) => Some("ICEBERG_REST"),
-            Self::Schema(_)
-            | Self::WireJsonSchema(_)
-            | Self::WireCborSchema(_)
-            | Self::WireAvroSchema(_)
-            | Self::Codec(_)
-            | Self::Vhost(_)
-            | Self::Branch(_)
-            | Self::Endpoint(_)
-            | Self::SignalingProtocol(_)
-            | Self::Generator(_)
-            | Self::Inferencer(_)
-            | Self::WasmProcessor(_)
-            | Self::Ingestor(_)
-            | Self::Reingestor(_)
-            | Self::Relay(_)
-            | Self::Lookup(_)
-            | Self::Junction(_)
-            | Self::Deduplicator(_)
-            | Self::Correlator(_)
-            | Self::Reorderer(_)
-            | Self::WindowProcessor(_)
-            | Self::Emitter(_)
-            | Self::Placement(_)
-            | Self::Udf(_) => None,
-        }
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateCodec {
     pub name: CodecName,
     pub wire_format: CodecWireFormat,
@@ -1112,7 +1004,18 @@ pub struct CreateCodec {
     pub encoding_rules: Vec<CodecEncodingRule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Default,
+)]
 pub struct CodecJaqTransformations {
     pub on_ingestion: Option<String>,
     pub on_emitting: Option<String>,
@@ -1124,7 +1027,19 @@ impl CodecJaqTransformations {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum CodecJaqFormat {
     Json,
@@ -1134,7 +1049,9 @@ pub enum CodecJaqFormat {
     Cbor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum CodecWireFormat {
     Json,
     Cbor,
@@ -1182,7 +1099,9 @@ impl CodecWireFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CodecProtobufConfig {
     pub resource: ResourceName,
     pub resource_version: Option<u64>,
@@ -1192,18 +1111,33 @@ pub struct CodecProtobufConfig {
     pub transformations: CodecJaqTransformations,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CodecEncodingRule {
     pub field: FieldName,
     pub encoding: CodecEncoding,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum CodecEncoding {
     Rfc3339,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateEmitter {
     pub name: EmitterName,
     pub from: ProcessorInputs,
@@ -1474,7 +1408,9 @@ pub enum AlterEmitterError {
     PublishingModeUnsupported { sink: String, mode: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateGenerator {
     pub name: GeneratorName,
     pub materialized_relay: RelayName,
@@ -1576,7 +1512,9 @@ impl CreateGenerator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ErrorPolicies {
     pub message: MessageErrorPolicy,
     pub general: GeneralErrorPolicy,
@@ -1591,7 +1529,9 @@ impl ErrorPolicies {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MessageErrorPolicy {
     Ignore,
     Log,
@@ -1601,19 +1541,34 @@ pub enum MessageErrorPolicy {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum GeneralErrorPolicy {
     Ignore,
     Log,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SqsFifoGroup {
     FromBranch,
     Expression(crate::Expression),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
     Kafka {
@@ -1984,7 +1939,9 @@ impl EmitSink {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ClickHouseValueMapping {
     pub column: String,
     pub expression: crate::Expression,
@@ -1992,14 +1949,18 @@ pub struct ClickHouseValueMapping {
 
 pub type OtelValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum OtelSignal {
     Logs,
     Traces,
     Metric(OtelMetric),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct OtelMetric {
     pub name: String,
     pub unit: String,
@@ -2007,7 +1968,9 @@ pub struct OtelMetric {
     pub kind: OtelMetricKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum OtelMetricKind {
     Gauge,
     Sum {
@@ -2019,14 +1982,28 @@ pub enum OtelMetricKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum OtelAggregationTemporality {
     Delta,
     Cumulative,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct OtelScope {
     pub name: String,
     pub version: Option<String>,
@@ -2034,7 +2011,9 @@ pub struct OtelScope {
 
 pub type PostgresValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum PostgresConflictAction {
     None,
     DoNothing { target: Vec<String> },
@@ -2043,7 +2022,9 @@ pub enum PostgresConflictAction {
 
 pub type MySqlValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MySqlConflictAction {
     None,
     DoNothing,
@@ -2053,12 +2034,26 @@ pub enum MySqlConflictAction {
 pub type MongoDbValueMapping = ClickHouseValueMapping;
 pub type IcebergValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum IcebergCatalog {
     Rest { client: ClientName },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum IcebergStorageBackend {
     S3,
@@ -2068,98 +2063,76 @@ pub enum IcebergStorageBackend {
     AzureBlob,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MongoDbConflictAction {
     None,
     DoNothing { target: Vec<String> },
     DoUpdate { target: Vec<String> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientKafka {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ClientConfigEntry {
+    pub key: String,
+    pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientPulsar {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
+/// Declare clients that share the connector-owned name, mount and configuration shape.
+macro_rules! declare_clients {
+    ($($Client:ident => $Config:ident,)+) => {
+        $(
+            #[derive(
+                Debug,
+                Clone,
+                PartialEq,
+                Eq,
+                Serialize,
+                Deserialize,
+                Archive,
+                RkyvSerialize,
+                RkyvDeserialize,
+            )]
+            pub struct $Client {
+                pub name: ClientName,
+                pub mount: Option<ResourceName>,
+                pub config: Vec<ClientConfigEntry>,
+            }
+
+            pub type $Config = ClientConfigEntry;
+        )+
+    };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientHttp {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
+declare_clients! {
+    CreateClientKafka => KafkaConfigEntry,
+    CreateClientPulsar => PulsarConfigEntry,
+    CreateClientHttp => HttpConfigEntry,
+    CreateClientSentry => SentryConfigEntry,
+    CreateClientOtel => OtelConfigEntry,
+    CreateClientPrometheus => PrometheusConfigEntry,
+    CreateClientMqtt => MqttConfigEntry,
+    CreateClientNats => NatsConfigEntry,
+    CreateClientRabbitMq => RabbitMqConfigEntry,
+    CreateClientRedis => RedisConfigEntry,
+    CreateClientZeroMq => ZeroMqConfigEntry,
+    CreateClientSqs => SqsConfigEntry,
+    CreateClientSyslog => SyslogConfigEntry,
+    CreateClientClickHouse => ClickHouseConfigEntry,
+    CreateClientPostgres => PostgresConfigEntry,
+    CreateClientMySql => MySqlConfigEntry,
+    CreateClientMongoDb => MongoDbConfigEntry,
+    CreateClientS3 => S3ConfigEntry,
+    CreateClientGcs => GcsConfigEntry,
+    CreateClientAzureBlob => AzureBlobConfigEntry,
+    CreateClientIcebergRest => IcebergRestConfigEntry,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientSentry {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientOtel {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientPrometheus {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientMqtt {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientNats {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientRabbitMq {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientRedis {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientZeroMq {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientSqs {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateClientWebsockets {
     pub name: ClientName,
     pub mount: Option<ResourceName>,
@@ -2167,99 +2140,11 @@ pub struct CreateClientWebsockets {
     pub config: Vec<ClientConfigEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientSyslog {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientClickHouse {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientPostgres {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientMySql {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientMongoDb {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientS3 {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientGcs {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientAzureBlob {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientIcebergRest {
-    pub name: ClientName,
-    pub mount: Option<ResourceName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientConfigEntry {
-    pub key: String,
-    pub value: String,
-}
-
-pub type KafkaConfigEntry = ClientConfigEntry;
-pub type PulsarConfigEntry = ClientConfigEntry;
-pub type HttpConfigEntry = ClientConfigEntry;
-pub type SentryConfigEntry = ClientConfigEntry;
-pub type OtelConfigEntry = ClientConfigEntry;
-pub type RabbitMqConfigEntry = ClientConfigEntry;
-pub type RedisConfigEntry = ClientConfigEntry;
-pub type MqttConfigEntry = ClientConfigEntry;
-pub type NatsConfigEntry = ClientConfigEntry;
-pub type PrometheusConfigEntry = ClientConfigEntry;
-pub type ZeroMqConfigEntry = ClientConfigEntry;
-pub type SqsConfigEntry = ClientConfigEntry;
 pub type WebsocketsConfigEntry = ClientConfigEntry;
-pub type SyslogConfigEntry = ClientConfigEntry;
-pub type ClickHouseConfigEntry = ClientConfigEntry;
-pub type PostgresConfigEntry = ClientConfigEntry;
-pub type MySqlConfigEntry = ClientConfigEntry;
-pub type MongoDbConfigEntry = ClientConfigEntry;
-pub type S3ConfigEntry = ClientConfigEntry;
-pub type GcsConfigEntry = ClientConfigEntry;
-pub type AzureBlobConfigEntry = ClientConfigEntry;
-pub type IcebergRestConfigEntry = ClientConfigEntry;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateBranch {
     pub name: BranchName,
     pub schema: SchemaName,
@@ -2268,7 +2153,9 @@ pub struct CreateBranch {
     pub eviction: Option<BranchEviction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum BranchEviction {
     Lru { max_instances: NonZeroU64 },
 }
@@ -2281,7 +2168,9 @@ impl BranchEviction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum BranchSelection {
     BranchedBy { branch: BranchName },
     Unbranched,
@@ -2311,7 +2200,9 @@ impl BranchSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateIngestor {
     pub name: IngestorName,
     pub output_routes: ProcessorOutputs,
@@ -2446,7 +2337,9 @@ pub enum AlterIngestorError {
     UnsupportedQuiesceMode { transport: String, mode: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorOutput {
     pub relay: RelayName,
     #[serde(default)]
@@ -2457,27 +2350,35 @@ pub struct ProcessorOutput {
     pub branch: Option<crate::OutputBranch>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct OutputFlushPolicy {
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InputCollectPolicy {
     pub collect_for: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorInputWhere {
     pub relay: RelayName,
     pub where_clause: crate::Expression,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorInputs {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from: Vec<RelayName>,
@@ -2567,7 +2468,9 @@ impl ProcessorOutput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorOutputs {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<ProcessorOutput>,
@@ -2614,13 +2517,17 @@ impl ProcessorOutputs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum IngestTimestampSource {
     Now,
     At(FieldName),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateReingestor {
     pub name: ReingestorName,
     pub from: ProcessorInputs,
@@ -2677,7 +2584,9 @@ impl CreateReingestor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateInferencer {
     pub name: InferencerName,
     pub from: ProcessorInputs,
@@ -2752,7 +2661,9 @@ pub enum InferencerTensorSchemaError {
     ElementCountOverflow { tensor: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateWasmProcessor {
     pub name: WasmProcessorName,
     pub from: ProcessorInputs,
@@ -2771,26 +2682,43 @@ pub struct CreateWasmProcessor {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct WasmProcessorLimits {
     pub max_fuel: NonZeroU64,
     pub max_memory_bytes: NonZeroU64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InferencerTensorMapping {
     pub tensor: String,
     pub schema: InferencerTensorSchema,
     pub expression: crate::Expression,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InferencerTensorDeclaration {
     pub tensor: String,
     pub schema: InferencerTensorSchema,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InferencerTensorSchema {
     pub representation: InferencerTensorRepresentation,
     pub element_type: InferencerTensorElementType,
@@ -2866,19 +2794,54 @@ impl InferencerTensorSchema {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum InferencerTensorRepresentation {
     Dense,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum InferencerTensorElementType {
     F32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum InferencerTensorDimension {
     Fixed(NonZeroU32),
     Dynamic,
@@ -2891,20 +2854,26 @@ impl InferencerTensorDimension {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateVhost {
     pub name: VhostName,
     pub hostnames: Vec<String>,
     pub tls: Option<VhostTlsResource>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct VhostTlsResource {
     pub resource: ResourceName,
     pub version: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateEndpoint {
     pub name: EndpointName,
     pub on_vhost: VhostName,
@@ -2913,21 +2882,46 @@ pub struct CreateEndpoint {
     pub signaling_protocol: Option<SignalingProtocolName>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EndpointType {
     Websockets,
     Http,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateSignalingProtocol {
     pub name: SignalingProtocolName,
     pub format: SignalingWireFormat,
     pub on_connect: SignalingProtocolOnConnect,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum SignalingWireFormat {
     Json,
@@ -2939,7 +2933,9 @@ pub enum SignalingWireFormat {
     Protobuf(SignalingProtobufConfig),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SignalingProtobufConfig {
     pub resource: ResourceName,
     pub resource_version: Option<u64>,
@@ -2949,7 +2945,9 @@ pub struct SignalingProtobufConfig {
     pub wait_message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SignalingProtocolOnConnect {
     /// Whether payload streams to the relay from the moment the connection opens.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2966,13 +2964,17 @@ pub struct SignalingProtocolOnConnect {
 ///
 /// A step completes before the next begins, which is what makes a request able to depend on an
 /// earlier reply.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SignalingStep {
     Send(Vec<String>),
     Wait(SignalingWaitStep),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SignalingWaitStep {
     /// Matchers that must all be satisfied, in any arrival order, for the step to complete.
     pub matchers: Vec<String>,
@@ -3022,7 +3024,18 @@ impl SignalingProtocolOnConnect {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum IngestSource {
     Http {
@@ -3265,13 +3278,26 @@ impl IngestSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum IngestQuiesceOverflow {
     DropOldest,
     DropNewest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum IngestQuiesceMode {
     Suspend,
     Buffer {
@@ -3298,25 +3324,33 @@ impl IngestQuiesceMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum KafkaOffsetMode {
     ConsumerGroup(ConsumerGroupName),
     Domain,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct RetryPolicy {
     pub backoff: String,
     pub max_backoff: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum EmitterAckWindow {
     Sequential,
     Parallel { max: NonZeroU64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum EmitterPublishingMode {
     NoAck {
         retry_policy: RetryPolicy,
@@ -3399,7 +3433,9 @@ impl EmitterPublishingMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum KafkaIngestMode {
     AckParallel {
         max: NonZeroU64,
@@ -3416,14 +3452,37 @@ pub enum KafkaIngestMode {
 
 pub type PulsarIngestMode = KafkaIngestMode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum MqttSession {
     Clean,
     Persistent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum MqttQos {
     AtMostOnce,
     AtLeastOnce,
@@ -3438,7 +3497,9 @@ impl MqttQos {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MqttIngestMode {
     NoAckSequential {
         session: MqttSession,
@@ -3483,12 +3544,16 @@ impl MqttIngestMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum NatsIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum RabbitMqIngestMode {
     AckSequential {
         timeout: String,
@@ -3496,17 +3561,23 @@ pub enum RabbitMqIngestMode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum RedisPubSubIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum ZeroMqIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SqsIngestMode {
     AckSequential {
         timeout: String,
@@ -3514,17 +3585,23 @@ pub enum SqsIngestMode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum EndpointIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum WebsocketsIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateRelay {
     pub name: RelayName,
     pub schema: SchemaName,
@@ -3609,7 +3686,9 @@ pub const fn default_relay_buffer() -> NonZeroUsize {
     NonZeroUsize::MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum RelayBranching {
     BranchedBy { branch: BranchName },
     Unbranched,
@@ -3639,7 +3718,9 @@ impl RelayBranching {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MaterializedRelayState {
     LastByTimestamp,
 }
@@ -3814,7 +3895,9 @@ impl ScheduledNode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateLookup {
     pub name: LookupName,
     pub key_field: FieldName,
@@ -3823,7 +3906,9 @@ pub struct CreateLookup {
     pub decode_using_codec: CodecName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateJunction {
     pub name: JunctionName,
     pub from: ProcessorInputs,
@@ -3882,7 +3967,9 @@ impl CreateJunction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateDeduplicator {
     pub name: DeduplicatorName,
     pub from: ProcessorInputs,
@@ -3960,7 +4047,9 @@ impl CreateDeduplicator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateCorrelator {
     pub name: CorrelatorName,
     pub left: ProcessorInputs,
@@ -3979,7 +4068,19 @@ pub struct CreateCorrelator {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumString,
+    IntoStaticStr,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum CorrelatorMatchPolicy {
@@ -3987,19 +4088,25 @@ pub enum CorrelatorMatchPolicy {
     Latest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CorrelationTimeoutPolicy {
     pub left: CorrelationTimeoutAction,
     pub right: CorrelationTimeoutAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum CorrelationTimeoutAction {
     Drop,
     SendTo { relay: RelayName },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateReorderer {
     pub name: ReordererName,
     pub from: ProcessorInputs,
@@ -4329,7 +4436,9 @@ impl ProcessorAlterTarget<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateWindowProcessor {
     pub name: WindowProcessorName,
     pub from: ProcessorInputs,
@@ -4344,7 +4453,9 @@ pub struct CreateWindowProcessor {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct WindowBound {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages: Option<u64>,

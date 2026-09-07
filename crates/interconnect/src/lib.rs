@@ -39,7 +39,7 @@ use rustls::{
     server::WebPkiClientVerifier,
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
-use strum::FromRepr;
+use strum::{FromRepr, IntoStaticStr};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -110,32 +110,36 @@ pub struct RelayPayload {
     pub admission: Option<RemoteAckRegistration>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelayPayloadKind {
-    Routed,
-    SubscriptionFanout,
-    Ingress,
+macro_rules! declare_relay_payload_kinds {
+    ($($Kind:ident = $tag:literal,)+) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum RelayPayloadKind {
+            $($Kind,)+
+        }
+
+        impl RelayPayloadKind {
+            fn wire_tag(self) -> u8 {
+                match self {
+                    $(Self::$Kind => $tag,)+
+                }
+            }
+
+            fn from_wire_tag(tag: u8) -> Result<Self, TransportError> {
+                match tag {
+                    $($tag => Ok(Self::$Kind),)+
+                    _ => Err(TransportError::Decode(format!(
+                        "unknown relay payload kind tag {tag}"
+                    ))),
+                }
+            }
+        }
+    };
 }
 
-impl RelayPayloadKind {
-    fn wire_tag(self) -> u8 {
-        match self {
-            Self::Routed => 1,
-            Self::SubscriptionFanout => 2,
-            Self::Ingress => 3,
-        }
-    }
-
-    fn from_wire_tag(tag: u8) -> Result<Self, TransportError> {
-        match tag {
-            1 => Ok(Self::Routed),
-            2 => Ok(Self::SubscriptionFanout),
-            3 => Ok(Self::Ingress),
-            _ => Err(TransportError::Decode(format!(
-                "unknown relay payload kind tag {tag}"
-            ))),
-        }
-    }
+declare_relay_payload_kinds! {
+    Routed = 1,
+    SubscriptionFanout = 2,
+    Ingress = 3,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -211,10 +215,29 @@ pub struct DomainTickEnvelope {
     pub tick: DomainTick,
 }
 
-/// The kinds of runtime state a node persists, and the byte each one occupies in a storage key.
-#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash, FromRepr)]
-#[repr(u8)]
-pub enum RuntimeStateKind {
+macro_rules! declare_runtime_state_kinds {
+    ($($Kind:ident = $tag:literal,)+) => {
+        /// The kinds of runtime state a node persists, and the byte each one occupies in a
+        /// storage key.
+        #[derive(
+            Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash, FromRepr,
+        )]
+        #[repr(u8)]
+        pub enum RuntimeStateKind {
+            $($Kind = $tag,)+
+        }
+
+        impl From<RuntimeStateKind> for u8 {
+            fn from(value: RuntimeStateKind) -> Self {
+                match value {
+                    $(RuntimeStateKind::$Kind => $tag,)+
+                }
+            }
+        }
+    };
+}
+
+declare_runtime_state_kinds! {
     BranchAggregated = 0,
     Correlator = 1,
     Deduplicator = 2,
@@ -223,21 +246,6 @@ pub enum RuntimeStateKind {
     WasmProcessor = 5,
     WindowProcessor = 6,
     BranchLru = 7,
-}
-
-impl From<RuntimeStateKind> for u8 {
-    fn from(value: RuntimeStateKind) -> Self {
-        match value {
-            RuntimeStateKind::BranchAggregated => 0,
-            RuntimeStateKind::Correlator => 1,
-            RuntimeStateKind::Deduplicator => 2,
-            RuntimeStateKind::KafkaOffset => 3,
-            RuntimeStateKind::MaterializedRelay => 4,
-            RuntimeStateKind::WasmProcessor => 5,
-            RuntimeStateKind::WindowProcessor => 6,
-            RuntimeStateKind::BranchLru => 7,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -334,7 +342,8 @@ pub struct DomainDrainStatusEnvelope {
     pub emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
 }
 
-#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum EmitterPublishingDrainStateEnvelope {
     AwaitingConfirmation,
     RetryingInfrastructure,
@@ -343,11 +352,7 @@ pub enum EmitterPublishingDrainStateEnvelope {
 
 impl EmitterPublishingDrainStateEnvelope {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AwaitingConfirmation => "awaiting_confirmation",
-            Self::RetryingInfrastructure => "retrying_infrastructure",
-            Self::RetryingIcebergCommit => "retrying_iceberg_commit",
-        }
+        self.into()
     }
 }
 

@@ -11,7 +11,6 @@
 
 use std::{
     collections::VecDeque,
-    fmt,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -134,7 +133,8 @@ pub struct SubscriptionEvent {
     pub payload: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerEventLevel {
     Unspecified,
     Info,
@@ -1394,18 +1394,6 @@ impl CommandOutcomeKind {
             Ok(proto::CommandResultKind::TransactionDetached) => Self::TransactionDetached,
             Ok(proto::CommandResultKind::Unspecified) | Err(_) => Self::Unspecified,
         }
-    }
-}
-
-impl fmt::Display for ServerEventLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::Unspecified => "UNSPECIFIED",
-            Self::Info => "INFO",
-            Self::Warn => "WARN",
-            Self::Error => "ERROR",
-        };
-        f.write_str(label)
     }
 }
 
