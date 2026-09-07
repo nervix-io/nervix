@@ -1555,6 +1555,14 @@ impl RegistryMutation {
         }
     }
 
+    /// Fold one alteration into the model it targets, keeping the model as it was when the
+    /// alteration no longer applies.
+    ///
+    /// Every arm below discards its outcome for the reason [`Self::fold_into_models`] gives: this
+    /// walk describes queued configuration rather than committing it, and a statement that reads
+    /// as invalid against an intermediate state is routinely repaired by a later statement in the
+    /// same batch. Validation happens once, on the batch's final models, where a rejection can
+    /// name the statement that caused it.
     fn apply_alteration(&self, model: &mut Model) {
         match (self, model) {
             (Self::AlterSchema(alter), Model::Schema(schema)) => {

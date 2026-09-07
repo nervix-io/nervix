@@ -161,7 +161,7 @@ impl ScheduledEmitterTask {
             }
             Err(_) => {
                 self.task.abort();
-                let _ = self.task.await;
+                self.task.join_after_shutdown("scheduled emitter").await;
                 Ok(())
             }
         }

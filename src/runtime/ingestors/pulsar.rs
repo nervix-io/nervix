@@ -224,7 +224,7 @@ impl PulsarIngestor {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {
-                        let _ = Self::flush_no_ack_group(
+                        if let Err(error) = Self::flush_no_ack_group(
                             &task_runtime,
                             &task_domain,
                             &task_ingestor,
@@ -233,15 +233,24 @@ impl PulsarIngestor {
                             &mut ingest_collector,
                             &mut no_ack_messages,
                         )
-                        .await;
+                        .await
+                        {
+                            task_events.report_error(format!(
+                                "failed to flush pulsar messages while quiescing ingestor '{}' in \
+                                 domain '{}': {}",
+                                task_ingestor.as_str(),
+                                task_domain.as_str(),
+                                error
+                            ));
+                        }
                         if let Err(error) = consumer.close().await {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to close pulsar consumer while quiescing ingestor '{}' in \
                                  domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
@@ -285,7 +294,7 @@ impl PulsarIngestor {
                             continue 'ingest;
                         }
                         changed = shutdown_rx.changed() => {
-                            let _ = Self::flush_no_ack_group(
+                            if let Err(error) = Self::flush_no_ack_group(
                                 &task_runtime,
                                 &task_domain,
                                 &task_ingestor,
@@ -293,7 +302,15 @@ impl PulsarIngestor {
                                 &mut consumer,
                                 &mut ingest_collector,
                                 &mut no_ack_messages,
-                            ).await;
+                            ).await {
+                                task_events.report_error(format!(
+                                    "failed to flush pulsar messages while stopping ingestor '{}' \
+                                     in domain '{}': {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                ));
+                            }
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break;
                             }
@@ -308,12 +325,12 @@ impl PulsarIngestor {
                                 &mut ingest_collector,
                                 &mut no_ack_messages,
                             ).await {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to flush pulsar messages for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                         }
                         message = consumer.next() => {
@@ -353,31 +370,31 @@ impl PulsarIngestor {
                                                         })
                                                         .await
                                                     {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
-                                                        )));
+                                                        ));
                                                         if let Err(nack_error) = consumer.nack(&message).await {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 nack_error
-                                                            )));
+                                                            ));
                                                         }
                                                         sleep(retry_delay).await;
                                                         retry_delay = next_retry_delay(retry_delay, retry_policy);
                                                     } else {
                                                         if ingest_collector.len() == collected_before {
                                                             if let Err(error) = consumer.ack(&message).await {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to ack pulsar message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                             }
                                                         } else {
                                                             no_ack_messages.push(message);
@@ -394,29 +411,29 @@ impl PulsarIngestor {
                                                                 &mut no_ack_messages,
                                                             ).await
                                                         {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to flush pulsar messages for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 error
-                                                            )));
+                                                            ));
                                                         }
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     if let Err(nack_error) = consumer.nack(&message).await {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             nack_error
-                                                        )));
+                                                        ));
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -434,19 +451,19 @@ impl PulsarIngestor {
                                             {
                                                 Ok(record) => PulsarBatchEntry { message, record },
                                                 Err(error) => {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     if let Err(nack_error) = consumer.nack(&message).await {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             nack_error
-                                                        )));
+                                                        ));
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -503,12 +520,12 @@ impl PulsarIngestor {
                                                 {
                                                     Ok(()) => true,
                                                     Err(error) => {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
-                                                        )));
+                                                        ));
                                                         false
                                                     }
                                                 };
@@ -521,12 +538,12 @@ impl PulsarIngestor {
                                                     ).await {
                                                         Some(AckOutcome::Ack) => {
                                                             if let Err(error) = consumer.ack(&entry.message).await {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to ack pulsar message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                                 sleep(retry_delay).await;
                                                                 retry_delay = next_retry_delay(retry_delay, retry_policy);
                                                             } else {
@@ -535,19 +552,19 @@ impl PulsarIngestor {
                                                             }
                                                         }
                                                         Some(AckOutcome::NoAck(error)) => {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "pulsar ack chain failed for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 error
-                                                            )));
+                                                            ));
                                                             if let Err(nack_error) = consumer.nack(&entry.message).await {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     nack_error
-                                                                )));
+                                                                ));
                                                             }
                                                             sleep(retry_delay).await;
                                                             retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -556,12 +573,12 @@ impl PulsarIngestor {
                                                     }
                                                 } else {
                                                     if let Err(nack_error) = consumer.nack(&entry.message).await {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             nack_error
-                                                        )));
+                                                        ));
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -580,19 +597,19 @@ impl PulsarIngestor {
                                             {
                                                 Ok(record) => PulsarBatchEntry { message, record },
                                                 Err(error) => {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     if let Err(nack_error) = consumer.nack(&message).await {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             nack_error
-                                                        )));
+                                                        ));
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -633,19 +650,19 @@ impl PulsarIngestor {
                                                                         });
                                                                     }
                                                                     Err(error) => {
-                                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                        task_events.report_error(format!(
                                                                             "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                                             task_ingestor.as_str(),
                                                                             task_domain.as_str(),
                                                                             error
-                                                                        )));
+                                                                        ));
                                                                         if let Err(nack_error) = consumer.nack(&next_message).await {
-                                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                            task_events.report_error(format!(
                                                                                 "failed to nack pulsar message for ingestor '{}' in domain '{}': {}",
                                                                                 task_ingestor.as_str(),
                                                                                 task_domain.as_str(),
                                                                                 nack_error
-                                                                            )));
+                                                                            ));
                                                                         }
                                                                         sleep(retry_delay).await;
                                                                         retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -654,12 +671,12 @@ impl PulsarIngestor {
                                                                 }
                                                             }
                                                             Some(Err(error)) => {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to receive pulsar message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                             }
                                                             None => break,
                                                         }
@@ -736,12 +753,12 @@ impl PulsarIngestor {
                                                 let dispatched = match dispatch_result {
                                                     Ok(()) => true,
                                                     Err(error) => {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to dispatch message group for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
-                                                        )));
+                                                        ));
                                                         false
                                                     }
                                                 };
@@ -786,20 +803,20 @@ impl PulsarIngestor {
                                                 }
 
                                                 if let Some(error) = batch_failure {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "pulsar ack batch failed for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     for message in &messages {
                                                         if let Err(nack_error) = consumer.nack(message).await {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to nack pulsar batch message for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 nack_error
-                                                            )));
+                                                            ));
                                                         }
                                                     }
                                                     sleep(retry_delay).await;
@@ -811,12 +828,12 @@ impl PulsarIngestor {
                                                     for message in &messages {
                                                         if let Err(error) = consumer.ack(message).await {
                                                             ack_failure = Some(error.to_string());
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to ack pulsar message for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 error
-                                                            )));
+                                                            ));
                                                             break;
                                                         }
                                                     }
@@ -835,12 +852,12 @@ impl PulsarIngestor {
                                         &task_ingestor,
                                         format!("pulsar receive failed: {error}"),
                                     );
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to receive pulsar message for ingestor '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     warn!(
                                         domain = task_domain.as_str(),
                                         ingestor = task_ingestor.as_str(),

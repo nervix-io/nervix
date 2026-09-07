@@ -177,13 +177,13 @@ impl KafkaIngestor {
                             partitions
                         }
                         Err(error) => {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to inspect kafka partitions for ingestor '{}' in domain \
                                  '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                             Vec::new()
                         }
                     };
@@ -205,13 +205,13 @@ impl KafkaIngestor {
                                 partitions
                             }
                             Err(error) => {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to inspect kafka partitions for ingestor '{}' in \
                                      domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 continue;
                             }
                         };
@@ -390,13 +390,13 @@ impl KafkaIngestor {
                             KafkaOffsetMode::ConsumerGroup(_) => consumer.unsubscribe(),
                             KafkaOffsetMode::Domain => {
                                 if let Err(error) = consumer.unassign() {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to unassign kafka source while quiescing ingestor \
                                          '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                 }
                                 consumer_ready = false;
                                 assignment_refresh_pending = true;
@@ -413,13 +413,13 @@ impl KafkaIngestor {
                         if let KafkaOffsetMode::ConsumerGroup(_) = &task_offset_mode
                             && let Err(error) = consumer.subscribe(&[task_topic.as_str()])
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to resubscribe kafka source after quiesce for ingestor \
                                  '{}' in domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         continue;
                     }
@@ -450,13 +450,13 @@ impl KafkaIngestor {
                                     assignment_refresh_pending = false;
                                 }
                                 Err(error) => {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to reset kafka domain offsets for ingestor '{}' \
                                          in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     sleep(retry_delay).await;
                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
                                     continue;
@@ -497,13 +497,13 @@ impl KafkaIngestor {
                                     }
                                 }
                                 Err(error) => {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to initialize kafka domain offsets for ingestor \
                                          '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     sleep(retry_delay).await;
                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
                                     continue;
@@ -542,12 +542,12 @@ impl KafkaIngestor {
                                 &task_branched_senders,
                                 &mut ingest_collector,
                             ).await {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to flush ingest group for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                         }
                         message = consumer.recv() => {
@@ -610,12 +610,12 @@ impl KafkaIngestor {
                                                         })
                                                         .await
                                                     {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
-                                                        )));
+                                                        ));
                                                         false
                                                     } else {
                                                         true
@@ -633,12 +633,12 @@ impl KafkaIngestor {
                                                             )
                                                             .await
                                                         {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to flush ingest group for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 error
-                                                            )));
+                                                            ));
                                                             false
                                                         } else {
                                                             true
@@ -658,12 +658,12 @@ impl KafkaIngestor {
                                                             )
                                                             .await
                                                     {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to persist kafka domain offset for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
-                                                        )));
+                                                        ));
                                                         let _ = Self::seek_offset(
                                                             &consumer,
                                                             message.topic(),
@@ -673,12 +673,12 @@ impl KafkaIngestor {
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                 }
                                             }
                                         }
@@ -686,19 +686,19 @@ impl KafkaIngestor {
                                             let record = match decode_message(&message).await {
                                                 Ok(record) => record,
                                                 Err(error) => {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     if let Err(seek_error) = Self::seek_offset(&consumer, message.topic(), message.partition(), message.offset()) {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             seek_error
-                                                        )));
+                                                        ));
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -756,12 +756,12 @@ impl KafkaIngestor {
                                                 {
                                                     Ok(()) => true,
                                                     Err(error) => {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
-                                                        )));
+                                                        ));
                                                         false
                                                     }
                                                 };
@@ -793,24 +793,24 @@ impl KafkaIngestor {
                                                                 )
                                                             };
                                                             if let Err(error) = commit_result {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to commit kafka offset for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                                 if let Err(seek_error) = Self::seek_offset(
                                                                     &consumer,
                                                                     message.topic(),
                                                                     message.partition(),
                                                                     message.offset(),
                                                                 ) {
-                                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                    task_events.report_error(format!(
                                                                         "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
                                                                         task_ingestor.as_str(),
                                                                         task_domain.as_str(),
                                                                         seek_error
-                                                                    )));
+                                                                    ));
                                                                 }
                                                                 sleep(retry_delay).await;
                                                                 retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -820,24 +820,24 @@ impl KafkaIngestor {
                                                             }
                                                         }
                                                         Some(AckOutcome::NoAck(error)) => {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "kafka ack chain failed for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 error
-                                                            )));
+                                                            ));
                                                             if let Err(seek_error) = Self::seek_offset(
                                                                 &consumer,
                                                                 message.topic(),
                                                                 message.partition(),
                                                                 message.offset(),
                                                             ) {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     seek_error
-                                                                )));
+                                                                ));
                                                             }
                                                             sleep(retry_delay).await;
                                                             retry_delay =
@@ -852,12 +852,12 @@ impl KafkaIngestor {
                                                         message.partition(),
                                                         message.offset(),
                                                     ) {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             seek_error
-                                                        )));
+                                                        ));
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -869,19 +869,19 @@ impl KafkaIngestor {
                                             let first = match decode_message(&message).await {
                                                 Ok(record) => KafkaBatchEntry { message, record },
                                                 Err(error) => {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     if let Err(seek_error) = Self::seek_offset(&consumer, message.topic(), message.partition(), message.offset()) {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             seek_error
-                                                        )));
+                                                        ));
                                                     }
                                                     sleep(retry_delay).await;
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -913,24 +913,24 @@ impl KafkaIngestor {
                                                                         record,
                                                                     }),
                                                                     Err(error) => {
-                                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                        task_events.report_error(format!(
                                                                             "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                                             task_ingestor.as_str(),
                                                                             task_domain.as_str(),
                                                                             error
-                                                                        )));
+                                                                        ));
                                                                         if let Err(seek_error) = Self::seek_offset(
                                                                             &consumer,
                                                                             next_message.topic(),
                                                                             next_message.partition(),
                                                                             next_message.offset(),
                                                                         ) {
-                                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                            task_events.report_error(format!(
                                                                                 "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
                                                                                 task_ingestor.as_str(),
                                                                                 task_domain.as_str(),
                                                                                 seek_error
-                                                                            )));
+                                                                            ));
                                                                         }
                                                                         sleep(retry_delay).await;
                                                                         retry_delay = next_retry_delay(retry_delay, retry_policy);
@@ -939,12 +939,12 @@ impl KafkaIngestor {
                                                                 }
                                                             }
                                                             Err(error) => {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to receive kafka message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                                 continue;
                                                             }
                                                         }
@@ -1046,12 +1046,12 @@ impl KafkaIngestor {
                                                 let dispatched = match dispatch_result {
                                                     Ok(()) => true,
                                                     Err(error) => {
-                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        task_events.report_error(format!(
                                                             "failed to dispatch message group for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
-                                                        )));
+                                                        ));
                                                         false
                                                     }
                                                 };
@@ -1096,12 +1096,12 @@ impl KafkaIngestor {
                                                 }
 
                                                 if let Some(error) = batch_failure {
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "kafka ack batch failed for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     for ((topic, partition), offset) in &batch_start_offsets {
                                                         if let Err(seek_error) = Self::seek_offset(
                                                             &consumer,
@@ -1109,12 +1109,12 @@ impl KafkaIngestor {
                                                             *partition,
                                                             *offset,
                                                         ) {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to seek kafka batch offset for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 seek_error
-                                                            )));
+                                                            ));
                                                         }
                                                     }
                                                     sleep(retry_delay).await;
@@ -1147,12 +1147,12 @@ impl KafkaIngestor {
                                                             )
                                                         };
                                                         if let Err(error) = commit_result {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to commit kafka offset for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 error
-                                                            )));
+                                                            ));
                                                             batch_failure = Some(error);
                                                             break;
                                                         }
@@ -1165,12 +1165,12 @@ impl KafkaIngestor {
                                                             *partition,
                                                             *offset,
                                                         ) {
-                                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                            task_events.report_error(format!(
                                                                 "failed to seek kafka batch offset for ingestor '{}' in domain '{}': {}",
                                                                 task_ingestor.as_str(),
                                                                 task_domain.as_str(),
                                                                 seek_error
-                                                            )));
+                                                            ));
                                                         }
                                                     }
                                                     sleep(retry_delay).await;
@@ -1187,12 +1187,12 @@ impl KafkaIngestor {
                                         &task_ingestor,
                                         format!("kafka receive failed: {error}"),
                                     );
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to receive kafka message for ingestor '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     warn!(
                                         domain = task_domain.as_str(),
                                         ingestor = task_ingestor.as_str(),

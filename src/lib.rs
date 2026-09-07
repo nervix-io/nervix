@@ -31,6 +31,7 @@ pub mod resource;
 pub mod runtime;
 pub mod runtime_ack;
 pub mod runtime_schema;
+pub(crate) mod task_shutdown;
 
 pub use nervix_proto as proto;
 #[cfg(feature = "testing")]

@@ -253,12 +253,12 @@ impl SqsIngestor {
                                                         {
                                                             Ok(()) => true,
                                                             Err(error) => {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                                 false
                                                             }
                                                         };
@@ -278,21 +278,21 @@ impl SqsIngestor {
                                                                             .send()
                                                                             .await
                                                                     {
-                                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                        task_events.report_error(format!(
                                                                             "failed to acknowledge sqs message for ingestor '{}' in domain '{}': {}",
                                                                             task_ingestor.as_str(),
                                                                             task_domain.as_str(),
                                                                             error
-                                                                        )));
+                                                                        ));
                                                                     }
                                                                 }
                                                                 Some(AckOutcome::NoAck(error)) => {
-                                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                    task_events.report_error(format!(
                                                                         "sqs ack chain failed for ingestor '{}' in domain '{}': {}",
                                                                         task_ingestor.as_str(),
                                                                         task_domain.as_str(),
                                                                         error
-                                                                    )));
+                                                                    ));
                                                                 }
                                                                 None => break,
                                                             }
@@ -310,12 +310,12 @@ impl SqsIngestor {
                                                 }
                                             }
                                             Err(error) => {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                task_events.report_error(format!(
                                                     "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                     task_ingestor.as_str(),
                                                     task_domain.as_str(),
                                                     error
-                                                )));
+                                                ));
                                                 warn!(
                                                     domain = task_domain.as_str(),
                                                     ingestor = task_ingestor.as_str(),
@@ -333,12 +333,12 @@ impl SqsIngestor {
                                         &task_ingestor,
                                         format!("sqs receive failed: {error}"),
                                     );
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to receive sqs message for ingestor '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     warn!(
                                         domain = task_domain.as_str(),
                                         ingestor = task_ingestor.as_str(),

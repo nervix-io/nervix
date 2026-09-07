@@ -73,14 +73,14 @@ impl MqttEmitter {
                             error.to_string(),
                             wait,
                         );
-                        let _ = events.send(RuntimeEvent::Error(format!(
+                        events.report_error(format!(
                             "mqtt emitter event loop failed for '{}' in domain '{}'; reconnecting \
                              in {}: {}",
                             emitter.as_str(),
                             domain.as_str(),
                             humantime::format_duration(wait),
                             error
-                        )));
+                        ));
                         warn!(
                             domain = domain.as_str(),
                             emitter = emitter.as_str(),

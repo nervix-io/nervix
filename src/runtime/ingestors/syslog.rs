@@ -612,11 +612,11 @@ impl SyslogIngestor {
             )
             .await
         {
-            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
+            context.runtime.events().report_error(format!(
                 "failed to flush Syslog messages for ingestor '{}' in domain '{}': {error}",
                 context.ingestor.as_str(),
                 context.domain.as_str()
-            )));
+            ));
         }
     }
 }

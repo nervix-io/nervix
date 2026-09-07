@@ -52,7 +52,7 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, timeout},
 };
-use tracing::info;
+use tracing::{error, info};
 use triomphe::Arc;
 
 mod transaction;
@@ -672,7 +672,14 @@ impl ConsensusHandle {
         let handle = self.metrics_task.lock().take();
         if let Some(handle) = handle {
             handle.abort();
-            let _ = handle.await;
+            // The abort makes a cancellation the expected outcome and it says nothing new. A panic
+            // is the opposite: the metrics task died on its own and this join is the last place
+            // that fact exists.
+            if let Err(error) = handle.await
+                && !error.is_cancelled()
+            {
+                error!(%error, "consensus metrics task panicked before shutdown could join it");
+            }
         }
     }
 

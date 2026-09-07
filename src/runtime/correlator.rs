@@ -832,7 +832,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                     side_error.span,
                     MessageErrorOperation::Set,
                 ),
-                vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                captured_partial_output(&result.batch, output_row),
                 matched.materialized_state[input_row].snapshot(),
             ))));
             continue;
@@ -851,7 +851,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                     None,
                     invalid_fields,
                 ),
-                vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                captured_partial_output(&result.batch, output_row),
                 matched.materialized_state[input_row].snapshot(),
             ))));
             continue;
@@ -923,7 +923,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                             None,
                             invalid_output_fields(&result.batch, output_row),
                         ),
-                        vm_partial_output_row_to_runtime_batch(&result.batch, output_row).ok(),
+                        captured_partial_output(&result.batch, output_row),
                         matched.materialized_state[input_row].snapshot(),
                     ))));
                 }

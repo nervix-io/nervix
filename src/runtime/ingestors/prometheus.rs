@@ -150,13 +150,13 @@ impl PrometheusIngestor {
                         })
                         .await
                     {
-                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                        task_events.report_error(format!(
                             "failed to dispatch buffered prometheus payload for ingestor '{}' in \
                              domain '{}': {}",
                             task_ingestor.as_str(),
                             task_domain.as_str(),
                             error
-                        )));
+                        ));
                     }
                 }
                 if drained_buffer {
@@ -169,13 +169,13 @@ impl PrometheusIngestor {
                         )
                         .await
                     {
-                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                        task_events.report_error(format!(
                             "failed to flush buffered prometheus payloads for ingestor '{}' in \
                              domain '{}': {}",
                             task_ingestor.as_str(),
                             task_domain.as_str(),
                             error
-                        )));
+                        ));
                     }
                     continue;
                 }
@@ -213,13 +213,13 @@ impl PrometheusIngestor {
                         ) {
                             Ok(value) => value,
                             Err(error) => {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to resolve prometheus domain clock for ingestor '{}' \
                                      in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 tokio::select! {
                                     changed = shutdown_rx.changed() => {
                                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -249,13 +249,13 @@ impl PrometheusIngestor {
                             ) {
                                 Ok(duration) => duration,
                                 Err(error) => {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to resolve prometheus cadence for ingestor '{}' \
                                          in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     Duration::from_millis(100)
                                 }
                             }
@@ -299,12 +299,12 @@ impl PrometheusIngestor {
                                             ));
                                         }
                                         Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to materialize prometheus sample for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                             warn!(
                                                 domain = task_domain.as_str(),
                                                 ingestor = task_ingestor.as_str(),
@@ -340,12 +340,12 @@ impl PrometheusIngestor {
                                         })
                                         .await
                                     {
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "failed to dispatch prometheus poll result for ingestor '{}' in domain '{}': {}",
                                             task_ingestor.as_str(),
                                             task_domain.as_str(),
                                             error
-                                        )));
+                                        ));
                                     }
                                 }
                             }
@@ -355,12 +355,12 @@ impl PrometheusIngestor {
                                     &task_ingestor,
                                     format!("prometheus query failed: {error}"),
                                 );
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to query prometheus for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 warn!(
                                     domain = task_domain.as_str(),
                                     ingestor = task_ingestor.as_str(),

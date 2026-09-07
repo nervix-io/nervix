@@ -289,13 +289,13 @@ impl Runtime {
                     )
                     .await;
                 if let Err(error) = dispatch_result.and(flush_result) {
-                    let _ = self.inner.events.send(RuntimeEvent::Error(format!(
+                    self.inner.events.report_error(format!(
                         "failed to dispatch {protocol} message for ingestor '{}' in domain '{}': \
                          {}",
                         binding.ingestor.as_str(),
                         binding.domain.as_str(),
                         error
-                    )));
+                    ));
                     warn!(
                         domain = binding.domain.as_str(),
                         ingestor = binding.ingestor.as_str(),
@@ -306,12 +306,12 @@ impl Runtime {
                 }
             }
             Err(error) => {
-                let _ = self.inner.events.send(RuntimeEvent::Error(format!(
+                self.inner.events.report_error(format!(
                     "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
                     binding.ingestor.as_str(),
                     binding.domain.as_str(),
                     error
-                )));
+                ));
                 warn!(
                     domain = binding.domain.as_str(),
                     ingestor = binding.ingestor.as_str(),

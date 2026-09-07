@@ -88,10 +88,7 @@ impl ClickHouseEmitter {
         ) {
             Ok(program) => Some(program),
             Err(error) => {
-                let _ = context
-                    .runtime
-                    .events()
-                    .send(RuntimeEvent::Error(error.to_string()));
+                context.runtime.events().report_error(error.to_string());
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),

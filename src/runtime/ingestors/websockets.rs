@@ -216,12 +216,12 @@ impl WebsocketsIngestor {
                                                 &task_ingestor,
                                                 format!("websocket signaling failed: {error}"),
                                             );
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "websocket signaling failed for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                             warn!(
                                                 domain = task_domain.as_str(),
                                                 ingestor = task_ingestor.as_str(),
@@ -295,12 +295,12 @@ impl WebsocketsIngestor {
                                                         &task_ingestor,
                                                         format!("websocket receive failed: {error}"),
                                                     );
-                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                    task_events.report_error(format!(
                                                         "websocket receive failed for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
-                                                    )));
+                                                    ));
                                                     warn!(
                                                         domain = task_domain.as_str(),
                                                         ingestor = task_ingestor.as_str(),
@@ -321,12 +321,12 @@ impl WebsocketsIngestor {
                                     &task_ingestor,
                                     format!("websocket connect failed: {error}"),
                                 );
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to connect websocket source for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 warn!(
                                     domain = task_domain.as_str(),
                                     ingestor = task_ingestor.as_str(),
@@ -402,12 +402,12 @@ impl WebsocketsIngestor {
             })
             .await
         {
-            let _ = runtime.events().send(RuntimeEvent::Error(format!(
+            runtime.events().report_error(format!(
                 "failed to dispatch websocket payload for ingestor '{}' in domain '{}': {}",
                 ingestor.as_str(),
                 domain.as_str(),
                 error
-            )));
+            ));
         }
     }
 

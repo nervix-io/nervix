@@ -149,6 +149,7 @@ use crate::{
         compile_schema, decode_with_codec, decode_with_codec_owned, parse_as_type_from_arrow,
         runtime_value_arrow_array, runtime_value_from_arrow_array,
     },
+    task_shutdown::JoinShutdown as _,
 };
 
 mod branch_aggregated_state;
@@ -364,8 +365,8 @@ use lookup_hash_map::{
 };
 use message_error::{
     MessageErrorCompileSchemas, MessageErrorFailure, MessageErrorHandling,
-    SingleRecordFilterMapOutcome, invalid_output_fields, operation_for_filter_label,
-    planned_structured_message_error, structured_message_error,
+    SingleRecordFilterMapOutcome, captured_partial_output, invalid_output_fields,
+    operation_for_filter_label, planned_structured_message_error, structured_message_error,
     vm_partial_output_row_to_runtime_batch,
 };
 use nervix_models::{DeduplicatorName, ReingestorName, SchemaName, WireSchemaName};
@@ -485,6 +486,10 @@ const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
 const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How many runtime events the bus holds for a receiver that has fallen behind. A receiver that
+/// exceeds it is told how many it missed rather than being left to believe it saw everything.
+const RUNTIME_EVENT_CAPACITY: usize = 256;
+
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
 
 type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
@@ -526,6 +531,48 @@ pub enum RuntimeError {
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     Error(String),
+}
+
+/// The node's runtime event bus, and the one way a connector failure becomes observable.
+///
+/// A failure that arrives here has already been recovered from: the connector reconnects, retries,
+/// or hands the message to its route's error policy, and the node keeps serving. What is left is
+/// to make that recovery visible, which is why publishing goes through [`Self::report_error`]
+/// rather than through the sender directly. Dropping the send result at each call site would leave
+/// the recovery silent, and a recovery nobody can observe is indistinguishable from data loss.
+#[derive(Clone)]
+pub(crate) struct RuntimeEvents {
+    sender: broadcast::Sender<RuntimeEvent>,
+}
+
+impl RuntimeEvents {
+    fn new() -> Self {
+        let (sender, _) = broadcast::channel(RUNTIME_EVENT_CAPACITY);
+        Self { sender }
+    }
+
+    /// Report a failure the node recovered from. Callers name the entity and domain in `message`,
+    /// because this bus carries the report to readers that have no other way to tell them apart.
+    ///
+    /// The event reaches the sessions attached to this node and, through the fan-out task the node
+    /// starts with, every peer. That task holds its subscription for as long as the node serves, so
+    /// a send that finds no receiver means the node is still starting or has already torn the task
+    /// down. Nothing is left to observe the event in that window, so it is logged at `warn`
+    /// instead. A delivered event is traced at `debug`, because the observers are the report and
+    /// many of these failures are per-message.
+    pub(crate) fn report_error(&self, message: impl Into<String>) {
+        let message = message.into();
+        debug!(error = %message, "reported runtime error to observers");
+        if let Err(broadcast::error::SendError(RuntimeEvent::Error(message))) =
+            self.sender.send(RuntimeEvent::Error(message))
+        {
+            warn!(error = %message, "runtime error raised while no observer is attached");
+        }
+    }
+
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.sender.subscribe()
+    }
 }
 
 /// The handle every task, ingestor, emitter, and connector carries. It is one `Arc` over the
@@ -577,7 +624,7 @@ struct RuntimeInner {
     /// request routing never scans domain executions or their configured routes.
     routed_endpoints: DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>,
     relay_boundary_fanouts: RelayBoundaryFanoutMap,
-    events: broadcast::Sender<RuntimeEvent>,
+    events: RuntimeEvents,
     /// The fault injectors are handed to the runtime by `RuntimeTestHooks`, and the test that
     /// built those hooks keeps arming them while the node runs.
     emitter_faults: Arc<EmitterFaultInjector>,

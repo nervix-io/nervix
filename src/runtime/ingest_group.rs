@@ -676,6 +676,12 @@ impl Runtime {
     /// This is the counterpart to `IngestGroupDispatch::collector`. Building the batch once per
     /// group replaces N single-row batch constructions, N channel sends, and the
     /// `spawn_blocking` hop the route task pays per message.
+    ///
+    /// Every failure below is handled before it is returned: the affected acknowledgements go to
+    /// the ingestor's general error policy, which is what decides whether the messages are logged,
+    /// routed to a dead-letter relay, or dropped. The returned error is a second copy of the first
+    /// such failure, for callers that need to stop rather than continue collecting. A caller that
+    /// only continues is therefore right to discard it, and discarding it loses no report.
     pub(in crate::runtime) async fn flush_ingest_collector(
         &self,
         domain: &DomainName,
