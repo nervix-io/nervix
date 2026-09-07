@@ -4,6 +4,7 @@ use ahash::{HashMap, HashSet};
 use apache_avro::{
     Schema as AvroSchema, from_avro_datum, to_avro_datum, types::Value as AvroValue,
 };
+use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, RecordBatchOptions, StringArray,
@@ -752,7 +753,7 @@ impl RuntimeRecordBatch {
                 let Ok(bytes) = column.to_data().get_slice_memory_size() else {
                     return u64::MAX;
                 };
-                u64::try_from(bytes).unwrap_or(u64::MAX)
+                bytes.arch_into()
             })
             .fold(0_u64, u64::saturating_add)
     }
@@ -969,7 +970,7 @@ impl RuntimeRecordBatch {
                             self.batch.num_rows()
                         ));
                     }
-                    u64::try_from(*row).map_err(|_| format!("Arrow row index {row} exceeds u64"))
+                    Ok::<u64, String>((*row).arch_into())
                 })
                 .collect::<Result<Vec<_>, String>>()?,
         );
@@ -2117,7 +2118,7 @@ impl<'a> ArrowCodecValue<'a> {
                     )
                 })?;
                 let end = start
-                    .checked_add(len.get() as usize)
+                    .checked_add(len.get().arch_into())
                     .verified("the offset and length address one fixed-size list already decoded");
                 Ok(ArrowCodecSequence {
                     codec: self.codec,
@@ -2835,7 +2836,7 @@ fn append_json_value_to_arrow(
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(&incompatible)?;
-            if values.len() != len.get() as usize {
+            if values.len() != len.get().arch_into() {
                 return Err(incompatible());
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
@@ -2962,7 +2963,7 @@ fn append_avro_value_to_arrow(
             let AvroValue::Array(values) = value else {
                 return Err(incompatible());
             };
-            if values.len() != len.get() as usize {
+            if values.len() != len.get().arch_into() {
                 return Err(incompatible());
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
@@ -3142,7 +3143,7 @@ fn append_runtime_value_to_arrow(
                 .downcast_mut::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>()
                 .ok_or_else(|| format!("{context} has an incompatible Arrow array builder"))?;
             let values = match value {
-                Some(RuntimeValue::Array(values)) if values.len() == len.get() as usize => {
+                Some(RuntimeValue::Array(values)) if values.len() == len.get().arch_into() => {
                     Some(values)
                 }
                 Some(RuntimeValue::Array(values)) => {
@@ -3159,7 +3160,7 @@ fn append_runtime_value_to_arrow(
                     ));
                 }
             };
-            for index in 0..len.get() as usize {
+            for index in 0..len.get().arch_into() {
                 append_runtime_value_to_arrow(
                     builder.values().as_mut(),
                     element,

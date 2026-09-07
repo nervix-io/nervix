@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use meticulous::ResultExt as _;
+
 /// Vertical clearance between two items in the same column. Wide enough for a branch-group
 /// header band and for two rate badges to sit above one another without touching.
 const ROW_GAP: i32 = 36;
@@ -480,7 +482,7 @@ impl<'a> Builder<'a> {
                                 ) * 1000
                             })
                             .sum();
-                        total / neighbors.len() as i64
+                        total / i64::try_from(neighbors.len()).unwrap_or(i64::MAX)
                     };
                 }
                 self.sort_column(column);
@@ -578,9 +580,16 @@ impl<'a> Builder<'a> {
 
         let mut extent = 0;
         for (position, edge) in edges.iter().enumerate() {
+            let position = i32::try_from(position).unwrap_or(i32::MAX);
             let offset = match pinned {
-                Some(centre) => (position as i32 - centre as i32) * PORT_PITCH,
-                None => (2 * position as i32 - (edges.len() as i32 - 1)) * PORT_PITCH / 2,
+                Some(centre) => {
+                    let centre = i32::try_from(centre).unwrap_or(i32::MAX);
+                    (position - centre) * PORT_PITCH
+                }
+                None => {
+                    let edge_count = i32::try_from(edges.len()).unwrap_or(i32::MAX);
+                    (2 * position - (edge_count - 1)) * PORT_PITCH / 2
+                }
             };
             extent = extent.max(offset.abs());
             ports.offsets.insert(
@@ -656,7 +665,7 @@ impl<'a> Builder<'a> {
                             anchor - self.slots[*slot].height / 2
                         })
                         .sum();
-                    desired.push(total / neighbors.len() as i32);
+                    desired.push(total / i32::try_from(neighbors.len()).unwrap_or(i32::MAX));
                 }
                 self.place_column(column, &desired);
             }
@@ -787,8 +796,9 @@ impl<'a> Builder<'a> {
             self.column_x.push(x);
             x += self.column_width[column];
             if column < lanes.len() {
+                let lane_count = i32::try_from(lanes[column].max(1)).unwrap_or(i32::MAX);
                 let gutter = SOURCE_PLUG
-                    + (lanes[column].max(1) as i32 + 1) * LANE_PITCH
+                    + (lane_count + 1) * LANE_PITCH
                     + BADGE_WIDTH
                     + BADGE_GAP * 2
                     + TARGET_PLUG;
@@ -919,7 +929,8 @@ impl<'a> Builder<'a> {
             };
             let ordered = self.order_lanes(&segments, ports);
             for (position, segment) in ordered.iter().enumerate() {
-                let x = gutter_x + SOURCE_PLUG + (position as i32 + 1) * LANE_PITCH;
+                let position = i32::try_from(position).unwrap_or(i32::MAX);
+                let x = gutter_x + SOURCE_PLUG + (position + 1) * LANE_PITCH;
                 lanes.insert(
                     LaneKey {
                         from: segment.from,
@@ -1005,7 +1016,8 @@ impl<'a> Builder<'a> {
             .map(|(slot, _)| self.slot_rect(slot).y)
             .min()
             .unwrap_or(0);
-        let corridor = top - FEEDBACK_PITCH * (1 + index as i32 % 3) - FEEDBACK_PITCH;
+        let feedback_lane = i32::try_from(index % 3).assured("a remainder below three fits i32");
+        let corridor = top - FEEDBACK_PITCH * (1 + feedback_lane) - FEEDBACK_PITCH;
         let start = (source_rect.right(), source_rect.center_y());
         let end = (target_rect.x, target_rect.center_y());
         RoutedEdge {

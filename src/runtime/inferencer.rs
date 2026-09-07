@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use ahash::{HashMap, HashMapExt};
+use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
@@ -473,7 +474,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         for (actual, declared) in shape.iter().zip(dimensions) {
             match declared {
                 InferencerTensorDimension::Fixed(expected)
-                    if *actual != expected.get() as usize =>
+                    if *actual != expected.get().arch_into() =>
                 {
                     return Err(format!(
                         "tensor shape {shape:?} has dimension {actual}, expected {expected}"
@@ -595,9 +596,9 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         }
         let (values, size) = match (dimension, value) {
             (InferencerTensorDimension::Fixed(expected), RuntimeValue::Array(values))
-                if values.len() == expected.get() as usize =>
+                if values.len() == expected.get().arch_into() =>
             {
-                (values, expected.get() as usize)
+                (values, expected.get().arch_into())
             }
             (InferencerTensorDimension::Fixed(expected), RuntimeValue::Array(values)) => {
                 return Err(format!(
@@ -651,7 +652,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         let mut shape = Vec::new();
         for dimension in dimensions {
             match dimension {
-                InferencerTensorDimension::Fixed(size) => shape.push(size.get() as usize),
+                InferencerTensorDimension::Fixed(size) => shape.push(size.get().arch_into()),
                 InferencerTensorDimension::Dynamic => {
                     return Err(
                         "cannot infer an inner DYNAMIC axis from an empty outer vector".to_string(),
@@ -690,7 +691,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             return Err("tensor value has fewer axes than its schema".to_string());
         };
         if let InferencerTensorDimension::Fixed(expected) = dimension
-            && size != expected.get() as usize
+            && size != expected.get().arch_into()
         {
             return Err(format!(
                 "tensor axis has length {size}, expected {expected}"

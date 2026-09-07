@@ -2091,16 +2091,6 @@ impl DomainState {
                     )?;
                 }
                 Model::WasmProcessor(processor) => {
-                    if usize::try_from(processor.limits.max_memory_bytes.get()).is_err() {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: format!(
-                                "WASM processor MAX MEMORY {} bytes is not supported on this node",
-                                processor.limits.max_memory_bytes
-                            ),
-                        }));
-                    }
                     add_processor_output_edges(
                         domain,
                         identifier,

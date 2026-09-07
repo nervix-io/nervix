@@ -1,4 +1,4 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 
 use nervix_models::{
     BranchName, CreateBranch, ModelName, ProcessorInputWhere, ProcessorInputs,
@@ -654,8 +654,8 @@ fn materialize_nodes(
                     }
                     RelayProcessorOperationTemplate::WindowProcessor {
                         output_routes: materialized_outputs,
-                        width_messages: width.messages.map(|messages| messages as usize),
-                        step_messages: step.messages.map(|messages| messages as usize),
+                        width_messages: width.messages.map(|messages| messages.arch_into()),
+                        step_messages: step.messages.map(|messages| messages.arch_into()),
                         width_duration: parse_optional_window_duration(
                             &node.processor,
                             "width",
@@ -817,25 +817,6 @@ fn parse_branch_ttl_setting(
     .transpose()
 }
 
-fn parse_branch_max_instances_setting(
-    max_instances: Option<NonZeroU64>,
-    kind: ModelKind,
-    identifier: &ModelName,
-) -> Result<Option<NonZeroUsize>, String> {
-    max_instances
-        .map(|max_instances| {
-            NonZeroUsize::try_from(max_instances).map_err(|_| {
-                format!(
-                    "branch MAX INSTANCES '{}' for {} '{}' is too large for this runtime",
-                    max_instances,
-                    kind.as_str(),
-                    identifier.as_str()
-                )
-            })
-        })
-        .transpose()
-}
-
 fn resolve_branch_relay_templates(
     branch_relay_ids: HashSet<RelayName>,
     model_index: &HashMap<RegistryEntity, Model>,
@@ -920,11 +901,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
                 spec.kind,
                 &spec.identifier,
             )?,
-            branch_max_instances: parse_branch_max_instances_setting(
-                spec.branch_max_instances,
-                spec.kind,
-                &spec.identifier,
-            )?,
+            branch_max_instances: spec.branch_max_instances.map(addressable_count),
             error_policies: spec.error_policies.clone(),
             relays,
             materialized_streams,
@@ -977,11 +954,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
             spec.kind,
             &spec.processor,
         )?,
-        branch_max_instances: parse_branch_max_instances_setting(
-            node.branch_max_instances,
-            spec.kind,
-            &spec.processor,
-        )?,
+        branch_max_instances: node.branch_max_instances.map(addressable_count),
         error_policies: spec.error_policies.clone(),
         relays,
         materialized_streams,

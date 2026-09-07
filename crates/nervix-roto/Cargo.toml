@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true }
+arch-into = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
 arrow-cast = { workspace = true }

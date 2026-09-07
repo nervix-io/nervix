@@ -118,8 +118,7 @@ impl SqsIngestor {
             })?;
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks =
-            Vec::with_capacity(super::IngestorStarter::instance_task_capacity(instances));
+        let mut tasks = Vec::with_capacity(instances.get().arch_into());
 
         for instance_idx in 0..instances.get() {
             let mut shutdown_rx = shutdown_tx.subscribe();

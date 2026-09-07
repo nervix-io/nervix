@@ -300,6 +300,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arch-into"
+version = "0.0.1-alpha.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db255be40781ef316d9bb174b0c4be5d44c1051940d5836ea6431899ffcb4ea8"
+dependencies = [
+ "const_panic",
+ "paste",
+]
+
+[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2439,6 +2449,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "const_panic"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9603f79528ece8163c496f8932121cb36cfe46259e9c907bb3d8205139d7caa3"
+dependencies = [
+ "typewit",
 ]
 
 [[package]]
@@ -6405,6 +6424,7 @@ name = "nervix-benchmark"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "arch-into",
  "clap",
  "humantime",
  "meticulous",
@@ -6432,6 +6452,7 @@ dependencies = [
 name = "nervix-cli"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "ariadne 0.5.1",
  "byte-unit",
  "clap",
@@ -6451,6 +6472,7 @@ dependencies = [
 name = "nervix-client-core"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-tar",
  "base64 0.22.1",
  "meticulous",
@@ -6471,6 +6493,7 @@ dependencies = [
 name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "ciborium",
  "fjall",
  "futures-util",
@@ -6515,9 +6538,11 @@ name = "nervix-interconnect"
 version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
+ "arch-into",
  "dashmap 6.2.1",
  "ed25519-dalek",
  "futures-util",
+ "meticulous",
  "nervix-models",
  "rand_core 0.6.4",
  "rkyv 0.8.18",
@@ -6605,6 +6630,7 @@ name = "nervix-roto"
 version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
+ "arch-into",
  "arrow-arith",
  "arrow-array",
  "arrow-cast",
@@ -6632,6 +6658,7 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "arc-swap",
+ "arch-into",
  "argon2",
  "arrow-arith",
  "arrow-array",
@@ -6767,6 +6794,7 @@ dependencies = [
 name = "nervix-test-environment"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "blake3",
  "clap",
  "meticulous",
@@ -6782,6 +6810,7 @@ name = "nervix-vm"
 version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
+ "arch-into",
  "arrow-arith",
  "arrow-array",
  "arrow-buffer",
@@ -6808,6 +6837,7 @@ dependencies = [
 name = "nervix-wasm"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
@@ -11920,6 +11950,12 @@ dependencies = [
  "quote",
  "syn 3.0.4",
 ]
+
+[[package]]
+name = "typewit"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "214ca0b2191785cbc06209b9ca1861e048e39b5ba33574b3cedd58363d5bb5f6"
 
 [[package]]
 name = "ubyte"

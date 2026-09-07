@@ -336,13 +336,7 @@ impl EmitterPublishingSettings {
         }
         let max_in_flight = match window {
             EmitterAckWindow::Sequential => NonZeroUsize::MIN,
-            EmitterAckWindow::Parallel { max } => NonZeroUsize::try_from(*max).map_err(|_| {
-                Self::invalid_setting(
-                    domain,
-                    emitter,
-                    "parallel acknowledgment window exceeds this node's capacity",
-                )
-            })?,
+            EmitterAckWindow::Parallel { max } => addressable_count(*max),
         };
         Ok(AckConfirmation {
             max_in_flight,
@@ -467,10 +461,9 @@ impl EmitterPublishBatch {
                     .flatten()
                     .flatten()
                     .map(|(name, value)| {
-                        u64::try_from(name.len())
-                            .unwrap_or(u64::MAX)
-                            .checked_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
-                            .assured(BYTES_IN_MEMORY)
+                        let name_len: u64 = name.len().arch_into();
+                        let value_len: u64 = value.len().arch_into();
+                        name_len.checked_add(value_len).assured(BYTES_IN_MEMORY)
                     })
                     .try_fold(0_u64, u64::checked_add)
                     .assured(BYTES_IN_MEMORY),
@@ -480,9 +473,7 @@ impl EmitterPublishBatch {
                 self.sqs_message_groups
                     .iter()
                     .map(|group| match group {
-                        Ok(Some(group)) | Err(group) => {
-                            u64::try_from(group.len()).unwrap_or(u64::MAX)
-                        }
+                        Ok(Some(group)) | Err(group) => group.len().arch_into(),
                         Ok(None) => 0,
                     })
                     .try_fold(0_u64, u64::checked_add)
@@ -558,18 +549,11 @@ impl EmitterPublishBatch {
         })
     }
 
-    fn pending_record_chunks(
-        &self,
-        max_batch: NonZeroU64,
-    ) -> EmitterRuntimeResult<Vec<Vec<usize>>> {
-        let max_batch = NonZeroUsize::try_from(max_batch).map_err(|_| {
-            emitter_config_error("emitter maximum record batch exceeds this node's capacity")
-        })?;
-        let pending = self.pending_record_rows();
-        Ok(pending
-            .chunks(max_batch.get())
+    fn pending_record_chunks(&self, max_batch: NonZeroU64) -> Vec<Vec<usize>> {
+        self.pending_record_rows()
+            .chunks(addressable_count(max_batch).get())
             .map(<[usize]>::to_vec)
-            .collect())
+            .collect()
     }
 
     fn pending_record_rows(&self) -> Vec<usize> {
@@ -885,7 +869,7 @@ impl EmitterBatchBuffer {
 
     fn update_buffered_messages(&self) {
         self.buffered_messages
-            .set_generic(usize::try_from(self.pending_messages).unwrap_or(usize::MAX));
+            .set_generic(self.pending_messages.arch_into());
     }
 
     fn reconfigure(
@@ -1187,10 +1171,7 @@ fn compile_sql_values_program(
         if site.operation != MessageErrorOperation::Values {
             continue;
         }
-        let Some(index) = site
-            .operation_index
-            .and_then(|index| usize::try_from(index).ok())
-        else {
+        let Some(index) = site.operation_index.map(|index| index.arch_into()) else {
             continue;
         };
         let Some(mapping) = values.get(index) else {
@@ -2548,7 +2529,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -2577,7 +2558,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -2607,7 +2588,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -2637,7 +2618,7 @@ impl SinkEmitter {
                     tokio::task::consume_budget().await;
                     let outcome = {
                         let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch)?;
+                        let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
                                 batch_index,
@@ -4823,9 +4804,10 @@ mod tests {
         let with_headers = EmitterPublishBatch::new(batch.clone(), Some(headers.clone()))
             .expect("row-aligned headers must build");
         assert_eq!(with_headers.headers.as_ref(), Some(&headers));
+        let header_bytes: u64 = "routefast".len().arch_into();
         assert_eq!(
             with_headers.estimated_bytes(),
-            batch.estimated_bytes() + u64::try_from("routefast".len()).unwrap()
+            batch.estimated_bytes() + header_bytes
         );
 
         let error = match EmitterPublishBatch::new(batch, Some(Vec::new())) {

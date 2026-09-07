@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use arch_into::ArchInto as _;
 use async_tar::{
     Archive as AsyncTarArchive, Builder as AsyncTarBuilder, EntryType, Header, HeaderMode,
 };
@@ -274,13 +275,11 @@ impl ResourceStore {
         entries: Vec<ResourceManifestEntry>,
     ) -> Result<ResourceManifest, ResourceStoreError> {
         let total_bytes = entries.iter().map(|entry| entry.size).sum();
-        let file_count = u64::try_from(
-            entries
-                .iter()
-                .filter(|entry| entry.entry_type == ResourceEntryType::File)
-                .count(),
-        )
-        .unwrap_or(u64::MAX);
+        let file_count = entries
+            .iter()
+            .filter(|entry| entry.entry_type == ResourceEntryType::File)
+            .count()
+            .arch_into();
         let manifest_checksum = manifest_checksum(&entries)?;
         let resource = ResourceVersion {
             id: install.id.clone(),

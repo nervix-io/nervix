@@ -10,9 +10,10 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use bytes::Bytes;
 use flatbuffers::{Allocator, FlatBufferBuilder};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
@@ -47,8 +48,6 @@ pub enum WasmProcessorError {
     Link(#[source] wasmtime::Error),
     #[error("failed to instantiate wasm module: {0}")]
     Instantiate(#[source] wasmtime::Error),
-    #[error("MAX MEMORY {limit} bytes is not supported on this host")]
-    InvalidMaxMemory { limit: NonZeroU64 },
     #[error("failed to reset MAX FUEL {limit} before {operation}: {source}")]
     ResetFuel {
         limit: NonZeroU64,
@@ -209,9 +208,9 @@ fn wasm_limit_error(
     source
         .downcast_ref::<GuestMemoryLimitExceeded>()
         .map(|exceeded| WasmProcessorError::MemoryLimitExceeded {
-            limit: u64::try_from(exceeded.limit).unwrap_or(u64::MAX),
-            allocated: u64::try_from(exceeded.allocated).unwrap_or(u64::MAX),
-            growth: u64::try_from(exceeded.growth).unwrap_or(u64::MAX),
+            limit: exceeded.limit.arch_into(),
+            allocated: exceeded.allocated.arch_into(),
+            growth: exceeded.growth.arch_into(),
             operation,
         })
 }
@@ -1213,11 +1212,7 @@ impl CompiledWasmProcessor {
         restored_state: Option<&[u8]>,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
-        let max_memory_bytes = usize::try_from(limits.max_memory_bytes.get()).map_err(|_| {
-            WasmProcessorError::InvalidMaxMemory {
-                limit: limits.max_memory_bytes,
-            }
-        })?;
+        let max_memory_bytes = limits.max_memory_bytes.get().arch_into();
         let mut store = Store::new(
             &self.engine,
             BranchStore::new(clock, max_memory_bytes, emitted_batch_sender),
@@ -1636,7 +1631,12 @@ impl WasmBranchInstance {
                     .clamp(bytes.len(), self.max_guest_buffer_bytes);
                 let ptr = self.allocate_guest_buffer(growth_target).await?;
                 self.memory
-                    .write(&mut self.store, ptr as usize, bytes)
+                    .write(
+                        &mut self.store,
+                        usize::try_from(ptr)
+                            .verified("the guest allocator returned a non-negative pointer"),
+                        bytes,
+                    )
                     .map_err(WasmProcessorError::MemoryWrite)?;
                 let size =
                     i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
@@ -1664,7 +1664,10 @@ impl WasmBranchInstance {
                 code: ptr,
             });
         }
-        self.guest_buffer_capacity = self.guest_buffer_capacity.max(size as usize);
+        self.guest_buffer_capacity = self.guest_buffer_capacity.max(
+            usize::try_from(size)
+                .verified("this size was converted from a supported host buffer length"),
+        );
         Ok(ptr)
     }
 
@@ -1675,7 +1678,12 @@ impl WasmBranchInstance {
         let ptr = self.allocate_guest_buffer(bytes.len()).await?;
         let size = i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
         self.memory
-            .write(&mut self.store, ptr as usize, bytes)
+            .write(
+                &mut self.store,
+                usize::try_from(ptr)
+                    .verified("the guest allocator returned a non-negative pointer"),
+                bytes,
+            )
             .map_err(WasmProcessorError::MemoryWrite)?;
         Ok((ptr, size))
     }
@@ -2263,7 +2271,7 @@ mod tests {
             .expect("spill must be copied into a grown guest buffer");
 
         assert_eq!(
-            usize::try_from(size).expect("size must be positive"),
+            usize::try_from(size).verified("the returned buffer size is positive"),
             expected.len()
         );
         assert!(branch.guest_buffer_capacity >= expected.len());
@@ -2272,7 +2280,7 @@ mod tests {
             .memory
             .read(
                 &branch.store,
-                usize::try_from(ptr).expect("pointer must be positive"),
+                usize::try_from(ptr).verified("the returned buffer pointer is positive"),
                 &mut actual,
             )
             .expect("finished spill must be readable from guest memory");

@@ -364,7 +364,8 @@ mod tests {
         }
 
         fn choose<T: Clone>(&mut self, items: &[T]) -> T {
-            let idx = (self.next_u8() as usize) % items.len();
+            let idx = usize::from(self.next_u8());
+            let idx = idx % items.len();
             items[idx].clone()
         }
 
@@ -374,7 +375,7 @@ mod tests {
 
         fn bounded_u64(&mut self, min: u64, max: u64) -> u64 {
             let span = max - min + 1;
-            min + (self.next_u8() as u64 % span)
+            min + (u64::from(self.next_u8()) % span)
         }
 
         /// A bound whose floor is itself non-zero, so the generated value is too.
@@ -406,7 +407,8 @@ mod tests {
 
         fn raw_name(&mut self) -> String {
             // Keep identifiers parser-valid and deterministic after canonical render.
-            let len = (self.next_u8() as usize % 8) + 1;
+            let len = usize::from(self.next_u8());
+            let len = (len % 8) + 1;
             let mut s = String::with_capacity(len);
             for i in 0..len {
                 let raw = self.next_u8();
@@ -427,7 +429,8 @@ mod tests {
 
         fn transport_literal(&mut self) -> String {
             // No quotes/newlines so canonical serializer always succeeds.
-            let len = (self.next_u8() as usize % 16) + 1;
+            let len = usize::from(self.next_u8());
+            let len = (len % 16) + 1;
             let mut out = String::with_capacity(len);
             for _ in 0..len {
                 let b = self.next_u8();
@@ -512,7 +515,8 @@ mod tests {
         let mut g = ByteGen::new(bytes);
         match g.next_u8() % 30 {
             0 => {
-                let field_count = (g.next_u8() as usize % 5) + 1;
+                let field_count = usize::from(g.next_u8());
+                let field_count = (field_count % 5) + 1;
                 let mut fields = Vec::with_capacity(field_count);
                 for _ in 0..field_count {
                     fields.push(SchemaField {
@@ -562,7 +566,8 @@ mod tests {
             }
             1 => {
                 let is_json = g.bool();
-                let field_count = (g.next_u8() as usize % 5) + 1;
+                let field_count = usize::from(g.next_u8());
+                let field_count = (field_count % 5) + 1;
                 if is_json {
                     let mut fields = Vec::with_capacity(field_count);
                     for _ in 0..field_count {
@@ -623,7 +628,8 @@ mod tests {
                 encoding_rules: Vec::new(),
             }),
             3 => {
-                let count = (g.next_u8() as usize % 6) + 1;
+                let count = usize::from(g.next_u8());
+                let count = (count % 6) + 1;
                 let mut config = Vec::with_capacity(count);
                 for _ in 0..count {
                     config.push(KafkaConfigEntry {

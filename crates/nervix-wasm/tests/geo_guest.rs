@@ -14,6 +14,7 @@ use std::{sync::Arc, time::Duration};
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use meticulous::ResultExt as _;
 use nervix_models::{Timestamp, WasmProcessorLimits};
 use nervix_wasm::{
     DomainClock, WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmOutputColumnRef,
@@ -218,7 +219,8 @@ async fn the_geo_guest_enriches_every_declared_route() {
             assert_eq!(
                 column,
                 &WasmOutputColumnRef::Input {
-                    column_index: index as u32
+                    column_index: u32::try_from(index)
+                        .assured("the test takes at most fourteen input columns")
                 }
             );
         }
@@ -226,7 +228,8 @@ async fn the_geo_guest_enriches_every_declared_route() {
             assert_eq!(
                 column,
                 &WasmOutputColumnRef::Generated {
-                    column_index: offset as u32
+                    column_index: u32::try_from(offset)
+                        .assured("the test examines ten generated columns")
                 }
             );
         }

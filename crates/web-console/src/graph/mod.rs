@@ -19,7 +19,9 @@ pub const RELAY_MAX_WIDTH: i32 = 220;
 /// The drawn width of a relay capsule. The console has no text metrics before paint, so this
 /// estimates from the label and the renderer truncates anything that overflows.
 pub fn relay_width(label: &str) -> i32 {
-    let estimated = i32::try_from(label.chars().count()).unwrap_or(i32::MAX / 8) * 7 + 32;
+    let character_count =
+        i32::try_from(label.chars().count()).map_or(i32::MAX / 8, |count| count.min(i32::MAX / 8));
+    let estimated = character_count * 7 + 32;
     estimated.clamp(RELAY_MIN_WIDTH, RELAY_MAX_WIDTH)
 }
 
