@@ -30,7 +30,6 @@ struct MqttTaskContext {
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
     branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
-    events: broadcast::Sender<RuntimeEvent>,
     quiesce: Arc<IngestorQuiesceControl>,
 }
 
@@ -67,7 +66,7 @@ impl MqttIngestor {
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
         let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -160,7 +159,7 @@ impl MqttIngestor {
                     "stopped mqtt ingestor"
                 );
             });
-            runtime.ingestors.insert(
+            runtime.inner.ingestors.insert(
                 key,
                 IngestorRuntime::Background {
                     shutdown: shutdown_tx,
@@ -207,7 +206,6 @@ impl MqttIngestor {
                 filter_where: filter_where.clone(),
                 codec: codec.clone(),
                 branched_senders: branched_senders.clone(),
-                events: runtime.events.clone(),
                 quiesce: quiesce.clone(),
             };
             let task_topic = topic.clone();
@@ -257,6 +255,7 @@ impl MqttIngestor {
                     }
                     if task_context
                         .runtime
+                        .inner
                         .ingestor_faults
                         .is_failed(&task_context.ingestor)
                     {
@@ -376,13 +375,15 @@ impl MqttIngestor {
                                 })
                                 .await
                             {
-                                let _ = task_context.events.send(RuntimeEvent::Error(format!(
-                                    "failed to dispatch buffered mqtt payload for ingestor '{}' \
-                                     in domain '{}': {}",
-                                    task_context.ingestor.as_str(),
-                                    task_context.domain.as_str(),
-                                    error
-                                )));
+                                let _ = task_context.runtime.events().send(RuntimeEvent::Error(
+                                    format!(
+                                        "failed to dispatch buffered mqtt payload for ingestor \
+                                         '{}' in domain '{}': {}",
+                                        task_context.ingestor.as_str(),
+                                        task_context.domain.as_str(),
+                                        error
+                                    ),
+                                ));
                             }
                             continue;
                         }
@@ -553,7 +554,7 @@ impl MqttIngestor {
             tasks.push(task);
         }
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -631,7 +632,7 @@ impl MqttIngestor {
                                 return MqttSubscriptionState::Ready;
                             }
                             let error = format!("mqtt subscribe failed: {suback:?}");
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                                 "failed to subscribe mqtt source for ingestor '{}' in domain '{}': {}",
                                 context.ingestor.as_str(),
                                 context.domain.as_str(),
@@ -652,7 +653,7 @@ impl MqttIngestor {
                         }
                         Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                         Err(error) => {
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                                 "failed to subscribe mqtt source for ingestor '{}' in domain '{}': {}",
                                 context.ingestor.as_str(),
                                 context.domain.as_str(),
@@ -711,7 +712,7 @@ impl MqttIngestor {
                         }
                         Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                         Err(error) => {
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                                 "failed to receive mqtt message for ingestor '{}' in domain '{}': {}",
                                 context.ingestor.as_str(),
                                 context.domain.as_str(),
@@ -756,7 +757,7 @@ impl MqttIngestor {
                         &context.ingestor,
                         format!("mqtt quiesce acknowledgement failed: {error}"),
                     );
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
+                    let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                         "failed to acknowledge mqtt payload under quiesce for ingestor '{}' in \
                          domain '{}': {}",
                         context.ingestor.as_str(),
@@ -781,7 +782,7 @@ impl MqttIngestor {
         if let Err(error) =
             Self::dispatch_entry(context, entry.record, AckSet::empty(), collector).await
         {
-            let _ = context.events.send(RuntimeEvent::Error(format!(
+            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                 context.ingestor.as_str(),
                 context.domain.as_str(),
@@ -826,7 +827,7 @@ impl MqttIngestor {
             let dispatched = match dispatch_result.and(flush_result) {
                 Ok(()) => true,
                 Err(error) => {
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
+                    let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                         "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                         context.ingestor.as_str(),
                         context.domain.as_str(),
@@ -840,7 +841,7 @@ impl MqttIngestor {
                 match Runtime::await_ack_completion(shutdown_rx, completion, ack_timeout).await {
                     Some(AckOutcome::Ack) => {
                         if let Err(error) = client_handle.ack(&entry.publish).await {
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                                 "failed to acknowledge mqtt message for ingestor '{}' in domain \
                                  '{}': {}",
                                 context.ingestor.as_str(),
@@ -856,7 +857,7 @@ impl MqttIngestor {
                         }
                     }
                     Some(AckOutcome::NoAck(error)) => {
-                        let _ = context.events.send(RuntimeEvent::Error(format!(
+                        let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                             "mqtt ack chain failed for ingestor '{}' in domain '{}': {}",
                             context.ingestor.as_str(),
                             context.domain.as_str(),
@@ -943,7 +944,7 @@ impl MqttIngestor {
                 let dispatched = match dispatch_result {
                     Ok(()) => true,
                     Err(error) => {
-                        let _ = context.events.send(RuntimeEvent::Error(format!(
+                        let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                             "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                             context.ingestor.as_str(),
                             context.domain.as_str(),
@@ -989,7 +990,7 @@ impl MqttIngestor {
             }
 
             if let Some(error) = batch_failure {
-                let _ = context.events.send(RuntimeEvent::Error(format!(
+                let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                     "mqtt ack batch failed for ingestor '{}' in domain '{}': {}",
                     context.ingestor.as_str(),
                     context.domain.as_str(),
@@ -1003,7 +1004,7 @@ impl MqttIngestor {
                 for publish in &publishes {
                     if let Err(error) = client_handle.ack(publish).await {
                         ack_failure = Some(error.to_string());
-                        let _ = context.events.send(RuntimeEvent::Error(format!(
+                        let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                             "failed to acknowledge mqtt message for ingestor '{}' in domain '{}': \
                              {}",
                             context.ingestor.as_str(),
@@ -1064,7 +1065,7 @@ impl MqttIngestor {
         match decode_ingested_payload(context.codec.clone(), payload).await {
             Ok(record) => Some(record),
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(format!(
+                let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                     "failed to decode message for ingestor '{}' in domain '{}': {}",
                     context.ingestor.as_str(),
                     context.domain.as_str(),
@@ -1120,7 +1121,7 @@ impl MqttIngestor {
             )
             .await;
         if let Err(error) = &result {
-            let _ = context.events.send(RuntimeEvent::Error(format!(
+            let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                 "failed to flush messages for ingestor '{}' in domain '{}': {}",
                 context.ingestor.as_str(),
                 context.domain.as_str(),

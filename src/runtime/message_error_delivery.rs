@@ -141,7 +141,7 @@ impl MessageErrorRouteTask {
     fn report_failure(&self, acks: &[AckSet], reason: String) {
         let _ = self
             .runtime
-            .events
+            .events()
             .send(RuntimeEvent::Error(reason.clone()));
         warn!(
             domain = self.route.domain.as_str(),
@@ -355,7 +355,7 @@ impl Runtime {
         delivery: MessageErrorDelivery,
     ) -> Result<(), String> {
         let failure_route = route.clone();
-        let route_runtime = match self.message_error_routes.entry(route.clone()) {
+        let route_runtime = match self.inner.message_error_routes.entry(route.clone()) {
             DashMapEntry::Occupied(entry) => entry.get().clone(),
             DashMapEntry::Vacant(entry) => {
                 let route_runtime =
@@ -379,13 +379,14 @@ impl Runtime {
 
     pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {
         let keys = self
+            .inner
             .message_error_routes
             .iter()
             .filter_map(|entry| (&entry.key().domain == domain).then_some(entry.key().clone()))
             .collect::<Vec<_>>();
         for key in keys {
             tokio::task::consume_budget().await;
-            if let Some((_, route)) = self.message_error_routes.remove(&key) {
+            if let Some((_, route)) = self.inner.message_error_routes.remove(&key) {
                 route.shutdown().await;
             }
         }

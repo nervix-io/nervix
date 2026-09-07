@@ -5,7 +5,7 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_approx_into::{ApproxInto as _, TryApproxInto as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -922,9 +922,9 @@ pub(crate) fn format_count(value: u64) -> String {
 /// A rate that has no integer value at all — a non-finite sample, or one past the `u64` range —
 /// renders as the unformatted float, so a report never claims a count it did not measure.
 pub(crate) fn format_rounded_count(value: f64) -> String {
-    match value.round().try_approx_into() {
-        Ok(count) => format_count(count),
-        Err(_) => value.to_string(),
+    match value.round().checked_approx_into() {
+        Some(count) => format_count(count),
+        None => value.to_string(),
     }
 }
 

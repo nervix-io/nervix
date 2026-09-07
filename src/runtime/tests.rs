@@ -185,7 +185,7 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
         (&retrying, 2_usize),
         (&iceberg, 5_usize),
     ] {
-        runtime.emitter_buffers.insert(
+        runtime.inner.emitter_buffers.insert(
             super::RuntimeKey::new(domain.clone(), emitter.clone()),
             Arc::new(AtomicUsize::new(pending_messages)),
         );
@@ -530,11 +530,12 @@ fn test_ingestor_quiesce_control(
     mode: IngestQuiesceMode,
 ) -> Arc<super::IngestorQuiesceControl> {
     let metric_labels = runtime
+        .inner
         .metrics
         .register_ingestor_quiesce(domain, ingestor, None);
     Arc::new(super::IngestorQuiesceControl::new(
         mode,
-        runtime.metrics.clone(),
+        runtime.inner.metrics.clone(),
         metric_labels,
     ))
 }
@@ -764,7 +765,7 @@ async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
         task_stopped.store(true, Ordering::SeqCst);
     });
 
-    runtime.ingestors.insert(
+    runtime.inner.ingestors.insert(
         key.clone(),
         super::IngestorRuntime::Background {
             shutdown: shutdown_tx,
@@ -772,7 +773,7 @@ async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
             tasks: vec![task],
         },
     );
-    runtime.ingestor_quiescence.insert(
+    runtime.inner.ingestor_quiescence.insert(
         key.clone(),
         test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
     );
@@ -780,9 +781,10 @@ async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
     assert_eq!(runtime.pause_ingestors_for_memory_pressure().await, 1);
     assert!(runtime.ingestors_paused_for_memory_pressure());
     assert!(!stopped.load(Ordering::SeqCst));
-    assert!(runtime.ingestors.get(&key).is_some());
+    assert!(runtime.inner.ingestors.get(&key).is_some());
     assert_eq!(
         runtime
+            .inner
             .ingestor_quiescence
             .get(&key)
             .and_then(|control| control.cause()),
@@ -851,7 +853,7 @@ async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
     let runtime = super::Runtime::default();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let (acks, completion) = AckSet::root();
-    runtime.pending_remote_acks.insert(7, acks);
+    runtime.inner.remote_dispatch.pending_acks.insert(7, acks);
     let runtime_task = runtime.clone();
 
     tokio::spawn(async move {
@@ -877,7 +879,7 @@ async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
         Some(AckOutcome::Ack)
     );
     assert!(
-        runtime.pending_remote_acks.get(&7).is_none(),
+        runtime.inner.remote_dispatch.pending_acks.get(&7).is_none(),
         "terminal ack must clear the pending remote ack"
     );
     drop(shutdown_tx);
@@ -887,7 +889,11 @@ async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
 async fn remote_relay_admission_alive_resets_dispatch_timeout() {
     let runtime = super::Runtime::default();
     let (admission_tx, admission_rx) = mpsc::unbounded_channel();
-    runtime.pending_relay_admissions.insert(9, admission_tx);
+    runtime
+        .inner
+        .remote_dispatch
+        .pending_relay_admissions
+        .insert(9, admission_tx);
     let runtime_task = runtime.clone();
 
     tokio::spawn(async move {
@@ -913,7 +919,12 @@ async fn remote_relay_admission_alive_resets_dispatch_timeout() {
         Ok(())
     );
     assert!(
-        runtime.pending_relay_admissions.get(&9).is_none(),
+        runtime
+            .inner
+            .remote_dispatch
+            .pending_relay_admissions
+            .get(&9)
+            .is_none(),
         "terminal admission ack must clear pending admission state"
     );
 }
@@ -990,7 +1001,7 @@ async fn relay_gate_allows_admitted_owner_batches_to_reach_consumers() {
     timeout(
         Duration::from_millis(100),
         services.fanout_owner_batch(
-            &runtime.metrics,
+            &runtime.inner.metrics,
             &domain,
             &relay,
             None,
@@ -3038,6 +3049,7 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
 
     assert!(
         !runtime
+            .inner
             .replicated_branch_aggregated_states
             .iter()
             .any(|state| state.key().kind == ModelKind::Relay),
@@ -3055,7 +3067,7 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
 
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
-    runtime.relay_boundary_fanouts.insert(
+    runtime.inner.relay_boundary_fanouts.insert(
         super::RuntimeKey::new(domain.clone(), relay.clone()),
         fanout,
     );
@@ -3068,7 +3080,7 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
         let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
         task_stopped.store(true, Ordering::SeqCst);
     });
-    runtime.ingestors.insert(
+    runtime.inner.ingestors.insert(
         key.clone(),
         super::IngestorRuntime::Background {
             shutdown: shutdown_tx,
@@ -3076,7 +3088,7 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
             tasks: vec![task],
         },
     );
-    runtime.ingestor_quiescence.insert(
+    runtime.inner.ingestor_quiescence.insert(
         key.clone(),
         test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
     );
@@ -3100,12 +3112,13 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
         .await
         .expect("entity hold should engage");
 
-    assert!(runtime.ingestors.get(&key).is_some());
+    assert!(runtime.inner.ingestors.get(&key).is_some());
     assert!(!stopped.load(Ordering::SeqCst));
     assert!(gate.is_closed());
     assert!(runtime.entity_gate_operation_is_held(operation_id, &domain));
     assert_eq!(
         runtime
+            .inner
             .ingestor_quiescence
             .get(&key)
             .and_then(|control| control.cause()),
@@ -3118,10 +3131,11 @@ async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
         .expect("entity hold should release");
     assert!(!runtime.entity_gate_operation_is_held(operation_id, &domain));
     assert!(!gate.is_closed());
-    assert!(runtime.ingestors.get(&key).is_some());
+    assert!(runtime.inner.ingestors.get(&key).is_some());
     assert!(!stopped.load(Ordering::SeqCst));
     assert_eq!(
         runtime
+            .inner
             .ingestor_quiescence
             .get(&key)
             .and_then(|control| control.cause()),
@@ -3142,7 +3156,7 @@ async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
     let operation_id = 42;
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
     let gate = fanout.dispatch_gate();
-    runtime.relay_boundary_fanouts.insert(
+    runtime.inner.relay_boundary_fanouts.insert(
         super::RuntimeKey::new(domain.clone(), relay.clone()),
         fanout,
     );
@@ -3232,6 +3246,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         .await
         .expect("running schedule should build");
     let graph_before_pause = runtime
+        .inner
         .executions
         .get(&domain)
         .expect("execution should exist")
@@ -3250,6 +3265,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         .expect("paused schedule should remain active");
 
     let execution = runtime
+        .inner
         .executions
         .get(&domain)
         .expect("paused execution should remain");
@@ -3337,6 +3353,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
         .expect("stale cluster state should be ignored");
 
     let execution = runtime
+        .inner
         .executions
         .get(&domain)
         .expect("current execution should remain");
@@ -3627,11 +3644,12 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
         "unexpected start error: {error}"
     );
     assert!(
-        !runtime.executions.contains_key(&domain),
+        !runtime.inner.executions.contains_key(&domain),
         "failed scheduled ingestor start must not leave a partial domain execution"
     );
     assert!(
         !runtime
+            .inner
             .ingestors
             .contains_key(&super::RuntimeKey::new(domain.clone(), ingestor.clone())),
         "failed scheduled ingestor start must not leave an ingestor runtime"
@@ -3868,7 +3886,8 @@ fn ownership_handoff_keeps_internal_moved_group_relays_open() {
 #[tokio::test]
 async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     let runtime = super::Runtime::default();
-    *runtime.local_node_id.write() = Some(ClusterNodeName::parse("node-1").expect("valid name"));
+    *runtime.inner.remote_dispatch.local_node_id.write() =
+        Some(ClusterNodeName::parse("node-1").expect("valid name"));
     let domain = domain("default");
     let event_schema = named::<SchemaName>("event");
     let processor = named::<DeduplicatorName>("deduplicate_events");
@@ -3969,6 +3988,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         .await
         .expect("non-junction scheduled processors must use the shared swap path");
     let execution = runtime
+        .inner
         .executions
         .get(&domain)
         .expect("domain execution must remain installed");
@@ -3986,7 +4006,8 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
 #[tokio::test]
 async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
     let runtime = super::Runtime::default();
-    *runtime.local_node_id.write() = Some(ClusterNodeName::parse("node-1").expect("valid name"));
+    *runtime.inner.remote_dispatch.local_node_id.write() =
+        Some(ClusterNodeName::parse("node-1").expect("valid name"));
     let domain = domain("default");
     let event_schema = named::<SchemaName>("event");
     let processor = named::<DeduplicatorName>("deduplicate_events");
@@ -4082,6 +4103,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         .expect("entity swap must apply");
 
     let installed = runtime
+        .inner
         .state_schema_fingerprints
         .get(&super::RuntimeStateSchemaKey::new(
             domain,
@@ -4498,7 +4520,7 @@ fn required_wait_ack_does_not_block_ownership_handoff_drain_status() {
     let domain = domain("default");
     let ingestor = named::<IngestorName>("orders_source");
     let tracker = Arc::new(AckRootTracker::default());
-    runtime.in_flight_by_ingestor.insert(
+    runtime.inner.in_flight_by_ingestor.insert(
         super::RuntimeKey::new(domain.clone(), ingestor.clone()),
         tracker.clone(),
     );
@@ -4527,13 +4549,13 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
     let _owner_receiver = services.activate_owner_buffer();
-    runtime.relay_boundary_fanouts.insert(
+    runtime.inner.relay_boundary_fanouts.insert(
         super::RuntimeKey::new(domain.clone(), relay.clone()),
         services.fanout.clone(),
     );
     services
         .enqueue_owner_batch(
-            &runtime.metrics,
+            &runtime.inner.metrics,
             &domain,
             &relay,
             None,
@@ -4570,7 +4592,7 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     .expect("relay owner ACK test batch should build");
 
     services
-        .enqueue_owner_batch(&runtime.metrics, &domain, &relay, None, &batch)
+        .enqueue_owner_batch(&runtime.inner.metrics, &domain, &relay, None, &batch)
         .await
         .expect("the relay owner buffer should admit the batch");
     let completion = completion.wait();
@@ -4854,6 +4876,7 @@ async fn wait_for_persisted_runtime_state_lsm(
     expected_lsm: u64,
 ) {
     let store = runtime
+        .inner
         .state_store
         .as_ref()
         .expect("test runtime should have a state store")
@@ -4955,6 +4978,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     assert_eq!(state.last_persisted_lsm.load(Ordering::SeqCst), 0);
     assert!(
         runtime
+            .inner
             .state_store
             .as_ref()
             .expect("test runtime should have a state store")
@@ -4968,6 +4992,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     task.await.expect("snapshot task should stop cleanly");
     assert_eq!(
         runtime
+            .inner
             .state_store
             .as_ref()
             .expect("test runtime should have a state store")
@@ -5373,7 +5398,7 @@ fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_s
     let runtime =
         super::Runtime::with_persistence(Some(db), Duration::from_millis(100), Default::default())
             .expect("runtime should open persisted state");
-    runtime.metrics.register_global_node(
+    runtime.inner.metrics.register_global_node(
         &domain,
         ModelKind::Ingestor,
         &ModelName::from(&ingestor),
@@ -5450,9 +5475,10 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
     );
     stale_state.mark_metrics_updated();
     runtime
+        .inner
         .replicated_branch_aggregated_states
         .insert(placement, stale_state);
-    runtime.metrics.register_global_node(
+    runtime.inner.metrics.register_global_node(
         &domain,
         ModelKind::Ingestor,
         &ModelName::from(&ingestor),
@@ -5528,9 +5554,11 @@ fn describe_does_not_reapply_equal_lsm_snapshot_over_active_metrics() {
         .expect("state should initialize"),
     );
     runtime
+        .inner
         .replicated_branch_aggregated_states
         .insert(placement, state);
     runtime
+        .inner
         .metrics
         .observe_global_node_sent(crate::metrics::NodeBatchObservation {
             domain: &domain,
@@ -5720,6 +5748,7 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         .expect("stale state should purge");
     assert!(
         !runtime
+            .inner
             .replicated_deduplicator_states
             .contains_key(&original_placement)
     );
@@ -6052,6 +6081,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
         .expect("unbranched relay execution should build");
 
     let execution = runtime
+        .inner
         .executions
         .get(&domain)
         .expect("domain execution should exist");
@@ -6319,7 +6349,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
     relay_schemas.insert(relay_id.clone(), schema.clone());
     let mut relay_services = HashMap::default();
     relay_services.insert(relay_id.clone(), services.clone());
-    runtime.executions.insert(
+    runtime.inner.executions.insert(
         domain.clone(),
         super::DomainExecution {
             schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
@@ -6440,7 +6470,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
         )
         .expect("relay batch should build");
         services
-            .enqueue_owner_batch(&runtime.metrics, &domain, &relay, None, &batch)
+            .enqueue_owner_batch(&runtime.inner.metrics, &domain, &relay, None, &batch)
             .await
             .expect("owner should admit the batch");
     }
@@ -6499,7 +6529,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     )
     .expect("relay batch should build");
     services
-        .enqueue_owner_batch(&runtime.metrics, &domain, &relay, None, &batch)
+        .enqueue_owner_batch(&runtime.inner.metrics, &domain, &relay, None, &batch)
         .await
         .expect("owner should admit the batch");
 
@@ -6644,7 +6674,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
 #[test]
 fn lookup_queries_surface_recorded_domain_instantiation_errors() {
     let runtime = super::Runtime::new();
-    runtime.domain_instantiation_errors.insert(
+    runtime.inner.domain_instantiation_errors.insert(
         domain("default"),
         "failed to build domain execution for 'default': lookup load failed".to_string(),
     );
@@ -6662,12 +6692,12 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
     let runtime = super::Runtime::new();
     let domain = domain("default");
     let ingestor = named("mqtt_notifications");
-    runtime.domain_instantiation_errors.insert(
+    runtime.inner.domain_instantiation_errors.insert(
         domain.clone(),
         "failed to build domain execution for 'default': ingestor start failed".to_string(),
     );
     let (shutdown, _) = watch::channel(false);
-    runtime.executions.insert(
+    runtime.inner.executions.insert(
         domain.clone(),
         super::DomainExecution {
             schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
@@ -6920,6 +6950,7 @@ fn sync_domains_preserves_clock_state_but_rejects_ingestion_while_paused() {
 
     assert_eq!(
         runtime
+            .inner
             .domains
             .get(&domain("paced"))
             .expect("domain should remain")
@@ -9594,7 +9625,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
     let (execution_shutdown, _) = watch::channel(false);
-    runtime.executions.insert(
+    runtime.inner.executions.insert(
         domain.clone(),
         super::DomainExecution {
             schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
@@ -9813,7 +9844,7 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         ("user_id", ParseAsType::U32),
     ]);
     let (execution_shutdown, _) = watch::channel(false);
-    runtime.executions.insert(
+    runtime.inner.executions.insert(
         domain.clone(),
         super::DomainExecution {
             schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
@@ -9934,6 +9965,7 @@ async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         loop {
             tokio::task::consume_budget().await;
             let pending = runtime
+                .inner
                 .force_flush_by_domain
                 .get(&domain)
                 .map(|force_flush| force_flush.pending())
@@ -12233,7 +12265,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
     let relay_registries = [(named("input"), super::RelayRegistry::new())]
         .into_iter()
         .collect();
-    runtime.executions.insert(
+    runtime.inner.executions.insert(
         domain.clone(),
         super::DomainExecution {
             schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),

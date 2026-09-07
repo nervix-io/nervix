@@ -49,7 +49,7 @@ use mysql_async::{
     Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Pool as MySqlPool, SslOpts as MySqlSslOpts,
     prelude::Queryable as MySqlQueryable,
 };
-use nervix_approx_into::{ApproxInto as _, TryApproxInto as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{Client, TransactionState as ClientTransactionState};
 #[cfg(feature = "testing")]
 use nervix_server::SchedulerMode;
@@ -12644,7 +12644,7 @@ async fn then_mongodb_collection_eventually_contains_document(
                     Some(MongoDbBson::Int32(value)) => i64::from(*value),
                     Some(MongoDbBson::Int64(value)) => *value,
                     Some(MongoDbBson::Double(value)) => {
-                        (*value).try_approx_into().unwrap_or_default()
+                        (*value).checked_approx_into().unwrap_or_default()
                     }
                     _ => 0,
                 };
@@ -12745,7 +12745,7 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
                 Some(MongoDbBson::Int32(value)) => usize::try_from(*value).ok(),
                 Some(MongoDbBson::Int64(value)) => usize::try_from(*value).ok(),
                 Some(MongoDbBson::Double(value)) if value.fract() == 0.0 => {
-                    (*value).try_approx_into().ok()
+                    (*value).checked_approx_into()
                 }
                 _ => continue,
             };

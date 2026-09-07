@@ -9,14 +9,13 @@
 //!
 //! [`ApproxInto`] is the rounding direction and is total: every integer has a nearest
 //! representable float, and above the mantissa width the float keeps only the leading bits.
-//! [`TryApproxInto`] is the failing direction: a float is not an integer until it is finite and
-//! inside the target's range, so the conversion returns [`FromFloatError`] instead of saturating
-//! the way `as` does.
+//! [`CheckedApproxInto`] is the failing direction: a float names no integer until it is finite and
+//! inside the target's range, so the conversion answers `None` instead of saturating the way `as`
+//! does. It follows `checked_add` and its siblings in both name and shape, so a caller states the
+//! guarantee with `meticulous`'s `OptionExt` or turns the `None` into its own domain error.
 //!
 //! Use `From` and `TryFrom` wherever they apply. This crate deliberately implements only the pairs
 //! they leave out, so reaching for `approx_into` is itself a statement that the conversion rounds.
-
-use thiserror::Error;
 
 /// A conversion into floating point that rounds to the nearest representable value.
 pub trait ApproxFrom<T>: Sized {
@@ -24,16 +23,14 @@ pub trait ApproxFrom<T>: Sized {
     fn approx_from(value: T) -> Self;
 }
 
-/// A conversion from floating point into an integer, which fails unless the value is an integer
-/// the target can hold.
-pub trait TryApproxFrom<T>: Sized {
+/// A conversion from floating point into an integer, which answers `None` unless the value is an
+/// integer the target can hold.
+pub trait CheckedApproxFrom<T>: Sized {
     /// Converts from `T`, discarding any fractional part.
     ///
-    /// # Errors
-    ///
-    /// Returns [`FromFloatError`] when the value is not finite, or when its integer part is
-    /// outside the range of `Self`.
-    fn try_approx_from(value: T) -> Result<Self, FromFloatError>;
+    /// Answers `None` when the value is not finite, or when its integer part is outside the range
+    /// of `Self`.
+    fn checked_approx_from(value: T) -> Option<Self>;
 }
 
 /// The calling side of [`ApproxFrom`], so a conversion can end a method chain.
@@ -42,36 +39,13 @@ pub trait ApproxInto: Sized {
     fn approx_into<T: ApproxFrom<Self>>(self) -> T;
 }
 
-/// The calling side of [`TryApproxFrom`], so a conversion can end a method chain.
-pub trait TryApproxInto: Sized {
+/// The calling side of [`CheckedApproxFrom`], so a conversion can end a method chain.
+pub trait CheckedApproxInto: Sized {
     /// Converts into `T`, discarding any fractional part.
     ///
-    /// # Errors
-    ///
-    /// Returns [`FromFloatError`] when the value is not finite, or when its integer part is
-    /// outside the range of `T`.
-    fn try_approx_into<T: TryApproxFrom<Self>>(self) -> Result<T, FromFloatError>;
-}
-
-/// Why a floating point value has no value in the target integer type.
-#[derive(Debug, Clone, Copy, PartialEq, Error)]
-pub enum FromFloatError {
-    /// The value is `NaN` or an infinity, so it names no integer at all.
-    #[error("{value} is not a finite number, so it has no {target} value")]
-    NotFinite {
-        /// The rejected value.
-        value: f64,
-        /// The integer type the conversion targeted.
-        target: &'static str,
-    },
-    /// The value is finite, but its integer part lies outside the target's range.
-    #[error("{value} is outside the range of {target}")]
-    OutOfRange {
-        /// The rejected value.
-        value: f64,
-        /// The integer type the conversion targeted.
-        target: &'static str,
-    },
+    /// Answers `None` when the value is not finite, or when its integer part is outside the range
+    /// of `T`.
+    fn checked_approx_into<T: CheckedApproxFrom<Self>>(self) -> Option<T>;
 }
 
 impl<T: Sized> ApproxInto for T {
@@ -81,10 +55,10 @@ impl<T: Sized> ApproxInto for T {
     }
 }
 
-impl<T: Sized> TryApproxInto for T {
+impl<T: Sized> CheckedApproxInto for T {
     #[inline]
-    fn try_approx_into<U: TryApproxFrom<Self>>(self) -> Result<U, FromFloatError> {
-        U::try_approx_from(self)
+    fn checked_approx_into<U: CheckedApproxFrom<Self>>(self) -> Option<U> {
+        U::checked_approx_from(self)
     }
 }
 
@@ -132,45 +106,39 @@ impl ApproxFrom<f64> for f32 {
 /// integer type's exclusive limit is `2^bits` unsigned and `2^(bits - 1)` signed, and every one of
 /// those is representable in `f64`. `i64::MAX as f64` would not be, which is why the limit is
 /// stated instead of derived.
-macro_rules! try_approx_from_float {
+macro_rules! checked_approx_from_float {
     ($($integer:ty => $minimum:expr, $limit:expr;)+) => {
         $(
-            impl TryApproxFrom<f64> for $integer {
+            impl CheckedApproxFrom<f64> for $integer {
                 #[inline]
                 #[expect(
                     clippy::as_conversions,
                     reason = "the bounds above have already excluded every value the cast would \
                               saturate or round"
                 )]
-                fn try_approx_from(value: f64) -> Result<Self, FromFloatError> {
+                fn checked_approx_from(value: f64) -> Option<Self> {
                     if !value.is_finite() {
-                        return Err(FromFloatError::NotFinite {
-                            value,
-                            target: stringify!($integer),
-                        });
+                        return None;
                     }
                     let integral = value.trunc();
                     if integral < $minimum || integral >= $limit {
-                        return Err(FromFloatError::OutOfRange {
-                            value,
-                            target: stringify!($integer),
-                        });
+                        return None;
                     }
-                    Ok(integral as Self)
+                    Some(integral as Self)
                 }
             }
 
-            impl TryApproxFrom<f32> for $integer {
+            impl CheckedApproxFrom<f32> for $integer {
                 #[inline]
-                fn try_approx_from(value: f32) -> Result<Self, FromFloatError> {
-                    Self::try_approx_from(f64::from(value))
+                fn checked_approx_from(value: f32) -> Option<Self> {
+                    Self::checked_approx_from(f64::from(value))
                 }
             }
         )+
     };
 }
 
-try_approx_from_float! {
+checked_approx_from_float! {
     u8 => 0.0, 256.0;
     u16 => 0.0, 65_536.0;
     u32 => 0.0, 4_294_967_296.0;
@@ -185,36 +153,30 @@ try_approx_from_float! {
 ///
 /// A 64-bit host makes the second step total and a 32-bit host makes it the range check the
 /// caller already asked for, so neither has to be special-cased here.
-macro_rules! try_approx_from_float_pointer_width {
+macro_rules! checked_approx_from_float_pointer_width {
     ($($integer:ty => $fixed:ty;)+) => {
         $(
-            impl<F> TryApproxFrom<F> for $integer
+            impl<F> CheckedApproxFrom<F> for $integer
             where
-                F: Copy,
-                $fixed: TryApproxFrom<F>,
-                f64: ApproxFrom<$fixed>,
+                $fixed: CheckedApproxFrom<F>,
             {
                 #[inline]
-                fn try_approx_from(value: F) -> Result<Self, FromFloatError> {
-                    let fixed = <$fixed>::try_approx_from(value)?;
-                    Self::try_from(fixed).map_err(|_| FromFloatError::OutOfRange {
-                        value: f64::approx_from(fixed),
-                        target: stringify!($integer),
-                    })
+                fn checked_approx_from(value: F) -> Option<Self> {
+                    Self::try_from(<$fixed>::checked_approx_from(value)?).ok()
                 }
             }
         )+
     };
 }
 
-try_approx_from_float_pointer_width! {
+checked_approx_from_float_pointer_width! {
     usize => u64;
     isize => i64;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ApproxInto as _, FromFloatError, TryApproxInto as _};
+    use super::{ApproxInto as _, CheckedApproxInto as _};
 
     #[test]
     fn integers_inside_the_mantissa_convert_exactly() {
@@ -233,63 +195,42 @@ mod tests {
 
     #[test]
     fn floats_lose_their_fractional_part() {
-        assert_eq!(3.9_f64.try_approx_into(), Ok(3_u64));
-        assert_eq!((-3.9_f64).try_approx_into(), Ok(-3_i64));
-        assert_eq!(0.5_f32.try_approx_into(), Ok(0_u8));
+        assert_eq!(3.9_f64.checked_approx_into(), Some(3_u64));
+        assert_eq!((-3.9_f64).checked_approx_into(), Some(-3_i64));
+        assert_eq!(0.5_f32.checked_approx_into(), Some(0_u8));
     }
 
     #[test]
-    fn floats_outside_the_target_range_are_rejected() {
-        assert_eq!(
-            (-1.0_f64).try_approx_into::<u64>(),
-            Err(FromFloatError::OutOfRange {
-                value: -1.0,
-                target: "u64",
-            })
-        );
-        assert_eq!(
-            256.0_f64.try_approx_into::<u8>(),
-            Err(FromFloatError::OutOfRange {
-                value: 256.0,
-                target: "u8",
-            })
-        );
-        assert_eq!(255.9_f64.try_approx_into(), Ok(255_u8));
+    fn floats_outside_the_target_range_name_no_integer() {
+        assert_eq!((-1.0_f64).checked_approx_into::<u64>(), None);
+        assert_eq!(256.0_f64.checked_approx_into::<u8>(), None);
+        assert_eq!(255.9_f64.checked_approx_into(), Some(255_u8));
     }
 
     #[test]
     fn the_signed_limit_is_exclusive_where_the_cast_would_saturate() {
         assert_eq!(
-            9_223_372_036_854_775_808.0_f64.try_approx_into::<i64>(),
-            Err(FromFloatError::OutOfRange {
-                value: 9_223_372_036_854_775_808.0,
-                target: "i64",
-            })
+            9_223_372_036_854_775_808.0_f64.checked_approx_into::<i64>(),
+            None
         );
         let largest: f64 = 9_223_372_036_854_774_784_i64.approx_into();
-        assert_eq!(largest.try_approx_into(), Ok(9_223_372_036_854_774_784_i64));
+        assert_eq!(
+            largest.checked_approx_into(),
+            Some(9_223_372_036_854_774_784_i64)
+        );
     }
 
     #[test]
     fn non_finite_floats_name_no_integer() {
-        assert!(matches!(
-            f64::NAN.try_approx_into::<i64>(),
-            Err(FromFloatError::NotFinite { value, target: "i64" }) if value.is_nan()
-        ));
-        assert!(matches!(
-            f64::INFINITY.try_approx_into::<usize>(),
-            Err(FromFloatError::NotFinite { .. })
-        ));
+        assert_eq!(f64::NAN.checked_approx_into::<i64>(), None);
+        assert_eq!(f64::INFINITY.checked_approx_into::<usize>(), None);
     }
 
     #[test]
     fn pointer_width_targets_reuse_the_fixed_width_range() {
-        assert_eq!(12.75_f64.try_approx_into(), Ok(12_usize));
-        assert_eq!((-12.75_f64).try_approx_into(), Ok(-12_isize));
-        assert!(matches!(
-            (-1.0_f64).try_approx_into::<usize>(),
-            Err(FromFloatError::OutOfRange { .. })
-        ));
+        assert_eq!(12.75_f64.checked_approx_into(), Some(12_usize));
+        assert_eq!((-12.75_f64).checked_approx_into(), Some(-12_isize));
+        assert_eq!((-1.0_f64).checked_approx_into::<usize>(), None);
     }
 
     #[test]

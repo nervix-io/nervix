@@ -11,7 +11,7 @@ use gloo_net::websocket::{
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_approx_into::{ApproxInto as _, TryApproxInto as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
@@ -2858,7 +2858,7 @@ fn GraphPanel(
                             {move || {
                                 let percent: i32 = (graph_zoom.get() * 100.0)
                                     .round()
-                                    .try_approx_into()
+                                    .checked_approx_into()
                                     .unwrap_or(i32::MAX);
                                 format!("{percent}%")
                             }}
@@ -3530,7 +3530,7 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
             let millis = (deadline - js_sys::Date::now())
                 .max(0.0)
                 .round()
-                .try_approx_into()
+                .checked_approx_into()
                 .unwrap_or(u64::MAX);
             remaining.set(millis);
         },

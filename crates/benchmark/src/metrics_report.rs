@@ -5,7 +5,7 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
-use nervix_approx_into::{ApproxInto as _, TryApproxInto as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -379,7 +379,7 @@ impl Histogram {
     ) -> Result<f64, MetricsReportError> {
         let rank: u64 = (count.approx_into::<f64>() * quantile)
             .ceil()
-            .try_approx_into()
+            .checked_approx_into()
             .unwrap_or(u64::MAX);
         for (upper_bound, cumulative) in &self.buckets {
             if *cumulative >= rank {
@@ -599,8 +599,8 @@ impl PrometheusSample {
             return Err(self.not_a_count(line));
         }
         self.value
-            .try_approx_into()
-            .map_err(|_| self.not_a_count(line))
+            .checked_approx_into()
+            .ok_or_else(|| self.not_a_count(line))
     }
 
     fn not_a_count(&self, line: usize) -> MetricsReportError {

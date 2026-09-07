@@ -414,7 +414,7 @@ impl IcebergEmitter {
             Report::new(IcebergEmitterError::CompileValues).attach_printable(error.to_string())
         })?;
         let mapped_schema = Self::mapped_arrow_schema(&program, values)?;
-        let staging_dir = Self::create_staging_dir(context.temp_dir.as_path())?;
+        let staging_dir = Self::create_staging_dir(context.runtime.temp_dir())?;
         let client_init = IcebergEmitterClientInit {
             config: resolved
                 .map(|config| config.entries.as_slice())

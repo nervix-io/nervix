@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nervix_approx_into::TryApproxInto as _;
+use nervix_approx_into::CheckedApproxInto as _;
 use thiserror::Error;
 
 use crate::{BenchmarkDefinition, LoadDuration};
@@ -175,11 +175,12 @@ fn automatic_duration(parameters: &toml::Table) -> Result<u64, SettingsError> {
             })?;
         let required: u64 = (flush.as_secs_f64() * FLUSH_CYCLES)
             .ceil()
-            .try_approx_into()
-            .map_err(|error| SettingsError::InvalidParameter {
+            .checked_approx_into()
+            .ok_or_else(|| SettingsError::InvalidParameter {
                 name: name.clone(),
                 value: value.clone(),
-                reason: format!("flush interval needs an unrunnable duration: {error}"),
+                reason: "flush interval demands a run longer than any benchmark can measure"
+                    .to_string(),
             })?;
         seconds = seconds.max(required);
     }

@@ -336,6 +336,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - `triomphe::Arc` is the default shared-ownership type for Nervix-owned state. Use
   `std::sync::Arc` only when weak references or an external API require it. In modules that need
   both, import the standard type as `StdArc` and confine it to that boundary.
+- Do not take shared ownership one field at a time. Values that are shared together and live
+  together belong in one named struct behind a single `Arc`, and the cloneable type is a thin
+  handle over it. A type that accumulates independent `Arc` fields is a missing struct: every
+  clone of it pays one refcount per field, and on a hot path that cost is repeated per batch. A
+  field keeps an `Arc` of its own only when a second owner outlives the handle's borrow, and the
+  field says who that owner is. Never wrap a handle that is already one `Arc` in another `Arc`.
 - In `if` conditions, prefer `if let` or `if let` chains over `matches!` when they express the same
   logic cleanly. Use `matches!` when an `if let` form would be unclear or outside an `if`
   condition.
