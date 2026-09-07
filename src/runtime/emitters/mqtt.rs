@@ -44,7 +44,7 @@ impl MqttEmitter {
         )?;
         let domain = context.domain.clone();
         let emitter = context.emitter.clone();
-        let events = context.events.clone();
+        let events = context.runtime.events().clone();
         let runtime = context.runtime.clone();
         let (eventloop_shutdown, mut eventloop_shutdown_rx) = watch::channel(false);
         tokio::spawn(async move {

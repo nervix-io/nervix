@@ -87,14 +87,15 @@ impl Default for EmitterBufferedMessages {
     }
 }
 
+/// What a sink connector needs to publish one emitter's output. The staging directory and the
+/// event bus are read through `runtime` rather than copied in beside it, so the context carries
+/// one handle to node state instead of a second view of the same values.
 #[derive(Clone)]
 pub(in crate::runtime) struct EmitterSinkContext {
     runtime: Runtime,
     domain: DomainName,
     emitter: EmitterName,
     error_policies: ErrorPolicies,
-    temp_dir: Arc<PathBuf>,
-    events: broadcast::Sender<RuntimeEvent>,
     udfs: Option<UdfExecutor>,
 }
 
@@ -1530,7 +1531,7 @@ fn emitter_service_url_has_scheme(
 
 impl EmitterSinkContext {
     fn report_init_error(&self, sink: &str, error: &str) {
-        let _ = self.events.send(RuntimeEvent::Error(format!(
+        let _ = self.runtime.events().send(RuntimeEvent::Error(format!(
             "failed to initialize {sink} emitter '{}' in domain '{}': {error}",
             self.emitter.as_str(),
             self.domain.as_str(),
@@ -1544,7 +1545,7 @@ impl EmitterSinkContext {
     }
 
     fn report_publish_error(&self, sink: &str, error: &str) {
-        let _ = self.events.send(RuntimeEvent::Error(format!(
+        let _ = self.runtime.events().send(RuntimeEvent::Error(format!(
             "failed to publish {sink} message for emitter '{}' in domain '{}': {error}",
             self.emitter.as_str(),
             self.domain.as_str(),
@@ -1558,7 +1559,7 @@ impl EmitterSinkContext {
     }
 
     fn report_flush_error(&self, sink: &str, error: &str) {
-        let _ = self.events.send(RuntimeEvent::Error(format!(
+        let _ = self.runtime.events().send(RuntimeEvent::Error(format!(
             "failed to flush {sink} rows for emitter '{}' in domain '{}': {error}",
             self.emitter.as_str(),
             self.domain.as_str(),
@@ -1586,7 +1587,10 @@ impl EmitterSinkContext {
         ) {
             Ok(policy) => Some(policy),
             Err(error) => {
-                let _ = self.events.send(RuntimeEvent::Error(error.to_string()));
+                let _ = self
+                    .runtime
+                    .events()
+                    .send(RuntimeEvent::Error(error.to_string()));
                 warn!(
                     domain = self.domain.as_str(),
                     emitter = self.emitter.as_str(),
@@ -2652,7 +2656,7 @@ impl SinkEmitter {
                     "fault injector failed emitter '{}'",
                     context.emitter.as_str()
                 );
-                let _ = context.events.send(RuntimeEvent::Error(format!(
+                let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
                     "{} in domain '{}'",
                     reason,
                     context.domain.as_str()
@@ -3223,8 +3227,7 @@ impl EmitterTask {
         let task_max_batch_size = emitter.max_batch_size.clone();
         let task_error_policies = emitter.error_policies.clone();
         let task_materialized_state = emitter.materialized_state.clone();
-        let task_events = runtime.events.clone();
-        let fault_injector = runtime.emitter_faults.clone();
+        let fault_injector = runtime.inner.emitter_faults.clone();
         let runtime = runtime.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let interaction_shutdown_rx = shutdown_tx.subscribe();
@@ -3234,6 +3237,7 @@ impl EmitterTask {
         let quiesce_counters = runtime.node_quiesce_counters(domain, &emitter.name);
         let force_flush = runtime.force_flush_participant(domain, quiesce_counters.clone());
         let emitter_buffer_count = runtime
+            .inner
             .emitter_buffers
             .entry(RuntimeKey::new(domain.clone(), emitter.name.clone()))
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
@@ -3292,8 +3296,6 @@ impl EmitterTask {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
                 error_policies: task_error_policies.clone(),
-                temp_dir: runtime.temp_dir.clone(),
-                events: task_events.clone(),
                 udfs,
             };
             let mut publish_backoff =
@@ -3734,8 +3736,10 @@ impl EmitterTask {
                         batch,
                     } => {
                         let delivery_observation = batch.delivery_observation(current_timestamp());
-                        let physical_node_id = runtime.local_node_id.read().clone();
+                        let physical_node_id =
+                            runtime.inner.remote_dispatch.local_node_id.read().clone();
                         runtime
+                            .inner
                             .metrics
                             .observe_global_node_received(NodeBatchObservation {
                                 domain: &task_domain,
@@ -3754,6 +3758,7 @@ impl EmitterTask {
                         );
                         for seconds in delivery_observation.latency_seconds {
                             runtime
+                                .inner
                                 .metrics
                                 .observe_global_delivery_latency_at_domain_time(
                                     NodeLatencyObservation {
@@ -4077,25 +4082,39 @@ impl EmitterBatchContext<'_> {
     fn observe_sent(&self, report: &PublishReport) {
         if let Some(relay) = self.metric_relay {
             self.runtime
+                .inner
                 .metrics
                 .observe_global_node_sent(NodeBatchObservation {
                     domain: self.domain,
                     kind: ModelKind::Emitter,
                     node: &ModelName::from(self.emitter),
                     relay,
-                    physical_node_id: self.runtime.local_node_id.read().as_ref(),
+                    physical_node_id: self
+                        .runtime
+                        .inner
+                        .remote_dispatch
+                        .local_node_id
+                        .read()
+                        .as_ref(),
                     messages: report.messages,
                     bytes: report.bytes,
                     domain_timestamp: Some(report.domain_timestamp),
                 });
         } else {
             self.runtime
+                .inner
                 .metrics
                 .observe_global_node_without_stream_sent(NodeWithoutRelayObservation {
                     domain: self.domain,
                     kind: ModelKind::Emitter,
                     node: &ModelName::from(self.emitter),
-                    physical_node_id: self.runtime.local_node_id.read().as_ref(),
+                    physical_node_id: self
+                        .runtime
+                        .inner
+                        .remote_dispatch
+                        .local_node_id
+                        .read()
+                        .as_ref(),
                     messages: report.messages,
                     bytes: report.bytes,
                     domain_timestamp: Some(report.domain_timestamp),
@@ -4777,14 +4796,11 @@ mod tests {
     }
 
     fn sink_context() -> EmitterSinkContext {
-        let (events, _) = broadcast::channel(4);
         EmitterSinkContext {
             runtime: Runtime::default(),
             domain: DomainName::parse("emitter_tests").expect("valid domain"),
             emitter: EmitterName::parse("output").expect("valid emitter name"),
             error_policies: ErrorPolicies::handled_by_log(),
-            temp_dir: Arc::new(PathBuf::new()),
-            events,
             udfs: None,
         }
     }
@@ -5715,7 +5731,7 @@ mod tests {
     #[test]
     fn sink_context_reports_configuration_and_publish_failures() {
         let context = sink_context();
-        let mut events = context.events.subscribe();
+        let mut events = context.runtime.events().subscribe();
 
         context.report_init_error("nats", "init failed");
         context.report_publish_error("nats", "publish failed");

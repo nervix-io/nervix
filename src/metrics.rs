@@ -1157,14 +1157,23 @@ impl AggregatedCounterSummary {
     }
 }
 
+/// The handle a runtime, an ingestor quiesce control, or a branch task keeps to record
+/// measurements. Every series lives together for as long as the node does, so the handle is one
+/// `Arc` over all of them and cloning it costs a single refcount.
 #[derive(Debug, Clone)]
 pub struct RuntimeMetrics {
-    counters: Arc<DashMap<MetricKey, Arc<CounterSeries>>>,
-    histograms: Arc<DashMap<MetricKey, Arc<HistogramSeries>>>,
-    branch_counters: Arc<DashMap<BranchMetricKey, Arc<CounterSeries>>>,
-    branch_histograms: Arc<DashMap<BranchMetricKey, Arc<HistogramSeries>>>,
-    branch_instance_references: Arc<DashMap<BranchInstanceMetricKey, BranchInstanceReferences>>,
-    prometheus: Arc<PrometheusMetrics>,
+    series: Arc<MetricSeries>,
+}
+
+/// Every series one node records into, plus the Prometheus registry they are exported through.
+#[derive(Debug)]
+struct MetricSeries {
+    counters: DashMap<MetricKey, Arc<CounterSeries>>,
+    histograms: DashMap<MetricKey, Arc<HistogramSeries>>,
+    branch_counters: DashMap<BranchMetricKey, Arc<CounterSeries>>,
+    branch_histograms: DashMap<BranchMetricKey, Arc<HistogramSeries>>,
+    branch_instance_references: DashMap<BranchInstanceMetricKey, BranchInstanceReferences>,
+    prometheus: PrometheusMetrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1250,12 +1259,14 @@ struct JemallocMetricsCollector {
 impl Default for RuntimeMetrics {
     fn default() -> Self {
         Self {
-            counters: Arc::new(DashMap::new()),
-            histograms: Arc::new(DashMap::new()),
-            branch_counters: Arc::new(DashMap::new()),
-            branch_histograms: Arc::new(DashMap::new()),
-            branch_instance_references: Arc::new(DashMap::new()),
-            prometheus: Arc::new(PrometheusMetrics::new()),
+            series: Arc::new(MetricSeries {
+                counters: DashMap::new(),
+                histograms: DashMap::new(),
+                branch_counters: DashMap::new(),
+                branch_histograms: DashMap::new(),
+                branch_instance_references: DashMap::new(),
+                prometheus: PrometheusMetrics::new(),
+            }),
         }
     }
 }
@@ -1828,18 +1839,22 @@ impl RuntimeMetrics {
                 .map_or_else(|| "-".to_string(), ClusterNodeName::to_string),
         };
         let values = labels.values();
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_records
             .with_label_values(&values)
             .set(0);
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_bytes
             .with_label_values(&values)
             .set(0);
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_dropped_total
             .with_label_values(&values);
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_rejected_total
             .with_label_values(&values);
         labels
@@ -1852,13 +1867,15 @@ impl RuntimeMetrics {
         bytes: usize,
     ) {
         let values = labels.values();
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_records
             .with_label_values(&values)
             .set(i64::try_from(records).assured(
                 "buffered records occupy memory and cannot exceed the allocator's isize limit",
             ));
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_bytes
             .with_label_values(&values)
             .set(i64::try_from(bytes).assured(
@@ -1871,7 +1888,8 @@ impl RuntimeMetrics {
         labels: &IngestorQuiesceMetricLabels,
         count: u64,
     ) {
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_dropped_total
             .with_label_values(&labels.values())
             .inc_by(count);
@@ -1882,7 +1900,8 @@ impl RuntimeMetrics {
         labels: &IngestorQuiesceMetricLabels,
         count: u64,
     ) {
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_rejected_total
             .with_label_values(&labels.values())
             .inc_by(count);
@@ -1895,18 +1914,21 @@ impl RuntimeMetrics {
         physical_node_id: Option<&ClusterNodeName>,
     ) {
         let physical_node_id = physical_node_id.map_or("-", ClusterNodeName::as_str);
-        self.prometheus.branch_instances.with_label_values(&[
+        self.series.prometheus.branch_instances.with_label_values(&[
             domain.as_str(),
             branch.as_str(),
             physical_node_id,
         ]);
         for reason in [BranchEvictionReason::Lru, BranchEvictionReason::Ttl] {
-            self.prometheus.branch_evictions_total.with_label_values(&[
-                domain.as_str(),
-                branch.as_str(),
-                physical_node_id,
-                reason.as_ref(),
-            ]);
+            self.series
+                .prometheus
+                .branch_evictions_total
+                .with_label_values(&[
+                    domain.as_str(),
+                    branch.as_str(),
+                    physical_node_id,
+                    reason.as_ref(),
+                ]);
         }
     }
 
@@ -1924,7 +1946,7 @@ impl RuntimeMetrics {
             physical_node_id: physical_node_id.to_string(),
             concrete_key: concrete_key.to_string(),
         };
-        match self.branch_instance_references.entry(metric_key) {
+        match self.series.branch_instance_references.entry(metric_key) {
             Entry::Occupied(mut entry) => {
                 let references = entry.get_mut();
                 references.count = references
@@ -1938,7 +1960,8 @@ impl RuntimeMetrics {
                     count: 1,
                     eviction_reason: None,
                 });
-                self.prometheus
+                self.series
+                    .prometheus
                     .branch_instances
                     .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
                     .inc();
@@ -1961,31 +1984,33 @@ impl RuntimeMetrics {
             physical_node_id: physical_node_id.to_string(),
             concrete_key: concrete_key.to_string(),
         };
-        let (removed_key, record_eviction) = match self.branch_instance_references.entry(metric_key)
-        {
-            Entry::Occupied(mut entry) if entry.get().count > 1 => {
-                let references = entry.get_mut();
-                references.count -= 1;
-                let record_eviction = references.eviction_reason.is_none();
-                if record_eviction {
-                    references.eviction_reason = Some(reason);
+        let (removed_key, record_eviction) =
+            match self.series.branch_instance_references.entry(metric_key) {
+                Entry::Occupied(mut entry) if entry.get().count > 1 => {
+                    let references = entry.get_mut();
+                    references.count -= 1;
+                    let record_eviction = references.eviction_reason.is_none();
+                    if record_eviction {
+                        references.eviction_reason = Some(reason);
+                    }
+                    (false, record_eviction)
                 }
-                (false, record_eviction)
-            }
-            Entry::Occupied(entry) => {
-                let references = entry.remove();
-                (true, references.eviction_reason.is_none())
-            }
-            Entry::Vacant(_) => return,
-        };
+                Entry::Occupied(entry) => {
+                    let references = entry.remove();
+                    (true, references.eviction_reason.is_none())
+                }
+                Entry::Vacant(_) => return,
+            };
         if removed_key {
-            self.prometheus
+            self.series
+                .prometheus
                 .branch_instances
                 .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
                 .dec();
         }
         if record_eviction {
-            self.prometheus
+            self.series
+                .prometheus
                 .branch_evictions_total
                 .with_label_values(&[
                     domain.as_str(),
@@ -2011,7 +2036,7 @@ impl RuntimeMetrics {
             physical_node_id: physical_node_id.to_string(),
             concrete_key: concrete_key.to_string(),
         };
-        let removed_key = match self.branch_instance_references.entry(metric_key) {
+        let removed_key = match self.series.branch_instance_references.entry(metric_key) {
             Entry::Occupied(mut entry) if entry.get().count > 1 => {
                 entry.get_mut().count -= 1;
                 false
@@ -2023,7 +2048,8 @@ impl RuntimeMetrics {
             Entry::Vacant(_) => return,
         };
         if removed_key {
-            self.prometheus
+            self.series
+                .prometheus
                 .branch_instances
                 .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
                 .dec();
@@ -2072,28 +2098,32 @@ impl RuntimeMetrics {
 
     pub(crate) fn remove_relay(&self, domain: &DomainName, relay: &RelayName) {
         let counter_keys = self
+            .series
             .counters
             .iter()
             .filter(|entry| entry.key().belongs_to_relay(domain, relay))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in counter_keys {
-            self.counters.remove(&key);
-            self.prometheus.remove(&key);
+            self.series.counters.remove(&key);
+            self.series.prometheus.remove(&key);
         }
         let histogram_keys = self
+            .series
             .histograms
             .iter()
             .filter(|entry| entry.key().belongs_to_relay(domain, relay))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in histogram_keys {
-            self.histograms.remove(&key);
-            self.prometheus.remove(&key);
+            self.series.histograms.remove(&key);
+            self.series.prometheus.remove(&key);
         }
-        self.branch_counters
+        self.series
+            .branch_counters
             .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
-        self.branch_histograms
+        self.series
+            .branch_histograms
             .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
     }
 
@@ -2242,7 +2272,7 @@ impl RuntimeMetrics {
             DELIVERY_LATENCY_SECONDS,
         );
         self.observe_histogram(key.clone(), seconds, None);
-        self.prometheus.observe_histogram(&key, seconds);
+        self.series.prometheus.observe_histogram(&key, seconds);
     }
 
     pub fn observe_global_delivery_latency_at_domain_time(
@@ -2263,7 +2293,9 @@ impl RuntimeMetrics {
             observation.seconds,
             observation.domain_timestamp,
         );
-        self.prometheus.observe_histogram(&key, observation.seconds);
+        self.series
+            .prometheus
+            .observe_histogram(&key, observation.seconds);
     }
 
     pub fn observe_branch_stream_received(
@@ -2365,7 +2397,8 @@ impl RuntimeMetrics {
             Some(observation.capacity),
             None,
         );
-        self.prometheus
+        self.series
+            .prometheus
             .observe_histogram(&key, observation.len as f64);
     }
 
@@ -2390,7 +2423,7 @@ impl RuntimeMetrics {
     }
 
     pub fn prometheus_text(&self) -> String {
-        self.prometheus.text()
+        self.series.prometheus.text()
     }
 
     pub fn snapshot_global_target(
@@ -2402,6 +2435,7 @@ impl RuntimeMetrics {
     ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
+            .series
             .counters
             .iter()
             .filter(|entry| {
@@ -2411,6 +2445,7 @@ impl RuntimeMetrics {
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.key.cmp(&right.key));
         let mut histograms = self
+            .series
             .histograms
             .iter()
             .filter(|entry| {
@@ -2435,6 +2470,7 @@ impl RuntimeMetrics {
     ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
+            .series
             .branch_counters
             .iter()
             .filter(|entry| {
@@ -2451,6 +2487,7 @@ impl RuntimeMetrics {
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.key.cmp(&right.key));
         let mut histograms = self
+            .series
             .branch_histograms
             .iter()
             .filter(|entry| {
@@ -2482,6 +2519,7 @@ impl RuntimeMetrics {
     ) {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let counter_keys = self
+            .series
             .counters
             .iter()
             .filter(|entry| {
@@ -2490,9 +2528,10 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in counter_keys {
-            self.counters.remove(&key);
+            self.series.counters.remove(&key);
         }
         let histogram_keys = self
+            .series
             .histograms
             .iter()
             .filter(|entry| {
@@ -2501,21 +2540,23 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in histogram_keys {
-            self.histograms.remove(&key);
+            self.series.histograms.remove(&key);
         }
 
         for counter in snapshot.counters {
             let Ok(key) = MetricKey::try_from(counter.key.clone()) else {
                 continue;
             };
-            self.counters
+            self.series
+                .counters
                 .insert(key, Arc::new(CounterSeries::from_snapshot(&counter)));
         }
         for histogram in snapshot.histograms {
             let Ok(key) = MetricKey::try_from(histogram.key.clone()) else {
                 continue;
             };
-            self.histograms
+            self.series
+                .histograms
                 .insert(key, Arc::new(HistogramSeries::from_snapshot(&histogram)));
         }
     }
@@ -2528,14 +2569,14 @@ impl RuntimeMetrics {
     ) -> bool {
         let target = target.into();
         let target_kind = kind.as_str().to_ascii_uppercase();
-        self.counters.iter().any(|entry| {
+        self.series.counters.iter().any(|entry| {
             let key = entry.key();
             key.domain == domain.as_str()
                 && key.target_kind == target_kind
                 && key.target == target.as_str()
                 && key.relay != "-"
                 && entry.value().value.load(AtomicOrdering::Relaxed) > 0
-        }) || self.histograms.iter().any(|entry| {
+        }) || self.series.histograms.iter().any(|entry| {
             let key = entry.key();
             key.domain == domain.as_str()
                 && key.target_kind == target_kind
@@ -2549,16 +2590,18 @@ impl RuntimeMetrics {
             let Ok(key) = MetricKey::try_from(counter.key.clone()) else {
                 continue;
             };
-            self.counters.remove(&key);
-            self.counters
+            self.series.counters.remove(&key);
+            self.series
+                .counters
                 .insert(key, Arc::new(CounterSeries::from_snapshot(&counter)));
         }
         for histogram in snapshot.histograms {
             let Ok(key) = MetricKey::try_from(histogram.key.clone()) else {
                 continue;
             };
-            self.histograms.remove(&key);
-            self.histograms
+            self.series.histograms.remove(&key);
+            self.series
+                .histograms
                 .insert(key, Arc::new(HistogramSeries::from_snapshot(&histogram)));
         }
     }
@@ -2574,6 +2617,7 @@ impl RuntimeMetrics {
     ) {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let counter_keys = self
+            .series
             .branch_counters
             .iter()
             .filter(|entry| {
@@ -2589,9 +2633,10 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in counter_keys {
-            self.branch_counters.remove(&key);
+            self.series.branch_counters.remove(&key);
         }
         let histogram_keys = self
+            .series
             .branch_histograms
             .iter()
             .filter(|entry| {
@@ -2607,14 +2652,14 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in histogram_keys {
-            self.branch_histograms.remove(&key);
+            self.series.branch_histograms.remove(&key);
         }
 
         for counter in snapshot.counters {
             let Ok(key) = MetricKey::try_from(counter.key.clone()) else {
                 continue;
             };
-            self.branch_counters.insert(
+            self.series.branch_counters.insert(
                 BranchMetricKey {
                     branch_key: branch_key.to_string(),
                     key,
@@ -2626,7 +2671,7 @@ impl RuntimeMetrics {
             let Ok(key) = MetricKey::try_from(histogram.key.clone()) else {
                 continue;
             };
-            self.branch_histograms.insert(
+            self.series.branch_histograms.insert(
                 BranchMetricKey {
                     branch_key: branch_key.to_string(),
                     key,
@@ -2645,6 +2690,7 @@ impl RuntimeMetrics {
         let target = target.into();
         let mut lines = Vec::new();
         let mut counters = self
+            .series
             .counters
             .iter()
             .filter(|entry| {
@@ -2656,6 +2702,7 @@ impl RuntimeMetrics {
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.0.cmp(&right.0));
         let mut histograms = self
+            .series
             .histograms
             .iter()
             .filter(|entry| {
@@ -2835,7 +2882,7 @@ impl RuntimeMetrics {
         target: &ModelName,
     ) -> Vec<DataflowBranchStatistics> {
         let mut branches = Vec::<(String, DataflowStatistics)>::new();
-        for entry in self.branch_counters.iter() {
+        for entry in self.series.branch_counters.iter() {
             let branch_key = entry.key();
             if branch_key.key.domain != domain.as_str()
                 || branch_key.key.target_kind != kind
@@ -2857,7 +2904,7 @@ impl RuntimeMetrics {
                 branches.push((branch_key.branch_key.clone(), statistics));
             }
         }
-        for entry in self.branch_histograms.iter() {
+        for entry in self.series.branch_histograms.iter() {
             let branch_key = entry.key();
             if branch_key.key.domain != domain.as_str()
                 || branch_key.key.target_kind != kind
@@ -2892,7 +2939,7 @@ impl RuntimeMetrics {
         metric: &DataflowMetricRef,
     ) -> Vec<DataflowBranchStatistics> {
         let mut branches = Vec::<(String, DataflowStatistics)>::new();
-        for entry in self.branch_counters.iter() {
+        for entry in self.series.branch_counters.iter() {
             let branch_key = entry.key();
             if !branch_key.key.matches_dataflow_metric_ref(domain, metric) {
                 continue;
@@ -2911,7 +2958,7 @@ impl RuntimeMetrics {
                 branches.push((branch_key.branch_key.clone(), statistics));
             }
         }
-        for entry in self.branch_histograms.iter() {
+        for entry in self.series.branch_histograms.iter() {
             let branch_key = entry.key();
             if !branch_key.key.matches_dataflow_metric_ref(domain, metric) {
                 continue;
@@ -2942,7 +2989,7 @@ impl RuntimeMetrics {
         include: impl Fn(&MetricKey) -> bool,
     ) -> DataflowStatistics {
         let mut statistics = DataflowStatistics::default();
-        for entry in self.counters.iter() {
+        for entry in self.series.counters.iter() {
             if !include(entry.key()) {
                 continue;
             }
@@ -2952,7 +2999,7 @@ impl RuntimeMetrics {
                 add_dataflow_statistics(&mut statistics, counter_statistics);
             }
         }
-        for entry in self.histograms.iter() {
+        for entry in self.series.histograms.iter() {
             if !include(entry.key()) {
                 continue;
             }
@@ -2971,7 +3018,7 @@ impl RuntimeMetrics {
         scope: DomainMetricScope,
     ) -> Vec<(MetricKey, AggregatedCounterSummary)> {
         let mut counters = Vec::<(MetricKey, AggregatedCounterSummary)>::new();
-        for entry in self.counters.iter() {
+        for entry in self.series.counters.iter() {
             let key = entry.key();
             if key.domain != domain.as_str() || !scope.includes_target_kind(&key.target_kind) {
                 continue;
@@ -3007,7 +3054,7 @@ impl RuntimeMetrics {
         scope: DomainMetricScope,
     ) -> Vec<(MetricKey, HistogramSummary)> {
         let mut histograms = Vec::<(MetricKey, AggregatedRollingHistograms)>::new();
-        for entry in self.histograms.iter() {
+        for entry in self.series.histograms.iter() {
             let key = entry.key();
             if key.domain != domain.as_str() || !scope.includes_target_kind(&key.target_kind) {
                 continue;
@@ -3061,7 +3108,8 @@ impl RuntimeMetrics {
         );
         let batch_key = with_metric(&messages_key, MESSAGES_PER_BATCH);
         self.observe_histogram(batch_key.clone(), messages as f64, domain_timestamp);
-        self.prometheus
+        self.series
+            .prometheus
             .observe_histogram(&batch_key, messages as f64);
     }
 
@@ -3096,17 +3144,18 @@ impl RuntimeMetrics {
 
     fn increment(&self, key: MetricKey, value: u64, domain_timestamp: Option<Timestamp>) {
         self.register_counter(key.clone());
-        if let Some(series) = self.counters.get(&key) {
+        if let Some(series) = self.series.counters.get(&key) {
             series.increment(value, domain_timestamp);
         }
-        self.prometheus.increment_counter(&key, value);
+        self.series.prometheus.increment_counter(&key, value);
     }
 
     fn register_counter(&self, key: MetricKey) {
-        self.counters
+        self.series
+            .counters
             .entry(key.clone())
             .or_insert_with(|| Arc::new(CounterSeries::default()));
-        self.prometheus.register_counter(&key);
+        self.series.prometheus.register_counter(&key);
     }
 
     fn observe_histogram(&self, key: MetricKey, value: f64, domain_timestamp: Option<Timestamp>) {
@@ -3121,7 +3170,8 @@ impl RuntimeMetrics {
         domain_timestamp: Option<Timestamp>,
     ) {
         let buckets = internal_buckets_for_metric(key.metric);
-        self.histograms
+        self.series
+            .histograms
             .entry(key)
             .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
             .observe_with_capacity(
@@ -3142,10 +3192,11 @@ impl RuntimeMetrics {
             branch_key: branch_key.to_string(),
             key,
         };
-        self.branch_counters
+        self.series
+            .branch_counters
             .entry(key.clone())
             .or_insert_with(|| Arc::new(CounterSeries::default()));
-        if let Some(series) = self.branch_counters.get(&key) {
+        if let Some(series) = self.series.branch_counters.get(&key) {
             series.increment(value, domain_timestamp);
         }
     }
@@ -3169,7 +3220,8 @@ impl RuntimeMetrics {
         domain_timestamp: Option<Timestamp>,
     ) {
         let buckets = internal_buckets_for_metric(key.metric);
-        self.branch_histograms
+        self.series
+            .branch_histograms
             .entry(BranchMetricKey {
                 branch_key: branch_key.to_string(),
                 key,
@@ -4145,7 +4197,7 @@ mod tests {
             rolling.wall_1m.inner.observe_at(10.0, old);
             rolling.wall_15m.inner.observe_at(10.0, old);
         }
-        metrics.histograms.insert(key, Arc::new(histogram));
+        metrics.series.histograms.insert(key, Arc::new(histogram));
 
         let rendered = metrics.describe_global_target(&domain, "DEDUPLICATOR", &node);
         let line = rendered
@@ -4318,24 +4370,28 @@ mod tests {
 
         assert!(
             metrics
+                .series
                 .counters
                 .iter()
                 .all(|entry| entry.key().target != relay.as_str())
         );
         assert!(
             metrics
+                .series
                 .histograms
                 .iter()
                 .all(|entry| entry.key().target != relay.as_str())
         );
         assert!(
             metrics
+                .series
                 .branch_counters
                 .iter()
                 .all(|entry| entry.key().key.target != relay.as_str())
         );
         assert!(
             metrics
+                .series
                 .branch_histograms
                 .iter()
                 .all(|entry| entry.key().key.target != relay.as_str())
