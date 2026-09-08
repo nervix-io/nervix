@@ -7,10 +7,6 @@ use std::{
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{DataType, Field, Schema};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_nspl::vm_program::{
-    BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
-    Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
-};
 
 use crate::{
     error::CompileError,
@@ -18,6 +14,10 @@ use crate::{
         AssignmentFallback, CompiledProgram, InputBinding, Instruction, InstructionKind,
         InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef, RegisterSpace,
         RegisterType, ScalarValue, SelectArm,
+    },
+    program::{
+        BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
+        Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
     },
     semantics::{
         BuiltinLowering, binary_descriptor, binary_output_type, builtin_descriptor,
@@ -1779,7 +1779,7 @@ impl Compiler {
 
     fn compile_invocation(
         &mut self,
-        invocation: &nervix_nspl::vm_program::SpannedInvocation,
+        invocation: &crate::program::SpannedInvocation,
     ) -> Result<InvocationBinding, CompileError> {
         if !self.allow_header_writes {
             return Err(CompileError {
@@ -3187,13 +3187,13 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field, Schema};
-    use nervix_nspl::vm_program::{
-        Expr, FieldRef, InternalFieldNamespace, InternalFieldRef, Program, SpannedNode,
-        parse_program,
-    };
     use rstest::{fixture, rstest};
 
     use super::*;
+    use crate::{
+        program::{Expr, FieldRef, InternalFieldNamespace, InternalFieldRef, Program, SpannedNode},
+        test_support::parse_program,
+    };
 
     fn has_builtin(compiled: &CompiledProgram, lowering: BuiltinLowering) -> bool {
         compiled.instructions.iter().any(|instruction| {
@@ -3288,12 +3288,12 @@ mod tests {
             udf_signatures,
             ..CompileOptions::default()
         };
-        let qualified = parse_program("SET input.value = udf::add_one(input.value);")
+        let qualified = parse_program("SET value = udf::add_one(input.value)")
             .expect("qualified call must parse");
         compile_program_with_options(&qualified, schema.clone(), options.clone())
             .expect("qualified call must resolve");
 
-        let bare = parse_program("SET input.value = add_one(input.value);")
+        let bare = parse_program("SET value = add_one(input.value)")
             .expect("bare call remains syntactically valid");
         let error = compile_program_with_options(&bare, schema, options)
             .expect_err("bare call must not resolve against the UDF catalog");
@@ -3303,7 +3303,7 @@ mod tests {
     #[test]
     fn rejects_mixed_operand_types() {
         let program =
-            parse_program("SET input.total = input.quantity + input.price;").expect("must parse");
+            parse_program("SET total = input.quantity + input.price").expect("must parse");
         let schema = schema(vec![
             Field::new("quantity", DataType::Int64, true),
             Field::new("price", DataType::Float64, true),
@@ -3325,7 +3325,7 @@ mod tests {
             Field::new("kind", DataType::Utf8, true),
         ]);
         let invalid_condition =
-            parse_program("SET input.result = CASE WHEN input.number THEN 1 ELSE 0 END;")
+            parse_program("SET result = CASE WHEN input.number THEN 1 ELSE 0 END")
                 .expect("program must parse");
         let error = compile_program_with_output_fields(
             &invalid_condition,
@@ -3335,10 +3335,9 @@ mod tests {
         .expect_err("non-Boolean condition must fail");
         assert_eq!(error.code, "invalid_condition");
 
-        let mismatched_results = parse_program(
-            "SET input.result = CASE input.kind WHEN \"number\" THEN 1 ELSE \"text\" END;",
-        )
-        .expect("program must parse");
+        let mismatched_results =
+            parse_program("SET result = CASE input.kind WHEN \"number\" THEN 1 ELSE \"text\" END")
+                .expect("program must parse");
         let error = compile_program_with_output_fields(
             &mismatched_results,
             schema.clone(),
@@ -3348,7 +3347,7 @@ mod tests {
         assert_eq!(error.code, "type_mismatch");
 
         let untyped =
-            parse_program("SET input.result = CASE WHEN input.number = 0 THEN NULL ELSE NULL END;")
+            parse_program("SET result = CASE WHEN input.number = 0 THEN NULL ELSE NULL END")
                 .expect("program must parse");
         let error = compile_program_with_output_fields(
             &untyped,
@@ -3358,9 +3357,8 @@ mod tests {
         .expect_err("all-NULL CASE must fail");
         assert_eq!(error.code, "untyped_null");
 
-        let omitted_else =
-            parse_program("SET input.result = CASE WHEN input.number = 0 THEN 1 END;")
-                .expect("program must parse");
+        let omitted_else = parse_program("SET result = CASE WHEN input.number = 0 THEN 1 END")
+            .expect("program must parse");
         let error = compile_program_with_output_fields(
             &omitted_else,
             schema,
@@ -3372,8 +3370,8 @@ mod tests {
 
     #[test]
     fn folds_constant_if_without_emitting_select() {
-        let program = parse_program("SET input.result = IF TRUE THEN 1 ELSE 2 END;")
-            .expect("program must parse");
+        let program =
+            parse_program("SET result = IF TRUE THEN 1 ELSE 2 END").expect("program must parse");
         let schema = schema(vec![Field::new("source", DataType::Int64, false)]);
         let compiled = compile_program_with_output_fields(
             &program,
@@ -3392,7 +3390,7 @@ mod tests {
 
     #[test]
     fn propagates_sensitivity_from_conditional_conditions() {
-        let program = parse_program("SET input.result = IF input.secret THEN 1 ELSE 0 END;")
+        let program = parse_program("SET result = IF input.secret THEN 1 ELSE 0 END")
             .expect("program must parse");
         let input_schema = schema(vec![Field::new("secret", DataType::Boolean, false)]);
         let output_schema = with_output_fields(
@@ -3413,7 +3411,7 @@ mod tests {
 
     #[test]
     fn lowers_builtin_to_dedicated_instruction() {
-        let program = parse_program("SET input.lowered = lower(input.name);").expect("must parse");
+        let program = parse_program("SET lowered = lower(input.name)").expect("must parse");
         let schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
 
         let compiled = compile_program_with_output_fields(
@@ -3482,7 +3480,7 @@ mod tests {
 
     #[test]
     fn header_functions_are_contextual_and_plural_reads_are_typed_vectors() {
-        let parsed = parse_program("SET input.headers = read_headers(lower(input.name))")
+        let parsed = parse_program("SET headers = read_headers(lower(input.name))")
             .expect("program must parse");
         let input_schema = schema(vec![Field::new("name", DataType::Utf8, false)]);
         let headers_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)));
@@ -3522,7 +3520,7 @@ mod tests {
     #[test]
     fn write_header_is_only_valid_as_an_emitter_invocation() {
         let schema = schema(vec![Field::new("value", DataType::Utf8, false)]);
-        let expression = parse_program("SET input.value = write_header(\"name\", input.value)")
+        let expression = parse_program("SET value = write_header(\"name\", input.value)")
             .expect("program must parse");
         let error = compile_program_with_options_for_bindings(
             &expression,
@@ -3556,7 +3554,7 @@ mod tests {
 
     #[test]
     fn rejects_set_target_missing_from_declared_output_schema() {
-        let program = parse_program("SET input.extra = input.value;").expect("must parse");
+        let program = parse_program("SET extra = input.value").expect("must parse");
         let input_schema = Arc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
@@ -3579,11 +3577,11 @@ mod tests {
     }
 
     #[test]
-    fn allows_declared_target_only_field_without_legacy_unset() {
-        let program = parse_program("SET input.total = input.value;").expect("must parse");
+    fn allows_declared_target_only_field() {
+        let program = parse_program("SET total = input.value").expect("must parse");
         let input_schema = Arc::new(Schema::new(vec![
             Field::new("value", DataType::Int64, true),
-            Field::new("legacy", DataType::Utf8, true),
+            Field::new("unused_input", DataType::Utf8, true),
         ]));
         let output_schema = Arc::new(Schema::new(vec![Field::new(
             "total",
@@ -3596,7 +3594,7 @@ mod tests {
             output_schema,
             [CompileBinding::writable("input", input_schema)],
         )
-        .expect("declared computed output must compile without legacy source-drop syntax");
+        .expect("declared computed output must compile");
 
         assert!(compiled.output_schema.field_with_name("total").is_ok());
     }
@@ -3609,28 +3607,28 @@ mod tests {
 
     #[rstest]
     #[case::rejects_derived_sensitive_value_in_normal_output(
-        "SET input.public_value = lower(input.secret);",
+        "SET public_value = lower(input.secret)",
         "public_value",
         false,
         false,
         SensitivityExpectation::Rejected
     )]
     #[case::accepts_sensitive_value_in_sensitive_output(
-        "SET input.copy = input.secret;",
+        "SET copy = input.secret",
         "copy",
         true,
         false,
         SensitivityExpectation::Accepted
     )]
     #[case::accepts_explicit_sensitive_leak(
-        "SET input.public_value = leak_sensitive(input.secret);",
+        "SET public_value = leak_sensitive(input.secret)",
         "public_value",
         false,
         false,
         SensitivityExpectation::Accepted
     )]
     #[case::accepts_sensitive_external_output(
-        "SET input.public_value = input.secret;",
+        "SET public_value = input.secret",
         "public_value",
         false,
         true,
@@ -3707,7 +3705,7 @@ mod tests {
 
     #[test]
     fn allows_null_assignment_to_declared_optional_output_field() {
-        let program = parse_program("SET input.maybe = NULL;").expect("must parse");
+        let program = parse_program("SET maybe = NULL").expect("must parse");
         let input_schema = schema(Vec::<Field>::new());
         let output_schema = schema(vec![Field::new("maybe", DataType::Utf8, true)]);
 
@@ -3727,7 +3725,7 @@ mod tests {
 
     #[test]
     fn rejects_null_assignment_to_required_output_field() {
-        let program = parse_program("SET input.maybe = NULL;").expect("must parse");
+        let program = parse_program("SET maybe = NULL").expect("must parse");
         let input_schema = schema(Vec::<Field>::new());
         let output_schema = schema(vec![Field::new("maybe", DataType::Utf8, false)]);
 
@@ -3739,7 +3737,7 @@ mod tests {
 
     #[test]
     fn rejects_null_without_assignment_target_type() {
-        let program = parse_program("WHERE NULL;").expect("must parse");
+        let program = parse_program("WHERE NULL").expect("must parse");
         let schema = schema(Vec::<Field>::new());
 
         let error = compile_program(&program, schema).expect_err("untyped NULL must fail");
@@ -3751,8 +3749,7 @@ mod tests {
     fn lowers_upper_trim_and_length_builtins() {
         let schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
 
-        let upper_program =
-            parse_program("SET input.uppered = upper(input.name);").expect("must parse");
+        let upper_program = parse_program("SET uppered = upper(input.name)").expect("must parse");
         let upper = compile_program_with_output_fields(
             &upper_program,
             schema.clone(),
@@ -3761,8 +3758,7 @@ mod tests {
         .expect("upper must compile");
         assert!(has_builtin(&upper, BuiltinLowering::Upper));
 
-        let trim_program =
-            parse_program("SET input.trimmed = trim(input.name);").expect("must parse");
+        let trim_program = parse_program("SET trimmed = trim(input.name)").expect("must parse");
         let trim = compile_program_with_output_fields(
             &trim_program,
             schema.clone(),
@@ -3771,8 +3767,7 @@ mod tests {
         .expect("trim must compile");
         assert!(has_builtin(&trim, BuiltinLowering::Trim));
 
-        let length_program =
-            parse_program("SET input.len = length(input.name);").expect("must parse");
+        let length_program = parse_program("SET len = length(input.name)").expect("must parse");
         let length = compile_program_with_output_fields(
             &length_program,
             schema,
@@ -3785,11 +3780,10 @@ mod tests {
     #[test]
     fn lowers_extended_builtins_to_dedicated_instructions() {
         let program = parse_program(
-            "SET input.chosen = coalesce(input.primary, input.fallback), input.was_null = \
-             is_null(input.primary), input.maybe = nullif(input.primary, input.fallback), \
-             input.magnitude = abs(input.amount), input.has = contains(input.text, input.needle), \
-             input.starts = starts_with(input.text, input.prefix), input.ends = \
-             ends_with(input.text, input.suffix);",
+            "SET chosen = coalesce(input.primary, input.fallback), was_null = \
+             is_null(input.primary), maybe = nullif(input.primary, input.fallback), magnitude = \
+             abs(input.amount), has = contains(input.text, input.needle), starts = \
+             starts_with(input.text, input.prefix), ends = ends_with(input.text, input.suffix)",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -3828,8 +3822,8 @@ mod tests {
 
     #[test]
     fn remaps_single_live_temp_chain_to_one_slot() {
-        let program = parse_program("SET input.lowered = lower(trim(upper(input.name)));")
-            .expect("must parse");
+        let program =
+            parse_program("SET lowered = lower(trim(upper(input.name)))").expect("must parse");
         let schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
 
         let compiled = compile_program_with_output_fields(
@@ -3847,7 +3841,7 @@ mod tests {
 
     #[test]
     fn keeps_multiple_temp_slots_when_values_are_live_together() {
-        let program = parse_program("SET input.equal = lower(input.left) = lower(input.right);")
+        let program = parse_program("SET equal = lower(input.left) = lower(input.right)")
             .expect("must parse");
         let schema = schema(vec![
             Field::new("left", DataType::Utf8, true),
@@ -3867,10 +3861,9 @@ mod tests {
 
     #[test]
     fn invalidates_expression_cache_after_each_assignment() {
-        let program = parse_program(
-            "SET input.lowered = lower(input.name), input.normalized = lower(input.name);",
-        )
-        .expect("must parse");
+        let program =
+            parse_program("SET lowered = lower(input.name), normalized = lower(input.name)")
+                .expect("must parse");
         let schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
 
         let compiled = compile_program_with_output_fields(
@@ -3903,7 +3896,7 @@ mod tests {
 
     #[test]
     fn compiles_repeated_set_targets_in_source_order() {
-        let program = parse_program("SET output.amount = 1, output.amount = output.amount + 1;")
+        let program = parse_program("SET output.amount = 1, output.amount = output.amount + 1")
             .expect("must parse");
         let input_schema = schema(Vec::<Field>::new());
         let output_schema = schema(vec![Field::new("amount", DataType::Int64, false)]);
@@ -3941,7 +3934,7 @@ mod tests {
 
     #[test]
     fn rejects_required_output_that_stays_symbolically_uninitialized() {
-        let program = parse_program("WHERE true;").expect("must parse");
+        let program = parse_program("WHERE true").expect("must parse");
         let output_schema = schema(vec![Field::new("amount", DataType::Int64, false)]);
 
         let error = compile_program_for_bindings(
@@ -3956,9 +3949,8 @@ mod tests {
 
     #[test]
     fn folds_constant_pure_expressions_into_literals() {
-        let program =
-            parse_program("SET input.lowered = lower(' ABC '), input.has = contains('abc', 'b');")
-                .expect("must parse");
+        let program = parse_program("SET lowered = lower(' ABC '), has = contains('abc', 'b')")
+            .expect("must parse");
         let schema = schema(Vec::<Field>::new());
 
         let compiled = compile_program_with_output_fields(
@@ -3993,8 +3985,7 @@ mod tests {
     #[test]
     fn keeps_repeated_erroring_expressions_separate() {
         let program = parse_program(
-            "SET input.first = input.amount / input.divisor, input.second = input.amount / \
-             input.divisor;",
+            "SET first = input.amount / input.divisor, second = input.amount / input.divisor",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4032,8 +4023,8 @@ mod tests {
 
     #[test]
     fn can_disable_temp_register_remap() {
-        let program = parse_program("SET input.lowered = lower(trim(upper(input.name)));")
-            .expect("must parse");
+        let program =
+            parse_program("SET lowered = lower(trim(upper(input.name)))").expect("must parse");
         let schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
         let output_schema =
             with_output_fields(&schema, vec![Field::new("lowered", DataType::Utf8, true)]);
@@ -4202,8 +4193,8 @@ mod tests {
 
     #[test]
     fn compiles_supported_unary_operations() {
-        let program = parse_program("SET input.neg = -input.amount, input.inv = NOT input.active;")
-            .expect("must parse");
+        let program =
+            parse_program("SET neg = -input.amount, inv = NOT input.active").expect("must parse");
         let schema = schema(vec![
             Field::new("amount", DataType::Int64, true),
             Field::new("active", DataType::Boolean, true),
@@ -4241,8 +4232,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_cast_source_type() {
-        let program =
-            parse_program("SET input.created = input.created AS INT64;").expect("must parse");
+        let program = parse_program("SET created = input.created AS INT64").expect("must parse");
         let schema = Arc::new(Schema::new(vec![Field::new(
             "created",
             DataType::Date32,
@@ -4255,8 +4245,8 @@ mod tests {
 
     #[test]
     fn rejects_non_boolean_filter() {
-        let program = parse_program("SET input.value = input.amount WHERE input.amount;")
-            .expect("must parse");
+        let program =
+            parse_program("SET value = input.amount WHERE input.amount").expect("must parse");
         let schema = schema(vec![Field::new("amount", DataType::Int64, true)]);
 
         let error = compile_program_with_output_fields(
@@ -4270,7 +4260,7 @@ mod tests {
 
     #[test]
     fn rejects_non_utf8_builtin_argument() {
-        let program = parse_program("SET input.bad = upper(input.amount);").expect("must parse");
+        let program = parse_program("SET bad = upper(input.amount)").expect("must parse");
         let schema = schema(vec![Field::new("amount", DataType::Int64, true)]);
 
         let error = compile_program_with_output_fields(
@@ -4285,8 +4275,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_extended_builtin_arguments() {
-        let mixed = parse_program("SET input.bad = coalesce(input.amount, input.name);")
-            .expect("must parse");
+        let mixed =
+            parse_program("SET bad = coalesce(input.amount, input.name)").expect("must parse");
         let mixed_schema = schema(vec![
             Field::new("amount", DataType::Int64, true),
             Field::new("name", DataType::Utf8, true),
@@ -4299,7 +4289,7 @@ mod tests {
         .expect_err("must fail");
         assert_eq!(mixed_error.code, "type_mismatch");
 
-        let abs = parse_program("SET input.bad = abs(input.name);").expect("must parse");
+        let abs = parse_program("SET bad = abs(input.name)").expect("must parse");
         let abs_schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
         let abs_error = compile_program_with_output_fields(
             &abs,
@@ -4310,7 +4300,7 @@ mod tests {
         assert_eq!(abs_error.code, "unsupported_function");
         assert!(abs_error.message.contains("requires numeric input"));
 
-        let unknown = parse_program("SET input.bad = mystery(input.name);").expect("must parse");
+        let unknown = parse_program("SET bad = mystery(input.name)").expect("must parse");
         let unknown_schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
         let unknown_error = compile_program_with_output_fields(
             &unknown,
@@ -4324,8 +4314,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_binary_operators_for_operand_type() {
-        let bool_program =
-            parse_program("SET input.bad = input.left > input.right;").expect("must parse");
+        let bool_program = parse_program("SET bad = input.left > input.right").expect("must parse");
         let bool_schema = schema(vec![
             Field::new("left", DataType::Boolean, true),
             Field::new("right", DataType::Boolean, true),
@@ -4339,7 +4328,7 @@ mod tests {
         assert_eq!(bool_error.code, "unsupported_binary");
 
         let numeric_program =
-            parse_program("SET input.bad = input.left AND input.right;").expect("must parse");
+            parse_program("SET bad = input.left AND input.right").expect("must parse");
         let numeric_schema = schema(vec![
             Field::new("left", DataType::Int64, true),
             Field::new("right", DataType::Int64, true),

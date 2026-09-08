@@ -1,24 +1,26 @@
-use std::{num::NonZeroUsize, ops::Range, time::Duration};
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Lowering semantic window assignments into VM expressions and aggregate demands.
+//! - **Depends on.** The vocabulary and the VM's program frontend.
+//! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
 
-use chumsky::{
-    input::{Stream, ValueInput},
-    prelude::*,
-};
+use std::{num::NonZeroUsize, time::Duration};
+
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction};
 use sorted_vec::SortedSet;
+use thiserror::Error;
 
-pub use crate::vm_program::WindowAggregateFunction;
-use crate::vm_program::{
-    Diagnostic, Expr, FieldRef, FunctionName, Literal, ParseError, ParseFromSourceError, Span,
-    SpannedExpr, SpannedNode, SpannedToken, Token, WindowAggregateInvocation, expr_parser,
-    field_ref_parser, lex, lower_expression,
+pub use crate::program::WindowAggregateFunction;
+use crate::{
+    frontend::lower_expression,
+    program::{
+        Expr, FieldRef, FunctionName, Literal, Span, SpannedExpr, SpannedNode,
+        WindowAggregateInvocation, spanned,
+    },
 };
-
-fn spanned<T>(inner: T, span: Span) -> SpannedNode<T> {
-    chumsky::span::Spanned { inner, span }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowAggregateProgram {
@@ -66,9 +68,23 @@ pub struct WindowAggregateDemand {
     pub linear_histogram: Option<WindowLinearHistogramConfig>,
 }
 
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct WindowAggregateError {
+    message: String,
+}
+
+pub type WindowAggregateResult<T> = Result<T, Report<WindowAggregateError>>;
+
+fn invalid_window_aggregate(message: impl Into<String>) -> Report<WindowAggregateError> {
+    Report::new(WindowAggregateError {
+        message: message.into(),
+    })
+}
+
 impl WindowAggregateFunction {
     fn parse_name(function: &FunctionName) -> Option<Self> {
-        if matches!(function, FunctionName::Udf(_)) {
+        if let FunctionName::Udf(_) = function {
             None
         } else {
             function.as_str().parse().ok()
@@ -146,12 +162,16 @@ impl WindowAggregateProgram {
 
 pub fn lower_window_assignments(
     construction: &RouteConstruction,
-) -> Result<SpannedNode<WindowAggregateProgram>, String> {
+) -> WindowAggregateResult<SpannedNode<WindowAggregateProgram>> {
     if construction.inherit.is_some() {
-        return Err("window routes do not support INHERIT".to_string());
+        return Err(invalid_window_aggregate(
+            "window routes do not support INHERIT",
+        ));
     }
     if !construction.invocations.is_empty() {
-        return Err("window routes do not support INVOKE".to_string());
+        return Err(invalid_window_aggregate(
+            "window routes do not support INVOKE",
+        ));
     }
     let span: Span = (0..0).into();
     let assignments = construction
@@ -162,7 +182,9 @@ pub fn lower_window_assignments(
                 assignment.target.scope,
                 AssignmentTargetScope::Bare | AssignmentTargetScope::Output
             ) {
-                return Err("window SET targets must be bare or output.<field>".to_string());
+                return Err(invalid_window_aggregate(
+                    "window SET targets must be bare or output.<field>",
+                ));
             }
             Ok(WindowAggregateAssignment {
                 target: FieldRef {
@@ -172,7 +194,7 @@ pub fn lower_window_assignments(
                 value: lower_window_expression(&assignment.value, span)?,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<WindowAggregateResult<Vec<_>>>()?;
     let mut program = WindowAggregateProgram {
         assignments,
         demands: Vec::new(),
@@ -184,41 +206,51 @@ pub fn lower_window_assignments(
 fn lower_window_expression(
     expression: &Expression,
     span: Span,
-) -> Result<SpannedNode<WindowAggregateExpr>, String> {
+) -> WindowAggregateResult<SpannedNode<WindowAggregateExpr>> {
     match expression {
         Expression::Array(items) => {
             if items.is_empty() {
-                return Err("window array expressions must not be empty".to_string());
+                return Err(invalid_window_aggregate(
+                    "window array expressions must not be empty",
+                ));
             }
             Ok(spanned(
                 WindowAggregateExpr::Array(
                     items
                         .iter()
                         .map(|item| lower_window_expression(item, span))
-                        .collect::<Result<Vec<_>, String>>()?,
+                        .collect::<WindowAggregateResult<Vec<_>>>()?,
                 ),
                 span,
             ))
         }
         _ => {
-            let expression = lower_expression(expression, "output")?;
-            validate_aggregate_expr(&expression).map_err(|error| format!("{error:?}"))?;
+            let expression =
+                lower_expression(expression, "output").map_err(invalid_window_aggregate)?;
+            validate_aggregate_expr(&expression)?;
             validate_window_input_scope(&expression.inner, false)?;
             Ok(spanned(WindowAggregateExpr::Scalar(expression), span))
         }
     }
 }
 
-fn validate_window_input_scope(expression: &Expr, inside_aggregate: bool) -> Result<(), String> {
+fn validate_window_input_scope(
+    expression: &Expr,
+    inside_aggregate: bool,
+) -> WindowAggregateResult<()> {
     match expression {
-        Expr::FieldRef(field) if inside_aggregate && field.relay != "input" => Err(format!(
-            "window aggregate arguments may read only input fields, found '{}.{}'",
-            field.relay, field.field
-        )),
-        Expr::FieldRef(field) if field.relay == "input" && !inside_aggregate => Err(format!(
-            "input.{} is available only inside a window aggregate argument",
-            field.field
-        )),
+        Expr::FieldRef(field) if inside_aggregate && field.relay != "input" => {
+            Err(invalid_window_aggregate(format!(
+                "window aggregate arguments may read only input fields, found '{}.{}'",
+                field.relay, field.field
+            )))
+        }
+        Expr::FieldRef(field) if field.relay == "input" && !inside_aggregate => {
+            Err(invalid_window_aggregate(format!(
+                "input.{} is available only inside a window aggregate argument",
+                field.field
+            )))
+        }
         Expr::FieldRef(_) | Expr::InternalFieldRef(_) | Expr::Literal(_) => Ok(()),
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
             validate_window_input_scope(&expr.inner, inside_aggregate)
@@ -357,126 +389,7 @@ fn collect_expr_demand_references(expr: &Expr, counts: &mut [usize]) {
     }
 }
 
-pub fn parse_aggregate_program(
-    input: &str,
-) -> Result<SpannedNode<WindowAggregateProgram>, ParseFromSourceError> {
-    let source = input.to_string();
-    let tokens = lex(input).map_err(|errors| ParseFromSourceError::Lex {
-        source: source.clone(),
-        diagnostics: errors
-            .into_iter()
-            .map(|error| Diagnostic {
-                message: format!("{error:?}"),
-                span: error.span().into_range(),
-            })
-            .collect(),
-    })?;
-
-    parse_aggregate_tokens(&tokens).map_err(|errors| ParseFromSourceError::Parse {
-        source,
-        diagnostics: errors
-            .into_iter()
-            .map(|error| Diagnostic {
-                message: format!("{error:?}"),
-                span: error.span().into_range(),
-            })
-            .collect(),
-    })
-}
-
-pub fn parse_aggregate_tokens(
-    tokens: &[SpannedToken],
-) -> Result<SpannedNode<WindowAggregateProgram>, Vec<ParseError<'_>>> {
-    let end_span = tokens
-        .last()
-        .map(|token| token.span.end..token.span.end)
-        .unwrap_or(0..0);
-    let relay = Stream::from_iter(
-        tokens
-            .iter()
-            .cloned()
-            .map(|token| (token.token, token.span)),
-    )
-    .map(end_span.into(), |(token, span)| (token, span));
-
-    let parsed = aggregate_parser().then_ignore(end()).parse(relay);
-    if parsed.has_errors() {
-        Err(parsed.into_errors())
-    } else {
-        let mut program = parsed
-            .into_output()
-            .verified("has_errors returned false above, so this parse produced output");
-        assign_aggregate_demands(&mut program.inner);
-        Ok(program)
-    }
-}
-
-fn aggregate_parser<'src, I>()
--> impl Parser<'src, I, SpannedNode<WindowAggregateProgram>, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    aggregate_assignment()
-        .separated_by(just(Token::Comma))
-        .at_least(1)
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .then_ignore(just(Token::Semicolon).repeated())
-        .map_with(|assignments, e| {
-            spanned(
-                WindowAggregateProgram {
-                    assignments,
-                    demands: Vec::new(),
-                },
-                e.span(),
-            )
-        })
-}
-
-fn aggregate_assignment<'src, I>()
--> impl Parser<'src, I, WindowAggregateAssignment, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    field_ref_parser()
-        .map(|target| target.inner)
-        .then_ignore(just(Token::Eq))
-        .then(aggregate_expr())
-        .map(|(target, value)| WindowAggregateAssignment { target, value })
-}
-
-fn aggregate_expr<'src, I>()
--> impl Parser<'src, I, SpannedNode<WindowAggregateExpr>, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    recursive(|aggregate_expr| {
-        let array = aggregate_expr
-            .clone()
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LBracket), just(Token::RBracket))
-            .try_map(|items, span: Span| {
-                if items.is_empty() {
-                    return Err(Rich::custom(span, "aggregate arrays must not be empty"));
-                }
-                Ok(spanned(WindowAggregateExpr::Array(items), span))
-            });
-
-        choice((array, expr_parser().try_map(aggregate_expr_from_vm_expr)))
-    })
-}
-
-fn aggregate_expr_from_vm_expr<'src>(
-    expr: SpannedExpr,
-    span: Span,
-) -> Result<SpannedNode<WindowAggregateExpr>, Rich<'src, Token>> {
-    validate_aggregate_expr(&expr)?;
-    Ok(spanned(WindowAggregateExpr::Scalar(expr), span))
-}
-
-fn validate_aggregate_expr<'src>(expr: &SpannedExpr) -> Result<(), Rich<'src, Token>> {
+fn validate_aggregate_expr(expr: &SpannedExpr) -> WindowAggregateResult<()> {
     match &expr.inner {
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => validate_aggregate_expr(expr),
         Expr::Binary { left, right, .. } => {
@@ -484,14 +397,8 @@ fn validate_aggregate_expr<'src>(expr: &SpannedExpr) -> Result<(), Rich<'src, To
             validate_aggregate_expr(right)
         }
         Expr::Call { function, args } => {
-            if legacy_percentile_name(function) {
-                return Err(Rich::custom(
-                    expr.span,
-                    "PERCENTILE is not supported; use PERCENTILE_LINEAR_HISTOGRAM",
-                ));
-            }
             if let Some(function) = WindowAggregateFunction::parse_name(function) {
-                return validate_aggregate_call(function, args, expr.span);
+                return validate_aggregate_call(function, args);
             }
             for arg in args {
                 validate_aggregate_expr(arg)?;
@@ -519,91 +426,79 @@ fn validate_aggregate_expr<'src>(expr: &SpannedExpr) -> Result<(), Rich<'src, To
     }
 }
 
-fn validate_aggregate_call<'src>(
+fn validate_aggregate_call(
     function: WindowAggregateFunction,
     args: &[SpannedExpr],
-    span: Span,
-) -> Result<(), Rich<'src, Token>> {
+) -> WindowAggregateResult<()> {
     if args.len() != function.expected_arity() {
-        return Err(Rich::custom(
-            span,
-            format!(
-                "{function:?} expects {} argument(s), found {}",
-                function.expected_arity(),
-                args.len()
-            ),
-        ));
+        return Err(invalid_window_aggregate(format!(
+            "{function:?} expects {} argument(s), found {}",
+            function.expected_arity(),
+            args.len()
+        )));
     }
     if args.iter().any(|arg| contains_aggregate_call(&arg.inner)) {
-        return Err(Rich::custom(
-            span,
+        return Err(invalid_window_aggregate(
             "aggregate functions must not be nested inside aggregate arguments",
         ));
     }
     if function == WindowAggregateFunction::PercentileLinearHistogram {
-        percentile_arg(&args[1], span)?;
+        percentile_arg(&args[1])?;
     }
     if function == WindowAggregateFunction::PercentileLinearHistogram {
-        linear_histogram_config(args, span)?;
+        linear_histogram_config(args)?;
     }
     Ok(())
 }
 
-fn percentile_arg<'src>(expr: &SpannedExpr, span: Span) -> Result<f64, Rich<'src, Token>> {
+fn percentile_arg(expr: &SpannedExpr) -> WindowAggregateResult<f64> {
     let value = match &expr.inner {
         Expr::Literal(Literal::Int64(value)) => (*value).approx_into(),
         Expr::Literal(Literal::Float64(value)) => *value,
         _ => {
-            return Err(Rich::custom(
-                span,
+            return Err(invalid_window_aggregate(
                 "PERCENTILE_LINEAR_HISTOGRAM percentile argument must be a numeric constant",
             ));
         }
     };
     if !(0.0..=100.0).contains(&value) {
-        return Err(Rich::custom(
-            span,
+        return Err(invalid_window_aggregate(
             "PERCENTILE_LINEAR_HISTOGRAM percentile argument must be between 0 and 100",
         ));
     }
     Ok(value)
 }
 
-fn linear_histogram_config<'src>(
+fn linear_histogram_config(
     args: &[SpannedExpr],
-    span: Span,
-) -> Result<WindowLinearHistogramConfig, Rich<'src, Token>> {
-    let buckets = usize::try_from(int_arg(&args[2], span, "bucket count")?)
+) -> WindowAggregateResult<WindowLinearHistogramConfig> {
+    let buckets = usize::try_from(int_arg(&args[2], "bucket count")?)
         .ok()
         .and_then(NonZeroUsize::new)
         .ok_or_else(|| {
-            Rich::custom(
-                span,
+            invalid_window_aggregate(
                 "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
             )
         })?;
-    let min = numeric_arg(&args[3], span, "minimum")?;
-    let max = numeric_arg(&args[4], span, "maximum")?;
+    let min = numeric_arg(&args[3], "minimum")?;
+    let max = numeric_arg(&args[4], "maximum")?;
     if min >= max {
-        return Err(Rich::custom(
-            span,
+        return Err(invalid_window_aggregate(
             "PERCENTILE_LINEAR_HISTOGRAM minimum must be less than maximum",
         ));
     }
     let delay = match &args[5].inner {
         Expr::Literal(Literal::String(value)) => value.clone(),
         _ => {
-            return Err(Rich::custom(
-                span,
+            return Err(invalid_window_aggregate(
                 "PERCENTILE_LINEAR_HISTOGRAM delay argument must be a duration string constant",
             ));
         }
     };
     let delay = humantime::parse_duration(&delay).map_err(|error| {
-        Rich::custom(
-            span,
-            format!("invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '{delay}': {error}"),
-        )
+        invalid_window_aggregate(format!(
+            "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '{delay}': {error}"
+        ))
     })?;
     Ok(WindowLinearHistogramConfig {
         buckets,
@@ -613,24 +508,22 @@ fn linear_histogram_config<'src>(
     })
 }
 
-fn int_arg<'src>(expr: &SpannedExpr, span: Span, name: &str) -> Result<i64, Rich<'src, Token>> {
+fn int_arg(expr: &SpannedExpr, name: &str) -> WindowAggregateResult<i64> {
     match &expr.inner {
         Expr::Literal(Literal::Int64(value)) => Ok(*value),
-        _ => Err(Rich::custom(
-            span,
-            format!("PERCENTILE_LINEAR_HISTOGRAM {name} argument must be an integer constant"),
-        )),
+        _ => Err(invalid_window_aggregate(format!(
+            "PERCENTILE_LINEAR_HISTOGRAM {name} argument must be an integer constant"
+        ))),
     }
 }
 
-fn numeric_arg<'src>(expr: &SpannedExpr, span: Span, name: &str) -> Result<f64, Rich<'src, Token>> {
+fn numeric_arg(expr: &SpannedExpr, name: &str) -> WindowAggregateResult<f64> {
     match &expr.inner {
         Expr::Literal(Literal::Int64(value)) => Ok((*value).approx_into()),
         Expr::Literal(Literal::Float64(value)) => Ok(*value),
-        _ => Err(Rich::custom(
-            span,
-            format!("PERCENTILE_LINEAR_HISTOGRAM {name} argument must be a numeric constant"),
-        )),
+        _ => Err(invalid_window_aggregate(format!(
+            "PERCENTILE_LINEAR_HISTOGRAM {name} argument must be a numeric constant"
+        ))),
     }
 }
 
@@ -638,7 +531,6 @@ fn contains_aggregate_call(expr: &Expr) -> bool {
     match expr {
         Expr::Call { function, args } => {
             WindowAggregateFunction::parse_name(function).is_some()
-                || legacy_percentile_name(function)
                 || args.iter().any(|arg| contains_aggregate_call(&arg.inner))
         }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => contains_aggregate_call(&expr.inner),
@@ -663,11 +555,6 @@ fn contains_aggregate_call(expr: &Expr) -> bool {
         }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
-}
-
-fn legacy_percentile_name(function: &FunctionName) -> bool {
-    !matches!(function, FunctionName::Udf(_))
-        && function.as_str().eq_ignore_ascii_case("percentile")
 }
 
 fn assign_aggregate_demands(program: &mut WindowAggregateProgram) {
@@ -706,16 +593,16 @@ fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggreg
             };
             let percentile =
                 if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
-                    Some(percentile_arg(&args[1], expr.span).verified(
-                        "the parser validated these same arguments before the demand pass runs",
+                    Some(percentile_arg(&args[1]).verified(
+                        "aggregate validation checked these same arguments before the demand pass",
                     ))
                 } else {
                     None
                 };
             let linear_histogram =
                 if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
-                    Some(linear_histogram_config(args, expr.span).verified(
-                        "the parser validated these same arguments before the demand pass runs",
+                    Some(linear_histogram_config(args).verified(
+                        "aggregate validation checked these same arguments before the demand pass",
                     ))
                 } else {
                     None
@@ -771,7 +658,7 @@ fn aggregate_demand_for_call(
 ) -> WindowAggregateDemand {
     let input = Some(
         args.first()
-            .verified("the parser rejects an aggregate call without its input argument")
+            .verified("aggregate validation above enforces the function's nonzero arity")
             .inner
             .clone(),
     );
@@ -842,23 +729,27 @@ fn collect_expr_field_refs<'a>(expr: &'a Expr, refs: &mut Vec<&'a FieldRef>) {
     }
 }
 
-pub fn span_range(span: Span) -> Range<usize> {
-    span.into_range()
-}
-
 #[cfg(test)]
 mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
 
+    fn lower_aggregate_program(
+        assignments: &str,
+    ) -> Result<SpannedNode<WindowAggregateProgram>, String> {
+        let construction = nervix_nspl::parse_route_construction(&format!("SET {assignments}"))
+            .map_err(|error| error.to_string())?;
+        lower_window_assignments(&construction).map_err(|error| error.to_string())
+    }
+
     #[test]
     fn parses_aggregate_program_and_demands() {
-        let parsed = parse_aggregate_program(
-            "s2.latency_p99 = PERCENTILE_LINEAR_HISTOGRAM(abs(s1.latency), 99, 2048, 0, 10000, \
-             '2s'), s2.time = MAX(s1.timestamp), s2.started_at = FIRST(s1.timestamp), \
-             s2.latencies = [PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 90, 2048, 0, 10000, '2s'), \
-             PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 95, 2048, 0, 10000, '2s')]",
+        let parsed = lower_aggregate_program(
+            "latency_p99 = PERCENTILE_LINEAR_HISTOGRAM(abs(input.latency), 99, 2048, 0, 10000, \
+             '2s'), time = MAX(input.timestamp), started_at = FIRST(input.timestamp), latencies = \
+             [PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 2048, 0, 10000, '2s'), \
+             PERCENTILE_LINEAR_HISTOGRAM(input.latency, 95, 2048, 0, 10000, '2s')]",
         )
         .expect("aggregate program should parse");
 
@@ -874,8 +765,8 @@ mod tests {
 
     #[test]
     fn conditional_window_results_collect_all_aggregate_demands() {
-        let parsed = parse_aggregate_program(
-            "s2.result = CASE WHEN COUNT(s1.value) > 0 THEN SUM(s1.value) ELSE 0 END",
+        let parsed = lower_aggregate_program(
+            "result = CASE WHEN COUNT(input.value) > 0 THEN SUM(input.value) ELSE 0 END",
         )
         .expect("conditional aggregate expression must parse");
 
@@ -885,18 +776,22 @@ mod tests {
 
     #[test]
     fn route_aggregate_arguments_reject_output_fields() {
-        let construction = crate::parse_route_construction("SET total = COUNT(output.total)")
+        let construction = nervix_nspl::parse_route_construction("SET total = COUNT(output.total)")
             .expect("route construction should parse");
 
         let error = lower_window_assignments(&construction)
             .expect_err("aggregate arguments must read the original input");
 
-        assert!(error.contains("window aggregate arguments may read only input fields"));
+        assert!(
+            error
+                .to_string()
+                .contains("window aggregate arguments may read only input fields")
+        );
     }
 
     #[test]
     fn route_array_values_preserve_ordered_aggregate_expressions() {
-        let construction = crate::parse_route_construction(
+        let construction = nervix_nspl::parse_route_construction(
             "SET percentiles = [MIN(input.value), MAX(input.value)]",
         )
         .expect("route array construction should parse");
@@ -921,9 +816,9 @@ mod tests {
 
     #[test]
     fn deduplicates_demands_and_assigns_call_demand_ids() {
-        let parsed = parse_aggregate_program(
-            "s2.p50 = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 50, 2048, 0, 10000, '2s'), s2.p90 = \
-             PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 90, 2048, 0, 10000, '2s')",
+        let parsed = lower_aggregate_program(
+            "p50 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 2048, 0, 10000, '2s'), p90 = \
+             PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 2048, 0, 10000, '2s')",
         )
         .expect("aggregate program should parse");
 
@@ -937,10 +832,10 @@ mod tests {
 
     #[test]
     fn counts_references_for_nested_array_aggregate_demands() {
-        let parsed = parse_aggregate_program(
-            "s2.latencies = [PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 50, 2048, 0, 10000, '2s'), \
-             PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 90, 2048, 0, 10000, '2s')], s2.count = \
-             COUNT(s1.latency)",
+        let parsed = lower_aggregate_program(
+            "latencies = [PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 2048, 0, 10000, '2s'), \
+             PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 2048, 0, 10000, '2s')], count = \
+             COUNT(input.latency)",
         )
         .expect("aggregate program should parse");
 
@@ -950,9 +845,9 @@ mod tests {
 
     #[test]
     fn minimizes_structures_across_compatible_aggregate_functions() {
-        let parsed = parse_aggregate_program(
-            "s2.first = FIRST(s1.value), s2.last = LAST(s1.value), s2.min = MIN(s1.value), s2.max \
-             = MAX(s1.value)",
+        let parsed = lower_aggregate_program(
+            "first = FIRST(input.value), last = LAST(input.value), min = MIN(input.value), max = \
+             MAX(input.value)",
         )
         .expect("compatible aggregate functions should share online structures");
 
@@ -973,22 +868,16 @@ mod tests {
 
     #[test]
     fn rejects_non_constant_percentile() {
-        parse_aggregate_program(
-            "s2.p = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, s1.rank, 2048, 0, 10000, '2s')",
+        lower_aggregate_program(
+            "p = PERCENTILE_LINEAR_HISTOGRAM(input.latency, input.rank, 2048, 0, 10000, '2s')",
         )
         .expect_err("percentile must be constant");
     }
 
     #[test]
-    fn rejects_legacy_percentile_function() {
-        parse_aggregate_program("s2.p = PERCENTILE(s1.latency, 99)")
-            .expect_err("legacy percentile must be rejected");
-    }
-
-    #[test]
     fn parses_linear_histogram_percentile_config() {
-        let parsed = parse_aggregate_program(
-            "s2.p99 = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 0, 10000, '2s')",
+        let parsed = lower_aggregate_program(
+            "p99 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 0, 10000, '2s')",
         )
         .expect("aggregate program should parse");
 
@@ -1011,31 +900,31 @@ mod tests {
 
     #[test]
     fn rejects_invalid_linear_histogram_config() {
-        parse_aggregate_program(
-            "s2.p = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 0, 0, 10000, '2s')",
+        lower_aggregate_program(
+            "p = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 0, 0, 10000, '2s')",
         )
         .expect_err("bucket count must be positive");
-        parse_aggregate_program(
-            "s2.p = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 10000, 0, '2s')",
+        lower_aggregate_program(
+            "p = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 10000, 0, '2s')",
         )
         .expect_err("range must be ordered");
-        parse_aggregate_program(
-            "s2.p = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 0, 10000, s1.delay)",
+        lower_aggregate_program(
+            "p = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 0, 10000, input.delay)",
         )
         .expect_err("delay must be constant");
     }
 
     #[test]
     fn rejects_nested_aggregate_calls() {
-        parse_aggregate_program("s2.p = SUM(COUNT(s1.latency))")
+        lower_aggregate_program("p = SUM(COUNT(input.latency))")
             .expect_err("aggregate calls must not be nested");
     }
 
     #[test]
     fn parses_aggregate_calls_inside_vm_expressions() {
-        let parsed = parse_aggregate_program(
-            "s2.adjusted_count = COUNT(s1.latency) + 2, s2.adjusted_p99 = \
-             ABS(PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 0, 10000, '2s'))",
+        let parsed = lower_aggregate_program(
+            "adjusted_count = COUNT(input.latency) + 2, adjusted_p99 = \
+             ABS(PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 0, 10000, '2s'))",
         )
         .expect("aggregate calls should be valid inside VM expressions");
 
@@ -1045,21 +934,21 @@ mod tests {
 
     #[test]
     fn exposes_referenced_field_refs() {
-        let parsed = parse_aggregate_program(
-            "s2.p = PERCENTILE_LINEAR_HISTOGRAM(abs(s1.latency), 99, 2048, 0, 10000, '2s')",
+        let parsed = lower_aggregate_program(
+            "p = PERCENTILE_LINEAR_HISTOGRAM(abs(input.latency), 99, 2048, 0, 10000, '2s')",
         )
         .expect("aggregate program should parse");
         let refs = referenced_field_refs(&parsed.assignments[0].value.inner);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].relay, "s1");
+        assert_eq!(refs[0].relay, "input");
         assert_eq!(refs[0].field, "latency");
     }
 
     #[test]
     fn combines_route_programs_with_globally_unique_demands() {
-        let first = parse_aggregate_program("output.count = COUNT(input.value)")
+        let first = lower_aggregate_program("output.count = COUNT(input.value)")
             .expect("first route aggregate should parse");
-        let second = parse_aggregate_program(
+        let second = lower_aggregate_program(
             "output.minimum = MIN(input.value), output.maximum = MAX(input.value)",
         )
         .expect("second route aggregate should parse");

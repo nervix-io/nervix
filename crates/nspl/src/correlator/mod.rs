@@ -9,10 +9,11 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, collect_for,
-        correlator_name, duration_lit, flushed_explicit_processor_outputs,
-        from_relay_clause_with_boundary, from_where_boundary_token, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies,
-        relay_ref, render_vm_program_tokens, suggest_from, tok, vm_program_error_message,
+        correlator_name, duration_lit, expression_error_message,
+        flushed_explicit_processor_outputs, from_relay_clause_with_boundary,
+        from_where_boundary_token, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
+        kw_phrase3, lex_input, materialized_state_dependencies, relay_ref,
+        render_expression_tokens, suggest_from, tok,
     },
 };
 
@@ -39,9 +40,9 @@ fn correlate_where_clause<'src>()
                 .labelled("correlate_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
 }
 

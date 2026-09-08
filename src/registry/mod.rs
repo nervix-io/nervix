@@ -10,11 +10,6 @@
 //! - **Must not know.** How a validated node runs. No Tokio task, no Arrow batch, no connector and
 //!   no branch-local state belongs here, and a decision must be computable without a cluster.
 //!
-//! This module breaks its own contract: route validation lowers programs through
-//! `nervix_nspl::vm_program`, so a decision names the language layer instead of the VM frontend the
-//! runtime compiles with, and the same Models are then lowered a second time in the runtime. One
-//! frontend used by both closes it.
-
 mod relocation;
 
 use std::{
@@ -57,20 +52,18 @@ use nervix_models::{
     ResolvedCodecWireFormat, RouteConstruction, ScheduledNode, ScheduledNodes, SchemaField,
     SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaLookup, WireSchemaName,
 };
-use nervix_nspl::{
-    vm_program::{
-        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
-        SemanticNamespaces, SpannedExpr, lower_branch_construction, lower_finalized_output_filter,
-        lower_generated_route, lower_route_construction, lower_set_only_route,
-        lower_transforming_route,
-    },
-    window_processor::aggregate::{lower_window_assignments, referenced_field_refs},
-};
 use nervix_roto::signatures_for as udf_signatures_for;
 use nervix_vm::{
-    CompileBinding, CompileOptions, OutputMode, SchemaSensitivity,
+    CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticNamespaces,
     compile_program_with_options_for_bindings_with_sensitivity,
-    infer_set_expr_types_for_bindings_with_udfs,
+    infer_set_expr_types_for_bindings_with_udfs, lower_branch_construction,
+    lower_finalized_output_filter, lower_generated_route, lower_route_construction,
+    lower_set_only_route, lower_transforming_route,
+    program::{
+        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
+        SpannedExpr,
+    },
+    window::{lower_window_assignments, referenced_field_refs},
 };
 use parking_lot::{Mutex, RwLock};
 use petgraph::{
@@ -8382,7 +8375,7 @@ fn lookup_hash_map_bindings(mut fields: Vec<(String, ArrowDataType)>) -> Vec<Com
 /// A rewritten program together with the internal fields its `LOOKUP_HASH_MAP` calls now read
 /// from, which the compiler binds as an extra input namespace.
 struct LookupHashMapRewriteResult {
-    program: nervix_nspl::vm_program::SpannedNode<Program>,
+    program: nervix_vm::program::SpannedNode<Program>,
     fields: Vec<(String, ArrowDataType)>,
 }
 
@@ -8400,7 +8393,7 @@ fn rewrite_lookup_hash_map_program(
     domain: &DomainName,
     identifier: &ModelName,
     models: &HashMap<NodeRef, Model>,
-    parsed: &nervix_nspl::vm_program::SpannedNode<Program>,
+    parsed: &nervix_vm::program::SpannedNode<Program>,
 ) -> Result<LookupHashMapRewriteResult, Report<RegistryError>> {
     let mut next_field = 0usize;
     let mut calls = Vec::<LookupHashMapCallSite>::new();
@@ -8414,7 +8407,7 @@ fn rewrite_lookup_hash_map_program(
             &mut next_field,
         )
     };
-    let program = nervix_nspl::vm_program::SpannedNode {
+    let program = nervix_vm::program::SpannedNode {
         inner: Program {
             filter: parsed.inner.filter.as_ref().map(&mut rewrite).transpose()?,
             set: parsed
@@ -8428,8 +8421,8 @@ fn rewrite_lookup_hash_map_program(
                 .invoke
                 .iter()
                 .map(|invocation| {
-                    Ok(nervix_nspl::vm_program::SpannedNode {
-                        inner: nervix_nspl::vm_program::Invocation {
+                    Ok(nervix_vm::program::SpannedNode {
+                        inner: nervix_vm::program::Invocation {
                             function: invocation.inner.function.clone(),
                             args: invocation
                                 .inner
@@ -8632,7 +8625,7 @@ fn rewrite_lookup_hash_map_expr(
                 .transpose()?,
         },
     };
-    Ok(nervix_nspl::vm_program::SpannedNode {
+    Ok(nervix_vm::program::SpannedNode {
         inner,
         span: expr.span,
     })
@@ -8720,7 +8713,7 @@ fn program_uses_header_reads(program: &Program) -> bool {
             .any(expr_uses_header_read)
 }
 
-fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec<(String, String)> {
+fn collect_program_field_refs(program: &nervix_vm::program::Program) -> Vec<(String, String)> {
     let mut refs = Vec::new();
     if let Some(filter) = &program.filter {
         collect_expr_field_refs(filter, &mut refs);
@@ -8740,7 +8733,7 @@ fn referenced_materialized_stream_bindings(
     domain: &DomainName,
     identifier: &ModelName,
     models: &HashMap<NodeRef, Model>,
-    parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+    parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     excluded_namespaces: &HashSet<String>,
     program_label: &str,
 ) -> Result<Vec<CompileBinding>, Report<RegistryError>> {

@@ -1,7 +1,9 @@
 use arrow_schema::{DataType, TimeUnit};
-use nervix_nspl::vm_program::{BinaryOp, Expr, FunctionName, SpannedExpr, UnaryOp};
 
-use crate::{CompileError, RegisterType};
+use crate::{
+    CompileError, RegisterType,
+    program::{BinaryOp, Expr, FunctionName, SpannedExpr, UnaryOp},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Volatility {
@@ -1130,14 +1132,11 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_nspl::vm_program::{
-        BinaryOp, Expr, FieldRef, FunctionName, Literal, SpannedNode, UnaryOp,
-    };
-
     use super::{
         DependencyScope, ExpressionSemantics, NullPropagation, Volatility, binary_op_semantics,
         builtin_function_semantics, cast_semantics, expr_semantics, unary_op_semantics,
     };
+    use crate::program::{BinaryOp, Expr, FieldRef, FunctionName, Literal, SpannedNode, UnaryOp};
 
     fn spanned(inner: Expr) -> SpannedNode<Expr> {
         SpannedNode {

@@ -8,9 +8,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2,
-        lex_input, relay_ref, render_vm_program_tokens, session_subscription_name,
-        session_subscription_ref, string_lit, suggest_from, tok, vm_program_error_message,
+        LexedInput, ParseError, ParseFromSourceError, expression_error_message, field_ref,
+        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, render_expression_tokens,
+        session_subscription_name, session_subscription_ref, string_lit, suggest_from, tok,
         word_raw,
     },
 };
@@ -95,8 +95,8 @@ fn subscription_where_clause<'src>()
                 .collect::<Vec<_>>(),
         )
         .try_map(|tokens, span| {
-            crate::parse_expression(&render_vm_program_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+            crate::parse_expression(&render_expression_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
 }
 

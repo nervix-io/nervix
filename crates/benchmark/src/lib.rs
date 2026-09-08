@@ -9,10 +9,6 @@
 //! - **Must not know.** How the systems it measures are built. Every implementation is driven
 //!   through its public interface, which is what keeps a comparison fair.
 //!
-//! This crate breaks its own contract: its binary names `nervix_nspl::client_statement` directly
-//! rather than going through the client core, which is what the ratchet counts as a parser
-//! reference outside the edges.
-
 mod ab;
 mod catalog;
 mod comparison;

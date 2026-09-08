@@ -1,3 +1,9 @@
+//! Layer: language.
+//!
+//! - **Owns.** The private tokens and lexical diagnostics used by semantic expression parsing.
+//! - **Depends on.** Chumsky's parser primitives.
+//! - **Must not know.** VM programs, registry state, or runtime execution.
+
 use chumsky::prelude::*;
 
 pub type Span = SimpleSpan<usize>;

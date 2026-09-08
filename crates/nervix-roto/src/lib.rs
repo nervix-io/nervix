@@ -7,9 +7,6 @@
 //! - **Depends on.** The VM and the vocabulary.
 //! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
 //!
-//! This crate breaks its own contract: it names `nervix_nspl::vm_program` for spans and function
-//! names, inheriting the VM's dependency on the language layer.
-
 use std::{
     cell::RefCell,
     fmt,
@@ -38,6 +35,7 @@ use nervix_models::{CreateUdf, ParseAsType, Timestamp};
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
     RuntimeError, SideError, TypedArray, UdfParameter, UdfSignature, UdfSignatures,
+    program::{FunctionName, Span},
 };
 use parking_lot::Mutex;
 use regex::Regex;
@@ -172,7 +170,7 @@ impl PartialEq for UdfArgs {
 #[derive(Debug)]
 struct CallState {
     udf_name: String,
-    span: nervix_nspl::vm_program::Span,
+    span: Span,
     row_count: usize,
     now: Timestamp,
     side_errors: Vec<(usize, SideError)>,
@@ -937,7 +935,7 @@ impl CompiledUdf {
         &self,
         arguments: &[TypedArray],
         row_count: usize,
-        span: nervix_nspl::vm_program::Span,
+        span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
     ) -> Result<InjectedResult, RuntimeError> {
@@ -1147,11 +1145,8 @@ impl UdfExecutor {
 }
 
 impl FunctionInjector for UdfExecutor {
-    fn execution_policy(
-        &self,
-        function: &nervix_nspl::vm_program::FunctionName,
-    ) -> FunctionExecutionPolicy {
-        if matches!(function, nervix_nspl::vm_program::FunctionName::Udf(_)) {
+    fn execution_policy(&self, function: &FunctionName) -> FunctionExecutionPolicy {
+        if matches!(function, FunctionName::Udf(_)) {
             FunctionExecutionPolicy::SpawnBlocking
         } else {
             FunctionExecutionPolicy::Inline
@@ -1160,10 +1155,10 @@ impl FunctionInjector for UdfExecutor {
 
     fn inject(
         &self,
-        function: &nervix_nspl::vm_program::FunctionName,
+        function: &FunctionName,
         arguments: &[TypedArray],
         row_count: usize,
-        span: nervix_nspl::vm_program::Span,
+        span: Span,
     ) -> Result<TypedArray, RuntimeError> {
         self.inject_with_errors(function, arguments, row_count, span)
             .map(|result| result.output)
@@ -1171,12 +1166,12 @@ impl FunctionInjector for UdfExecutor {
 
     fn inject_with_errors(
         &self,
-        function: &nervix_nspl::vm_program::FunctionName,
+        function: &FunctionName,
         arguments: &[TypedArray],
         row_count: usize,
-        span: nervix_nspl::vm_program::Span,
+        span: Span,
     ) -> Result<InjectedResult, RuntimeError> {
-        let nervix_nspl::vm_program::FunctionName::Udf(name) = function else {
+        let FunctionName::Udf(name) = function else {
             return Err(RuntimeError::MissingFunctionInjector {
                 function: function.as_str().to_string(),
             });
@@ -1197,14 +1192,14 @@ impl FunctionInjector for UdfExecutor {
 
     fn inject_with_context(
         &self,
-        function: &nervix_nspl::vm_program::FunctionName,
+        function: &FunctionName,
         arguments: &[TypedArray],
         row_count: usize,
-        span: nervix_nspl::vm_program::Span,
+        span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
     ) -> Result<InjectedResult, RuntimeError> {
-        let nervix_nspl::vm_program::FunctionName::Udf(name) = function else {
+        let FunctionName::Udf(name) = function else {
             return Err(RuntimeError::MissingFunctionInjector {
                 function: function.as_str().to_string(),
             });
@@ -1524,7 +1519,7 @@ mod tests {
     #[test]
     fn compiles_and_executes_i64_column_udf() {
         let executor = UdfExecutor::compile_sync([add_one_model()]).expect("UDF should compile");
-        let function = nervix_nspl::vm_program::FunctionName::Udf("add_one".to_string());
+        let function = FunctionName::Udf("add_one".to_string());
         assert_eq!(
             executor.execution_policy(&function),
             FunctionExecutionPolicy::SpawnBlocking
