@@ -347,24 +347,45 @@ async fn a_full_wait_queue_is_typed_backpressure_rather_than_unbounded_growth() 
 async fn consensus_storage_runs_its_jobs_in_admission_order() {
     let executor = small_executor();
     let order = StdArc::new(parking_lot::Mutex::new(Vec::new()));
-    let mut handles = Vec::new();
+    // Submit every job before any of them can finish, so the single ordered worker is what decides
+    // the order rather than the caller awaiting them one at a time.
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let mut held = Some(released);
+    let mut submissions = Vec::new();
     for index in 0..8_usize {
         let reservation = executor
             .try_reserve(MemoryClass::Commands, 1024)
             .expect("the commands class has room");
-        let executor = executor.clone();
+        let submitted = executor.clone();
         let order = StdArc::clone(&order);
-        handles.push(
-            executor
+        // The first job parks until the test releases it, so the rest queue behind it.
+        let gate = held.take();
+        submissions.push(tokio::spawn(async move {
+            submitted
                 .run_storage(StorageClass::Consensus, reservation, move |_charge, _| {
+                    if let Some(gate) = gate {
+                        let _ = gate.blocking_recv();
+                    }
                     order.lock().push(index);
                 })
-                .await,
-        );
+                .await
+        }));
+        // Admission is taken in submission order, so let each spawn reach the semaphore first.
+        while executor.snapshot().consensus_storage.admitted
+            < u64::try_from(index).expect("a small index fits") + 1
+        {
+            tokio::task::yield_now().await;
+        }
     }
-    for handle in handles {
-        handle.expect("every ordered storage job runs");
+
+    release.send(()).expect("the first job is still parked");
+    for submission in submissions {
+        submission
+            .await
+            .expect("every submission is joined")
+            .expect("every ordered storage job runs");
     }
+
     assert_eq!(*order.lock(), (0..8).collect::<Vec<_>>());
 }
 
@@ -417,7 +438,16 @@ async fn a_budgeted_buffer_returns_its_bytes_with_the_charge_that_backs_them() {
     buffer.write_all(b"nervix").expect("a small write fits");
     let (bytes, reservation) = buffer.into_parts();
     assert_eq!(bytes, b"nervix");
-    assert!(executor.snapshot().commands_memory.reserved_bytes >= 4096);
+    assert_eq!(
+        executor.snapshot().commands_memory.reserved_bytes,
+        6,
+        "taking the buffer apart narrows the charge to what it holds"
+    );
+    assert_eq!(
+        bytes.capacity(),
+        bytes.len(),
+        "and narrows the allocation with it, so the charge still measures the memory"
+    );
     drop(reservation);
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, 0);
 }

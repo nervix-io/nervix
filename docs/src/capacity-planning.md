@@ -39,18 +39,24 @@ never returns permanently occupies one worker. See the
 
 ## Bounded Execution And Transient Memory
 
-Every variable-size encode, decode, validation and hash a node performs runs on a bounded pool of
-workers rather than on the asynchronous runtime, and is charged against a reserved byte budget
-before it allocates. The classes are independent, so work saturating one leaves the others' capacity
-intact.
+Every variable-size encode, decode, validation and hash a node performs is admitted into one of
+five bounded classes rather than run on the asynchronous runtime, and is charged against a reserved
+byte budget before it allocates. Each class has its own admission, so work saturating one cannot
+take the slots another is entitled to.
 
-| Class | Workers | Work |
+| Class | Concurrent jobs | Work |
 | --- | --- | --- |
-| Control | 1, reserved | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
+| Control | 1 | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
 | Data | available CPUs − 1 | Per-message relay body encoding, decoding and validation |
 | Bulk | available CPUs − 1 | Whole-transfer work: resource archives and large read results |
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
 | Filesystem storage | 2 | Every other synchronous filesystem and database operation |
+
+These counts bound admission, not threads. Jobs run on the process-wide blocking pool that the
+node's other blocking work also uses, so a class's count is the number of its jobs that may be on
+that pool at once. A class is guaranteed its share of admission; it is not guaranteed an idle
+thread. Size the blocking pool for the sum of these counts plus whatever else the node offloads —
+connector flushes, model inference and UDF execution among them.
 
 Transient memory is 256 MiB per node, divided into ceilings that cannot borrow from each other:
 8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work and 32 MiB for

@@ -203,7 +203,12 @@ impl Reservation {
     /// measure of the allocation rather than of the room the writer reserved to work in: a
     /// five-byte heartbeat that started with a four-kibibyte reservation must not hold four
     /// kibibytes of its class for as long as it is queued.
-    pub fn shrink_to(&mut self, bytes: u64) {
+    ///
+    /// Deliberately not public. Narrowing a charge is only correct alongside narrowing the
+    /// allocation it stands for, and `BudgetedBuffer::into_parts` is the one place that does both;
+    /// exposing this on its own would offer callers a way to make the budget stop measuring the
+    /// memory it bounds.
+    pub(crate) fn shrink_to(&mut self, bytes: u64) {
         let Ok(target) = u32::try_from(bytes) else {
             return;
         };
@@ -266,9 +271,15 @@ impl BudgetedBuffer {
         self.bytes.is_empty()
     }
 
-    /// The written bytes and the charge they carry, so the caller can keep both together for as
-    /// long as it holds the buffer's contents.
-    pub fn into_parts(self) -> (Vec<u8>, Reservation) {
+    /// The written bytes and the charge that backs them, narrowed to each other.
+    ///
+    /// A writer reserves room to grow into and usually stops short of it. Both halves of that room
+    /// are given back here: the vector drops to what it holds and the charge follows it. Releasing
+    /// one without the other would break the property the budget exists for — a class that has
+    /// released its charge but not its allocation stops measuring the memory it is bounding.
+    pub fn into_parts(mut self) -> (Vec<u8>, Reservation) {
+        self.bytes.shrink_to_fit();
+        self.reservation.shrink_to(self.bytes.len().arch_into());
         (self.bytes, self.reservation)
     }
 
@@ -377,12 +388,11 @@ impl ChargedBytes {
         }
     }
 
-    /// Freeze what an incremental writer produced, narrowing its charge to the bytes it actually
-    /// wrote. The room the writer reserved to grow into goes back to its class here, so a queued
-    /// frame holds its own size and nothing more.
+    /// Freeze what an incremental writer produced. The writer's unused room, and the charge that
+    /// stood for it, are both released as the buffer is taken apart, so a queued frame holds its
+    /// own size and nothing more.
     pub fn from_buffer(buffer: BudgetedBuffer) -> Self {
-        let (bytes, mut reservation) = buffer.into_parts();
-        reservation.shrink_to(bytes.len().arch_into());
+        let (bytes, reservation) = buffer.into_parts();
         Self::from_owned(bytes, reservation)
     }
 

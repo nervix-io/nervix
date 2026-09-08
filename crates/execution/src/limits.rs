@@ -6,11 +6,13 @@ use error_stack::Report;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
-/// A bounded pool of workers that runs CPU work off the async workers.
+/// A bounded share of admission onto the blocking pool for CPU work, keeping it off the async
+/// workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CpuClass {
-    /// Control-plane and consensus work, whose capacity is reserved so that saturated data or
-    /// bulk work cannot delay a heartbeat, a vote, an acknowledgement or an administrative reply.
+    /// Control-plane and consensus work. Its share of admission is its own, so saturated data or
+    /// bulk work cannot take the slot a heartbeat, a vote, an acknowledgement or an administrative
+    /// reply needs. The slot is not a reserved thread; see the crate documentation.
     Control,
     /// Per-message data-plane work: relay body encoding and decoding, validation and hashing.
     Data,
@@ -18,11 +20,13 @@ pub enum CpuClass {
     Bulk,
 }
 
-/// A bounded pool of workers that runs synchronous filesystem and database work.
+/// A bounded share of admission onto the blocking pool for synchronous filesystem and database
+/// work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageClass {
-    /// The single ordered worker consensus storage executes on, so appends, deletions and applied
-    /// positions reach the durable barrier in the order they were admitted.
+    /// Consensus storage, admitted one job at a time. Admission is granted in the order it was
+    /// requested and the next job cannot start until the previous one exits, so appends, deletions
+    /// and applied positions reach the durable barrier in the order they were admitted.
     Consensus,
     /// Every other synchronous filesystem and database operation.
     Filesystem,
@@ -79,7 +83,7 @@ impl From<StorageClass> for WorkerClassName {
     }
 }
 
-/// How many workers each class runs, and how many jobs may wait for one.
+/// How many jobs each class may have running at once, and how many may wait for a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerCounts {
     pub control_cpu: NonZeroUsize,

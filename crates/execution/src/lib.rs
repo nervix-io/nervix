@@ -8,7 +8,8 @@
 //!   the incremental writer that fails at its budget boundary instead of growing past it. It is
 //!   the only entry point for variable-size encoding, decoding, validation, hashing, snapshot
 //!   construction, and synchronous filesystem or database work.
-//! - **Depends on.** Tokio's runtime, and the byte vocabulary its budgets are configured in.
+//! - **Depends on.** Tokio's runtime and its blocking pool, and the byte vocabulary its budgets
+//!   are configured in.
 //! - **Must not know.** What a job computes. It admits, charges, runs and cancels; it decides
 //!   nothing about relays, branches, domains, peers, graphs or the cluster.
 //!
@@ -16,6 +17,15 @@
 //! job slot, then submit. A submission that is dropped before it reaches a worker releases its
 //! reservation with it; a submission already running keeps its reservation until the work actually
 //! exits, because the memory is still allocated until then.
+//!
+//! A class bounds admission, not threads. Jobs run on the process-wide Tokio blocking pool, and a
+//! class's worker count is the number of its jobs that may be on that pool at once — taken before
+//! the job is submitted, so a class can never hand the pool more than it is allowed. What a class
+//! guarantees is therefore that no other class can consume its share of admission. It does not
+//! guarantee a free thread: the pool is shared with every other `spawn_blocking` caller in the
+//! process, and a class holding a free permit still queues behind whatever is already running
+//! there. Reserving threads per class would isolate them physically, at the cost of a pool per
+//! class; the node deliberately does not do that.
 
 mod cancellation;
 mod limits;
