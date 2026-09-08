@@ -424,9 +424,9 @@ fn materialized_default_assignments<'src>()
                 .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
         )
         .try_map(|tokens, span| {
-            let source = format!("SET {}", render_vm_program_tokens(&tokens));
+            let source = format!("SET {}", render_expression_tokens(&tokens));
             let construction = crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))?;
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))?;
             if construction.inherit.is_some()
                 || construction.where_clause.is_some()
                 || !construction.invocations.is_empty()
@@ -1292,9 +1292,9 @@ fn route_construction_clause<'src>(
         .ignore_then(body)
         .try_map(move |tail, span| {
             let head: &'static str = head.into();
-            let source = format!("{head} {}", render_vm_program_tokens(&tail));
+            let source = format!("{head} {}", render_expression_tokens(&tail));
             crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1392,9 +1392,9 @@ fn explicit_route_construction<'src>()
     kw(Identifier::Set)
         .ignore_then(route_construction_body("set_assignments"))
         .try_map(|tokens, span| {
-            let source = format!("SET {}", render_vm_program_tokens(&tokens));
+            let source = format!("SET {}", render_expression_tokens(&tokens));
             crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .try_map(|construction, span| {
             if construction.assignments.is_empty() {
@@ -1427,9 +1427,9 @@ fn source_where_clause_with_boundary<'src>(
                 .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1451,9 +1451,9 @@ where
                 .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1472,8 +1472,8 @@ where
         .at_least(1)
         .collect::<Vec<_>>()
         .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_vm_program_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+            crate::parse_expression_list(&render_expression_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .labelled(label)
         .boxed()
@@ -1542,9 +1542,9 @@ pub fn filter_where_clause<'src>()
                 .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1997,18 +1997,18 @@ fn format_found_token(token: &Token) -> String {
     }
 }
 
-pub fn render_vm_program_tokens(tokens: &[Token]) -> String {
+pub fn render_expression_tokens(tokens: &[Token]) -> String {
     let mut rendered = String::new();
     for (index, token) in tokens.iter().enumerate() {
         if index > 0 && !matches!(tokens[index - 1], Token::Dot) && !matches!(token, Token::Dot) {
             rendered.push(' ');
         }
-        rendered.push_str(&vm_program_token_to_source(token));
+        rendered.push_str(&expression_token_to_source(token));
     }
     rendered
 }
 
-fn vm_program_token_to_source(token: &Token) -> String {
+fn expression_token_to_source(token: &Token) -> String {
     match token {
         Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
         Token::Word(Word::UnknownWord(raw)) => raw.clone(),
@@ -2049,15 +2049,13 @@ fn vm_program_token_to_source(token: &Token) -> String {
     }
 }
 
-pub fn vm_program_error_message(error: crate::vm_program::ParseFromSourceError) -> String {
+pub fn expression_error_message(error: ParseFromSourceError) -> String {
     match error {
-        crate::vm_program::ParseFromSourceError::Lex { diagnostics, .. }
-        | crate::vm_program::ParseFromSourceError::Parse { diagnostics, .. } => {
-            match diagnostics.first() {
-                Some(diagnostic) => diagnostic.message.clone(),
-                None => "invalid FILTER-MAP program".to_string(),
-            }
-        }
+        ParseFromSourceError::Lex { diagnostics, .. }
+        | ParseFromSourceError::Parse { diagnostics, .. } => match diagnostics.first() {
+            Some(diagnostic) => diagnostic.message.clone(),
+            None => "invalid expression".to_string(),
+        },
     }
 }
 

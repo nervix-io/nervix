@@ -1,5 +1,3 @@
-pub mod aggregate;
-
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{AckMode, CreateStatement, CreateWindowProcessor, WindowBound};

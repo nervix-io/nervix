@@ -13,20 +13,16 @@ use nervix_models::{
     InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, ModelKind, ModelName,
     RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp, WindowBound,
 };
-use nervix_nspl::{
-    vm_program::{
-        FieldRef, Program as VmProgram, SemanticNamespaces, Span, SpannedNode,
-        lower_route_construction,
-    },
-    window_processor::aggregate::{WindowAggregateExpr, WindowAggregateProgram},
-};
 use nervix_roto::UdfExecutor;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileOptions as VmCompileOptions,
     CompiledProgram as VmCompiledProgram, InstructionKind as VmInstructionKind,
-    OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity,
+    OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity, SemanticNamespaces,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program,
     infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
+    lower_route_construction,
+    program::{FieldRef, Program as VmProgram, Span, SpannedNode},
+    window::{WindowAggregateExpr, WindowAggregateProgram},
 };
 use nervix_wasm::{CompiledWasmProcessor, WasmBranchInstance};
 use ordered_float::OrderedFloat;
@@ -862,7 +858,7 @@ impl CompiledWindowAggregateExpr {
             Self::Scalar(program) => {
                 for instruction in &program.instructions {
                     if let VmInstructionKind::Inject {
-                        function: nervix_nspl::vm_program::FunctionName::WindowAggregate(invocation),
+                        function: nervix_vm::program::FunctionName::WindowAggregate(invocation),
                         output_type,
                         ..
                     } = &instruction.kind

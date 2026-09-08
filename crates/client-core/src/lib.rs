@@ -52,6 +52,26 @@ pub struct Diagnostic {
     pub span_end: u32,
 }
 
+#[derive(Debug, Error)]
+#[error("failed to parse the statement batch: {message}")]
+pub struct QuerySplitError {
+    message: String,
+}
+
+/// Splits a batch into the exact NSPL source slices that should be submitted separately.
+pub fn split_query_statements(query: &str) -> Result<Vec<&str>, QuerySplitError> {
+    nervix_nspl::client_statement::parse_client_statement_sources(query)
+        .map(|statements| {
+            statements
+                .iter()
+                .map(|statement| statement.source(query))
+                .collect()
+        })
+        .map_err(|error| QuerySplitError {
+            message: error.to_string(),
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub success: bool,
@@ -1408,6 +1428,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use meticulous::ResultExt as _;
     use tokio::sync::{Mutex, mpsc, oneshot};
     use triomphe::Arc;
 
@@ -1416,8 +1437,19 @@ mod tests {
         Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
         SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
         TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
-        recovered_transaction_outcome, transaction_operation_was_observed,
+        recovered_transaction_outcome, split_query_statements, transaction_operation_was_observed,
     };
+
+    #[test]
+    fn statement_splitting_returns_exact_source_slices() {
+        let query = "USE prod; LIST DOMAINS;";
+
+        assert_eq!(
+            split_query_statements(query)
+                .assured("the literal statement batch is valid current NSPL"),
+            ["USE prod;", "LIST DOMAINS;"]
+        );
+    }
 
     fn test_client(domain: &str) -> Client {
         let (request_tx, request_rx) = mpsc::channel(1);

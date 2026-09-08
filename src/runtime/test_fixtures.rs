@@ -19,7 +19,7 @@ use nervix_models::{
     ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ScheduledNode, SchemaField,
     SchemaName, Timestamp,
 };
-use nervix_nspl::window_processor::aggregate::lower_window_assignments;
+use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
@@ -154,16 +154,14 @@ pub(super) fn with_inherit_all(mut outputs: ProcessorOutputs) -> ProcessorOutput
     outputs
 }
 
-pub(super) fn window_aggregate(
-    set: &str,
-) -> nervix_nspl::window_processor::aggregate::WindowAggregateProgram {
+pub(super) fn window_aggregate(set: &str) -> nervix_vm::window::WindowAggregateProgram {
     lower_window_assignments(&construction(set))
         .expect("window route construction should lower")
         .inner
 }
 
 pub(super) fn compile_window_aggregate_for_test(
-    aggregate: &nervix_nspl::window_processor::aggregate::WindowAggregateProgram,
+    aggregate: &nervix_vm::window::WindowAggregateProgram,
     input_type: ParseAsType,
     output_schema: &super::CompiledSchema,
 ) -> super::CompiledWindowAggregateProgram {
@@ -193,7 +191,7 @@ pub(super) fn compile_window_aggregate_for_test(
 }
 
 pub(super) fn window_inputs(
-    aggregate: &nervix_nspl::window_processor::aggregate::WindowAggregateProgram,
+    aggregate: &nervix_vm::window::WindowAggregateProgram,
     value: RuntimeValue,
 ) -> Vec<super::WindowAggregateInput> {
     aggregate

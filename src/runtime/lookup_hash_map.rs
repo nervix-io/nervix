@@ -69,7 +69,7 @@ pub(super) fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String
 }
 
 pub(super) fn collect_program_field_refs(
-    program: &nervix_nspl::vm_program::Program,
+    program: &nervix_vm::program::Program,
 ) -> Vec<(String, String)> {
     let mut refs = Vec::new();
     if let Some(filter) = &program.filter {
@@ -89,7 +89,7 @@ pub(super) fn collect_program_field_refs(
 pub(super) fn lookup_hash_map_literal_arg(
     args: &[SpannedExpr],
     index: usize,
-    function_span: nervix_nspl::vm_program::Span,
+    function_span: nervix_vm::program::Span,
 ) -> Result<&str, String> {
     let Some(arg) = args.get(index) else {
         return Err(format!(
@@ -147,7 +147,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
 ) -> Result<SpannedExpr, String> {
     let rewritten = match &expr.inner {
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => expr.clone(),
-        Expr::Unary { op, expr: inner } => nervix_nspl::vm_program::SpannedNode {
+        Expr::Unary { op, expr: inner } => nervix_vm::program::SpannedNode {
             inner: Expr::Unary {
                 op: *op,
                 expr: Box::new(rewrite_lookup_hash_map_expr(
@@ -158,7 +158,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
             },
             span: expr.span,
         },
-        Expr::Binary { op, left, right } => nervix_nspl::vm_program::SpannedNode {
+        Expr::Binary { op, left, right } => nervix_vm::program::SpannedNode {
             inner: Expr::Binary {
                 op: *op,
                 left: Box::new(rewrite_lookup_hash_map_expr(
@@ -177,7 +177,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
         Expr::Cast {
             expr: inner,
             data_type,
-        } => nervix_nspl::vm_program::SpannedNode {
+        } => nervix_vm::program::SpannedNode {
             inner: Expr::Cast {
                 expr: Box::new(rewrite_lookup_hash_map_expr(
                     inner,
@@ -192,7 +192,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
             operand,
             branches,
             else_result,
-        } => nervix_nspl::vm_program::SpannedNode {
+        } => nervix_vm::program::SpannedNode {
             inner: Expr::Case {
                 operand: operand
                     .as_ref()
@@ -286,7 +286,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
                     });
                     generated_field
                 };
-                nervix_nspl::vm_program::SpannedNode {
+                nervix_vm::program::SpannedNode {
                     inner: Expr::InternalFieldRef(InternalFieldRef {
                         namespace: InternalFieldNamespace::LookupHashMap,
                         field: generated_field,
@@ -294,7 +294,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
                     span: expr.span,
                 }
             } else {
-                nervix_nspl::vm_program::SpannedNode {
+                nervix_vm::program::SpannedNode {
                     inner: Expr::Call {
                         function: function.clone(),
                         args: args
@@ -313,17 +313,17 @@ pub(super) fn rewrite_lookup_hash_map_expr(
 }
 
 pub(super) fn rewrite_lookup_hash_map_program(
-    parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+    parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     available_lookups: &HashMap<LookupName, Arc<LookupRuntime>>,
 ) -> Result<
     (
-        nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+        nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
         Vec<PendingLookupHashMapCall>,
     ),
     String,
 > {
     let mut pending_calls = Vec::new();
-    let program = nervix_nspl::vm_program::Program {
+    let program = nervix_vm::program::Program {
         filter: parsed
             .inner
             .filter
@@ -344,8 +344,8 @@ pub(super) fn rewrite_lookup_hash_map_program(
             .invoke
             .iter()
             .map(|invocation| {
-                Ok(nervix_nspl::vm_program::SpannedNode {
-                    inner: nervix_nspl::vm_program::Invocation {
+                Ok(nervix_vm::program::SpannedNode {
+                    inner: nervix_vm::program::Invocation {
                         function: invocation.inner.function.clone(),
                         args: invocation
                             .inner
@@ -366,7 +366,7 @@ pub(super) fn rewrite_lookup_hash_map_program(
             .collect::<Result<Vec<_>, String>>()?,
     };
     Ok((
-        nervix_nspl::vm_program::SpannedNode {
+        nervix_vm::program::SpannedNode {
             inner: program,
             span: parsed.span,
         },
@@ -396,11 +396,11 @@ pub(super) fn compile_lookup_hash_map_calls(
     );
     let mut compiled_calls = Vec::with_capacity(pending_calls.len());
     for call in pending_calls {
-        let key_program = nervix_nspl::vm_program::SpannedNode {
-            inner: nervix_nspl::vm_program::Program {
+        let key_program = nervix_vm::program::SpannedNode {
+            inner: nervix_vm::program::Program {
                 filter: None,
                 set: vec![(
-                    nervix_nspl::vm_program::FieldRef {
+                    nervix_vm::program::FieldRef {
                         relay: writable_namespace.to_string(),
                         field: call.generated_field.clone(),
                     },

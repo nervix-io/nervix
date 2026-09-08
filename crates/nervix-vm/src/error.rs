@@ -1,9 +1,8 @@
 use arrow_schema::DataType;
-use nervix_nspl::vm_program::Span;
 use strum::IntoStaticStr;
 use thiserror::Error;
 
-use crate::ir::RegisterRef;
+use crate::{ir::RegisterRef, program::Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]

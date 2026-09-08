@@ -11,7 +11,10 @@ use nervix_models::{
     UdfName, UnaryOperator,
 };
 
-use crate::vm_program::{Diagnostic, ParseFromSourceError, SpannedToken, Token, lex};
+use crate::{
+    expression_lexer::{SpannedToken, Token, lex},
+    parser_support::{Diagnostic, ParseFromSourceError},
+};
 
 type Span = chumsky::span::SimpleSpan<usize>;
 type ParseError<'src> = Rich<'src, Token, Span>;
