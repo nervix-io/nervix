@@ -338,7 +338,10 @@ impl RelayConsumerFanout {
         if self.subscriptions.receiver_count() == 0 {
             return;
         }
-        let _ = self.subscriptions.broadcast(batch.detached()).await;
+        self.subscriptions
+            .broadcast(batch.detached())
+            .await
+            .means_peer_left("relay subscription");
     }
 
     pub(super) async fn dispatch_runtime_consumers(
@@ -1456,7 +1459,7 @@ impl Runtime {
                             break;
                         };
                         let _completion = services.begin_owner_batch_completion();
-                        let _ = runtime
+                        runtime
                             .fanout_relay_owner_batch(
                                 &domain,
                                 &relay,
@@ -1464,7 +1467,11 @@ impl Runtime {
                                 &mut branches,
                                 &batch,
                             )
-                            .await;
+                            .await
+                            .discarded(
+                                "the batch is acknowledged inside the fanout, and the owner task \
+                                 has no second consumer for a rejected copy",
+                            );
                     }
                     _ = async {
                         if branch_ttl.is_some() {
@@ -1505,9 +1512,13 @@ impl Runtime {
                     }
                 };
                 let _completion = services.begin_owner_batch_completion();
-                let _ = runtime
+                runtime
                     .fanout_relay_owner_batch(&domain, &relay, &services, &mut branches, &batch)
-                    .await;
+                    .await
+                    .discarded(
+                        "the batch is acknowledged inside the fanout, and the owner task has no \
+                         second consumer for a rejected copy",
+                    );
             }
             services.observe_owner_buffer_length(
                 &runtime.inner.metrics,

@@ -6,7 +6,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_op_separator,
-        alter_reingestor_operation, completion_context, filter_where_clause,
+        alter_reingestor_operation, completion_context, completion_tokens, filter_where_clause,
         flushed_ingestor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
         lex_input, materialized_state_dependencies, reingestor_name, reingestor_ref, suggest_from,
         suggestions_from_errors, tok,
@@ -120,9 +120,8 @@ pub fn suggest_create_reingestor(input: &str, cursor: usize) -> Vec<String> {
 
 pub fn suggest_alter_reingestor(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let LexedInput { tokens, .. } = match lex_input(&source) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
     let out = alter_reingestor_parser()
         .then_ignore(end())

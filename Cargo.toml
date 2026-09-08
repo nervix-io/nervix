@@ -95,6 +95,7 @@ nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 nervix-proto = { workspace = true, features = ["client", "server"] }
+nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
@@ -233,6 +234,7 @@ members = [
   "crates/nspl-format",
   "crates/models",
   "crates/proto",
+  "crates/recovery",
   "crates/test-environment",
   "crates/nervix-cli",
 ]
@@ -363,6 +365,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
+nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }

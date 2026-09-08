@@ -11,6 +11,9 @@ use super::super::*;
 pub(in crate::runtime) struct MqttIngestor;
 
 const MQTT_INSTANCE_PLACEHOLDER: &str = "{{instance}}";
+/// Why a caller that keeps running discards what [`MqttIngestor::flush_collector`] returns.
+const FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE: &str =
+    "flush_collector reported this failure to the runtime event bus";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::runtime) struct MqttIngestorAddr {
@@ -376,23 +379,27 @@ impl MqttIngestor {
                         {
                             MqttNextPublish::Publish(publish) => *publish,
                             MqttNextPublish::Flush => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 continue;
                             }
                             MqttNextPublish::Shutdown => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 break 'outer;
                             }
                             MqttNextPublish::Reconnect => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 break;
                             }
                             MqttNextPublish::Suspend => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 break;
                             }
                         };
@@ -763,7 +770,9 @@ impl MqttIngestor {
                 error
             ));
         } else if collector.len() >= INGEST_GROUP_MAX_ROWS {
-            let _ = Self::flush_collector(context, collector).await;
+            Self::flush_collector(context, collector)
+                .await
+                .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
         }
     }
 
@@ -1081,6 +1090,11 @@ impl MqttIngestor {
             .await
     }
 
+    /// Flushes the collector and reports a failure to the runtime event bus.
+    ///
+    /// The runtime has already routed every per-message failure through the ingestor's error
+    /// policy, so what this adds is the summary. A caller that keeps running discards the returned
+    /// result and names [`FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE`] as its reason.
     async fn flush_collector(
         context: &MqttTaskContext,
         collector: &mut IngestRouteCollector,

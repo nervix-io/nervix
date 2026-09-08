@@ -872,8 +872,9 @@ impl IngestorRouteTask {
                 next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
             tokio::select! {
                 biased;
-                changed = shutdown_rx.changed() => {
-                    let _ = changed;
+                // A signalled stop and a dropped sender both mean the owner is gone, and this
+                // arm drains and finishes either way, so the outcome carries nothing to read.
+                _ = shutdown_rx.changed() => {
                     input.close();
                     while let Some(message) = input.recv().await {
                         tokio::task::consume_budget().await;
@@ -942,7 +943,7 @@ impl IngestorRouteRuntime {
     }
 
     pub(super) async fn shutdown(&self) {
-        let _ = self.shutdown.send(true);
+        self.shutdown.send_replace(true);
         let task = self.task.lock().take();
         if let Some(task) = task {
             task.join_after_shutdown("branch entrypoint").await;
@@ -1287,7 +1288,7 @@ impl BranchExecutionRuntime {
     pub(super) async fn shutdown(&self) {
         const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
-        let _ = self.shutdown.send(true);
+        self.shutdown.send_replace(true);
         let Some(mut task) = self.task.lock().take() else {
             return;
         };
@@ -1516,6 +1517,10 @@ pub(super) fn wall_duration_until_domain_deadline(
     };
     match wall_duration_until_logical_target(clock, now, deadline) {
         Ok(duration) => duration,
+        // The conversion fails only for a paced domain whose configured time rate does not parse,
+        // which the registry rejects when the domain is configured. Nothing this task does can
+        // repair one that got through, so it waits a fixed step and looks again rather than
+        // spinning; the domain clock reports its own state.
         Err(_) => Duration::from_millis(100),
     }
 }

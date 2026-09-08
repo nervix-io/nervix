@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_benchmark::LoadShape;
+use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use rdkafka::{
     ClientContext, Message, Offset, TopicPartitionList,
@@ -467,7 +468,10 @@ impl Drop for SummaryDrain {
     fn drop(&mut self) {
         self.state.stop.store(true, AtomicOrdering::Relaxed);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            worker.join().discarded(
+                "the worker was asked to stop above, and a summary it fails to finish is not part \
+                 of the measurement",
+            );
         }
     }
 }

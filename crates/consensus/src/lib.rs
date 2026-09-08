@@ -25,6 +25,7 @@ use nervix_models::{
     DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
     ResourceVersionCounter, ResourceVersionStatus, Statement, UserName,
 };
+use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
     TransferLeaderResponse, VoteRequest, VoteResponse,
@@ -309,6 +310,8 @@ const KEY_STATE_MACHINE: &[u8] = b"state_machine";
 const KEY_SNAPSHOT: &[u8] = b"snapshot";
 const KEY_CLUSTER_SCHEDULE: &[u8] = b"cluster_schedule";
 const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
+/// How many consensus transitions a session can fall behind before the bus drops the oldest.
+const CONSENSUS_EVENT_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct ConsensusSettings {
@@ -603,8 +606,39 @@ struct ConsensusState {
     cluster_api_http_client: HttpClient,
     node_unavailability_timeout: Duration,
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
-    events: broadcast::Sender<String>,
+    events: ConsensusEvents,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// The consensus event bus, and the one way a Raft transition reaches an attached session.
+///
+/// A transition is already the node's own record of itself, which is why publishing goes through
+/// [`Self::report`] rather than through the sender directly: the log and the bus carry the same
+/// text, and the log carries it whether or not anyone is attached. Subscribers here are live
+/// sessions only, so a node serving none is the ordinary case rather than a failure, and the
+/// send's outcome adds nothing the `info` line has not already recorded.
+#[derive(Clone)]
+struct ConsensusEvents {
+    sender: broadcast::Sender<String>,
+}
+
+impl ConsensusEvents {
+    fn new() -> Self {
+        let (sender, _) = broadcast::channel(CONSENSUS_EVENT_CAPACITY);
+        Self { sender }
+    }
+
+    /// Record a transition of this node's consensus state and offer it to attached sessions.
+    fn report(&self, message: String) {
+        info!("{message}");
+        self.sender
+            .send(message)
+            .discarded("the info line above is this transition's record, attached session or not");
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.sender.subscribe()
+    }
 }
 
 impl std::ops::Deref for Proposer {
@@ -684,9 +718,9 @@ impl Consensus {
         )
         .await
         .map_err(|_| ConsensusError::Startup)?;
-        let (events, _) = broadcast::channel(256);
+        let events = ConsensusEvents::new();
         let metrics_raft = raft.clone();
-        let event_tx = events.clone();
+        let metrics_events = events.clone();
         let metrics_task = tokio::spawn(async move {
             let mut rx = metrics_raft.metrics();
             let mut last_transition = None;
@@ -717,8 +751,7 @@ impl Consensus {
                             .map(|v| v.index.to_string())
                             .unwrap_or_else(|| "(none)".to_string())
                     );
-                    info!("{summary}");
-                    let _ = event_tx.send(summary.clone());
+                    metrics_events.report(summary);
                     last_transition = Some(transition);
                 }
             }
@@ -740,7 +773,10 @@ impl Consensus {
     }
 
     pub async fn shutdown(&self) {
-        let _ = self.inner.raft.shutdown().await;
+        self.inner.raft.shutdown().await.discarded(
+            "openraft joins its core task inside this call and always answers Ok; the core's own \
+             outcome is not exposed here",
+        );
         let handle = self.inner.metrics_task.lock().take();
         if let Some(handle) = handle {
             handle.abort();
@@ -1372,12 +1408,10 @@ impl Administrator {
             .await
             .map(|_| ())
             .map_err(|_| ConsensusError::Startup)?;
-        let message = format!(
+        self.inner.events.report(format!(
             "raft initialized with single-node membership {}",
             self.inner.local_node_id
-        );
-        info!("{message}");
-        let _ = self.inner.events.send(message);
+        ));
         Ok(true)
     }
 
@@ -1422,8 +1456,7 @@ impl Administrator {
                         node.node_id, node.cluster_api_advertise_addr
                     )
                 };
-                info!("{add_message}");
-                let _ = self.inner.events.send(add_message);
+                self.inner.events.report(add_message);
                 self.inner
                     .raft
                     .add_learner(
@@ -1488,8 +1521,7 @@ impl Administrator {
                             unavailable_since.elapsed(),
                             self.inner.node_unavailability_timeout
                         );
-                        info!("{message}");
-                        let _ = self.inner.events.send(message);
+                        self.inner.events.report(message);
                         entry.last_reported_unavailable_at = Some(Instant::now());
                     }
                 } else {
@@ -1522,9 +1554,9 @@ impl Administrator {
             .voter_ids()
             .collect::<BTreeSet<_>>();
         if current_voters != after {
-            let message = format!("raft membership updated: {:?}", after);
-            info!("{message}");
-            let _ = self.inner.events.send(message);
+            self.inner
+                .events
+                .report(format!("raft membership updated: {after:?}"));
         }
         Ok(())
     }
@@ -1593,9 +1625,9 @@ impl Administrator {
             }
         })?;
 
-        let message = format!("raft node removed: {node_id}");
-        info!("{message}");
-        let _ = self.inner.events.send(message);
+        self.inner
+            .events
+            .report(format!("raft node removed: {node_id}"));
         Ok(())
     }
 
@@ -2189,18 +2221,25 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
             if let EntryPayload::Normal(command) = &entry.payload {
                 let applied = apply_consensus_command(&mut state, command);
                 state.record_runtime_revision(entry.log_id.index, &applied);
+                // These four watches publish committed state, and a node subscribes to them
+                // whenever a service that reads them starts, not only at boot. `send_replace`
+                // stores the value even while nothing is listening, so a subscriber that arrives
+                // afterwards observes what was committed rather than the last value that happened
+                // to have an audience.
                 if applied.schedule_changed {
                     write_key(&self.inner.schedule, KEY_CLUSTER_SCHEDULE, &state.schedule)?;
-                    let _ = self.inner.schedule_tx.send(state.schedule.clone());
+                    self.inner.schedule_tx.send_replace(state.schedule.clone());
                 }
                 if applied.domains_changed {
-                    let _ = self.inner.domain_tx.send(state.domains.clone());
+                    self.inner.domain_tx.send_replace(state.domains.clone());
                 }
                 if applied.resources_changed {
-                    let _ = self.inner.resource_tx.send(state.resources.clone());
+                    self.inner.resource_tx.send_replace(state.resources.clone());
                 }
                 if applied.transactions_changed {
-                    let _ = self.inner.transaction_tx.send(state.transactions.clone());
+                    self.inner
+                        .transaction_tx
+                        .send_replace(state.transactions.clone());
                 }
                 write_key(&self.inner.sm, KEY_STATE_MACHINE, &*state)?;
                 drop(state);
@@ -2235,10 +2274,14 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
         }
         write_key(&self.inner.sm, KEY_STATE_MACHINE, &stored)?;
         write_key(&self.inner.schedule, KEY_CLUSTER_SCHEDULE, &stored.schedule)?;
-        let _ = self.inner.schedule_tx.send(stored.schedule.clone());
-        let _ = self.inner.domain_tx.send(stored.domains.clone());
-        let _ = self.inner.resource_tx.send(stored.resources.clone());
-        let _ = self.inner.transaction_tx.send(stored.transactions.clone());
+        self.inner.schedule_tx.send_replace(stored.schedule.clone());
+        self.inner.domain_tx.send_replace(stored.domains.clone());
+        self.inner
+            .resource_tx
+            .send_replace(stored.resources.clone());
+        self.inner
+            .transaction_tx
+            .send_replace(stored.transactions.clone());
         let stored_snapshot = StoredSnapshotData {
             meta: meta.clone(),
             data: bytes,

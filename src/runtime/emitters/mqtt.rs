@@ -339,6 +339,13 @@ impl MqttEmitter {
         }
     }
 
+    /// Collects the records behind the oldest one whose confirmation already resolved.
+    ///
+    /// The caller reached here because the oldest record failed or timed out, and it is about to
+    /// return that failure for the whole publish. Records behind it that already succeeded or were
+    /// individually rejected are recorded so the retry does not send them again. Anything else is
+    /// deliberately left in neither list: its failure is the same infrastructure failure the
+    /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingMqttConfirmation>,
         outcome: &mut PerRecordPublishOutcome,

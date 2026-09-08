@@ -289,7 +289,7 @@ impl Runtime {
         let Some((_, tx)) = self.inner.pending_state_syncs.remove(&correlation_id) else {
             return;
         };
-        let _ = tx.send(result);
+        tx.send(result).means_peer_left("state sync requester");
     }
 
     pub(crate) fn handle_state_replication_ack(

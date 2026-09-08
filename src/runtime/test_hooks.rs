@@ -12,6 +12,7 @@ use dashmap::DashMap;
 #[cfg(feature = "testing")]
 use nervix_models::DomainName;
 use nervix_models::{ClusterNodeName, EmitterName, IngestorName};
+use nervix_recovery::NoReceiver as _;
 use tokio::sync::{Notify, broadcast};
 use triomphe::Arc;
 
@@ -151,10 +152,12 @@ impl RuntimeTestHooks {
         from_node_id: ClusterNodeName,
         to_node_id: ClusterNodeName,
     ) {
-        let _ = self.leadership_transfers.send(LeadershipTransferRequest {
-            from_node_id,
-            to_node_id,
-        });
+        self.leadership_transfers
+            .send(LeadershipTransferRequest {
+                from_node_id,
+                to_node_id,
+            })
+            .means_shutdown("leadership transfer watcher");
     }
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {

@@ -52,6 +52,7 @@ use nervix_models::{
     ResolvedCodecWireFormat, RouteConstruction, ScheduledNode, ScheduledNodes, SchemaField,
     SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaLookup, WireSchemaName,
 };
+use nervix_recovery::Discarded as _;
 use nervix_roto::signatures_for as udf_signatures_for;
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticNamespaces,
@@ -77,6 +78,12 @@ use tracing::{info, warn};
 use triomphe::Arc;
 
 use crate::jaq_program::StatefulJaqProgram;
+
+/// Why applying one alteration of a batch discards its outcome.
+/// See [`RegistryMutation::apply_alteration`].
+const ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS: &str =
+    "an alteration the batch later repairs is applied against the final models, where a rejection \
+     can name the statement that caused it";
 
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
@@ -1033,7 +1040,10 @@ impl Registry {
                             &HashSet::from_iter([key.clone()]),
                         )?;
                     }
-                    let _ = candidate.remove(&key);
+                    candidate.remove(&key).discarded(
+                        "a candidate that never held the dropped entity is already in the state \
+                         this removal wants",
+                    );
                 }
             }
             let mutation_candidate = mutation
@@ -1054,6 +1064,10 @@ impl Registry {
 
         let domain_state = match self.build_domain_state(domain, &candidate) {
             Ok(state) => state,
+            // A caller that allows an incomplete candidate is queuing a step of a transaction that
+            // later steps complete, so a candidate that does not yet build has no plan to offer
+            // and no failure to report. The batch is validated once, on its final models, where a
+            // rejection can name the statement that caused it.
             Err(_) if allow_incomplete_candidate => {
                 return Ok(TransactionMutationPreflight {
                     planned: None,
@@ -1551,43 +1565,69 @@ impl RegistryMutation {
     fn apply_alteration(&self, model: &mut Model) {
         match (self, model) {
             (Self::AlterSchema(alter), Model::Schema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterWireJsonSchema(alter), Model::WireJsonSchema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterWireCborSchema(alter), Model::WireCborSchema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterWireAvroSchema(alter), Model::WireAvroSchema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterRelay(alter), Model::Relay(relay)) => {
-                let _ = relay.apply_alter(alter);
+                relay
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterJunction(alter), Model::Junction(junction)) => {
-                let _ = junction.apply_alter(alter);
+                junction
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterDeduplicator(alter), Model::Deduplicator(deduplicator)) => {
-                let _ = deduplicator.apply_alter(alter);
+                deduplicator
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterReorderer(alter), Model::Reorderer(reorderer)) => {
-                let _ = reorderer.apply_alter(alter);
+                reorderer
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterEmitter(alter), Model::Emitter(emitter)) => {
-                let _ = emitter.apply_alter(alter);
+                emitter
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterIngestor(alter), Model::Ingestor(ingestor)) => {
-                let _ = ingestor.apply_alter(alter);
+                ingestor
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterReingestor(alter), Model::Reingestor(reingestor)) => {
-                let _ = reingestor.apply_alter(alter);
+                reingestor
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterGenerator(alter), Model::Generator(generator)) => {
-                let _ = generator.apply_alter(alter);
+                generator
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterPlacement(alter), Model::Placement(placement)) => {
-                let _ = placement.apply_alter(alter);
+                placement
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             _ => {}
         }

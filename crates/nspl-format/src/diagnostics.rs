@@ -2,6 +2,7 @@
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use nervix_nspl::schema::{Diagnostic, ParseFromSourceError};
+use nervix_recovery::Discarded as _;
 
 /// Writes an annotated frame for `error` to standard error.
 ///
@@ -50,7 +51,8 @@ pub fn report(origin: &str, error: &ParseFromSourceError) {
         );
     }
 
-    let _ = builder
+    builder
         .finish()
-        .eprint((origin, Source::from(failure.source)));
+        .eprint((origin, Source::from(failure.source)))
+        .discarded("a diagnostic that cannot reach stderr leaves the exit status as the report");
 }

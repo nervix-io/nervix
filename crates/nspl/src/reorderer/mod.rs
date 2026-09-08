@@ -9,10 +9,10 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
-        duration_lit, expression_error_message, filter_where_clause, flushed_processor_outputs,
-        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, render_expression_tokens, reorderer_name, reorderer_ref,
-        suggest_from, suggestions_from_errors, tok,
+        completion_tokens, duration_lit, expression_error_message, filter_where_clause,
+        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, lex_input, materialized_state_dependencies, render_expression_tokens,
+        reorderer_name, reorderer_ref, suggest_from, suggestions_from_errors, tok,
     },
 };
 
@@ -188,9 +188,8 @@ pub fn suggest_create_reorderer(input: &str, cursor: usize) -> Vec<String> {
 
 pub fn suggest_alter_reorderer(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let LexedInput { tokens, .. } = match lex_input(&source) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
     let out = alter_reorderer_parser()
         .then_ignore(end())

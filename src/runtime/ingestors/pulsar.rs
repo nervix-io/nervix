@@ -974,7 +974,10 @@ impl PulsarIngestor {
         {
             for message in messages.drain(..) {
                 tokio::task::consume_budget().await;
-                let _ = consumer.nack(&message).await;
+                consumer
+                    .nack(&message)
+                    .await
+                    .reported("nacking a pulsar message whose flush failed");
             }
             return Err(error);
         }

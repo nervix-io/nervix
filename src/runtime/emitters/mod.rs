@@ -2607,7 +2607,6 @@ impl SinkEmitter {
             _ => {}
         }
 
-        let _ = codec;
         Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
             .attach_printable("emitter has no initialized sink client for its configured sink"))
     }
@@ -3345,7 +3344,9 @@ impl EmitterTask {
                     }) => {
                         emitter_buffer.reconfigure(&context, &config.flush_policy);
                         sink.reconfigure_flush_policy(&context, &config.flush_policy);
-                        let _ = response.send(());
+                        response
+                            .send(())
+                            .means_peer_left("emitter reconfiguration requester");
                     }
                     RelayInteractionEvent::Command(EmitterTaskCommand::Stop {
                         deadline,
@@ -3366,8 +3367,9 @@ impl EmitterTask {
                             );
                             context.report_flush_error(task_sink.label(), &reason);
                             clear_emitter_stop_signal(&task_stop_signal, deadline);
-                            let _ =
-                                response.send(Err(format!("emitter final flush failed: {reason}")));
+                            response
+                                .send(Err(format!("emitter final flush failed: {reason}")))
+                                .means_peer_left("emitter stop requester");
                             continue;
                         }
                         let mut control = EmitterPublishControl {

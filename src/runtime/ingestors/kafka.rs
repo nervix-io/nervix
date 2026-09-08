@@ -194,7 +194,11 @@ impl KafkaIngestor {
                             .borrow()
                             .checked_add(1)
                             .assured("an ingestor cannot observe 2^64 partition rebalances");
-                        let _ = rebalance_tx.send(rebalance_epoch);
+                        // `send_replace` stores the epoch whether or not a partition consumer
+                        // is subscribed. `send` would leave the previous epoch in place, and the
+                        // next rebalance reads that value back to derive its successor, so a
+                        // rebalance observed while nothing listened would stall the sequence.
+                        rebalance_tx.send_replace(rebalance_epoch);
                         info!(
                             domain = task_domain.as_str(),
                             ingestor = task_ingestor.as_str(),
@@ -350,14 +354,15 @@ impl KafkaIngestor {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {
-                        let _ = task_runtime
+                        task_runtime
                             .flush_ingest_collector(
                                 &task_domain,
                                 &task_ingestor,
                                 &task_branched_senders,
                                 &mut ingest_collector,
                             )
-                            .await;
+                            .await
+                            .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                         match &task_offset_mode {
                             KafkaOffsetMode::ConsumerGroup(_) => consumer.unsubscribe(),
                             KafkaOffsetMode::Domain => {
@@ -491,12 +496,13 @@ impl KafkaIngestor {
                             continue;
                         }
                         changed = shutdown_rx.changed() => {
-                            let _ = task_runtime.flush_ingest_collector(
+                            task_runtime.flush_ingest_collector(
                                 &task_domain,
                                 &task_ingestor,
                                 &task_branched_senders,
                                 &mut ingest_collector,
-                            ).await;
+                            ).await
+                            .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break;
                             }
@@ -636,12 +642,27 @@ impl KafkaIngestor {
                                                             task_domain.as_str(),
                                                             error
                                                         ));
-                                                        let _ = Self::seek_offset(
+                                                        // Rewinding is how the ingestor keeps
+                                                        // a message whose offset never landed:
+                                                        // a rewind that fails too advances past
+                                                        // it, so the failure is reported rather
+                                                        // than dropped.
+                                                        if let Err(error) = Self::seek_offset(
                                                             &consumer,
                                                             message.topic(),
                                                             message.partition(),
                                                             message.offset(),
-                                                        );
+                                                        ) {
+                                                            task_events.report_error(format!(
+                                                                "failed to rewind kafka \
+                                                                 ingestor '{}' in domain \
+                                                                 '{}' after its offset was \
+                                                                 not persisted: {}",
+                                                                task_ingestor.as_str(),
+                                                                task_domain.as_str(),
+                                                                error
+                                                            ));
+                                                        }
                                                     }
                                                 }
                                                 Err(error) => {

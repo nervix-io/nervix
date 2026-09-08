@@ -18,6 +18,7 @@ fastrand = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
 parking_lot = { workspace = true }
 rand_core = { workspace = true }
 rkyv = { workspace = true }

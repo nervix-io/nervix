@@ -325,6 +325,18 @@ build and the existing tests, and nothing in it changes behavior.
   it, or make the invariant hold in the type. Never invent a guarantee to retire a panic site.
 - A build script is the exception that stays a panic: a failed code generation is a real build
   failure, so it panics with its cause rather than claiming a guarantee it does not have.
+- The recovery class has its own vocabulary, in `nervix-recovery`, and `let _ = …` is not part of
+  it. A dropped outcome states no class: it reads the same whether the failure was considered and
+  recovered from or never considered at all. Use `discarded` with the reason that makes dropping it
+  correct, or `reported` where this call is the only witness of the failure.
+- A channel send fails for one reason, that no receiver is left, and that fact means three
+  different things. `means_shutdown` says the receiver stopped with the node, domain, or task it
+  belonged to. `means_peer_left` says the requester, session, or observer withdrew. A receiver held
+  for as long as its sender is a guarantee, not a recovery, so its absence takes `assured` or
+  `verified` and panics.
+- A `watch::Sender` whose value must be current for a later subscriber uses `send_replace`, which
+  stores the value whether or not a receiver exists. `send` leaves the previous value in place when
+  it fails, so discarding its result publishes a stale value to whoever subscribes next.
 - Prefer checked arithmetic and handle the overflow case explicitly. `saturating_*` and
   `wrapping_*` are correct only where saturation or wrapping is the meaning of the computation
   itself, such as a clamped backpressure budget, a bounded retry delay, or a hash mixer, and the
@@ -492,9 +504,9 @@ build and the existing tests, and nothing in it changes behavior.
   `docs/src` and should be read from there rather than restated in the skill.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
-  casts outside imports and qualified paths, bare `unwrap` and `expect`, `saturating_*` and
-  `wrapping_*` calls outside the time API,
-  `Result<_, String>`, signatures returning a Nervix error without `Report`, node identities
+  casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
+  `let _ =` instead of stating their class, `saturating_*` and `wrapping_*` calls outside the time
+  API, `Result<_, String>`, signatures returning a Nervix error without `Report`, node identities
   carried as `String`, struct fields gated on `cfg(feature = "testing")`, parser references outside
   the language edges, and `Model` references in the data plane, and CI fails when a count is above
   `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run

@@ -2166,6 +2166,11 @@ fn fold_binary_expr(op: BinaryOp, left: FoldedValue, right: FoldedValue) -> Opti
     }
 }
 
+/// The value a builtin call folds to at compile time, or `None` when it does not fold.
+///
+/// Folding is an optimisation, so declining is always safe: the VM evaluates the call per row
+/// instead. Every arm here declines the same way, for an argument that is not a literal of the
+/// shape the builtin needs.
 fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<FoldedValue> {
     match function {
         FunctionName::Lower => {
@@ -2197,7 +2202,10 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
                 return None;
             };
             Some(FoldedValue::NonNull(ScalarValue::Int64(
-                i64::try_from(value.chars().count()).ok()?,
+                i64::try_from(value.chars().count()).assured(
+                    "a string literal is at most isize::MAX bytes, so its character count fits in \
+                     an i64",
+                ),
             )))
         }
         FunctionName::Coalesce => args.iter().find_map(|arg| match arg {

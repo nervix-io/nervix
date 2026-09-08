@@ -51,8 +51,8 @@ macro_rules! suggest_from {
         let cursor: usize = $cursor;
         let (source, prefix) = $crate::parser_support::completion_context(input, cursor);
 
-        let offer = |source: &str| match $crate::parser_support::lex_input(source) {
-            Ok($crate::parser_support::LexedInput { tokens, .. }) => {
+        let offer = |source: &str| match $crate::parser_support::completion_tokens(source) {
+            Some(tokens) => {
                 let out = $parser
                     .then_ignore(chumsky::prelude::end())
                     .parse(tokens.as_slice());
@@ -62,7 +62,7 @@ macro_rules! suggest_from {
                     Vec::new()
                 }
             }
-            Err(_) => Vec::new(),
+            None => Vec::new(),
         };
 
         let suggestions = offer(&source);
@@ -1768,6 +1768,17 @@ pub struct LexedInput {
     pub source: String,
     pub spanned_tokens: Vec<SpannedToken>,
     pub tokens: Vec<Token>,
+}
+
+/// The tokens a completion offer is derived from, or none when `source` does not lex.
+///
+/// Completion runs on text the user is still typing, so a source that does not lex is the ordinary
+/// case rather than a failure: an unterminated string or a half-written number leaves the lexer
+/// with nothing, and a caller with no tokens has no expectations to turn into suggestions. The
+/// diagnostics the lexer would produce belong to parsing, which reports them to the user; a
+/// completion offer is not the place to raise them.
+pub fn completion_tokens(source: &str) -> Option<Vec<Token>> {
+    lex_input(source).ok().map(|lexed| lexed.tokens)
 }
 
 pub fn lex_input(input: &str) -> Result<LexedInput, ParseFromSourceError> {

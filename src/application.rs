@@ -141,6 +141,7 @@ use nervix_nspl::{
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, lower_window_assignments};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
@@ -924,7 +925,9 @@ impl SessionSubscriptions {
                                         },
                                     )),
                                 };
-                                let _ = tx.send(Ok(event)).await;
+                                tx.send(Ok(event))
+                                    .await
+                                    .means_peer_left("session subscription stream");
                                 break 'subscription_loop;
                             }
                             Err(RelaySubscriptionRecvError::Overflowed(_)) => continue,
@@ -980,7 +983,7 @@ impl SessionSubscriptions {
 
     async fn remove(&mut self, name: &SubscriptionName) -> Option<(DomainName, RelayName)> {
         let subscription = self.subscriptions.remove(name)?;
-        let _ = subscription.stop_tx.send(true);
+        subscription.stop_tx.send_replace(true);
         subscription
             .task
             .join_after_shutdown("session subscription")
@@ -990,7 +993,7 @@ impl SessionSubscriptions {
 
     async fn stop_all(&mut self, service: &SessionServiceImpl) {
         for (_, subscription) in self.subscriptions.drain() {
-            let _ = subscription.stop_tx.send(true);
+            subscription.stop_tx.send_replace(true);
             subscription
                 .task
                 .join_after_shutdown("session subscription")
@@ -1488,12 +1491,13 @@ async fn handle_http_request(
                                     )
                                     .await;
                                 if !outcome.is_accepted() {
-                                    let _ = websocket
+                                    websocket
                                         .send(Message::Close(Some(CloseFrame {
                                             code: CloseCode::Again,
                                             reason: "Try Again Later".into(),
                                         })))
-                                        .await;
+                                        .await
+                                        .means_peer_left("websocket ingest client");
                                     break;
                                 }
                             }
@@ -1507,12 +1511,13 @@ async fn handle_http_request(
                                     )
                                     .await;
                                 if !outcome.is_accepted() {
-                                    let _ = websocket
+                                    websocket
                                         .send(Message::Close(Some(CloseFrame {
                                             code: CloseCode::Again,
                                             reason: "Try Again Later".into(),
                                         })))
-                                        .await;
+                                        .await
+                                        .means_peer_left("websocket ingest client");
                                     break;
                                 }
                             }
@@ -1708,6 +1713,11 @@ async fn read_cbor_request_body<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// The resource an archive request addresses, or `None` when `path` addresses something else.
+///
+/// This is route matching: a path whose segments are not a domain, a resource name and a version
+/// is simply not this route, which is why every failed parse below reads as no match rather than
+/// as a rejected request.
 fn parse_resource_archive_request_path(path: &str) -> Option<ResourceId> {
     let suffix = path.strip_prefix(RESOURCE_ARCHIVE_PATH_PREFIX)?;
     let mut parts = suffix.split('/');
@@ -2415,6 +2425,11 @@ fn web_console_query_param(query: Option<&str>, name: &str) -> Option<String> {
         .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
 }
 
+/// The credentials a `Basic` authorization token carries, or `None` when it carries none.
+///
+/// A token that is not base64, not UTF-8, or not `user:password` is a malformed header rather than
+/// a wrong password, and the caller answers both the same way. Nothing about the token is reported,
+/// because it is the secret.
 fn credentials_from_basic_token(token: &str) -> Option<BasicAuthCredentials> {
     let decoded = BASE64_STANDARD.decode(token).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
@@ -3243,6 +3258,58 @@ struct PlannedOwnershipMove {
 
 type AuthRateLimiter = DefaultKeyedRateLimiter<String>;
 
+/// How many events a session can fall behind before the bus drops the oldest.
+const SESSION_EVENT_CAPACITY: usize = 256;
+
+/// The session event bus, and the one way a control-plane failure or a cluster transition reaches
+/// the sessions attached to this node.
+///
+/// Unlike the runtime event bus this one carries no fan-out task, so its only subscribers are live
+/// sessions, and a node serving none is the ordinary case rather than a startup window. An event
+/// that finds no receiver is therefore expected, which is why publishing goes through these
+/// methods: each one leaves a record that does not depend on anyone listening, and the send that
+/// follows only offers the same fact to whoever is.
+#[derive(Clone)]
+struct SessionEvents {
+    sender: broadcast::Sender<ServerEvent>,
+}
+
+impl SessionEvents {
+    fn new(capacity: usize) -> Self {
+        Self {
+            sender: broadcast::channel(capacity).0,
+        }
+    }
+
+    /// Report a control-plane failure this node recovered from.
+    fn report_error(&self, message: impl Into<String>) {
+        let message = message.into();
+        warn!(error = %message, "server error reported to sessions");
+        self.publish(ServerEventLevel::Error, message);
+    }
+
+    /// Offer a transition the cluster or consensus bus has already recorded.
+    ///
+    /// Those buses write their own `info` line before handing the text here, so this is a relay
+    /// rather than a report and it logs nothing of its own.
+    fn relay_info(&self, message: String) {
+        self.publish(ServerEventLevel::Info, message);
+    }
+
+    fn publish(&self, level: ServerEventLevel, message: String) {
+        self.sender
+            .send(ServerEvent {
+                level: i32::from(level),
+                message,
+            })
+            .discarded("the record this event carries is written before it is offered");
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+        self.sender.subscribe()
+    }
+}
+
 /// The handle every gRPC request, background reconciliation task, and HTTP server clones. It is
 /// one `Arc` over the server's state, so handing the service to a spawned task costs a single
 /// refcount rather than one per piece of state the server owns.
@@ -3274,7 +3341,7 @@ struct SessionServiceInner {
     #[cfg(feature = "testing")]
     scheduler_mode: SchedulerMode,
     shutdown: CancellationToken,
-    events: broadcast::Sender<ServerEvent>,
+    events: SessionEvents,
     subscription_interest_counts: DashMap<SubscriptionInterestKey, usize, RandomState>,
     interconnect: Transport,
     domain_clocks: DashMap<DomainName, DomainClockRuntimeState, RandomState>,
@@ -4010,7 +4077,9 @@ impl SessionService for SessionServiceImpl {
                         let request = match request {
                             Ok(request) => request,
                             Err(status) => {
-                                let _ = tx.send(Err(status)).await;
+                                tx.send(Err(status))
+                                    .await
+                                    .means_peer_left("session response stream");
                                 subscriptions.stop_all(&service).await;
                                 service.release_session_transaction_binding(&mut subscriptions);
                                 return;
@@ -4057,11 +4126,12 @@ impl SessionService for SessionServiceImpl {
                                 }
                             }
                             Some(proto::session_request::Request::SetActiveDomain(_)) => {
-                                let _ = tx
-                                    .send(Err(Status::invalid_argument(
-                                        "active domain selection is only supported by the web console websocket",
-                                    )))
-                                    .await;
+                                tx.send(Err(Status::invalid_argument(
+                                    "active domain selection is only supported by the web console \
+                                     websocket",
+                                )))
+                                .await
+                                .means_peer_left("session response stream");
                                 subscriptions.stop_all(&service).await;
                                 service.release_session_transaction_binding(&mut subscriptions);
                                 return;
@@ -4080,11 +4150,11 @@ impl SessionService for SessionServiceImpl {
                                 }
                             }
                             None => {
-                                let _ = tx
-                                    .send(Err(Status::invalid_argument(
-                                        "session request payload is missing",
-                                    )))
-                                    .await;
+                                tx.send(Err(Status::invalid_argument(
+                                    "session request payload is missing",
+                                )))
+                                .await
+                                .means_peer_left("session response stream");
                                 subscriptions.stop_all(&service).await;
                                 service.release_session_transaction_binding(&mut subscriptions);
                                 return;
@@ -4423,18 +4493,8 @@ impl SessionServiceImpl {
     }
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
-    ///
-    /// Unlike the runtime event bus, this one carries no fan-out task, so its only subscribers are
-    /// live sessions and a node serving none is the ordinary case rather than a startup window.
-    /// The event is therefore expected to find no receiver, and the log is what keeps the recovery
-    /// observable when it does.
     fn broadcast_error(&self, message: impl Into<String>) {
-        let message = message.into();
-        warn!(error = %message, "server error reported to sessions");
-        let _ = self.inner.events.send(ServerEvent {
-            level: i32::from(ServerEventLevel::Error),
-            message,
-        });
+        self.inner.events.report_error(message);
     }
 
     /// Validates the bindings a planned batch would activate: everything that has to reach outside
@@ -5136,7 +5196,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.visible);
+            sender
+                .send(response.visible)
+                .means_peer_left("subscription interest visibility requester");
         }
     }
 
@@ -5715,7 +5777,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("describe relay requester");
         }
     }
 
@@ -6171,7 +6235,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("dataflow node status requester");
         }
     }
 
@@ -6240,7 +6306,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("domain drain status requester");
         }
     }
 
@@ -6437,7 +6505,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("entity gate requester");
         }
     }
 
@@ -6447,7 +6517,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("entity drain status requester");
         }
     }
 
@@ -6457,7 +6529,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("entity gate release requester");
         }
     }
 
@@ -7000,6 +7074,29 @@ impl SessionServiceImpl {
         })
     }
 
+    /// Stops a domain whose start could not be completed, and says so when the stop fails too.
+    ///
+    /// The caller is on its way to returning the start failure, and this rollback is what keeps
+    /// the cluster from holding a domain the operator was told did not start. A rollback that
+    /// fails leaves exactly that state, so the reason is appended to the caller's message rather
+    /// than dropped: nothing else in the command's answer would mention it.
+    async fn roll_back_started_domain(&self, domain_id: &DomainName) -> String {
+        let mut failures = Vec::new();
+        if let Err(error) = self.inner.consensus.stop_domain(domain_id.clone()).await {
+            failures.push(format!("stopping it again failed: {error}"));
+        }
+        if let Err(error) = self.apply_current_cluster_state().await {
+            failures.push(format!("reapplying the cluster state failed: {error}"));
+        }
+        if failures.is_empty() {
+            return String::new();
+        }
+        format!(
+            "; the domain may still be running because {}",
+            failures.join(" and ")
+        )
+    }
+
     /// Restores the pre-alteration models and schedule after a committed batch failed to reach the
     /// cluster. Every quiesce level needs the restore, because the registry commit already landed;
     /// only a domain-paused alteration additionally has to resume the domain.
@@ -7141,7 +7238,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("describe metrics requester");
         }
     }
 
@@ -7275,7 +7374,9 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result);
+            sender
+                .send(response.result)
+                .means_peer_left("describe lookup requester");
         }
     }
 
@@ -8060,7 +8161,9 @@ impl SessionServiceImpl {
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             };
-            let _ = sender.send(result);
+            sender
+                .send(result)
+                .means_peer_left("lookup query requester");
         }
     }
 
@@ -8709,7 +8812,7 @@ impl SessionServiceImpl {
                             domain_id.as_str()
                         ));
                     }
-                    let _ = parse_start_point(&start.start)?;
+                    parse_start_point(&start.start)?;
                     domain.status = DomainStatus::Running;
                     domain.last_start = start.start.clone();
                     domain.start_version = domain.start_version.checked_add(1).assured(
@@ -8789,14 +8892,13 @@ impl SessionServiceImpl {
             .verified("replaying the transaction resolved this domain before reaching the step");
         self.validate_changed_model_bindings(domain_id, domain.config.pace, planned)
             .await?;
-        let _ = self.prepare_planned_domain_udfs(planned).await?;
-        let _ = self
-            .prepare_domain_schedule(
-                domain_id,
-                planned.candidate_graph(),
-                domain.config.placement,
-            )
-            .await?;
+        self.prepare_planned_domain_udfs(planned).await?;
+        self.prepare_domain_schedule(
+            domain_id,
+            planned.candidate_graph(),
+            domain.config.placement,
+        )
+        .await?;
         Ok(candidate_quiesce_level)
     }
 
@@ -10363,13 +10465,20 @@ impl SessionServiceImpl {
                             } else {
                                 None
                             };
-                            if requires_domain_pause {
-                                let _ = self.resume_domain_after_alter(&domain).await;
-                            }
+                            let resume_error = if requires_domain_pause {
+                                self.resume_domain_after_alter(&domain).await.err()
+                            } else {
+                                None
+                            };
                             let error = match rollback_error {
                                 Some(rollback) => error.attach(format!(
                                     "local registry rollback also failed: {rollback}"
                                 )),
+                                None => error,
+                            };
+                            let error = match resume_error {
+                                Some(resume) => error
+                                    .attach(format!("the domain also remains paused: {resume}")),
                                 None => error,
                             };
                             let message = format!(
@@ -10446,12 +10555,18 @@ impl SessionServiceImpl {
                         if let Some(gate) = cluster_entity_gate.take() {
                             self.release_cluster_entity_gates(gate).await;
                         }
-                        if requires_domain_pause {
-                            let _ = self.resume_domain_after_alter(&domain).await;
-                        }
+                        let paused = if requires_domain_pause {
+                            self.resume_domain_after_alter(&domain)
+                                .await
+                                .err()
+                                .map(|resume| format!("; the domain also remains paused: {resume}"))
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
                         return command_error(format!(
                             "committed models and schedule for domain '{}', but the destination \
-                             failed to activate: {error}",
+                             failed to activate: {error}{paused}",
                             domain.as_str()
                         ));
                     }
@@ -11710,10 +11825,9 @@ impl SessionServiceImpl {
         {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
-                    let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
-                    let _ = self.apply_current_cluster_state().await;
+                    let rollback = self.roll_back_started_domain(domain_id).await;
                     return command_error(format!(
-                        "failed to start domain '{}': {error}",
+                        "failed to start domain '{}': {error}{rollback}",
                         domain_id.as_str()
                     ));
                 }
@@ -11735,8 +11849,8 @@ impl SessionServiceImpl {
                         )
                         .await
                 {
-                    let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
-                    return command_error(message);
+                    let rollback = self.roll_back_started_domain(domain_id).await;
+                    return command_error(format!("{message}{rollback}"));
                 }
                 if let DomainPace::Paced = domain.config.pace {
                     self.inner.domain_clock_reconciliations.insert(
@@ -16035,9 +16149,9 @@ fn requires_leader(statement: &Statement) -> bool {
 
 fn validate_domain_config(config: &DomainConfig) -> Result<(), String> {
     if let DomainPace::Paced = config.pace {
-        let _ = humantime::parse_duration(&config.period)
+        humantime::parse_duration(&config.period)
             .map_err(|err| format!("invalid domain period '{}': {err}", config.period))?;
-        let _ = humantime::parse_duration(&config.skew)
+        humantime::parse_duration(&config.skew)
             .map_err(|err| format!("invalid domain skew '{}': {err}", config.skew))?;
     }
     Ok(())
@@ -16879,6 +16993,7 @@ impl SessionServiceImpl {
     }
 }
 
+/// The kind and model a dataflow metric identifier addresses, or `None` when `id` is not one.
 fn dataflow_metric_target(id: &str) -> Option<(String, ModelName)> {
     let (kind, identifier) = id.split_once(':')?;
     Some((
@@ -16956,6 +17071,8 @@ fn create_registry_error_response(
             }
         }
         RegistryError::MissingReference { reference, .. } => {
+            // A reference that is not a model name has nothing to underline in the query, and a
+            // diagnostic without a span is still the diagnostic the operator needs.
             let span = match ModelName::try_from(reference.as_str()) {
                 Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
                 Err(_) => 0..0,
@@ -16973,6 +17090,7 @@ fn create_registry_error_response(
             }
         }
         RegistryError::InvalidReferenceKind { reference, .. } => {
+            // As above: a reference that is not a model name leaves the diagnostic unanchored.
             let span = match ModelName::try_from(reference.as_str()) {
                 Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
                 Err(_) => 0..0,
@@ -17023,6 +17141,10 @@ fn map_diagnostic(d: &ParseDiagnostic) -> Diagnostic {
     }
 }
 
+/// Where `identifier` appears in `query`, for a diagnostic that wants to underline it.
+///
+/// The query reached here because it failed validation, so it may also fail to lex. A diagnostic
+/// without a span is still a diagnostic, which is why absence is the answer rather than an error.
 fn find_identifier_span(query: &str, identifier: &ModelName) -> Option<std::ops::Range<usize>> {
     let tokens = lex(query).ok()?;
     tokens.into_iter().find_map(|spanned| match spanned.token {
@@ -17367,7 +17489,7 @@ fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
+        write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
     }
     out
 }
@@ -17391,6 +17513,10 @@ fn decode_hex(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The public key `input` encodes, or `None` when it does not encode one.
+///
+/// The input is a peer-supplied hex string, so text of the wrong length, the wrong alphabet, or the
+/// wrong curve point all mean the same thing: this peer offered no key the node can verify with.
 fn decode_verifying_key(input: &str) -> Option<VerifyingKey> {
     let bytes = decode_hex(input)?;
     let array: [u8; 32] = bytes.try_into().ok()?;
@@ -17781,7 +17907,9 @@ pub struct TracingGuard {
 impl Drop for TracingGuard {
     fn drop(&mut self) {
         if let Some(tracer_provider) = self.tracer_provider.take() {
-            let _ = tracer_provider.shutdown();
+            tracer_provider
+                .shutdown()
+                .reported("flushing the tracer provider on shutdown");
         }
     }
 }
@@ -17867,14 +17995,17 @@ pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let file = Arc::new(ParkingMutex::new(file));
     let make_writer = BoxMakeWriter::new(move || SharedFileWriter(file.clone()));
-    let _ = fmt()
+    fmt()
         .with_ansi(false)
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new(DEFAULT_TRACE_FILTER)),
         )
         .with_writer(make_writer)
-        .try_init();
+        .try_init()
+        .discarded(
+            "the first call in this process installed the subscriber this one would replace",
+        );
     Ok(())
 }
 
@@ -18842,7 +18973,7 @@ impl Application {
                 }
             }
         }));
-        let (events, _) = broadcast::channel(256);
+        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
         let service = SessionServiceImpl {
             inner: Arc::new(SessionServiceInner {
                 cluster: cluster.clone(),
@@ -19512,12 +19643,7 @@ impl Application {
                 tokio::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
-                        Ok(message) => {
-                            let _ = cluster_events.send(ServerEvent {
-                                level: i32::from(ServerEventLevel::Info),
-                                message,
-                            });
-                        }
+                        Ok(message) => cluster_events.relay_info(message),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "cluster event relay fell behind the event bus");
                         }
@@ -19535,12 +19661,7 @@ impl Application {
                 tokio::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
-                        Ok(message) => {
-                            let _ = consensus_events.send(ServerEvent {
-                                level: i32::from(ServerEventLevel::Info),
-                                message,
-                            });
-                        }
+                        Ok(message) => consensus_events.relay_info(message),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "consensus event relay fell behind the event bus");
                         }
@@ -19576,7 +19697,9 @@ impl Application {
             };
             let grpc_incoming = stream::unfold(grpc_listener, |listener| async {
                 let accepted = listener.accept().await.map(|(relay, _)| {
-                    let _ = relay.set_nodelay(true);
+                    relay
+                        .set_nodelay(true)
+                        .reported("disabling Nagle on an accepted gRPC connection");
                     relay
                 });
                 Some((accepted, listener))
@@ -20086,7 +20209,7 @@ mod tests {
                 #[cfg(feature = "testing")]
                 scheduler_mode: SchedulerMode::Sticky,
                 shutdown: CancellationToken::new(),
-                events: broadcast::channel(16).0,
+                events: SessionEvents::new(16),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect,
                 domain_clocks: DashMap::with_hasher(RandomState::new()),

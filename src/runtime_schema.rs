@@ -884,6 +884,8 @@ impl RuntimeRecordBatch {
                 self.batch.num_rows()
             ));
         }
+        // `index_of` reports a missing field as an error, and a missing field is exactly what an
+        // absent value means here: the batch carries no column of that name to read.
         let column_index = match self.schema_ref().index_of(name) {
             Ok(index) => index,
             Err(_) => return Ok(None),

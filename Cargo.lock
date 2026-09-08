@@ -6460,6 +6460,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-client-core",
  "nervix-models",
+ "nervix-recovery",
  "nervix-test-environment",
  "ordered-float 4.6.0",
  "parking_lot",
@@ -6490,6 +6491,7 @@ dependencies = [
  "nervix-client-core",
  "nervix-models",
  "nervix-nspl",
+ "nervix-recovery",
  "reedline",
  "rpassword",
  "thiserror 2.0.20",
@@ -6508,6 +6510,7 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",
+ "nervix-recovery",
  "prost 0.13.5",
  "rustls",
  "strum 0.26.3",
@@ -6529,6 +6532,7 @@ dependencies = [
  "futures-util",
  "meticulous",
  "nervix-models",
+ "nervix-recovery",
  "openraft",
  "parking_lot",
  "reqwest 0.13.4",
@@ -6577,6 +6581,7 @@ dependencies = [
  "futures-util",
  "meticulous",
  "nervix-models",
+ "nervix-recovery",
  "parking_lot",
  "rand_core 0.6.4",
  "rkyv",
@@ -6648,6 +6653,7 @@ dependencies = [
  "meticulous",
  "nervix-models",
  "nervix-nspl",
+ "nervix-recovery",
  "tempfile",
  "thiserror 2.0.20",
 ]
@@ -6660,6 +6666,14 @@ dependencies = [
  "prost 0.13.5",
  "tonic 0.13.1",
  "tonic-build",
+]
+
+[[package]]
+name = "nervix-recovery"
+version = "0.1.0-dev"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6677,6 +6691,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-models",
+ "nervix-recovery",
  "nervix-vm",
  "parking_lot",
  "regex",
@@ -6760,6 +6775,7 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",
+ "nervix-recovery",
  "nervix-roto",
  "nervix-test-environment",
  "nervix-vm",
@@ -6837,6 +6853,7 @@ dependencies = [
  "blake3",
  "clap",
  "meticulous",
+ "nervix-recovery",
  "reqwest 0.13.4",
  "serde_json",
  "tempfile",
@@ -6890,6 +6907,7 @@ dependencies = [
  "flatbuffers",
  "meticulous",
  "nervix-models",
+ "nervix-recovery",
  "nervix-wasm-protocol",
  "nonzero_ext",
  "parking_lot",
@@ -6938,6 +6956,7 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",
+ "nervix-recovery",
  "prost 0.13.5",
  "url",
  "wasm-bindgen",

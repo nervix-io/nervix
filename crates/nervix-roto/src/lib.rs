@@ -32,6 +32,7 @@ use arrow_select::{nullif::nullif, zip::zip};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_models::{CreateUdf, ParseAsType, Timestamp};
+use nervix_recovery::Discarded as _;
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
     RuntimeError, SideError, TypedArray, UdfParameter, UdfSignature, UdfSignatures,
@@ -1255,7 +1256,10 @@ fn compile_udf(model: CreateUdf, watchdog: Duration) -> Result<CompiledUdf, UdfE
         Ok(package) => package,
         Err(report) => {
             let mut diagnostics = String::new();
-            let _ = report.write(&mut diagnostics, false);
+            report.write(&mut diagnostics, false).discarded(
+                "the compile error below is returned whether or not its diagnostics could be \
+                 rendered",
+            );
             if !model.volatile {
                 for function in ["now", "rand_f64", "uuid_v4"] {
                     if contains_call(&model.code, function) && diagnostics.contains(function) {
