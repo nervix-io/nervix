@@ -19,7 +19,7 @@
 //! inherits the contract above.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     fs::OpenOptions,
     future::Future,
@@ -106,8 +106,8 @@ use nervix_interconnect::{
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
     Envelope, IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
-    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse, PeerVerifier,
-    RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
+    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse, PeerTarget,
+    PeerVerifier, RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
     StateSyncResponse as RemoteStateSyncResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
@@ -5207,8 +5207,7 @@ impl SessionServiceImpl {
                 let connection = self
                     .inner
                     .interconnect
-                    .connection_for(addr, "localhost", mode)
-                    .await
+                    .connection_for(node_id, addr, "localhost", mode)
                     .map_err(|error| {
                         format!("failed to connect interconnect for '{node_id}': {error}")
                     })?;
@@ -18664,6 +18663,15 @@ impl Application {
                     }
                 }
                 cluster_for_interconnect.retain_interconnect_live_set(&live_node_ids);
+                struct PeerConnectionPlan {
+                    node_id: ClusterNodeName,
+                    target_label: String,
+                    targets: BTreeSet<PeerTarget>,
+                    initiate: bool,
+                }
+
+                let mut plans = Vec::new();
+                let mut outbound_targets = BTreeMap::new();
                 for node in gossip.live_nodes {
                     if node.node_id == local_node_id {
                         continue;
@@ -18687,20 +18695,12 @@ impl Application {
                             .record_interconnect_failure(&node.node_id, Some(target_label.clone()));
                         continue;
                     }
-                    if !should_initiate_interconnect(&local_node_id, &node.node_id) {
-                        if interconnect_for_membership.is_connected_to(&node.node_id) {
-                            cluster_for_interconnect
-                                .record_interconnect_connected(&node.node_id, target_label.clone());
-                        } else {
-                            cluster_for_interconnect.record_interconnect_failure(
-                                &node.node_id,
-                                Some(target_label.clone()),
-                            );
-                        }
-                        continue;
-                    }
-                    let resolved_targets = match target_addr.resolve_all().await {
-                        Ok(addrs) => addrs,
+                    let initiate = should_initiate_interconnect(&local_node_id, &node.node_id);
+                    let targets = match target_addr.resolve_all().await {
+                        Ok(addrs) => addrs
+                            .into_iter()
+                            .map(|addr| PeerTarget::new(addr, "localhost", peer_interconnect_mode))
+                            .collect::<BTreeSet<_>>(),
                         Err(_err) => {
                             cluster_for_interconnect.record_interconnect_failure(
                                 &node.node_id,
@@ -18709,13 +18709,41 @@ impl Application {
                             continue;
                         }
                     };
+                    outbound_targets.insert(node.node_id.clone(), targets.clone());
+                    plans.push(PeerConnectionPlan {
+                        node_id: node.node_id,
+                        target_label,
+                        targets,
+                        initiate,
+                    });
+                }
+                interconnect_for_membership.replace_outbound_targets(&outbound_targets);
+
+                for plan in plans {
+                    tokio::task::consume_budget().await;
+                    if !plan.initiate {
+                        if interconnect_for_membership.is_connected_to(&plan.node_id) {
+                            cluster_for_interconnect
+                                .record_interconnect_connected(&plan.node_id, plan.target_label);
+                        } else {
+                            cluster_for_interconnect.record_interconnect_failure(
+                                &plan.node_id,
+                                Some(plan.target_label),
+                            );
+                        }
+                        continue;
+                    }
                     let mut connected = false;
-                    for resolved_target in resolved_targets {
+                    for target in plan.targets {
                         if interconnect_for_membership
-                            .connection_for(resolved_target, "localhost", peer_interconnect_mode)
-                            .await
+                            .connection_for(
+                                &plan.node_id,
+                                target.addr,
+                                &target.server_name,
+                                target.mode,
+                            )
                             .is_ok()
-                            && interconnect_for_membership.is_connected_to(&node.node_id)
+                            && interconnect_for_membership.is_connected_to(&plan.node_id)
                         {
                             connected = true;
                             break;
@@ -18723,10 +18751,10 @@ impl Application {
                     }
                     if connected {
                         cluster_for_interconnect
-                            .record_interconnect_connected(&node.node_id, target_label);
+                            .record_interconnect_connected(&plan.node_id, plan.target_label);
                     } else {
                         cluster_for_interconnect
-                            .record_interconnect_failure(&node.node_id, Some(target_label));
+                            .record_interconnect_failure(&plan.node_id, Some(plan.target_label));
                     }
                 }
                 tokio::select! {

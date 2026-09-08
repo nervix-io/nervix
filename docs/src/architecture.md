@@ -68,6 +68,18 @@ Internal node-to-node networking is also split explicitly:
 - the cluster API carries Raft and resource-transfer traffic and can run in plain HTTP or HTTPS mode
 - the interconnect carries runtime payloads and control envelopes and can run in plain or TLS mode
 
-For both cluster API and interconnect, plain and TLS listeners use separate addresses. The selected mode is an explicit process-level configuration choice.
+The interconnect connection driver owns socket read and write progress independently. Timer events,
+traffic in the opposite direction, and cancellation of an application request cannot restart a
+partially transferred frame on the same connection. Connection setup and send-queue admission each
+have a five-second deadline. An outbound driver is bound to the node identity it expects to
+authenticate, so another trusted node at that address cannot consume its queued data. Failed
+connections reconnect with jittered exponential backoff from 200 milliseconds up to five seconds.
+When gossip removes a peer or replaces its advertised address, the old connection and reconnect
+work is retired before its permit can be reused. Node shutdown stops new admission, drains queued
+connection work for up to ten seconds, and then closes anything still active; an incomplete
+handshake cannot extend that bound.
+
+For both cluster API and interconnect, plain and TLS listeners use separate addresses. The selected
+mode is an explicit process-level configuration choice.
 
 The rest of this section splits control-plane semantics from data-plane semantics because that distinction is fundamental to how Nervix behaves.

@@ -12,6 +12,7 @@
 //! typed request primitive by attrition.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     hash::RandomState,
     io,
     net::SocketAddr,
@@ -20,8 +21,9 @@ use std::{
     time::Duration,
 };
 
+use ahash::HashMap;
 use arch_into::ArchInto as _;
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use meticulous::ResultExt as _;
 use nervix_models::{
@@ -34,7 +36,7 @@ use rand_core::OsRng;
 use rkyv::{Archive, Deserialize, Serialize};
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
+    pki_types::{CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
@@ -43,16 +45,22 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
-    time::{Instant, MissedTickBehavior, interval, sleep, sleep_until},
+    sync::{Semaphore, mpsc},
+    time::timeout,
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
+mod connection;
 mod request;
 
+#[cfg(test)]
+use connection::{connect_outbound_stream, drive_connection, exchange_introductions};
+use connection::{
+    retire_outbound_connection, run_inbound_connection, spawn_outbound_connection,
+    unregister_connected_peer,
+};
 pub use request::{
     HandlerRegistrationError, InterconnectRequest, RemoteRequestFailure, RequestContext,
     RequestError,
@@ -63,6 +71,10 @@ const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEND_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_INCOMING_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_RECONNECT_BACKOFF_MS: u64 = 200;
+const DEFAULT_MAX_RECONNECT_BACKOFF_MS: u64 = 5_000;
+const DEFAULT_CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_QUEUE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_INTERVAL: Duration = Duration::from_millis(500);
 const PING_TIMEOUT: Duration = Duration::from_secs(1);
 const WIRE_TAG_INTRODUCTION: u8 = 1;
@@ -75,6 +87,10 @@ const WIRE_TAG_CONTROL: u8 = 5;
 pub struct TransportOptions {
     pub max_connections: usize,
     pub reconnect_backoff: Duration,
+    pub max_reconnect_backoff: Duration,
+    pub connection_setup_timeout: Duration,
+    pub queue_admission_timeout: Duration,
+    pub shutdown_drain_timeout: Duration,
     pub send_queue_capacity: usize,
     pub incoming_queue_capacity: usize,
     pub max_frame_bytes: usize,
@@ -85,6 +101,10 @@ impl Default for TransportOptions {
         Self {
             max_connections: 32,
             reconnect_backoff: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_MS),
+            max_reconnect_backoff: Duration::from_millis(DEFAULT_MAX_RECONNECT_BACKOFF_MS),
+            connection_setup_timeout: DEFAULT_CONNECTION_SETUP_TIMEOUT,
+            queue_admission_timeout: DEFAULT_QUEUE_ADMISSION_TIMEOUT,
+            shutdown_drain_timeout: DEFAULT_SHUTDOWN_DRAIN_TIMEOUT,
             send_queue_capacity: DEFAULT_SEND_QUEUE_CAPACITY,
             incoming_queue_capacity: DEFAULT_INCOMING_QUEUE_CAPACITY,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
@@ -92,10 +112,84 @@ impl Default for TransportOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+impl TransportOptions {
+    fn validation_error(&self) -> Option<TransportError> {
+        if self.max_connections == 0 {
+            return Some(TransportError::InvalidOptions {
+                reason: "max_connections must be greater than zero",
+            });
+        }
+        if self.send_queue_capacity == 0 {
+            return Some(TransportError::InvalidOptions {
+                reason: "send_queue_capacity must be greater than zero",
+            });
+        }
+        if self.incoming_queue_capacity == 0 {
+            return Some(TransportError::InvalidOptions {
+                reason: "incoming_queue_capacity must be greater than zero",
+            });
+        }
+        if self.max_frame_bytes == 0 {
+            return Some(TransportError::InvalidOptions {
+                reason: "max_frame_bytes must be greater than zero",
+            });
+        }
+        if self.reconnect_backoff < Duration::from_millis(1) {
+            return Some(TransportError::InvalidOptions {
+                reason: "reconnect_backoff must be at least one millisecond",
+            });
+        }
+        if self.max_reconnect_backoff < self.reconnect_backoff {
+            return Some(TransportError::InvalidOptions {
+                reason: "max_reconnect_backoff must not be below reconnect_backoff",
+            });
+        }
+        if u64::try_from(self.max_reconnect_backoff.as_millis()).is_err() {
+            return Some(TransportError::InvalidOptions {
+                reason: "max_reconnect_backoff must fit in milliseconds",
+            });
+        }
+        if self.connection_setup_timeout.is_zero() {
+            return Some(TransportError::InvalidOptions {
+                reason: "connection_setup_timeout must be greater than zero",
+            });
+        }
+        if self.queue_admission_timeout.is_zero() {
+            return Some(TransportError::InvalidOptions {
+                reason: "queue_admission_timeout must be greater than zero",
+            });
+        }
+        if self.shutdown_drain_timeout.is_zero() {
+            return Some(TransportError::InvalidOptions {
+                reason: "shutdown_drain_timeout must be greater than zero",
+            });
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TransportMode {
     Plain,
     Tls,
+}
+
+/// One currently advertised address at which a live peer accepts interconnect connections.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PeerTarget {
+    pub addr: SocketAddr,
+    pub server_name: String,
+    pub mode: TransportMode,
+}
+
+impl PeerTarget {
+    pub fn new(addr: SocketAddr, server_name: impl Into<String>, mode: TransportMode) -> Self {
+        Self {
+            addr,
+            server_name: server_name.into(),
+            mode,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -538,22 +632,76 @@ pub struct ReceivedEnvelope {
     pub reply: ConnectionHandle,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConnectionHandle {
+#[derive(Debug)]
+struct ConnectionHandleInner {
     peer_addr: SocketAddr,
     tx: mpsc::Sender<Envelope>,
+    connection_cancel: CancellationToken,
+    admission_closed: CancellationToken,
+    queue_admission_timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectionHandle {
+    inner: Arc<ConnectionHandleInner>,
 }
 
 impl ConnectionHandle {
+    fn new(
+        peer_addr: SocketAddr,
+        tx: mpsc::Sender<Envelope>,
+        connection_cancel: CancellationToken,
+        admission_closed: CancellationToken,
+        queue_admission_timeout: Duration,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ConnectionHandleInner {
+                peer_addr,
+                tx,
+                connection_cancel,
+                admission_closed,
+                queue_admission_timeout,
+            }),
+        }
+    }
+
     pub async fn send(&self, envelope: Envelope) -> Result<(), TransportError> {
-        self.tx
-            .send(envelope)
-            .await
-            .map_err(|_| TransportError::Closed(self.peer_addr))
+        if self.inner.admission_closed.is_cancelled() {
+            return Err(TransportError::ShuttingDown);
+        }
+        if self.inner.connection_cancel.is_cancelled() {
+            return Err(TransportError::Closed(self.inner.peer_addr));
+        }
+
+        tokio::select! {
+            biased;
+            _ = self.inner.admission_closed.cancelled() => Err(TransportError::ShuttingDown),
+            _ = self.inner.connection_cancel.cancelled() => {
+                Err(TransportError::Closed(self.inner.peer_addr))
+            }
+            result = timeout(self.inner.queue_admission_timeout, self.inner.tx.send(envelope)) => {
+                match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(_)) => Err(TransportError::Closed(self.inner.peer_addr)),
+                    Err(_) => Err(TransportError::QueueAdmissionTimeout {
+                        peer: self.inner.peer_addr,
+                        timeout: self.inner.queue_admission_timeout,
+                    }),
+                }
+            }
+        }
     }
 
     pub fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
+        self.inner.peer_addr
+    }
+
+    fn cancel(&self) {
+        self.inner.connection_cancel.cancel();
+    }
+
+    fn cancellation(&self) -> &CancellationToken {
+        &self.inner.connection_cancel
     }
 }
 
@@ -571,31 +719,46 @@ struct TransportInner {
     options: TransportOptions,
     local_addr: SocketAddr,
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
-    outbound: DashMap<ConnectionKey, ConnectionHandle, RandomState>,
-    outbound_state: DashMap<ConnectionKey, ConnectionState, RandomState>,
-    connected_peers: DashMap<ClusterNodeName, Vec<ConnectionHandle>, RandomState>,
+    outbound: DashMap<ConnectionKey, OutboundConnection, RandomState>,
+    connected_peers:
+        DashMap<ClusterNodeName, HashMap<CancellationToken, ConnectionHandle>, RandomState>,
     requests: RequestState,
     outbound_permits: StdArc<Semaphore>,
-    shutdown: CancellationToken,
+    admission_gate: parking_lot::RwLock<()>,
+    admission_closed: CancellationToken,
+    draining: CancellationToken,
+    force_close: CancellationToken,
     tasks: TaskTracker,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct ConnectionKey {
+    peer_node_id: ClusterNodeName,
     addr: SocketAddr,
     server_name: String,
     mode: TransportMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConnectionState {
-    Connecting,
-    Connected,
-    Disconnected,
+impl ConnectionKey {
+    fn new(peer_node_id: ClusterNodeName, target: &PeerTarget) -> Self {
+        Self {
+            peer_node_id,
+            addr: target.addr,
+            server_name: target.server_name.clone(),
+            mode: target.mode,
+        }
+    }
+}
+
+struct OutboundConnection {
+    handle: ConnectionHandle,
+    cancel: CancellationToken,
 }
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("invalid transport options: {reason}")]
+    InvalidOptions { reason: &'static str },
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("tls error: {0}")]
@@ -610,6 +773,10 @@ pub enum TransportError {
     FrameTooLarge { size: usize, limit: usize },
     #[error("connection pool exhausted")]
     PoolExhausted,
+    #[error("connection setup with {peer} timed out after {timeout:?}")]
+    ConnectionSetupTimeout { peer: SocketAddr, timeout: Duration },
+    #[error("timed out after {timeout:?} waiting to queue data for {peer}")]
+    QueueAdmissionTimeout { peer: SocketAddr, timeout: Duration },
     #[error("transport is shutting down")]
     ShuttingDown,
     #[error("connection to {0} is closed")]
@@ -737,6 +904,9 @@ impl Transport {
         peer_verifier: PeerVerifier,
         options: TransportOptions,
     ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
+        if let Some(error) = options.validation_error() {
+            return Err(error);
+        }
         install_rustls_crypto_provider();
 
         let listener = TcpListener::bind(listen_addr).await?;
@@ -757,11 +927,13 @@ impl Transport {
             local_addr,
             incoming_tx,
             outbound: DashMap::default(),
-            outbound_state: DashMap::default(),
             connected_peers: DashMap::default(),
             requests: RequestState::default(),
             outbound_permits: StdArc::new(Semaphore::new(options.max_connections)),
-            shutdown: CancellationToken::new(),
+            admission_gate: parking_lot::RwLock::new(()),
+            admission_closed: CancellationToken::new(),
+            draining: CancellationToken::new(),
+            force_close: CancellationToken::new(),
             tasks: TaskTracker::new(),
         });
 
@@ -778,75 +950,107 @@ impl Transport {
         self.inner.identity.node_id()
     }
 
+    /// Queues an envelope on the connection that must authenticate as `peer_node_id`.
     pub async fn send(
         &self,
+        peer_node_id: &ClusterNodeName,
         target: SocketAddr,
         server_name: &str,
         mode: TransportMode,
         envelope: Envelope,
     ) -> Result<(), TransportError> {
-        let handle = self.connection_for(target, server_name, mode).await?;
+        let handle = self.connection_for(peer_node_id, target, server_name, mode)?;
         handle.send(envelope).await
     }
 
-    pub async fn connection_for(
+    /// Returns the single persistent driver for an expected peer and concrete target.
+    pub fn connection_for(
         &self,
+        peer_node_id: &ClusterNodeName,
         target: SocketAddr,
         server_name: &str,
         mode: TransportMode,
     ) -> Result<ConnectionHandle, TransportError> {
-        if self.inner.shutdown.is_cancelled() {
+        // Shutdown takes the write side before closing the task tracker, so every admitted driver
+        // is registered with the tracker before its bounded wait can observe an empty transport.
+        let _admission_guard = self.inner.admission_gate.read();
+        if self.inner.admission_closed.is_cancelled() {
             return Err(TransportError::ShuttingDown);
         }
 
         let key = ConnectionKey {
+            peer_node_id: peer_node_id.clone(),
             addr: target,
             server_name: server_name.to_string(),
             mode,
         };
-        if let Some(existing) = self
-            .inner
-            .outbound
-            .get(&key)
-            .map(|entry| entry.value().clone())
-        {
-            return Ok(existing);
+        match self.inner.outbound.entry(key.clone()) {
+            Entry::Occupied(existing) => Ok(existing.get().handle.clone()),
+            Entry::Vacant(entry) => {
+                let permit = self
+                    .inner
+                    .outbound_permits
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| TransportError::PoolExhausted)?;
+                let (tx, rx) = mpsc::channel(self.inner.options.send_queue_capacity);
+                let cancel = CancellationToken::new();
+                let handle = ConnectionHandle::new(
+                    target,
+                    tx,
+                    cancel.clone(),
+                    self.inner.admission_closed.clone(),
+                    self.inner.options.queue_admission_timeout,
+                );
+                let inserted = entry.insert(OutboundConnection {
+                    handle: handle.clone(),
+                    cancel: cancel.clone(),
+                });
+                drop(inserted);
+                spawn_outbound_connection(
+                    self.inner.clone(),
+                    key,
+                    handle.clone(),
+                    cancel,
+                    rx,
+                    permit,
+                );
+                Ok(handle)
+            }
         }
-
-        let permit = self
-            .inner
-            .outbound_permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| TransportError::PoolExhausted)?;
-        let (tx, rx) = mpsc::channel(self.inner.options.send_queue_capacity);
-        let handle = ConnectionHandle {
-            peer_addr: target,
-            tx,
-        };
-
-        let io_stream = connect_outbound_stream(&self.inner, &key).await?;
-
-        if let Some(existing) = self
-            .inner
-            .outbound
-            .get(&key)
-            .map(|entry| entry.value().clone())
-        {
-            return Ok(existing);
-        }
-        self.inner.outbound.insert(key.clone(), handle.clone());
-        self.inner
-            .outbound_state
-            .insert(key.clone(), ConnectionState::Connecting);
-
-        spawn_outbound_connection(self.inner.clone(), key, rx, permit, io_stream);
-
-        Ok(handle)
     }
 
     pub async fn active_outbound_connections(&self) -> usize {
         self.inner.outbound.len()
+    }
+
+    /// Reconciles the concrete addresses at which this node may dial each current peer.
+    ///
+    /// Any connection or reconnect driver for a replaced address is retired immediately. A later
+    /// completion from that driver is fenced by its cancellation identity and cannot remove or
+    /// register a replacement created for the same address.
+    pub fn replace_outbound_targets(
+        &self,
+        targets: &BTreeMap<ClusterNodeName, BTreeSet<PeerTarget>>,
+    ) {
+        let all_targets = targets
+            .iter()
+            .flat_map(|(peer_node_id, peer_targets)| {
+                peer_targets
+                    .iter()
+                    .map(|target| ConnectionKey::new(peer_node_id.clone(), target))
+            })
+            .collect::<BTreeSet<_>>();
+        let retired = self
+            .inner
+            .outbound
+            .iter()
+            .filter(|entry| !all_targets.contains(entry.key()))
+            .map(|entry| (entry.key().clone(), entry.cancel.clone()))
+            .collect::<Vec<_>>();
+        for (key, cancel) in retired {
+            retire_outbound_connection(&self.inner, &key, &cancel);
+        }
     }
 
     pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
@@ -857,27 +1061,88 @@ impl Transport {
     }
 
     pub async fn shutdown(&self) {
-        self.inner.shutdown.cancel();
+        {
+            let _admission_guard = self.inner.admission_gate.write();
+            self.inner.admission_closed.cancel();
+            self.inner.tasks.close();
+        }
         self.inner.requests.shutdown();
-        self.inner.tasks.close();
-        self.inner.tasks.wait().await;
+        self.inner.draining.cancel();
+        if timeout(
+            self.inner.options.shutdown_drain_timeout,
+            self.inner.tasks.wait(),
+        )
+        .await
+        .is_err()
+        {
+            self.inner.force_close.cancel();
+            let connections = self
+                .inner
+                .connected_peers
+                .iter()
+                .flat_map(|peer| peer.values().cloned().collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            for connection in connections {
+                connection.cancel();
+            }
+            let reconnects = self
+                .inner
+                .outbound
+                .iter()
+                .map(|entry| entry.cancel.clone())
+                .collect::<Vec<_>>();
+            for reconnect in reconnects {
+                reconnect.cancel();
+            }
+            let _ = timeout(
+                self.inner.options.connection_setup_timeout,
+                self.inner.tasks.wait(),
+            )
+            .await;
+        }
         self.inner.outbound.clear();
-        self.inner.outbound_state.clear();
         self.inner.connected_peers.clear();
+    }
+
+    fn retire_departed_connections(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
+        let connected = self
+            .inner
+            .connected_peers
+            .iter()
+            .filter(|peer| !live_nodes.contains(peer.key()))
+            .flat_map(|peer| peer.values().cloned().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for connection in connected {
+            connection.cancel();
+        }
+
+        let outbound = self
+            .inner
+            .outbound
+            .iter()
+            .filter(|entry| !live_nodes.contains(&entry.key().peer_node_id))
+            .map(|entry| (entry.key().clone(), entry.cancel.clone()))
+            .collect::<Vec<_>>();
+        for (key, cancel) in outbound {
+            retire_outbound_connection(&self.inner, &key, &cancel);
+        }
     }
 }
 
 fn spawn_accept_loop(inner: Arc<TransportInner>, listener: TcpListener) {
-    let shutdown = inner.shutdown.clone();
+    let draining = inner.draining.clone();
+    let force_close = inner.force_close.clone();
     let tasks = inner.tasks.clone();
     tasks.spawn(async move {
         loop {
             tokio::task::consume_budget().await;
             tokio::select! {
-                _ = shutdown.cancelled() => break,
+                biased;
+                _ = force_close.cancelled() => break,
+                _ = draining.cancelled() => break,
                 accepted = listener.accept() => {
                     let Ok((stream, peer_addr)) = accepted else {
-                        if !shutdown.is_cancelled() {
+                        if !draining.is_cancelled() {
                             warn!("interconnect accept failed");
                         }
                         continue;
@@ -889,332 +1154,16 @@ fn spawn_accept_loop(inner: Arc<TransportInner>, listener: TcpListener) {
                     let inner = inner.clone();
                     let tasks = inner.tasks.clone();
                     tasks.spawn(async move {
-                        match accept_inbound_stream(&inner, stream, peer_addr).await {
-                            Ok(io_stream) => {
-                                let (tx, mut rx) =
-                                    mpsc::channel(inner.options.send_queue_capacity);
-                                let handle = ConnectionHandle { peer_addr, tx };
-                                let mut pending = None;
-                                if let Err(err) = run_connection_loop(
-                                    inner,
-                                    peer_addr,
-                                    handle,
-                                    None,
-                                    &mut rx,
-                                    io_stream,
-                                    &mut pending,
-                                )
-                                .await
-                                {
-                                    debug!(?err, %peer_addr, "inbound interconnect connection closed");
-                                }
-                            }
-                            Err(err) => {
-                                warn!(?err, %peer_addr, "failed to accept interconnect connection");
-                            }
+                        if let Err(err) = run_inbound_connection(inner.clone(), stream, peer_addr).await
+                            && !inner.draining.is_cancelled()
+                        {
+                            debug!(?err, %peer_addr, "inbound interconnect connection closed");
                         }
                     });
                 }
             }
         }
     });
-}
-
-fn spawn_outbound_connection(
-    inner: Arc<TransportInner>,
-    key: ConnectionKey,
-    rx: mpsc::Receiver<Envelope>,
-    permit: OwnedSemaphorePermit,
-    initial_stream: BoxedIo,
-) {
-    let shutdown = inner.shutdown.clone();
-    let tasks = inner.tasks.clone();
-    tasks.spawn(async move {
-        run_outbound_connection(inner.clone(), key.clone(), rx, shutdown, initial_stream).await;
-        inner.outbound.remove(&key);
-        inner.outbound_state.remove(&key);
-        drop(permit);
-    });
-}
-
-async fn run_outbound_connection(
-    inner: Arc<TransportInner>,
-    key: ConnectionKey,
-    mut rx: mpsc::Receiver<Envelope>,
-    shutdown: CancellationToken,
-    initial_stream: BoxedIo,
-) {
-    let mut pending = None;
-    let mut current_stream = Some(initial_stream);
-
-    loop {
-        tokio::task::consume_budget().await;
-        if shutdown.is_cancelled() {
-            return;
-        }
-
-        let io_stream = if let Some(stream) = current_stream.take() {
-            stream
-        } else {
-            match connect_outbound_stream(&inner, &key).await {
-                Ok(next_stream) => {
-                    inner
-                        .outbound_state
-                        .insert(key.clone(), ConnectionState::Connecting);
-                    next_stream
-                }
-                Err(connect_err) => {
-                    inner
-                        .outbound_state
-                        .insert(key.clone(), ConnectionState::Disconnected);
-                    debug!(?connect_err, target = %key.addr, "outbound interconnect reconnect failed");
-                    sleep(inner.options.reconnect_backoff).await;
-                    continue;
-                }
-            }
-        };
-
-        let handle = ConnectionHandle {
-            peer_addr: key.addr,
-            tx: {
-                let Some(existing) = inner.outbound.get(&key) else {
-                    return;
-                };
-                existing.tx.clone()
-            },
-        };
-
-        if let Err(err) = run_connection_loop(
-            inner.clone(),
-            key.addr,
-            handle,
-            Some(key.clone()),
-            &mut rx,
-            io_stream,
-            &mut pending,
-        )
-        .await
-        {
-            inner
-                .outbound_state
-                .insert(key.clone(), ConnectionState::Disconnected);
-            debug!(?err, target = %key.addr, "outbound interconnect connection closed");
-            if shutdown.is_cancelled() {
-                return;
-            }
-            sleep(inner.options.reconnect_backoff).await;
-        } else {
-            return;
-        }
-    }
-}
-
-type BoxedIo = Box<dyn AsyncReadWrite>;
-
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
-
-async fn accept_inbound_stream(
-    inner: &Arc<TransportInner>,
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-) -> Result<BoxedIo, TransportError> {
-    match inner.mode {
-        TransportMode::Plain => Ok(Box::new(stream)),
-        TransportMode::Tls => {
-            let acceptor = TlsAcceptor::from(
-                inner
-                    .server_config
-                    .clone()
-                    .ok_or(TransportError::MissingTlsConfig)?,
-            );
-            acceptor
-                .accept(stream)
-                .await
-                .map(|stream| -> BoxedIo { Box::new(stream) })
-                .map_err(|err| {
-                    warn!(?err, %peer_addr, "failed to accept interconnect tls connection");
-                    TransportError::Io(io::Error::other(err.to_string()))
-                })
-        }
-    }
-}
-
-async fn connect_outbound_stream(
-    inner: &Arc<TransportInner>,
-    key: &ConnectionKey,
-) -> Result<BoxedIo, TransportError> {
-    let tcp = TcpStream::connect(key.addr).await.map_err(|err| {
-        debug!(?err, target = %key.addr, "outbound interconnect connect failed");
-        TransportError::Io(err)
-    })?;
-    configure_socket(&tcp)?;
-
-    match key.mode {
-        TransportMode::Plain => Ok(Box::new(tcp)),
-        TransportMode::Tls => {
-            let server_name = ServerName::try_from(key.server_name.clone())
-                .map_err(|_| TransportError::InvalidServerName(key.server_name.clone()))?;
-            let connector = TlsConnector::from(
-                inner
-                    .client_config
-                    .clone()
-                    .ok_or(TransportError::MissingTlsConfig)?,
-            );
-            connector
-                .connect(server_name, tcp)
-                .await
-                .map(|stream| -> BoxedIo { Box::new(stream) })
-                .map_err(|err| {
-                    debug!(?err, target = %key.addr, "outbound interconnect tls connect failed");
-                    TransportError::Io(io::Error::other(err.to_string()))
-                })
-        }
-    }
-}
-
-async fn run_connection_loop(
-    inner: Arc<TransportInner>,
-    peer_addr: SocketAddr,
-    reply_handle: ConnectionHandle,
-    outbound_key: Option<ConnectionKey>,
-    rx: &mut mpsc::Receiver<Envelope>,
-    io_stream: BoxedIo,
-    retry_payload: &mut Option<Envelope>,
-) -> Result<(), TransportError> {
-    let mut pending = retry_payload.take().map(WireEnvelope::Payload);
-    let result = async {
-        let (mut reader, mut writer) = tokio::io::split(io_stream);
-        let mut keepalive = interval(PING_INTERVAL);
-        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_ping_at = Instant::now();
-        write_wire_envelope(
-            &mut writer,
-            &WireEnvelope::Introduction(inner.identity.signed_introduction()),
-        )
-        .await?;
-        let peer_node_id = read_and_verify_introduction(
-            &mut reader,
-            inner.options.max_frame_bytes,
-            &inner.peer_verifier,
-        )
-        .await?;
-        if let Some(outbound_key) = outbound_key.as_ref() {
-            inner
-                .outbound_state
-                .insert(outbound_key.clone(), ConnectionState::Connected);
-        }
-        register_connected_peer(&inner, &peer_node_id, &reply_handle);
-
-        let result = async {
-            loop {
-                tokio::task::consume_budget().await;
-                let ping_deadline = last_ping_at + PING_TIMEOUT;
-                tokio::select! {
-                    biased;
-                    _ = inner.shutdown.cancelled() => break Ok(()),
-                    result = read_wire_envelope(&mut reader, inner.options.max_frame_bytes) => {
-                        match result? {
-                            WireEnvelope::Introduction(_) => {
-                                break Err(TransportError::InvalidHandshake(
-                                    "received duplicate introduction".to_string(),
-                                ));
-                            }
-                            WireEnvelope::Ping => {
-                                last_ping_at = Instant::now();
-                            }
-                            WireEnvelope::Payload(envelope) => {
-                                last_ping_at = Instant::now();
-                                let envelope = match envelope {
-                                    Envelope::Control(control) => {
-                                        let Some(control) = inner.requests.route_control(
-                                            &inner,
-                                            &peer_node_id,
-                                            &reply_handle,
-                                            control,
-                                        ) else {
-                                            continue;
-                                        };
-                                        Envelope::Control(control)
-                                    }
-                                    envelope => envelope,
-                                };
-                                inner
-                                    .incoming_tx
-                                    .send(ReceivedEnvelope {
-                                        peer_addr,
-                                        peer_node_id: peer_node_id.clone(),
-                                        envelope,
-                                        reply: reply_handle.clone(),
-                                    })
-                                    .await
-                                    .map_err(|_| TransportError::ShuttingDown)?;
-                            }
-                        }
-                    }
-                    _ = sleep_until(ping_deadline) => {
-                        break Err(TransportError::Closed(peer_addr));
-                    }
-                    _ = keepalive.tick(), if pending.is_none() => {
-                        pending = Some(WireEnvelope::Ping);
-                    }
-                    maybe_envelope = rx.recv(), if pending.is_none() => {
-                        match maybe_envelope {
-                            Some(envelope) => pending = Some(WireEnvelope::Payload(envelope)),
-                            None => break Ok(()),
-                        }
-                    }
-                    result = async {
-                        let Some(envelope) = pending.as_ref() else {
-                            return Ok(());
-                        };
-                        write_wire_envelope(&mut writer, envelope).await
-                    }, if pending.is_some() => {
-                        result?;
-                        pending = None;
-                    }
-                }
-            }
-        }
-        .await;
-        unregister_connected_peer(&inner, &peer_node_id, &reply_handle);
-        result
-    }
-    .await;
-    if let Some(WireEnvelope::Payload(payload)) = pending {
-        *retry_payload = Some(payload);
-    }
-    result
-}
-
-fn register_connected_peer(
-    inner: &TransportInner,
-    peer_node_id: &ClusterNodeName,
-    connection: &ConnectionHandle,
-) {
-    inner
-        .connected_peers
-        .entry(peer_node_id.clone())
-        .and_modify(|connections| connections.push(connection.clone()))
-        .or_insert_with(|| vec![connection.clone()]);
-    inner.requests.connection_changed();
-}
-
-fn unregister_connected_peer(
-    inner: &TransportInner,
-    peer_node_id: &ClusterNodeName,
-    connection: &ConnectionHandle,
-) {
-    let Some(mut connections) = inner.connected_peers.get_mut(peer_node_id) else {
-        return;
-    };
-    connections.retain(|candidate| !candidate.tx.same_channel(&connection.tx));
-    drop(connections);
-    inner
-        .connected_peers
-        .remove_if(peer_node_id, |_, connections| connections.is_empty());
-    inner.requests.connection_changed();
 }
 
 fn configure_socket(stream: &TcpStream) -> io::Result<()> {
@@ -2002,14 +1951,21 @@ fn map_pem_error(err: PemError) -> TlsConfigError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, io::ErrorKind, path::PathBuf, process::Command};
+    use std::{
+        collections::BTreeSet, io::ErrorKind, path::PathBuf, process::Command, sync::Arc as StdArc,
+    };
 
     use ahash::HashMap;
     use error_stack::Report;
     use nervix_models::{DomainName, RelayName};
-    use tokio::{sync::Notify, time::timeout};
+    use tokio::{
+        sync::Notify,
+        time::{sleep, timeout},
+    };
 
     use super::*;
+
+    mod connection_lifetime;
 
     fn tls_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2054,6 +2010,33 @@ mod tests {
                 .collect::<HashMap<_, _>>(),
         );
         PeerVerifier::new(move |node_id| keys.get(node_id).copied())
+    }
+
+    fn test_inner(
+        identity: LocalIdentity,
+        peer_verifier: PeerVerifier,
+        incoming_tx: mpsc::Sender<ReceivedEnvelope>,
+        max_connections: usize,
+    ) -> Arc<TransportInner> {
+        Arc::new(TransportInner {
+            mode: TransportMode::Plain,
+            client_config: None,
+            server_config: None,
+            identity,
+            peer_verifier,
+            options: TransportOptions::default(),
+            local_addr: "127.0.0.1:0".parse().expect("valid test address"),
+            incoming_tx,
+            outbound: DashMap::default(),
+            connected_peers: DashMap::default(),
+            requests: RequestState::default(),
+            outbound_permits: StdArc::new(Semaphore::new(max_connections)),
+            admission_gate: parking_lot::RwLock::new(()),
+            admission_closed: CancellationToken::new(),
+            draining: CancellationToken::new(),
+            force_close: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+        })
     }
 
     async fn recv_one(rx: &mut mpsc::Receiver<ReceivedEnvelope>) -> ReceivedEnvelope {
@@ -2162,8 +2145,12 @@ mod tests {
         .expect("bind transport b");
 
         transport_a
-            .connection_for(transport_b.local_addr(), "localhost", TransportMode::Plain)
-            .await
+            .connection_for(
+                &node_b,
+                transport_b.local_addr(),
+                "localhost",
+                TransportMode::Plain,
+            )
             .expect("connect transports");
         timeout(Duration::from_secs(5), async {
             loop {
@@ -2383,6 +2370,7 @@ mod tests {
 
         transport_a
             .send(
+                transport_b.node_id(),
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
@@ -2450,6 +2438,7 @@ mod tests {
         for _ in 1..=2 {
             transport_a
                 .send(
+                    transport_b.node_id(),
                     transport_b.local_addr(),
                     "localhost",
                     TransportMode::Tls,
@@ -2495,6 +2484,7 @@ mod tests {
 
         transport_a
             .send(
+                transport_b.node_id(),
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
@@ -2504,20 +2494,14 @@ mod tests {
             .expect("initial send");
         let _ = recv_one(&mut incoming_b).await;
 
-        let key = ConnectionKey {
-            addr: transport_b.local_addr(),
-            server_name: "localhost".to_string(),
-            mode: TransportMode::Tls,
-        };
-        transport_a
-            .inner
-            .outbound_state
-            .insert(key.clone(), ConnectionState::Disconnected);
-
         let handle = transport_a
-            .connection_for(transport_b.local_addr(), "localhost", TransportMode::Tls)
-            .await
-            .expect("disconnected handle should still be reusable");
+            .connection_for(
+                transport_b.node_id(),
+                transport_b.local_addr(),
+                "localhost",
+                TransportMode::Tls,
+            )
+            .expect("outbound handle should be reusable");
         handle
             .send(Envelope::RelayPayload(dummy_stream_payload("metrics")))
             .await
@@ -2555,6 +2539,7 @@ mod tests {
 
         transport_a
             .send(
+                transport_b.node_id(),
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
@@ -2626,6 +2611,7 @@ mod tests {
 
         transport_a
             .send(
+                transport_b.node_id(),
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
@@ -2636,6 +2622,7 @@ mod tests {
 
         let err = transport_a
             .send(
+                transport_c.node_id(),
                 transport_c.local_addr(),
                 "localhost",
                 TransportMode::Tls,
@@ -2682,6 +2669,7 @@ mod tests {
 
         transport_a
             .send(
+                identity_b.node_id(),
                 target,
                 "localhost",
                 TransportMode::Tls,
@@ -2702,6 +2690,7 @@ mod tests {
         transport_b.shutdown().await;
 
         let send_fut = transport_a.send(
+            identity_b.node_id(),
             target,
             "localhost",
             TransportMode::Tls,
@@ -2739,23 +2728,7 @@ mod tests {
         let identity_a = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
         let identity_b = test_identity(&ClusterNodeName::parse("node-b").expect("valid name"));
         let (incoming_tx, _incoming_rx) = mpsc::channel(1);
-        let inner = Arc::new(TransportInner {
-            mode: TransportMode::Plain,
-            client_config: None,
-            server_config: None,
-            identity: identity_a,
-            peer_verifier: verifier_for(&[&identity_b]),
-            options: TransportOptions::default(),
-            local_addr: "127.0.0.1:0".parse().unwrap(),
-            incoming_tx,
-            outbound: DashMap::default(),
-            outbound_state: DashMap::default(),
-            connected_peers: DashMap::default(),
-            requests: RequestState::default(),
-            outbound_permits: StdArc::new(Semaphore::new(1)),
-            shutdown: CancellationToken::new(),
-            tasks: TaskTracker::new(),
-        });
+        let inner = test_inner(identity_a, verifier_for(&[&identity_b]), incoming_tx, 1);
         let (client_io, mut peer_io) = tokio::io::duplex(64 * 1024);
         let peer_task = tokio::spawn(async move {
             let introduction = read_wire_envelope(&mut peer_io, DEFAULT_MAX_FRAME_BYTES)
@@ -2771,21 +2744,28 @@ mod tests {
         });
         let peer_addr = "127.0.0.1:12345".parse().unwrap();
         let (reply_tx, _reply_rx) = mpsc::channel(1);
-        let reply_handle = ConnectionHandle {
+        let cancel = CancellationToken::new();
+        let reply_handle = ConnectionHandle::new(
             peer_addr,
-            tx: reply_tx,
-        };
+            reply_tx,
+            cancel.clone(),
+            inner.admission_closed.clone(),
+            inner.options.queue_admission_timeout,
+        );
         let (_send_tx, mut send_rx) = mpsc::channel(1);
         let expected = Envelope::RelayPayload(dummy_stream_payload("retry"));
         let mut retry_payload = Some(expected.clone());
+        let established = exchange_introductions(&inner, Box::new(client_io))
+            .await
+            .expect("connection handshake should complete");
 
-        run_connection_loop(
+        let _ = drive_connection(
             inner.clone(),
             peer_addr,
             reply_handle,
-            None,
+            established,
+            &cancel,
             &mut send_rx,
-            Box::new(client_io),
             &mut retry_payload,
         )
         .await
@@ -2837,6 +2817,7 @@ mod tests {
 
         transport_a
             .send(
+                transport_b.node_id(),
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
@@ -2872,6 +2853,7 @@ mod tests {
         .expect("bind transport a");
 
         let key = ConnectionKey {
+            peer_node_id: identity_a.node_id().clone(),
             addr: transport_a.local_addr(),
             server_name: "localhost".to_string(),
             mode: TransportMode::Tls,
@@ -2886,11 +2868,13 @@ mod tests {
             local_addr: "127.0.0.1:0".parse().unwrap(),
             incoming_tx: mpsc::channel(1).0,
             outbound: DashMap::default(),
-            outbound_state: DashMap::default(),
             connected_peers: DashMap::default(),
             requests: RequestState::default(),
             outbound_permits: StdArc::new(Semaphore::new(1)),
-            shutdown: CancellationToken::new(),
+            admission_gate: parking_lot::RwLock::new(()),
+            admission_closed: CancellationToken::new(),
+            draining: CancellationToken::new(),
+            force_close: CancellationToken::new(),
             tasks: TaskTracker::new(),
         });
         let tls_stream = connect_outbound_stream(&inner, &key)

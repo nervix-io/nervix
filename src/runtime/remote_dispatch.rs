@@ -215,8 +215,7 @@ impl RemoteDispatcher {
                 };
                 let connection = self
                     .interconnect
-                    .connection_for(target_addr, "localhost", mode)
-                    .await
+                    .connection_for(node_id, target_addr, "localhost", mode)
                     .map_err(|error| {
                         format!("failed to connect interconnect for '{node_id}': {error}")
                     })?;
