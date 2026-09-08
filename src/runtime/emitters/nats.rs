@@ -52,9 +52,7 @@ impl NatsEmitter {
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {
         let client = Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
+            client_config_entries(resolved, client.config.as_slice()),
             retry_policy,
         )
         .await?;

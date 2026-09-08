@@ -14,10 +14,10 @@ fn main() {
     if let Err(error) = fs::create_dir_all(&generated_dir) {
         panic!("failed to create the FlatBuffers output directory: {error}");
     }
-    let compiler = env::var_os("FLATC_PATH").map_or_else(
-        flatc_rust::Flatc::from_env_path,
-        flatc_rust::Flatc::from_path,
-    );
+    let compiler = match env::var_os("FLATC_PATH") {
+        Some(path) => flatc_rust::Flatc::from_path(path),
+        None => flatc_rust::Flatc::from_env_path(),
+    };
     let result = match compiler.check() {
         Ok(()) => compiler.run(flatc_rust::Args {
             inputs: &[SCHEMA.as_ref()],

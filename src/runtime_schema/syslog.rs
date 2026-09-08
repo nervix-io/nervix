@@ -74,10 +74,13 @@ pub(super) fn decode(
     payload: &[u8],
     builder: &mut RuntimeRecordBatchBuilder,
 ) -> Result<(), CodecError> {
-    let end = payload
+    let last_kept = payload
         .iter()
-        .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'))
-        .map_or(0, |index| index + 1);
+        .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'));
+    let end = match last_kept {
+        Some(index) => index + 1,
+        None => 0,
+    };
     let payload = &payload[..end];
     if payload.is_empty() {
         return Err(decode_error(
@@ -132,10 +135,10 @@ pub(super) fn encode_row(row: &ArrowCodecRow<'_>, payload: &mut Vec<u8>) -> Resu
         }
     }
 
-    let timestamp = optional_datetime(row, "timestamp")?
-        .as_ref()
-        .map(format_rfc5424_timestamp)
-        .unwrap_or_else(|| "-".to_string());
+    let timestamp = match optional_datetime(row, "timestamp")?.as_ref() {
+        Some(timestamp) => format_rfc5424_timestamp(timestamp),
+        None => "-".to_string(),
+    };
     let priority = u16::from(facility) * 8 + u16::from(severity);
     use std::io::Write as _;
     write!(
@@ -349,11 +352,10 @@ fn parse_rfc3164<'a>(
             message: body,
         });
     };
-    let (hostname, remainder) = remainder
-        .split_once(' ')
-        .map_or((remainder, ""), |(hostname, remainder)| {
-            (hostname, remainder)
-        });
+    let (hostname, remainder) = match remainder.split_once(' ') {
+        Some((hostname, remainder)) => (hostname, remainder),
+        None => (remainder, ""),
+    };
     let hostname = if hostname.is_empty() {
         None
     } else {
@@ -723,11 +725,10 @@ fn required_u8(row: &ArrowCodecRow<'_>, name: &str) -> Result<u8, CodecError> {
     if array.is_null(row.row_index) {
         return Err(encode_field_error(row, name, "required field is null"));
     }
-    array
-        .as_any()
-        .downcast_ref::<UInt8Array>()
-        .map(|array| array.value(row.row_index))
-        .ok_or_else(|| encode_field_error(row, name, "field is not a U8 column"))
+    let Some(array) = array.as_any().downcast_ref::<UInt8Array>() else {
+        return Err(encode_field_error(row, name, "field is not a U8 column"));
+    };
+    Ok(array.value(row.row_index))
 }
 
 fn required_string<'a>(row: &'a ArrowCodecRow<'_>, name: &str) -> Result<&'a str, CodecError> {
@@ -754,11 +755,14 @@ fn optional_string<'a>(
     if array.is_null(row.row_index) {
         return Ok(None);
     }
-    array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .map(|array| Some(array.value(row.row_index)))
-        .ok_or_else(|| encode_field_error(row, name, "field is not a STRING column"))
+    let Some(array) = array.as_any().downcast_ref::<StringArray>() else {
+        return Err(encode_field_error(
+            row,
+            name,
+            "field is not a STRING column",
+        ));
+    };
+    Ok(Some(array.value(row.row_index)))
 }
 
 fn optional_datetime(
@@ -772,13 +776,16 @@ fn optional_datetime(
     if array.is_null(row.row_index) {
         return Ok(None);
     }
-    array
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .map(|array| {
-            Some(DateTime::from_timestamp_nanos(array.value(row.row_index)).fixed_offset())
-        })
-        .ok_or_else(|| encode_field_error(row, name, "field is not a DATETIME column"))
+    let Some(array) = array.as_any().downcast_ref::<TimestampNanosecondArray>() else {
+        return Err(encode_field_error(
+            row,
+            name,
+            "field is not a DATETIME column",
+        ));
+    };
+    Ok(Some(
+        DateTime::from_timestamp_nanos(array.value(row.row_index)).fixed_offset(),
+    ))
 }
 
 fn header_value<'a>(

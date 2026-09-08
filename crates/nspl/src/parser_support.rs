@@ -1932,10 +1932,10 @@ fn format_parse_error(err: &ParseError<'_>) -> String {
                 expected.join(" | ")
             };
 
-            let found_text = found
-                .as_deref()
-                .map(format_found_token)
-                .unwrap_or_else(|| "end of input".to_string());
+            let found_text = match found.as_deref() {
+                Some(found) => format_found_token(found),
+                None => "end of input".to_string(),
+            };
 
             format!("expected {expected_text}, found {found_text}")
         }
@@ -2052,10 +2052,10 @@ fn expression_token_to_source(token: &Token) -> String {
 pub fn expression_error_message(error: ParseFromSourceError) -> String {
     match error {
         ParseFromSourceError::Lex { diagnostics, .. }
-        | ParseFromSourceError::Parse { diagnostics, .. } => diagnostics
-            .first()
-            .map(|diagnostic| diagnostic.message.clone())
-            .unwrap_or_else(|| "invalid expression".to_string()),
+        | ParseFromSourceError::Parse { diagnostics, .. } => match diagnostics.first() {
+            Some(diagnostic) => diagnostic.message.clone(),
+            None => "invalid expression".to_string(),
+        },
     }
 }
 

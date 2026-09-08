@@ -20,10 +20,13 @@ pub(super) fn checked_add_duration_to_timestamp(base: Timestamp, duration: Durat
     // Saturation is the meaning here: a schedule further out than the nanosecond range is already
     // further out than any timestamp this clock will reach.
     let nanos = i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX);
-    base.into_datetime()
+    match base
+        .into_datetime()
         .checked_add_signed(TimeDelta::nanoseconds(nanos))
-        .map(Timestamp::from)
-        .unwrap_or(base)
+    {
+        Some(advanced) => Timestamp::from(advanced),
+        None => base,
+    }
 }
 
 pub(super) fn advance_scheduled_timestamp(
@@ -168,11 +171,13 @@ pub(super) fn current_domain_logical_time(
         .round()
         .checked_approx_into()
         .unwrap_or(i64::MAX);
-    Ok(anchor_logical
+    let advanced = anchor_logical
         .into_datetime()
-        .checked_add_signed(TimeDelta::nanoseconds(logical_elapsed_nanos))
-        .map(Timestamp::from)
-        .unwrap_or(anchor_logical))
+        .checked_add_signed(TimeDelta::nanoseconds(logical_elapsed_nanos));
+    match advanced {
+        Some(advanced) => Ok(Timestamp::from(advanced)),
+        None => Ok(anchor_logical),
+    }
 }
 
 pub(super) fn wall_duration_until_logical_target(

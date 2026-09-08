@@ -168,11 +168,11 @@ impl<'de> Deserialize<'de> for LoadDuration {
             where
                 E: de::Error,
             {
-                u64::try_from(value)
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .map(LoadDuration::Seconds)
-                    .ok_or_else(|| E::invalid_value(de::Unexpected::Signed(value), &self))
+                let seconds = match u64::try_from(value) {
+                    Ok(seconds) if seconds > 0 => seconds,
+                    _ => return Err(E::invalid_value(de::Unexpected::Signed(value), &self)),
+                };
+                Ok(LoadDuration::Seconds(seconds))
             }
         }
 

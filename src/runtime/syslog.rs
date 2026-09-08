@@ -206,9 +206,10 @@ impl SyslogClientConfig {
         entries: &[nervix_models::ClientConfigEntry],
         key: &'static str,
     ) -> Result<String, SyslogConfigError> {
-        Self::optional_value(entries, key)
-            .map(str::to_string)
-            .ok_or(SyslogConfigError::MissingKey { key })
+        match Self::optional_value(entries, key) {
+            Some(value) => Ok(value.to_string()),
+            None => Err(SyslogConfigError::MissingKey { key }),
+        }
     }
 
     fn optional_value<'a>(

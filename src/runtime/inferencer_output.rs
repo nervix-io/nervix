@@ -145,18 +145,14 @@ pub(super) async fn flush_branch_inferencer_output(
         }
     };
 
-    let execution_mode = inputs
-        .first()
-        .map(|mapping| &mapping.schema)
-        .or_else(|| output_schema.first().map(|declaration| &declaration.schema))
-        .map(|schema| {
-            if schema.batch_axis().is_some() {
-                InferencerExecutionMode::Batched
-            } else {
-                InferencerExecutionMode::PerMessage
-            }
-        })
-        .unwrap_or(InferencerExecutionMode::PerMessage);
+    let declared_schema = match inputs.first() {
+        Some(mapping) => Some(&mapping.schema),
+        None => output_schema.first().map(|declaration| &declaration.schema),
+    };
+    let execution_mode = match declared_schema {
+        Some(schema) if schema.batch_axis().is_some() => InferencerExecutionMode::Batched,
+        _ => InferencerExecutionMode::PerMessage,
+    };
     let Some(session) = session.as_ref() else {
         branch.runtime.handle_internal_processor_error_for_acks(
             &branch.domain,

@@ -740,9 +740,10 @@ fn string_library() -> impl roto::Registerable {
             }
 
             fn otherwise_s(chain: Val<StringWhen>, fallback: RotoString) -> Val<StringColumn> {
-                let expected_rows = chain.0.arms.first().map_or(row_count(), |(condition, _)| {
-                    condition.0.0.len()
-                });
+                let expected_rows = match chain.0.arms.first() {
+                    Some((condition, _)) => condition.0.0.len(),
+                    None => row_count(),
+                };
                 let conditions = chain.0.arms.iter().map(|(condition, value)| {
                     let condition = condition.0.0.as_any().downcast_ref::<BooleanArray>()
                         .verified("the bridge builds this column wrapper only around the matching Arrow array");
@@ -1034,17 +1035,18 @@ impl CompiledUdf {
                 "the caller installs the call state before entering the guest and takes it here",
             )
         });
-        let output = call.map_err(|panic| RuntimeError::InjectedFunctionFailed {
-            function: self.model.name.to_string(),
-            message: panic.downcast_ref::<&str>().map_or_else(
-                || {
-                    panic
-                        .downcast_ref::<String>()
-                        .map(|message| format!("Roto execution trapped: {message}"))
-                        .unwrap_or_else(|| "Roto execution trapped".to_string())
-                },
-                |message| format!("Roto execution trapped: {message}"),
-            ),
+        let output = call.map_err(|panic| {
+            let message = if let Some(message) = panic.downcast_ref::<&str>() {
+                format!("Roto execution trapped: {message}")
+            } else if let Some(message) = panic.downcast_ref::<String>() {
+                format!("Roto execution trapped: {message}")
+            } else {
+                "Roto execution trapped".to_string()
+            };
+            RuntimeError::InjectedFunctionFailed {
+                function: self.model.name.to_string(),
+                message,
+            }
         })?;
         if started.elapsed() > self.watchdog {
             return Err(RuntimeError::InjectedFunctionFailed {
@@ -1420,17 +1422,15 @@ pub fn arrow_data_type(ty: &ParseAsType) -> DataType {
 fn typed_array_from_ref(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
     macro_rules! downcast {
         ($array_ty:ty, $variant:ident) => {
-            array
-                .as_any()
-                .downcast_ref::<$array_ty>()
-                .cloned()
-                .map(TypedArray::$variant)
-                .ok_or_else(|| RuntimeError::InvalidBatch {
+            match array.as_any().downcast_ref::<$array_ty>() {
+                Some(typed) => Ok(TypedArray::$variant(typed.clone())),
+                None => Err(RuntimeError::InvalidBatch {
                     message: format!(
                         "Arrow array has invalid physical type for {:?}",
                         array.data_type()
                     ),
-                })
+                }),
+            }
         };
     }
     match array.data_type() {

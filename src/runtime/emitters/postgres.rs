@@ -42,10 +42,10 @@ impl PostgresWriteError {
             Self::Execute(error) => error.as_db_error().map(|error| error.code().code()),
             _ => None,
         };
-        code.map_or_else(
-            || "Postgres rejected record".to_string(),
-            |code| format!("Postgres rejected record with SQLSTATE {code}"),
-        )
+        match code {
+            Some(code) => format!("Postgres rejected record with SQLSTATE {code}"),
+            None => "Postgres rejected record".to_string(),
+        }
     }
 
     fn into_report(self) -> Report<EmitterRuntimeError> {
@@ -54,10 +54,10 @@ impl PostgresWriteError {
                 Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
             }
             Self::Execute(error) => {
-                let code = error
-                    .as_db_error()
-                    .map(|error| error.code().code())
-                    .unwrap_or("unknown");
+                let code = match error.as_db_error() {
+                    Some(error) => error.code().code(),
+                    None => "unknown",
+                };
                 Report::new(EmitterRuntimeError::PublishBatch)
                     .attach_printable(format!("Postgres request failed with SQLSTATE {code}"))
             }
@@ -80,11 +80,10 @@ impl PostgresEmitter {
         values: &[PostgresValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let client = match Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
+        let client = match Self::client_from_config(client_config_entries(
+            resolved,
+            client.config.as_slice(),
+        ))
         .await
         {
             Ok(client) => Some(client),

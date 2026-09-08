@@ -285,15 +285,15 @@ impl Runtime {
         if reassignments.is_empty() {
             return Ok(());
         }
-        let shutdown = self
-            .inner
-            .executions
-            .get(domain)
-            .map(|execution| execution.shutdown.clone())
-            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: "domain execution is unavailable for schedule reassignment".to_string(),
-            })?;
+        let shutdown = match self.inner.executions.get(domain) {
+            Some(execution) => execution.shutdown.clone(),
+            None => {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: "domain execution is unavailable for schedule reassignment".to_string(),
+                });
+            }
+        };
         let mut relay_states_moved = false;
         for entity in reassignments {
             tokio::task::consume_budget().await;
@@ -909,23 +909,20 @@ impl Runtime {
                             .relays()
                             .iter()
                             .map(|input_relay| {
-                                execution
-                                    .relay_services
-                                    .get(input_relay)
-                                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                let Some(services) = execution.relay_services.get(input_relay)
+                                else {
+                                    return Err(RuntimeError::BuildDomainExecution {
                                         domain: domain.as_str().to_string(),
                                         reason: format!(
                                             "missing relay services for swapped emitter input '{}'",
                                             input_relay.as_str()
                                         ),
-                                    })
-                                    .map(|services| {
-                                        (
-                                            input_relay.clone(),
-                                            services
-                                                .add_local_runtime_consumer(desired_emitter.mode),
-                                        )
-                                    })
+                                    });
+                                };
+                                Ok((
+                                    input_relay.clone(),
+                                    services.add_local_runtime_consumer(desired_emitter.mode),
+                                ))
                             })
                             .collect::<Result<Vec<_>, RuntimeError>>()?;
                         let deps = self.emitter_task_deps(
@@ -1136,24 +1133,19 @@ impl Runtime {
                             .relays()
                             .iter()
                             .map(|relay| {
-                                execution
-                                    .relay_services
-                                    .get(relay)
-                                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                let Some(services) = execution.relay_services.get(relay) else {
+                                    return Err(RuntimeError::BuildDomainExecution {
                                         domain: domain.as_str().to_string(),
                                         reason: format!(
                                             "missing reingestor input relay services '{}'",
                                             relay.as_str()
                                         ),
-                                    })
-                                    .map(|services| {
-                                        (
-                                            relay.clone(),
-                                            services.add_local_runtime_consumer(
-                                                desired_reingestor.mode,
-                                            ),
-                                        )
-                                    })
+                                    });
+                                };
+                                Ok((
+                                    relay.clone(),
+                                    services.add_local_runtime_consumer(desired_reingestor.mode),
+                                ))
                             })
                             .collect::<Result<Vec<_>, RuntimeError>>()?
                     };

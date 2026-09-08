@@ -110,10 +110,14 @@ impl CompiledProgramWithMaterializedInterest {
         fallback_operation: MessageErrorOperation,
     ) -> StructuredMessageError {
         let site = self.error_sites.get(&span);
+        let operation = match site {
+            Some(site) => site.operation,
+            None => fallback_operation,
+        };
         structured_message_error(
             MessageErrorCode::Evaluation,
             reason,
-            site.map_or(fallback_operation, |site| site.operation),
+            operation,
             site.and_then(|site| site.operation_index),
             site.map(|site| site.fields.iter().cloned())
                 .into_iter()
@@ -163,6 +167,15 @@ impl RuntimeVmCompileContext<'_> {
 
     pub(super) fn compile_options(&self, options: VmCompileOptions) -> VmCompileOptions {
         runtime_udf_compile_options(self.udfs, options)
+    }
+}
+
+/// The signatures a compile resolves calls against: the domain's when it has a UDF executor, and
+/// none when it has not.
+pub(super) fn runtime_udf_signatures(udfs: Option<&UdfExecutor>) -> VmUdfSignatures {
+    match udfs {
+        Some(udfs) => udfs.signatures().clone(),
+        None => VmUdfSignatures::default(),
     }
 }
 
@@ -1506,9 +1519,7 @@ pub(crate) fn compile_key_projection_program(
         )
     })?;
     let bindings = vec![VmCompileBinding::writable("input", input_schema.clone())];
-    let signatures = udfs
-        .map(|udfs| udfs.signatures().clone())
-        .unwrap_or_default();
+    let signatures = runtime_udf_signatures(udfs);
     let key_types =
         infer_vm_set_expr_types_for_bindings_with_udfs(&parsed, bindings.clone(), signatures)
             .map_err(|error| {
@@ -1588,8 +1599,7 @@ pub(super) async fn evaluate_constant_expression_vm(
     let inferred = infer_vm_set_expr_types_for_bindings_with_udfs(
         &parsed,
         infer_bindings,
-        udfs.map(|executor| executor.signatures().clone())
-            .unwrap_or_default(),
+        runtime_udf_signatures(udfs),
     )
     .map_err(|error| {
         format!(
@@ -1926,14 +1936,16 @@ pub(super) fn compile_processor_output_program(
     } else {
         None
     };
-    let available_lookups = context
+    let available_lookups = match context
         .branch
         .runtime
         .inner
         .executions
         .get(&context.branch.domain)
-        .map(|execution| execution.lookups.clone())
-        .unwrap_or_default();
+    {
+        Some(execution) => execution.lookups.clone(),
+        None => HashMap::default(),
+    };
     let udfs = context
         .branch
         .runtime

@@ -332,11 +332,13 @@ impl SessionServiceImpl {
             .zip(&owners)
             .map(|(member, owner)| {
                 let moves = *owner != relocation.destination;
-                let assignment = planned
-                    .as_ref()
-                    .filter(|_| moves)
-                    .and_then(|planned| planned.nodes.get(&member.runtime_node))
-                    .or_else(|| current.nodes.get(&member.runtime_node));
+                let mut assignment = None;
+                if moves && let Some(planned) = planned.as_ref() {
+                    assignment = planned.nodes.get(&member.runtime_node);
+                }
+                if assignment.is_none() {
+                    assignment = current.nodes.get(&member.runtime_node);
+                }
                 RelocationPlanMember {
                     runtime_node: member.runtime_node.clone(),
                     group: member.group,
@@ -344,9 +346,10 @@ impl SessionServiceImpl {
                     reason: member.reason,
                     owner: owner.clone(),
                     moves,
-                    replicas: assignment
-                        .map(|node| node.replica_nodes().into_iter().cloned().collect())
-                        .unwrap_or_default(),
+                    replicas: match assignment {
+                        Some(node) => node.replica_nodes().into_iter().cloned().collect(),
+                        None => Vec::new(),
+                    },
                     promoted_replica: moves
                         && current
                             .nodes

@@ -28,9 +28,7 @@ impl PulsarEmitter {
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
         let producer = Self::producer_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
+            client_config_entries(resolved, client.config.as_slice()),
             topic.as_str(),
         )
         .await?;

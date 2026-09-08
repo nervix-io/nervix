@@ -702,20 +702,20 @@ impl Consensus {
                     leader: metrics.current_leader.clone(),
                 };
                 if last_transition.as_ref() != Some(&transition) {
+                    let leader = match &transition.leader {
+                        Some(leader) => leader.as_str(),
+                        None => "(none)",
+                    };
+                    let last_applied = match metrics.last_applied {
+                        Some(last_applied) => last_applied.index.to_string(),
+                        None => "(none)".to_string(),
+                    };
                     let summary = format!(
-                        "raft transition: state={} leader={} term={} last_log_index={} \
-                         last_applied={}",
+                        "raft transition: state={} leader={leader} term={} last_log_index={} \
+                         last_applied={last_applied}",
                         transition.state,
-                        transition
-                            .leader
-                            .as_ref()
-                            .map_or("(none)", ClusterNodeName::as_str),
                         transition.term,
                         metrics.last_log_index.unwrap_or_default(),
-                        metrics
-                            .last_applied
-                            .map(|v| v.index.to_string())
-                            .unwrap_or_else(|| "(none)".to_string())
                     );
                     info!("{summary}");
                     let _ = event_tx.send(summary.clone());
@@ -902,12 +902,11 @@ impl Observer {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         let mut lines = Vec::new();
         lines.push(format!("raft.id: {}", self.inner.local_node_id));
-        lines.push(format!(
-            "raft.current_leader: {}",
-            metrics
-                .current_leader
-                .map_or_else(|| "(none)".to_string(), |leader| leader.to_string())
-        ));
+        let current_leader = match metrics.current_leader {
+            Some(leader) => leader.to_string(),
+            None => "(none)".to_string(),
+        };
+        lines.push(format!("raft.current_leader: {current_leader}"));
         lines.push(format!("raft.current_term: {}", metrics.current_term));
         lines.push(format!("raft.state: {:?}", metrics.state));
         lines.push(format!(
@@ -927,13 +926,11 @@ impl Observer {
             "raft.last_log_index: {}",
             metrics.last_log_index.unwrap_or_default()
         ));
-        lines.push(format!(
-            "raft.last_applied: {}",
-            metrics
-                .last_applied
-                .map(|v| v.index.to_string())
-                .unwrap_or_else(|| "(none)".to_string())
-        ));
+        let last_applied = match metrics.last_applied {
+            Some(last_applied) => last_applied.index.to_string(),
+            None => "(none)".to_string(),
+        };
+        lines.push(format!("raft.last_applied: {last_applied}"));
         lines.push("raft.membership:".to_string());
         for (node_id, node) in metrics.membership_config.nodes() {
             let role = if metrics
@@ -1879,15 +1876,13 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
             .map_err(unreachable_err)?;
         let status = response.status();
         if status != StatusCode::OK {
-            let body = timeout(rpc_timeout, response.bytes())
-                .await
-                .map_err(|_| {
-                    io_error(format!(
-                        "transfer_leader response timed out after {rpc_timeout:?}"
-                    ))
-                })
-                .and_then(|result| result.map_err(io_error))
-                .map_err(unreachable_err)?;
+            let received = match timeout(rpc_timeout, response.bytes()).await {
+                Ok(received) => received.map_err(io_error),
+                Err(_) => Err(io_error(format!(
+                    "transfer_leader response timed out after {rpc_timeout:?}"
+                ))),
+            };
+            let body = received.map_err(unreachable_err)?;
             return Err(RPCError::Unreachable(unreachable_err(io_error(format!(
                 "transfer_leader failed with {}: {}",
                 status,
@@ -2126,7 +2121,10 @@ impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
     }
 
     async fn truncate_after(&mut self, last_log_id: Option<LogIdOf>) -> Result<(), io::Error> {
-        let cut = last_log_id.clone().map(|v| v.index).unwrap_or(0);
+        let cut = match &last_log_id {
+            Some(last_log_id) => last_log_id.index,
+            None => 0,
+        };
         let mut to_delete = Vec::new();
         for item in self.inner.logs.iter() {
             let (key, _) = item.into_inner().map_err(io_error)?;
