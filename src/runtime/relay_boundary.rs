@@ -723,7 +723,7 @@ impl RelayRetention {
 /// the branch retention limits it enforces, and the fan-in it consumes.
 pub(super) struct RelayStateTaskSpec {
     pub(super) relay: RelayName,
-    pub(super) state: Arc<ReplicatedMaterializedRelayState>,
+    pub(super) state: MaterializedRelayStateOriginator,
     pub(super) retention: RelayRetention,
     pub(super) receiver: RelayRuntimeFanIn,
 }
@@ -1560,22 +1560,13 @@ impl Runtime {
                  interaction",
             );
             let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
-            let mut restored_branches = state
-                .entries
-                .iter()
-                .map(|entry| {
-                    (
-                        entry.key().clone(),
-                        entry.value().metadata().ingested_at_high_watermark(),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut restored_branches = state.read().restored_branch_watermarks();
             restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
             for (key, last_ingestion) in restored_branches {
                 branch_instances.insert_restored(key, last_ingestion, ());
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
-            loop {
+            'state_task: loop {
                 tokio::task::consume_budget().await;
                 if let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
@@ -1587,7 +1578,15 @@ impl Runtime {
                         .unwrap_or_else(current_timestamp);
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         tokio::task::consume_budget().await;
-                        runtime.delete_materialized_stream_key(&state, &key);
+                        if let Err(error) = runtime.delete_materialized_stream_key(&state, &key) {
+                            warn!(
+                                domain = domain.as_str(),
+                                relay = relay.as_str(),
+                                error = %error,
+                                "materialized relay assignment changed during branch expiration"
+                            );
+                            break 'state_task;
+                        }
                     }
                     next_expiration_scan = Instant::now() + expiration_scan_interval;
                     continue;
@@ -1656,7 +1655,17 @@ impl Runtime {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
                         tokio::task::consume_budget().await;
-                        runtime.delete_materialized_stream_key(&state, &evicted_key);
+                        if let Err(error) =
+                            runtime.delete_materialized_stream_key(&state, &evicted_key)
+                        {
+                            warn!(
+                                domain = domain.as_str(),
+                                relay = relay.as_str(),
+                                error = %error,
+                                "materialized relay assignment changed during branch eviction"
+                            );
+                            break 'state_task;
+                        }
                     }
                 }
                 let messages = match batch.try_into_messages() {
@@ -1675,11 +1684,19 @@ impl Runtime {
                 };
                 for message in messages {
                     tokio::task::consume_budget().await;
-                    runtime.update_materialized_stream_last_by_timestamp(
+                    if let Err(error) = runtime.update_materialized_stream_last_by_timestamp(
                         &state,
                         &branch_key,
                         &message.record,
-                    );
+                    ) {
+                        warn!(
+                            domain = domain.as_str(),
+                            relay = relay.as_str(),
+                            error = %error,
+                            "materialized relay assignment changed while applying a batch"
+                        );
+                        break 'state_task;
+                    }
                 }
             }
         });
@@ -2480,7 +2497,7 @@ mod tests {
         let domain = domain("default");
         let relay = named::<RelayName>("materialized_orders");
         let schema = test_schema(&[("value", ParseAsType::I64)]);
-        let state = runtime
+        let mut assignment = runtime
             .replicated_materialized_stream_state(
                 RuntimeStatePlacement {
                     domain: domain.clone(),
@@ -2492,8 +2509,14 @@ mod tests {
                 },
                 schema.arrow_schema(),
                 None,
+                Vec::new(),
+                None,
             )
             .expect("materialized state should initialize");
+        let state = assignment
+            .originator
+            .take()
+            .expect("branch-local state should grant authoritative access");
         let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(2));
         let receiver = RelayRuntimeFanIn::new(broadcast.new_receiver());
         let task = runtime.spawn_relay_state_task(
@@ -2528,8 +2551,20 @@ mod tests {
             .await
             .expect("relay state task should drain before the shutdown deadline");
 
-        assert!(state.entries.contains_key(&acme));
-        assert!(state.entries.contains_key(&beta));
+        assert!(
+            state
+                .read()
+                .remote_entry(&acme)
+                .expect("the acme record should be readable")
+                .is_some()
+        );
+        assert!(
+            state
+                .read()
+                .remote_entry(&beta)
+                .expect("the beta record should be readable")
+                .is_some()
+        );
         assert_eq!(
             runtime
                 .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay))

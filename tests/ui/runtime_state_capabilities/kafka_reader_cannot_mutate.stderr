@@ -1,0 +1,5 @@
+error[E0599]: no method named `apply_committed_offset` found for reference `&nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead` in the current scope
+ --> $DIR/kafka_reader_cannot_mutate.rs:4:20
+  |
+4 |     let _ = reader.apply_committed_offset("events", 0, 1);
+  |                    ^^^^^^^^^^^^^^^^^^^^^^ method not found in `&nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead`

@@ -1612,7 +1612,12 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: format!("missing materialized relay spec '{}'", relay.name.as_str()),
             })?;
-            let state = self
+            let replica_nodes = node
+                .replica_nodes()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut assignment = self
                 .replicated_materialized_stream_state(
                     self.state_placement(
                         domain,
@@ -1623,23 +1628,45 @@ impl Runtime {
                     ),
                     schema,
                     execution_node.clone(),
+                    replica_nodes,
+                    Some(local_node_id),
                 )
                 .map_err(|error| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
             if let Some(task) =
-                self.spawn_materialized_stream_snapshot_task(shutdown_tx, state.clone())
+                self.spawn_materialized_stream_snapshot_task(shutdown_tx, assignment.persistence)
             {
                 placement.tasks.push(task);
             }
-            if !executes_locally
-                && let Some(task) =
-                    self.spawn_materialized_stream_replica_poll_task(shutdown_tx, state.clone())
-            {
-                placement.tasks.push(task);
+            if executes_locally {
+                placement.materialized_state =
+                    Some(assignment.originator.take().ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "materialized relay '{}' lacks authoritative state access",
+                                relay.name.as_str()
+                            ),
+                        }
+                    })?);
+            } else {
+                let installer = assignment.installer.take().ok_or_else(|| {
+                    RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "materialized relay '{}' lacks replica installation access",
+                            relay.name.as_str()
+                        ),
+                    }
+                })?;
+                if let Some(task) =
+                    self.spawn_materialized_stream_replica_poll_task(shutdown_tx, installer)
+                {
+                    placement.tasks.push(task);
+                }
             }
-            placement.materialized_state = Some(state);
         }
 
         if let Model::Ingestor(ingestor) = node.config.as_ref()
@@ -1655,7 +1682,7 @@ impl Runtime {
                 .cloned()
                 .collect::<Vec<_>>();
             let required_replica_acks = replica_nodes.len();
-            let state = self
+            let mut assignment = self
                 .replicated_kafka_offset_state(
                     self.state_placement(
                         domain,
@@ -1667,19 +1694,43 @@ impl Runtime {
                     node.primary_node.clone(),
                     replica_nodes,
                     required_replica_acks,
+                    Some(local_node_id),
                 )
                 .map_err(|error| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-            if let Some(task) = self.spawn_kafka_offset_snapshot_task(shutdown_tx, state.clone()) {
+            if let Some(task) =
+                self.spawn_kafka_offset_snapshot_task(shutdown_tx, assignment.persistence)
+            {
                 placement.tasks.push(task);
             }
             if node.is_primary_on(local_node_id) {
-                placement.kafka_offset_state = Some(state);
-            } else if let Some(task) = self.spawn_kafka_offset_replica_poll_task(shutdown_tx, state)
-            {
-                placement.tasks.push(task);
+                placement.kafka_offset_state =
+                    Some(assignment.originator.take().ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "Kafka ingestor '{}' lacks authoritative offset access",
+                                ingestor.name.as_str()
+                            ),
+                        }
+                    })?);
+            } else {
+                let installer = assignment.installer.take().ok_or_else(|| {
+                    RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "Kafka ingestor '{}' lacks replica installation access",
+                            ingestor.name.as_str()
+                        ),
+                    }
+                })?;
+                if let Some(task) =
+                    self.spawn_kafka_offset_replica_poll_task(shutdown_tx, installer)
+                {
+                    placement.tasks.push(task);
+                }
             }
         }
 

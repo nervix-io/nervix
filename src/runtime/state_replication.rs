@@ -179,6 +179,7 @@ impl Runtime {
             let mut found = false;
             for state in self.inner.replicated_materialized_stream_states.iter() {
                 let concrete = state.key();
+                let read = ReplicatedMaterializedRelayState::read(state.value());
                 if concrete.domain != placement.domain
                     || concrete.state != placement.state
                     || concrete.kind != placement.kind
@@ -196,20 +197,17 @@ impl Runtime {
                     continue;
                 }
                 found = true;
-                latest_lsm = latest_lsm.max(state.current_lsm.current());
+                latest_lsm = latest_lsm.max(read.current_lsm());
                 if let Some(requested) = placement.branch_key.as_ref() {
                     let key = Some(requested.clone());
-                    if let Some(entry) = self.visible_materialized_stream_remote_entry(
-                        concrete,
-                        state.value(),
-                        &key,
-                    )? {
+                    if let Some(entry) =
+                        self.visible_materialized_stream_remote_entry(concrete, &read, &key)?
+                    {
                         entries.push(entry);
                     }
                 } else {
-                    entries.extend(
-                        self.visible_materialized_stream_remote_entries(concrete, state.value())?,
-                    );
+                    entries
+                        .extend(self.visible_materialized_stream_remote_entries(concrete, &read)?);
                 }
             }
             if found {
@@ -232,7 +230,9 @@ impl Runtime {
             return Ok(None);
         }
         if let Some(state) = self.inner.replicated_kafka_offset_states.get(placement) {
-            let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
+            let snapshot = ReplicatedKafkaOffsetState::read(state.value())
+                .latest_snapshot()
+                .map_err(|error| error.to_string())?;
             if snapshot.lsm > after_lsm {
                 return Ok(Some(snapshot));
             }
@@ -242,9 +242,10 @@ impl Runtime {
             .replicated_materialized_stream_states
             .get(placement)
         {
-            let entries = self.visible_materialized_stream_remote_entries(placement, &state)?;
+            let read = ReplicatedMaterializedRelayState::read(state.value());
+            let entries = self.visible_materialized_stream_remote_entries(placement, &read)?;
             let snapshot = PersistedRuntimeStateEntry {
-                lsm: state.current_lsm.current(),
+                lsm: read.current_lsm(),
                 schema_fingerprint: placement.schema_fingerprint,
                 payload: encode_materialized_stream_snapshot_entries(&entries)
                     .map_err(|error| error.to_string())?,
@@ -381,7 +382,7 @@ impl Runtime {
 
     pub(in crate::runtime) async fn wait_for_kafka_offset_replica_quorum(
         &self,
-        state: &ReplicatedKafkaOffsetState,
+        state: &KafkaOffsetStateRead,
         lsm: u64,
     ) -> Result<(), String> {
         if state.required_replica_acks() == 0 {
@@ -397,12 +398,12 @@ impl Runtime {
             if now >= deadline {
                 return Err(format!(
                     "timed out waiting for replica quorum for '{}' at lsm {}",
-                    state.placement.identifier.as_str(),
+                    state.placement().identifier.as_str(),
                     lsm
                 ));
             }
             tokio::select! {
-                _ = state.replication_notify.notified() => {}
+                _ = state.wait_for_replication_progress() => {}
                 _ = sleep_until(deadline) => {}
             }
         }
@@ -441,23 +442,23 @@ impl Runtime {
 
     pub(in crate::runtime) async fn persist_kafka_offset_snapshot(
         &self,
-        state: &ReplicatedKafkaOffsetState,
+        state: &KafkaOffsetStatePersistence,
         lsm: u64,
         payload: &[u8],
     ) -> Result<(), String> {
         if let Some(store) = &self.inner.state_store {
             store
-                .persist_latest_snapshot(&state.placement, lsm, payload)
+                .persist_latest_snapshot(state.read().placement(), lsm, payload)
                 .map_err(|error| error.to_string())?;
-            state.last_persisted_lsm.store(lsm, Ordering::SeqCst);
-            state.dirty.store(false, Ordering::SeqCst);
+            state.record_persisted(lsm);
         }
-        self.wait_for_kafka_offset_replica_quorum(state, lsm).await
+        self.wait_for_kafka_offset_replica_quorum(state.read(), lsm)
+            .await
     }
 
     pub(in crate::runtime) async fn commit_domain_kafka_offset(
         &self,
-        state: &ReplicatedKafkaOffsetState,
+        state: &KafkaOffsetStateOriginator,
         topic: &str,
         partition: i32,
         next_offset: i64,
@@ -465,19 +466,19 @@ impl Runtime {
         let (lsm, payload) = state
             .apply_committed_offset(topic, partition, next_offset)
             .map_err(|error| error.to_string())?;
-        self.persist_kafka_offset_snapshot(state, lsm, &payload)
+        self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
             .await
     }
 
     pub(in crate::runtime) async fn reset_domain_kafka_offsets(
         &self,
-        state: &ReplicatedKafkaOffsetState,
+        state: &KafkaOffsetStateOriginator,
         offsets: HashMap<KafkaTopicPartition, i64>,
     ) -> Result<(), String> {
         let (lsm, payload) = state
             .replace_offsets(offsets)
             .map_err(|error| error.to_string())?;
-        self.persist_kafka_offset_snapshot(state, lsm, &payload)
+        self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
             .await
     }
 
@@ -500,23 +501,25 @@ impl Runtime {
 
     pub(in crate::runtime) fn update_materialized_stream_last_by_timestamp(
         &self,
-        state: &ReplicatedMaterializedRelayState,
+        state: &MaterializedRelayStateOriginator,
         key: &Option<BranchKey>,
         record: &RuntimeRow,
-    ) {
-        if state.update_last_by_timestamp(key, record).is_some() {
+    ) -> Result<(), error_stack::Report<StateAuthorityError>> {
+        if state.update_last_by_timestamp(key, record)?.is_some() {
             self.inner.materialized_state_changed.notify_waiters();
         }
+        Ok(())
     }
 
     pub(in crate::runtime) fn delete_materialized_stream_key(
         &self,
-        state: &ReplicatedMaterializedRelayState,
+        state: &MaterializedRelayStateOriginator,
         key: &Option<BranchKey>,
-    ) {
-        if state.remove_key(key).is_some() {
+    ) -> Result<(), error_stack::Report<StateAuthorityError>> {
+        if state.remove_key(key)?.is_some() {
             self.inner.materialized_state_changed.notify_waiters();
         }
+        Ok(())
     }
 
     pub(in crate::runtime) fn replicated_deduplicator_state(
@@ -549,33 +552,27 @@ impl Runtime {
         primary_node: Option<ClusterNodeName>,
         replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
-    ) -> Result<Arc<ReplicatedKafkaOffsetState>, RuntimePersistenceError> {
-        if let Some(existing) = self.inner.replicated_kafka_offset_states.get(&placement) {
-            existing.rebind_roles(StateReplicationRoles::new(
-                primary_node,
-                replica_nodes,
-                required_replica_acks,
-            ));
-            return Ok(existing.clone());
-        }
-        let initial = self
-            .inner
-            .state_store
-            .as_ref()
-            .map(|store| store.latest_snapshot(&placement))
-            .transpose()?
-            .flatten();
-        let state = Arc::new(ReplicatedKafkaOffsetState::new(
-            placement.clone(),
-            primary_node,
-            replica_nodes,
-            required_replica_acks,
-            initial,
-        )?);
-        self.inner
-            .replicated_kafka_offset_states
-            .insert(placement, state.clone());
-        Ok(state)
+        local_node: Option<&ClusterNodeName>,
+    ) -> Result<KafkaOffsetStateAssignment, RuntimePersistenceError> {
+        let roles = StateReplicationRoles::new(primary_node, replica_nodes, required_replica_acks);
+        let state =
+            if let Some(existing) = self.inner.replicated_kafka_offset_states.get(&placement) {
+                existing.clone()
+            } else {
+                let initial = self
+                    .inner
+                    .state_store
+                    .as_ref()
+                    .map(|store| store.latest_snapshot(&placement))
+                    .transpose()?
+                    .flatten();
+                let state = Arc::new(ReplicatedKafkaOffsetState::new(placement.clone(), initial)?);
+                self.inner
+                    .replicated_kafka_offset_states
+                    .insert(placement, state.clone());
+                state
+            };
+        Ok(ReplicatedKafkaOffsetState::bind(&state, roles, local_node))
     }
 
     pub(in crate::runtime) fn replicated_materialized_stream_state(
@@ -583,32 +580,37 @@ impl Runtime {
         placement: RuntimeStatePlacement,
         schema: StdArc<arrow_schema::Schema>,
         primary_node: Option<ClusterNodeName>,
-    ) -> Result<Arc<ReplicatedMaterializedRelayState>, RuntimePersistenceError> {
-        if let Some(existing) = self
+        replica_nodes: Vec<ClusterNodeName>,
+        local_node: Option<&ClusterNodeName>,
+    ) -> Result<MaterializedRelayStateAssignment, RuntimePersistenceError> {
+        let roles = StateReplicationRoles::new(primary_node, replica_nodes, 0);
+        let state = if let Some(existing) = self
             .inner
             .replicated_materialized_stream_states
             .get(&placement)
         {
-            existing.rebind_roles(StateReplicationRoles::owned_by(primary_node));
-            return Ok(existing.clone());
-        }
-        let initial = self
-            .inner
-            .state_store
-            .as_ref()
-            .map(|store| store.latest_snapshot(&placement))
-            .transpose()?
-            .flatten();
-        let state = Arc::new(ReplicatedMaterializedRelayState::new(
-            placement.clone(),
-            schema,
-            primary_node,
-            initial,
-        )?);
-        self.inner
-            .replicated_materialized_stream_states
-            .insert(placement, state.clone());
-        Ok(state)
+            existing.clone()
+        } else {
+            let initial = self
+                .inner
+                .state_store
+                .as_ref()
+                .map(|store| store.latest_snapshot(&placement))
+                .transpose()?
+                .flatten();
+            let state = Arc::new(ReplicatedMaterializedRelayState::new(
+                placement.clone(),
+                schema,
+                initial,
+            )?);
+            self.inner
+                .replicated_materialized_stream_states
+                .insert(placement, state.clone());
+            state
+        };
+        Ok(ReplicatedMaterializedRelayState::bind(
+            &state, roles, local_node,
+        ))
     }
 
     pub(in crate::runtime) fn replicated_window_processor_state(
@@ -718,31 +720,34 @@ impl Runtime {
     pub(in crate::runtime) fn spawn_kafka_offset_snapshot_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
-        state: Arc<ReplicatedKafkaOffsetState>,
+        state: KafkaOffsetStatePersistence,
     ) -> Option<JoinHandle<()>> {
         let store = self.inner.state_store.as_ref()?.clone();
         let snapshot_interval = self.inner.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
-                |state: &ReplicatedKafkaOffsetState, store: &RuntimeStateStore| {
-                    if !state.dirty.load(Ordering::SeqCst) {
+                |state: &KafkaOffsetStatePersistence, store: &RuntimeStateStore| {
+                    if !state.take_dirty() {
                         return Ok(());
                     }
-                    let snapshot = state.latest_snapshot()?;
-                    if snapshot.lsm <= state.last_persisted_lsm.load(Ordering::SeqCst) {
-                        return Ok(());
+                    let result = (|| {
+                        let snapshot = state.read().latest_snapshot()?;
+                        if snapshot.lsm <= state.last_persisted_lsm() {
+                            return Ok(());
+                        }
+                        store.persist_latest_snapshot(
+                            state.read().placement(),
+                            snapshot.lsm,
+                            &snapshot.payload,
+                        )?;
+                        state.record_persisted(snapshot.lsm);
+                        Ok::<(), RuntimePersistenceError>(())
+                    })();
+                    if result.is_err() {
+                        state.restore_dirty();
                     }
-                    store.persist_latest_snapshot(
-                        &state.placement,
-                        snapshot.lsm,
-                        &snapshot.payload,
-                    )?;
-                    state
-                        .last_persisted_lsm
-                        .store(snapshot.lsm, Ordering::SeqCst);
-                    state.dirty.store(false, Ordering::SeqCst);
-                    Ok::<(), RuntimePersistenceError>(())
+                    result
                 };
             loop {
                 tokio::task::consume_budget().await;
@@ -808,21 +813,34 @@ impl Runtime {
     pub(in crate::runtime) fn spawn_materialized_stream_snapshot_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
-        state: Arc<ReplicatedMaterializedRelayState>,
+        state: MaterializedRelayStatePersistence,
     ) -> Option<JoinHandle<()>> {
         let store = self.inner.state_store.as_ref()?.clone();
         let snapshot_interval = self.inner.state_snapshot_interval;
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
-                |state: &ReplicatedMaterializedRelayState, store: &RuntimeStateStore| {
-                    persist_dirty_runtime_state_snapshot(
-                        store,
-                        &state.placement,
-                        &state.last_persisted_lsm,
-                        &state.dirty,
-                        || state.latest_snapshot(),
-                    )
+                |state: &MaterializedRelayStatePersistence, store: &RuntimeStateStore| {
+                    if !state.take_dirty() {
+                        return Ok(());
+                    }
+                    let result = (|| {
+                        let snapshot = state.read().latest_snapshot()?;
+                        if snapshot.lsm <= state.last_persisted_lsm() {
+                            return Ok(());
+                        }
+                        store.persist_latest_snapshot(
+                            state.read().placement(),
+                            snapshot.lsm,
+                            &snapshot.payload,
+                        )?;
+                        state.record_persisted(snapshot.lsm);
+                        Ok::<(), RuntimePersistenceError>(())
+                    })();
+                    if result.is_err() {
+                        state.restore_dirty();
+                    }
+                    result
                 };
             loop {
                 tokio::task::consume_budget().await;
@@ -940,9 +958,9 @@ impl Runtime {
     pub(in crate::runtime) fn spawn_kafka_offset_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
-        state: Arc<ReplicatedKafkaOffsetState>,
+        state: KafkaOffsetSnapshotInstaller,
     ) -> Option<JoinHandle<()>> {
-        let primary_node = state.primary_node()?;
+        let primary_node = state.read().primary_node()?;
         let poll_interval = self.inner.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -962,20 +980,21 @@ impl Runtime {
                         _ = sleep(poll_interval) => {}
                     }
                 }
-                let after_lsm = state.current_lsm.current();
+                let after_lsm = state.read().current_lsm();
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
-                        &state.placement,
+                        state.read().placement(),
                         after_lsm,
                         poll_interval,
                     )
                     .await
                 {
                     Ok(Some(snapshot)) => {
-                        if let Err(error) = state.apply_snapshot(snapshot.lsm, &snapshot.payload) {
+                        if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
+                        {
                             warn!(error = %error, "failed to apply replicated kafka offset snapshot");
-                            continue;
+                            break;
                         }
                         let dispatcher = runtime.inner.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
@@ -990,7 +1009,7 @@ impl Runtime {
                                     Envelope::Control(
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
-                                                placement: state.placement.to_remote(),
+                                                placement: state.read().placement().to_remote(),
                                                 lsm: snapshot.lsm,
                                             },
                                         ),
@@ -1014,9 +1033,9 @@ impl Runtime {
     pub(in crate::runtime) fn spawn_materialized_stream_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
-        state: Arc<ReplicatedMaterializedRelayState>,
+        state: MaterializedRelaySnapshotInstaller,
     ) -> Option<JoinHandle<()>> {
-        let primary_node = state.primary_node()?;
+        let primary_node = state.read().primary_node()?;
         let poll_interval = self.inner.state_replication_poll_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -1036,20 +1055,21 @@ impl Runtime {
                         _ = sleep(poll_interval) => {}
                     }
                 }
-                let after_lsm = state.current_lsm.current();
+                let after_lsm = state.read().current_lsm();
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
-                        &state.placement,
+                        state.read().placement(),
                         after_lsm,
                         poll_interval,
                     )
                     .await
                 {
                     Ok(Some(snapshot)) => {
-                        if let Err(error) = state.apply_snapshot(snapshot.lsm, &snapshot.payload) {
+                        if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
+                        {
                             warn!(error = %error, "failed to apply replicated materialized relay snapshot");
-                            continue;
+                            break;
                         }
                         runtime.inner.materialized_state_changed.notify_waiters();
                         let dispatcher = runtime.inner.remote_dispatcher.read().clone();
@@ -1065,7 +1085,7 @@ impl Runtime {
                                     Envelope::Control(
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
-                                                placement: state.placement.to_remote(),
+                                                placement: state.read().placement().to_remote(),
                                                 lsm: snapshot.lsm,
                                             },
                                         ),
@@ -1607,23 +1627,36 @@ mod tests {
             branch_key: None,
         };
         let schema = test_schema(&[("status", ParseAsType::String)]);
-        let state = runtime
-            .replicated_materialized_stream_state(placement.clone(), schema.arrow_schema(), None)
+        let mut assignment = runtime
+            .replicated_materialized_stream_state(
+                placement.clone(),
+                schema.arrow_schema(),
+                None,
+                Vec::new(),
+                None,
+            )
             .expect("materialized relay state should initialize");
+        let state = assignment
+            .originator
+            .take()
+            .expect("branch-local state should grant authoritative access");
+        let persistence = assignment.persistence;
         let (shutdown_tx, _) = watch::channel(false);
         let task = runtime
-            .spawn_materialized_stream_snapshot_task(&shutdown_tx, state.clone())
+            .spawn_materialized_stream_snapshot_task(&shutdown_tx, persistence.clone())
             .expect("persisted runtime should spawn a snapshot task");
         let record = test_runtime_row([(
             "status".to_string(),
             RuntimeValue::String("ready".to_string()),
         )]);
 
-        runtime.update_materialized_stream_last_by_timestamp(&state, &None, &record);
+        runtime
+            .update_materialized_stream_last_by_timestamp(&state, &None, &record)
+            .expect("the materialized state assignment should remain authoritative");
 
-        assert_eq!(state.current_lsm.current(), 1);
-        assert!(state.dirty.load(Ordering::SeqCst));
-        assert_eq!(state.last_persisted_lsm.load(Ordering::SeqCst), 0);
+        assert_eq!(state.read().current_lsm(), 1);
+        assert!(persistence.is_dirty());
+        assert_eq!(persistence.last_persisted_lsm(), 0);
         assert!(
             runtime
                 .inner
@@ -1876,9 +1909,17 @@ mod tests {
             schema_fingerprint: [0; 32],
             branch_key: None,
         };
-        let state = ReplicatedKafkaOffsetState::new(placement.clone(), None, Vec::new(), 0, None)
-            .expect("kafka state should initialize");
-        let (offset_lsm, offset_payload) = state
+        let state = Arc::new(
+            ReplicatedKafkaOffsetState::new(placement.clone(), None)
+                .expect("kafka state should initialize"),
+        );
+        let mut assignment =
+            ReplicatedKafkaOffsetState::bind(&state, StateReplicationRoles::owned_by(None), None);
+        let originator = assignment
+            .originator
+            .take()
+            .expect("local Kafka state should grant authoritative access");
+        let (offset_lsm, offset_payload) = originator
             .replace_offsets(HashMap::from_iter([
                 (
                     KafkaTopicPartition {
@@ -1899,7 +1940,7 @@ mod tests {
         store
             .persist_latest_snapshot(&placement, offset_lsm, &offset_payload)
             .expect("offset snapshot should persist");
-        let (schedule_lsm, schedule_payload) = state
+        let (schedule_lsm, schedule_payload) = originator
             .update_partition_schedule("notifications", nonzero!(2u64), vec![0, 1])
             .expect("schedule should update")
             .expect("schedule snapshot should be produced");
@@ -1907,20 +1948,20 @@ mod tests {
             .persist_latest_snapshot(&placement, schedule_lsm, &schedule_payload)
             .expect("schedule snapshot should persist");
 
-        let restored = ReplicatedKafkaOffsetState::new(
-            placement.clone(),
-            None,
-            Vec::new(),
-            0,
-            store
-                .latest_snapshot(&placement)
-                .expect("snapshot should load"),
-        )
-        .expect("restored kafka state should initialize");
-        assert_eq!(restored.next_offset("notifications", 0), Some(12));
-        assert_eq!(restored.next_offset("notifications", 1), Some(18));
+        let restored = Arc::new(
+            ReplicatedKafkaOffsetState::new(
+                placement.clone(),
+                store
+                    .latest_snapshot(&placement)
+                    .expect("snapshot should load"),
+            )
+            .expect("restored kafka state should initialize"),
+        );
+        let read = ReplicatedKafkaOffsetState::read(&restored);
+        assert_eq!(read.next_offset("notifications", 0), Some(12));
+        assert_eq!(read.next_offset("notifications", 1), Some(18));
         assert_eq!(
-            restored.describe_topic("notifications"),
+            read.describe_topic("notifications"),
             Some(KafkaDomainOffsetDescribe {
                 topic: "notifications".to_string(),
                 instances: 2,

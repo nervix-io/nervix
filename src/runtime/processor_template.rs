@@ -661,10 +661,16 @@ impl BranchInstanceTemplate {
                     relay,
                     key.clone(),
                 );
-                runtime
-                    .replicated_materialized_stream_state(placement, schema, None)
-                    .map(|state| (relay.clone(), state))
-                    .map_err(|error| error.to_string())
+                let mut assignment = runtime
+                    .replicated_materialized_stream_state(placement, schema, None, Vec::new(), None)
+                    .map_err(|error| error.to_string())?;
+                let state = assignment.originator.take().ok_or_else(|| {
+                    format!(
+                        "branch-local materialized relay '{}' lacks authoritative state access",
+                        relay.as_str()
+                    )
+                })?;
+                Ok((relay.clone(), state))
             })
             .collect::<Result<HashMap<_, _>, String>>()?;
         let processors = self

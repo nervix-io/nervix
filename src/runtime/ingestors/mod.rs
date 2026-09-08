@@ -38,7 +38,7 @@ impl IngestorStarter {
         domain: &DomainName,
         source_model: Model,
         ingestor: CreateIngestor,
-        kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+        kafka_offset_state: Option<KafkaOffsetStateOriginator>,
     ) -> Result<(), RuntimeError> {
         runtime.prepare_ingestor_quiescence(domain, &ingestor);
         match (&source_model, &ingestor.source) {

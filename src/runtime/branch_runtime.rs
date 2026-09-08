@@ -11,7 +11,7 @@ pub(super) struct BranchRuntime {
     pub(super) root_relay: RelayName,
     pub(super) error_policies: ErrorPolicies,
     pub(super) relays: HashMap<RelayName, ConcreteRelayRuntime>,
-    pub(super) materialized_states: HashMap<RelayName, Arc<ReplicatedMaterializedRelayState>>,
+    pub(super) materialized_states: HashMap<RelayName, MaterializedRelayStateOriginator>,
     pub(super) relay_state_epoch: Option<u64>,
     pub(super) processors: HashMap<ModelName, RelayProcessorNode>,
 }
@@ -197,11 +197,22 @@ impl BranchRuntime {
                 relay,
                 self.key.clone(),
             );
-            match self
-                .runtime
-                .replicated_materialized_stream_state(placement, schema, None)
-            {
-                Ok(state) => {
+            match self.runtime.replicated_materialized_stream_state(
+                placement,
+                schema,
+                None,
+                Vec::new(),
+                None,
+            ) {
+                Ok(mut assignment) => {
+                    let Some(state) = assignment.originator.take() else {
+                        warn!(
+                            domain = self.domain.as_str(),
+                            relay = relay.as_str(),
+                            "branch-local materialized relay lacks authoritative state access"
+                        );
+                        return;
+                    };
                     self.materialized_states.insert(relay.clone(), state);
                 }
                 Err(error) => {
@@ -246,11 +257,20 @@ impl BranchRuntime {
         };
         for message in messages {
             tokio::task::consume_budget().await;
-            self.runtime.update_materialized_stream_last_by_timestamp(
+            if let Err(error) = self.runtime.update_materialized_stream_last_by_timestamp(
                 state,
                 &batch.key,
                 &message.record,
-            );
+            ) {
+                warn!(
+                    domain = self.domain.as_str(),
+                    relay = relay.as_str(),
+                    branch = branch_key_display(&self.key),
+                    error = %error,
+                    "materialized relay assignment changed while applying a branch-local batch"
+                );
+                return;
+            }
         }
     }
 
