@@ -12,7 +12,7 @@ upload step. See [Declaration](udfs.md#declaration).
 BEGIN;
 
 CREATE UDF amount_band
-  WITH ROTO_0_11
+  WITH ROTO_0_13
   ARGS (amount I64)
   RETURNS STRING
   CODE $roto$

@@ -367,8 +367,8 @@ pub enum Identifier {
     Returns,
     Volatile,
     Code,
-    #[strum(serialize = "ROTO_0_11")]
-    Roto0_11,
+    #[strum(serialize = "ROTO_0_13")]
+    Roto0_13,
 }
 
 fn classify_word(raw: &str) -> Word {

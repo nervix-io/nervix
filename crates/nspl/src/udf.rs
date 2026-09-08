@@ -40,7 +40,7 @@ pub fn create_udf_parser<'src>()
             optional: optional.is_some(),
         })
         .boxed();
-    let language = kw(Identifier::Roto0_11).to(UdfLanguage::Roto0_11);
+    let language = kw(Identifier::Roto0_13).to(UdfLanguage::Roto0_13);
 
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn parses_multiline_udf_with_exact_signature_and_source() {
         let source = "CREATE UDF display_name
-            WITH ROTO_0_11
+            WITH ROTO_0_13
             ARGS (nick STRING OPTIONAL, score ARRAY<F64, 3>)
             RETURNS STRING OPTIONAL
             VOLATILE
@@ -203,18 +203,18 @@ $roto$;";
     #[test]
     fn rejects_empty_duplicate_and_over_limit_argument_lists() {
         assert!(
-            parse_create_udf("CREATE UDF f WITH ROTO_0_11 ARGS () RETURNS I64 CODE $$fn f() {}$$;")
+            parse_create_udf("CREATE UDF f WITH ROTO_0_13 ARGS () RETURNS I64 CODE $$fn f() {}$$;")
                 .is_err()
         );
         assert!(
             parse_create_udf(
-                "CREATE UDF f WITH ROTO_0_11 ARGS (x I64, x I64) RETURNS I64 CODE $$x$$;"
+                "CREATE UDF f WITH ROTO_0_13 ARGS (x I64, x I64) RETURNS I64 CODE $$x$$;"
             )
             .is_err()
         );
         assert!(
             parse_create_udf(
-                "CREATE UDF f WITH ROTO_0_11 ARGS (a I64,b I64,c I64,d I64,e I64,f I64,g I64,h \
+                "CREATE UDF f WITH ROTO_0_13 ARGS (a I64,b I64,c I64,d I64,e I64,f I64,g I64,h \
                  I64,i I64) RETURNS I64 CODE $$x$$;"
             )
             .is_err()
@@ -232,7 +232,7 @@ $roto$;";
     #[test]
     fn completion_stays_on_the_composed_udf_grammar_branch() {
         let suggestions = suggest_statement("CREATE UDF f WITH ", "CREATE UDF f WITH ".len());
-        assert!(suggestions.contains(&"ROTO_0_11".to_string()));
+        assert!(suggestions.contains(&"ROTO_0_13".to_string()));
         assert!(!suggestions.contains(&"KAFKA".to_string()));
     }
 }

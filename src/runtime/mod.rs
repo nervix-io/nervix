@@ -68,19 +68,19 @@ use nervix_models::{
     CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace,
     DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName,
     EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName,
-    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
-    ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, WireSchemaDefinition,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
+    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
+    ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality,
+    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch,
+    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
+    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
+    RouteConstruction, ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
 };
 use nervix_nspl::{
     vm_program::{
@@ -145,9 +145,9 @@ use crate::{
     },
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool, RuntimeRecordBatch,
-        RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_codec_with_protobuf,
-        compile_schema, decode_with_codec, decode_with_codec_owned, parse_as_type_from_arrow,
-        runtime_value_arrow_array, runtime_value_from_arrow_array,
+        RuntimeRecordMetadata, RuntimeRow, RuntimeValue, RuntimeValueColumn,
+        compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
+        parse_as_type_from_arrow, runtime_value_arrow_array, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
 };
@@ -163,6 +163,7 @@ mod deduplicator;
 mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
+mod domain_wire_schemas;
 mod emitter_supervision;
 mod emitters;
 mod endpoint;
@@ -308,6 +309,7 @@ use domain_execution::{
     RuntimeDomainClockState, RuntimeDomainState,
 };
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
+use domain_wire_schemas::DomainWireSchemas;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
     clear_emitter_stop_signal,
@@ -369,7 +371,10 @@ use message_error::{
     operation_for_filter_label, planned_structured_message_error, structured_message_error,
     vm_partial_output_row_to_runtime_batch,
 };
-use nervix_models::{DeduplicatorName, ReingestorName, SchemaName, WireSchemaName};
+use nervix_models::{
+    CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DeduplicatorName,
+    ReingestorName, ResolvedCodecWireFormat, SchemaName, WireSchemaLookup, WireSchemaName,
+};
 pub use observability::{
     DataflowNodeTransientState, IngestorDescribe, KafkaDomainOffsetDescribe, LocalLookupDescription,
 };

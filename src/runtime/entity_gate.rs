@@ -1156,8 +1156,7 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
-            flush_each: "IMMEDIATE".to_string(),
-            max_batch_size: None,
+            flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -1239,7 +1238,7 @@ mod tests {
                     name: named(name),
                     from: ProcessorInputs::single(named(input)),
                     output_routes: (ProcessorOutputs::single(named(output)))
-                        .with_flush_policy("IMMEDIATE".to_string(), None),
+                        .with_flush_policy(FlushPolicy::Immediate),
                     branched_by: BranchSelection::unbranched(),
                     mode: AckMode::Attached,
                     filter_where: None,

@@ -1047,7 +1047,7 @@ pub(super) async fn evaluate_output_branch_program(
             let array = result.batch.column(column_index).to_array_ref();
             let value = runtime_value_from_arrow_array(
                 array.as_ref(),
-                &parse_as_type_from_arrow(field.data_type())?,
+                &parse_as_type_from_arrow(field.data_type()).map_err(|error| error.to_string())?,
                 false,
                 output_row,
                 field.name(),
@@ -1827,8 +1827,10 @@ mod tests {
                 client: named("kafka_main"),
                 topic: named("notifications_out"),
             }),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
@@ -1958,8 +1960,10 @@ mod tests {
                     "concat(input.tenant, '-', input.region)",
                 ))),
             }),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::SqsBatch {

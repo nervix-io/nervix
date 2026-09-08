@@ -354,6 +354,15 @@ build and the existing tests, and nothing in it changes behavior.
   total complexity or isolates a real boundary.
 - Model internal special cases with typed variants or internal-only structures, never magic or
   reserved user-visible identifiers that can collide with user-defined names.
+- A structure that can hold a value together with a contradicting description of it — a string
+  payload labeled as an integer, a wire schema paired with a format that reads another kind — is
+  structurally wrong. Fix the type so the contradiction cannot be represented: put the kind and its
+  payload in one enum variant, or let a type parameter drive the value's type. Then delete the
+  consistency checks and the unreachable mismatch errors the old shape required, rather than
+  keeping a validation step that rejects the state afterwards.
+- A hot path may carry a descriptor beside the value it describes only where deriving it per batch
+  or per row is a measured cost. Such a site is agreed with the user before it is written, and it
+  carries a comment naming the path and the cost that justifies it.
 - Avoid tuples beyond a trivial local pair, nested tuples, and tuples whose shape is whatever the
   construction site happened to produce. Returns of three or more elements, map keys and values,
   accumulators threaded through iterator chains, and channel payloads carrying several unrelated

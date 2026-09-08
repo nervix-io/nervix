@@ -430,8 +430,11 @@ pub(super) async fn compute_lookup_hash_map_columns(
             .index_of(&call.generated_field)
             .ok()
             .map(|index| {
-                let array = result.batch.column(index).to_array_ref();
-                parse_as_type_from_arrow(array.data_type()).map(|ty| (array, ty))
+                RuntimeValueColumn::new(
+                    call.generated_field.as_str(),
+                    result.batch.column(index).to_array_ref(),
+                )
+                .map_err(|error| error.to_string())
             })
             .transpose()?;
         let mut row_keys: Vec<Option<String>> = vec![None; row_count];
@@ -444,16 +447,10 @@ pub(super) async fn compute_lookup_hash_map_columns(
                     side_error.span
                 ));
             }
-            let Some((array, ty)) = key_column.as_ref() else {
+            let Some(key_column) = key_column.as_ref() else {
                 continue;
             };
-            if let Some(value) = runtime_value_from_arrow_array(
-                array.as_ref(),
-                ty,
-                true,
-                output_row,
-                &call.generated_field,
-            )? {
+            if let Some(value) = key_column.nullable_value_at(output_row)? {
                 row_keys[input_row] = Some(value.to_key_fragment());
             }
         }
@@ -496,7 +493,7 @@ pub(super) fn vm_output_value(
     let array = batch.column(column_index).to_array_ref();
     runtime_value_from_arrow_array(
         array.as_ref(),
-        &parse_as_type_from_arrow(field.data_type())?,
+        &parse_as_type_from_arrow(field.data_type()).map_err(|error| error.to_string())?,
         field.is_nullable(),
         row,
         field_name,

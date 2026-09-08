@@ -1015,13 +1015,10 @@ pub(super) async fn evaluate_window_aggregate_inputs(
             let column_index = result.batch.schema().index_of(field_name).map_err(|_| {
                 format!("window aggregate input VM produced no '{field_name}' field")
             })?;
-            let field = result.batch.schema().field(column_index);
             let array = result.batch.column(column_index).to_array_ref();
-            Ok(Some(WindowAggregateInputColumn {
-                field_name: field_name.as_str(),
-                array,
-                ty: parse_as_type_from_arrow(field.data_type())?,
-            }))
+            RuntimeValueColumn::new(field_name.as_str(), array)
+                .map(Some)
+                .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok((0..row_count)
@@ -1039,26 +1036,13 @@ pub(super) async fn evaluate_window_aggregate_inputs(
                     let Some(column) = column else {
                         return Ok(WindowAggregateInput { value: None });
                     };
-                    runtime_value_from_arrow_array(
-                        column.array.as_ref(),
-                        &column.ty,
-                        true,
-                        row,
-                        column.field_name,
-                    )
-                    .map(|value| WindowAggregateInput { value })
+                    column
+                        .nullable_value_at(row)
+                        .map(|value| WindowAggregateInput { value })
                 })
                 .collect()
         })
         .collect())
-}
-
-/// One column of a window processor's aggregate input, read once per batch so every row reads the
-/// same array with the same declared type.
-pub(super) struct WindowAggregateInputColumn<'program> {
-    pub(super) field_name: &'program str,
-    pub(super) array: ArrayRef,
-    pub(super) ty: nervix_models::ParseAsType,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1358,7 +1342,8 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
                 let array = result.batch.column(column_index).to_array_ref();
                 runtime_value_from_arrow_array(
                     array.as_ref(),
-                    &parse_as_type_from_arrow(field.data_type())?,
+                    &parse_as_type_from_arrow(field.data_type())
+                        .map_err(|error| error.to_string())?,
                     false,
                     0,
                     target_field,
