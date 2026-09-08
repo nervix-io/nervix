@@ -27,7 +27,7 @@ jobs:
       (github.event_name != 'pull_request' ||
         !contains(github.event.pull_request.labels.*.name, 'no-docker')) &&
       (github.event.action != 'labeled' || github.event.label.name == 'benchmark')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     timeout-minutes: 40
     outputs:
       build_id: ${{ steps.meta.outputs.build_id }}
@@ -43,7 +43,7 @@ jobs:
   build-arch:
     name: build-${{ matrix.image }}-${{ matrix.arch }}
     needs: meta
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 80
     strategy:
       fail-fast: false
@@ -54,11 +54,13 @@ jobs:
             platform: linux/amd64
             arch: amd64
             llvm: "23"
+            runner: blacksmith-4vcpu-ubuntu-2404
           - image: debian
             version: trixie
             platform: linux/arm64
             arch: arm64
             llvm: "23"
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
           # - image: alpine
           #   version: "3.23"
           #   platform: linux/amd64
@@ -126,7 +128,7 @@ jobs:
       github.event_name == 'pull_request' &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: blacksmith-8vcpu-ubuntu-2404-arm
     timeout-minutes: 120
     permissions:
       contents: read
@@ -265,7 +267,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'no-docker') &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     timeout-minutes: 10
     permissions:
       pull-requests: write
@@ -351,7 +353,7 @@ jobs:
       github.event.action != 'labeled' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     timeout-minutes: 40
     strategy:
       fail-fast: false
