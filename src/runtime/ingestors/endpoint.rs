@@ -1,5 +1,3 @@
-use nervix_models::DomainName;
-
 use super::super::*;
 
 pub(in crate::runtime) struct EndpointIngestor;
@@ -7,10 +5,14 @@ pub(in crate::runtime) struct EndpointIngestor;
 impl EndpointIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        endpoint: CreateEndpoint,
-        ingestor: CreateIngestor,
+        plan: EndpointIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let EndpointIngestorStartPlan {
+            ingestor,
+            endpoint,
+            mode: _,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -29,12 +31,12 @@ impl EndpointIngestor {
             };
             execution
                 .endpoint_routes
-                .get(&endpoint.name)
+                .get(&endpoint)
                 .cloned()
                 .ok_or_else(|| RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
                     ingestor: ingestor.name.as_str().to_string(),
-                    reason: format!("endpoint '{}' is not instantiated", endpoint.name.as_str()),
+                    reason: format!("endpoint '{}' is not instantiated", endpoint.as_str()),
                 })?
         };
 
