@@ -45,7 +45,6 @@ use chrono::DateTime;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
-use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 use regex::Regex;
 use tokio::task;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
@@ -57,6 +56,7 @@ use crate::{
         CompiledProgram, InputBinding, Instruction, InstructionKind, RegisterLayout,
         RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
     },
+    program::{BinaryOp, FunctionName, Span, UnaryOp},
     semantics::BuiltinLowering,
 };
 
@@ -3464,13 +3464,14 @@ mod tests {
     };
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use nervix_models::Timestamp;
-    use nervix_nspl::vm_program::parse_program;
     use uuid::{Uuid, Version};
 
     use super::*;
     use crate::{
         CompileBinding, CompileOptions, OutputBinding, compile_program_for_bindings,
         compile_program_with_options_for_bindings,
+        program::{Program, SpannedNode},
+        test_support::parse_program,
     };
 
     #[derive(Debug)]
@@ -3565,7 +3566,7 @@ mod tests {
     }
 
     fn compile_program_with_output_fields(
-        program: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+        program: &SpannedNode<Program>,
         input_schema: StdArc<Schema>,
         fields: Vec<Field>,
     ) -> CompiledProgram {
@@ -3580,10 +3581,9 @@ mod tests {
 
     #[test]
     fn executes_program_and_populates_error_side_channel() {
-        let parsed = parse_program(
-            "SET input.div = input.left / input.right, input.parsed = input.raw AS INT64;",
-        )
-        .expect("must parse");
+        let parsed =
+            parse_program("SET div = input.left / input.right, parsed = input.raw AS INT64")
+                .expect("must parse");
         let schema = schema(vec![
             Field::new("left", DataType::Int64, true),
             Field::new("right", DataType::Int64, true),
@@ -3645,10 +3645,9 @@ mod tests {
 
     #[test]
     fn conditional_results_observe_only_selected_row_errors() {
-        let parsed = parse_program(
-            "SET input.result = CASE WHEN input.run THEN 10 / input.divisor ELSE 0 END;",
-        )
-        .expect("conditional expression must parse");
+        let parsed =
+            parse_program("SET result = CASE WHEN input.run THEN 10 / input.divisor ELSE 0 END")
+                .expect("conditional expression must parse");
         let schema = schema(vec![
             Field::new("run", DataType::Boolean, true),
             Field::new("divisor", DataType::Int64, true),
@@ -3690,7 +3689,7 @@ mod tests {
 
     #[test]
     fn executes_null_assignment_to_declared_optional_field() {
-        let parsed = parse_program("SET input.maybe = NULL;").expect("must parse");
+        let parsed = parse_program("SET maybe = NULL").expect("must parse");
         let schema = schema(vec![Field::new("value", DataType::Utf8, true)]);
         let compiled = compile_program_with_output_fields(
             &parsed,
@@ -3718,8 +3717,7 @@ mod tests {
 
     #[test]
     fn reading_uninitialized_input_uses_typed_null_semantics() {
-        let parsed =
-            parse_program("SET input.value = coalesce(input.value, 1);").expect("must parse");
+        let parsed = parse_program("SET value = coalesce(input.value, 1)").expect("must parse");
         let input_schema = schema(vec![Field::new("value", DataType::Int64, true)]);
         let output_schema = schema(vec![Field::new("value", DataType::Int64, false)]);
         let compiled = compile_program_for_bindings(
@@ -3745,7 +3743,7 @@ mod tests {
 
     #[test]
     fn directly_reading_uninitialized_input_initializes_nulls() {
-        let parsed = parse_program("SET input.value = input.value;").expect("must parse");
+        let parsed = parse_program("SET value = input.value").expect("must parse");
         let schema = schema(vec![Field::new("value", DataType::Int64, true)]);
         let compiled = compile_program_for_bindings(
             &parsed,
@@ -3767,7 +3765,7 @@ mod tests {
 
     #[test]
     fn filters_rows_after_projection() {
-        let parsed = parse_program("SET input.total = input.left + input.right WHERE input.keep;")
+        let parsed = parse_program("SET total = input.left + input.right WHERE input.keep")
             .expect("must parse");
         let schema = schema(vec![
             Field::new("keep", DataType::Boolean, true),
@@ -3800,10 +3798,9 @@ mod tests {
 
     #[test]
     fn executes_filter_against_projected_output_rows() {
-        let parsed = parse_program(
-            "SET input.lowered = lower(input.level) WHERE lower(input.level) = \"error\";",
-        )
-        .expect("must parse");
+        let parsed =
+            parse_program("SET lowered = lower(input.level) WHERE lower(input.level) = \"error\"")
+                .expect("must parse");
         let schema = schema(vec![
             Field::new("active", DataType::Boolean, true),
             Field::new("level", DataType::Utf8, true),
@@ -3852,7 +3849,7 @@ mod tests {
 
     #[test]
     fn unfiltered_execution_uses_identity_row_selection() {
-        let parsed = parse_program("SET input.copy = input.value;").expect("must parse");
+        let parsed = parse_program("SET copy = input.value").expect("must parse");
         let input_schema = schema(vec![Field::new("value", DataType::Int64, false)]);
         let compiled = compile_program_with_output_fields(
             &parsed,
@@ -3893,7 +3890,7 @@ mod tests {
 
     #[test]
     fn executes_dedicated_builtin_instruction() {
-        let parsed = parse_program("SET input.lowered = lower(input.name);").expect("must parse");
+        let parsed = parse_program("SET lowered = lower(input.name)").expect("must parse");
         let schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
         let compiled = compile_program_with_output_fields(
             &parsed,
@@ -3944,9 +3941,9 @@ mod tests {
             .slice(1, 3),
         );
         let parsed = parse_program(
-            "SET input.total = sum(input.values), input.first_value = first(input.values), \
-             input.last_value = last(input.values), input.second_value = nth(input.values, 1), \
-             input.value_count = count(input.values), input.fixed_last = last(input.fixed);",
+            "SET total = sum(input.values), first_value = first(input.values), last_value = \
+             last(input.values), second_value = nth(input.values, 1), value_count = \
+             count(input.values), fixed_last = last(input.fixed)",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4013,9 +4010,8 @@ mod tests {
 
     #[test]
     fn executes_int64_negation_and_comparison_paths() {
-        let parsed =
-            parse_program("SET input.neg = -input.value, input.lt = input.left < input.right;")
-                .expect("must parse");
+        let parsed = parse_program("SET neg = -input.value, lt = input.left < input.right")
+            .expect("must parse");
         let schema = schema(vec![
             Field::new("value", DataType::Int64, true),
             Field::new("left", DataType::Int64, true),
@@ -4058,8 +4054,8 @@ mod tests {
     #[test]
     fn executes_literals_not_sub_mul_and_null_propagation() {
         let parsed = parse_program(
-            "SET input.lit = 41, input.notted = NOT input.flag, input.diff = input.left - \
-             input.right, input.product = input.left * input.right;",
+            "SET lit = 41, notted = NOT input.flag, diff = input.left - input.right, product = \
+             input.left * input.right",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4114,10 +4110,9 @@ mod tests {
     #[test]
     fn executes_float_boolean_and_utf8_projection_paths() {
         let parsed = parse_program(
-            "SET input.neg = -input.amount, input.total = input.left + input.right, input.cmp = \
-             input.left < input.right, input.both = input.on AND input.off, input.uppered = \
-             upper(input.name), input.trimmed = trim(input.name), input.len = length(input.name), \
-             input.lexical = input.name > input.other;",
+            "SET neg = -input.amount, total = input.left + input.right, cmp = input.left < \
+             input.right, both = input.on AND input.off, uppered = upper(input.name), trimmed = \
+             trim(input.name), len = length(input.name), lexical = input.name > input.other",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4200,8 +4195,8 @@ mod tests {
     #[test]
     fn reports_non_finite_float_arithmetic_per_row() {
         let parsed = parse_program(
-            "SET input.f64_result = input.f64_left / input.f64_right, input.f32_result = \
-             input.f32_left * input.f32_right;",
+            "SET f64_result = input.f64_left / input.f64_right, f32_result = input.f32_left * \
+             input.f32_right",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4289,11 +4284,11 @@ mod tests {
     #[test]
     fn executes_cast_matrix_and_reports_failures() {
         let parsed = parse_program(
-            "SET input.i_from_f = input.flt AS INT64, input.i_from_b = input.flag AS INT64, \
-             input.f_from_b = input.flag AS FLOAT64, input.s_from_i = input.num AS STRING, \
-             input.s_from_f = input.flt AS STRING, input.s_from_b = input.flag AS STRING, \
-             input.b_from_i = input.num AS BOOLEAN, input.b_from_f = input.flt AS BOOLEAN, \
-             input.b_from_s = input.txt AS BOOLEAN, input.f_from_s = input.txt AS FLOAT64;",
+            "SET i_from_f = input.flt AS INT64, i_from_b = input.flag AS INT64, f_from_b = \
+             input.flag AS FLOAT64, s_from_i = input.num AS STRING, s_from_f = input.flt AS \
+             STRING, s_from_b = input.flag AS STRING, b_from_i = input.num AS BOOLEAN, b_from_f = \
+             input.flt AS BOOLEAN, b_from_s = input.txt AS BOOLEAN, f_from_s = input.txt AS \
+             FLOAT64",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4385,10 +4380,9 @@ mod tests {
 
     #[test]
     fn kernel_casts_only_report_new_nulls() {
-        let parsed = parse_program(
-            "SET input.parsed = input.text AS INT64, input.narrowed = input.wide AS INT8;",
-        )
-        .expect("must parse");
+        let parsed =
+            parse_program("SET parsed = input.text AS INT64, narrowed = input.wide AS INT8")
+                .expect("must parse");
         let schema = schema(vec![
             Field::new("text", DataType::Utf8, true),
             Field::new("wide", DataType::Int64, true),
@@ -4447,8 +4441,8 @@ mod tests {
     #[test]
     fn preserves_row_errors_for_nonconvertible_scalar_cast_pairs() {
         let parsed = parse_program(
-            "SET input.datetime_from_bool = input.flag AS DATETIME, input.bool_from_datetime = \
-             input.occurred_at AS BOOLEAN;",
+            "SET datetime_from_bool = input.flag AS DATETIME, bool_from_datetime = \
+             input.occurred_at AS BOOLEAN",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4510,11 +4504,10 @@ mod tests {
     #[test]
     fn executes_extended_builtin_instructions() {
         let parsed = parse_program(
-            "SET input.chosen = coalesce(input.primary, input.fallback), input.was_null = \
-             is_null(input.primary), input.maybe = nullif(input.primary, input.fallback), \
-             input.has = contains(input.text, input.needle), input.starts = \
-             starts_with(input.text, input.prefix), input.ends = ends_with(input.text, \
-             input.suffix);",
+            "SET chosen = coalesce(input.primary, input.fallback), was_null = \
+             is_null(input.primary), maybe = nullif(input.primary, input.fallback), has = \
+             contains(input.text, input.needle), starts = starts_with(input.text, input.prefix), \
+             ends = ends_with(input.text, input.suffix)",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4602,10 +4595,8 @@ mod tests {
 
     #[test]
     fn executes_abs_and_reports_overflow() {
-        let parsed = parse_program(
-            "SET input.int_abs = abs(input.ints), input.float_abs = abs(input.floats);",
-        )
-        .expect("must parse");
+        let parsed = parse_program("SET int_abs = abs(input.ints), float_abs = abs(input.floats)")
+            .expect("must parse");
         let schema = schema(vec![
             Field::new("ints", DataType::Int64, true),
             Field::new("floats", DataType::Float64, true),
@@ -4661,10 +4652,10 @@ mod tests {
     #[test]
     fn executes_narrow_numeric_and_float32_paths() {
         let parsed = parse_program(
-            "SET input.u8_sum = input.u8 + (1 AS U8), input.i8_abs = abs(input.i8), \
-             input.u16_keep = coalesce(input.u16, 0 AS U16), input.u32_same = nullif(input.u32, \
-             999 AS U32), input.u64_sum = input.u64 + (2 AS U64), input.f32_sum = input.f32 + \
-             (1.5 AS F32), input.f32_text = input.f32 AS STRING;",
+            "SET u8_sum = input.u8 + (1 AS U8), i8_abs = abs(input.i8), u16_keep = \
+             coalesce(input.u16, 0 AS U16), u32_same = nullif(input.u32, 999 AS U32), u64_sum = \
+             input.u64 + (2 AS U64), f32_sum = input.f32 + (1.5 AS F32), f32_text = input.f32 AS \
+             STRING",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4738,10 +4729,9 @@ mod tests {
     #[test]
     fn executes_numeric_binary_dispatch_for_all_scalar_widths() {
         let parsed = parse_program(
-            "SET input.u8_eq = input.u8 = (5 AS U8), input.u16_sum = input.u16 + (2 AS U16), \
-             input.i16_rem = input.i16 % (4 AS I16), input.i32_gte = input.i32 >= (9 AS I32), \
-             input.u32_product = input.u32 * (3 AS U32), input.u64_lt = input.u64 < (20 AS U64), \
-             input.f32_lte = input.f32 <= (1.5 AS F32);",
+            "SET u8_eq = input.u8 = (5 AS U8), u16_sum = input.u16 + (2 AS U16), i16_rem = \
+             input.i16 % (4 AS I16), i32_gte = input.i32 >= (9 AS I32), u32_product = input.u32 * \
+             (3 AS U32), u64_lt = input.u64 < (20 AS U64), f32_lte = input.f32 <= (1.5 AS F32)",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4915,8 +4905,8 @@ mod tests {
     #[test]
     fn compares_nan_floats_with_ieee_semantics() {
         let parsed = parse_program(
-            "SET input.eq = input.left = input.right, input.neq = input.left != input.right, \
-             input.gt = input.left > input.right, input.lt = input.left < input.right;",
+            "SET eq = input.left = input.right, neq = input.left != input.right, gt = input.left \
+             > input.right, lt = input.left < input.right",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -4982,9 +4972,9 @@ mod tests {
     #[test]
     fn executes_datetime_comparisons_and_casts() {
         let parsed = parse_program(
-            "SET input.occurred_text = input.occurred_at AS STRING, input.occurred_roundtrip = \
-             (input.occurred_at AS STRING) AS DATETIME, input.occurred_nanos = input.occurred_at \
-             AS INT64 WHERE input.occurred_at > ('2026-04-07T00:00:00Z' AS DATETIME);",
+            "SET occurred_text = input.occurred_at AS STRING, occurred_roundtrip = \
+             (input.occurred_at AS STRING) AS DATETIME, occurred_nanos = input.occurred_at AS \
+             INT64 WHERE input.occurred_at > ('2026-04-07T00:00:00Z' AS DATETIME)",
         )
         .expect("must parse");
         let schema = schema(vec![Field::new(
@@ -5053,25 +5043,24 @@ mod tests {
     #[test]
     fn executes_extended_text_regex_and_contextual_builtins() {
         let parsed = parse_program(
-            "SET input.now_value = now(), input.uuid4 = uuid_v4(), input.uuid7 = uuid_v7(), \
-             input.bits = bit_length(input.plain), input.ascii_value = ascii(input.plain), \
-             input.trimmed = btrim(input.spaced), input.chars = char_length(input.spaced), \
-             input.joined = concat(input.prefix, input.fill, input.prefix), input.titled = \
-             initcap(input.spaced), input.lefted = left(input.plain, input.count), input.lowered \
-             = lower(input.plain), input.lpaded = lpad(input.prefix, input.width, input.fill), \
-             input.ltrimmed = ltrim(input.spaced), input.digest = md5(input.prefix), \
-             input.repeated = repeat(input.prefix, input.count), input.replaced = \
-             replace(input.plain, input.prefix, input.replacement), input.reversed = \
-             reverse(input.prefix), input.righted = right(input.plain, input.count), input.rpaded \
-             = rpad(input.prefix, input.width, input.fill), input.rtrimmed = rtrim(input.spaced), \
-             input.part = split_part(input.dotted, input.delim, input.count), input.starts = \
-             starts_with(input.plain, input.prefix), input.pos = strpos(input.plain, \
-             input.prefix), input.piece = substr(input.plain, input.start, input.length), \
-             input.hexed = to_hex(input.hex_value), input.translated = translate(input.prefix, \
-             input.from_chars, input.to_chars), input.trimmed2 = trim(input.spaced), \
-             input.uppered = upper(input.prefix), input.regex_ok = regexp_like(input.plain, \
-             input.pattern), input.regex_replaced = regexp_replace(input.plain, input.pattern, \
-             input.replacement), input.regex_piece = regexp_substr(input.spaced, input.pattern);",
+            "SET now_value = now(), uuid4 = uuid_v4(), uuid7 = uuid_v7(), bits = \
+             bit_length(input.plain), ascii_value = ascii(input.plain), trimmed = \
+             btrim(input.spaced), chars = char_length(input.spaced), joined = \
+             concat(input.prefix, input.fill, input.prefix), titled = initcap(input.spaced), \
+             lefted = left(input.plain, input.count), lowered = lower(input.plain), lpaded = \
+             lpad(input.prefix, input.width, input.fill), ltrimmed = ltrim(input.spaced), digest \
+             = md5(input.prefix), repeated = repeat(input.prefix, input.count), replaced = \
+             replace(input.plain, input.prefix, input.replacement), reversed = \
+             reverse(input.prefix), righted = right(input.plain, input.count), rpaded = \
+             rpad(input.prefix, input.width, input.fill), rtrimmed = rtrim(input.spaced), part = \
+             split_part(input.dotted, input.delim, input.count), starts = \
+             starts_with(input.plain, input.prefix), pos = strpos(input.plain, input.prefix), \
+             piece = substr(input.plain, input.start, input.length), hexed = \
+             to_hex(input.hex_value), translated = translate(input.prefix, input.from_chars, \
+             input.to_chars), trimmed2 = trim(input.spaced), uppered = upper(input.prefix), \
+             regex_ok = regexp_like(input.plain, input.pattern), regex_replaced = \
+             regexp_replace(input.plain, input.pattern, input.replacement), regex_piece = \
+             regexp_substr(input.spaced, input.pattern)",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -5307,14 +5296,13 @@ mod tests {
     #[test]
     fn executes_extended_math_builtins() {
         let parsed = parse_program(
-            "SET input.absolute = abs(input.int_value), input.acos_value = acos(input.half), \
-             input.asin_value = asin(input.half), input.atan_value = atan(input.two), \
-             input.ceil_value = ceil(input.neg_float), input.cos_value = cos(input.half), \
-             input.exp_value = exp(input.one), input.floor_value = floor(input.neg_float), \
-             input.ln_value = ln(input.two), input.log_value = log(input.hundred), \
-             input.log_base_value = log(input.two, input.hundred), input.pow_value = \
-             pow(input.two, input.three), input.round_value = round(input.round_me), \
-             input.sqrt_value = sqrt(input.nine), input.tan_value = tan(input.half);",
+            "SET absolute = abs(input.int_value), acos_value = acos(input.half), asin_value = \
+             asin(input.half), atan_value = atan(input.two), ceil_value = ceil(input.neg_float), \
+             cos_value = cos(input.half), exp_value = exp(input.one), floor_value = \
+             floor(input.neg_float), ln_value = ln(input.two), log_value = log(input.hundred), \
+             log_base_value = log(input.two, input.hundred), pow_value = pow(input.two, \
+             input.three), round_value = round(input.round_me), sqrt_value = sqrt(input.nine), \
+             tan_value = tan(input.half)",
         )
         .expect("must parse");
         let schema = schema(vec![
@@ -5434,9 +5422,9 @@ mod tests {
     #[test]
     fn executes_injected_header_reads_and_returns_selected_invocations_in_order() {
         let parsed = parse_program(
-            "SET input.header_name = lower(input.header_name), input.route = \
-             read_header(input.header_name) WHERE input.keep INVOKE write_header(\"route\", \
-             input.header_name), write_header(\"route\", \"second\")",
+            "SET header_name = lower(input.header_name), route = read_header(input.header_name) \
+             WHERE input.keep INVOKE write_header(\"route\", input.header_name), \
+             write_header(\"route\", \"second\")",
         )
         .expect("program must parse");
         let input_schema = schema(vec![
@@ -5496,7 +5484,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_injector_policy_offloads_small_batches() {
-        let parsed = parse_program("SET input.route = read_header(input.header_name);")
+        let parsed = parse_program("SET route = read_header(input.header_name)")
             .expect("program must parse");
         let input_schema = schema(vec![
             Field::new("header_name", DataType::Utf8, false),

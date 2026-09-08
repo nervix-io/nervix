@@ -7,10 +7,7 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
 use meticulous::OptionExt as _;
 use nervix_models::{CreateCodec, ParseAsType};
 
-use super::{
-    ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatch,
-    RuntimeRecordBatchBuilder,
-};
+use super::{ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatchBuilder};
 
 const DEFAULT_PRIORITY: u8 = 13;
 
@@ -75,7 +72,8 @@ pub(super) fn validate_compiled_schema(
 pub(super) fn decode(
     codec: &CompiledCodec,
     payload: &[u8],
-) -> Result<RuntimeRecordBatch, CodecError> {
+    builder: &mut RuntimeRecordBatchBuilder,
+) -> Result<(), CodecError> {
     let end = payload
         .iter()
         .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'))
@@ -95,7 +93,7 @@ pub(super) fn decode(
     } else {
         parse_rfc3164(codec, split.priority, split.body)?
     };
-    build_batch(codec, &parsed)
+    append_row(codec, &parsed, builder)
 }
 
 pub(super) fn encode_row(row: &ArrowCodecRow<'_>, payload: &mut Vec<u8>) -> Result<(), CodecError> {
@@ -605,31 +603,28 @@ fn valid_sd_name_byte(byte: u8) -> bool {
     (b'!'..=b'~').contains(&byte) && !matches!(byte, b'=' | b']' | b'"')
 }
 
-fn build_batch(
+fn append_row(
     codec: &CompiledCodec,
     parsed: &ParsedSyslog<'_>,
-) -> Result<RuntimeRecordBatch, CodecError> {
-    let mut builder = codec.schema.batch_builder(1);
+    builder: &mut RuntimeRecordBatchBuilder,
+) -> Result<(), CodecError> {
     for index in 0..codec.schema.fields.len() {
         let field = codec.schema.fields[index].name.as_str();
         match field {
-            "facility" => append_u8(&mut builder, index, parsed.facility),
-            "severity" => append_u8(&mut builder, index, parsed.severity),
-            "timestamp" => append_datetime(&mut builder, index, parsed.timestamp.as_ref()),
-            "hostname" => append_string(&mut builder, index, parsed.hostname),
-            "app_name" => append_string(&mut builder, index, parsed.app_name),
-            "proc_id" => append_string(&mut builder, index, parsed.proc_id),
-            "msg_id" => append_string(&mut builder, index, parsed.msg_id),
-            "structured_data" => append_string(&mut builder, index, parsed.structured_data),
-            "message" => append_string(&mut builder, index, Some(parsed.message)),
+            "facility" => append_u8(builder, index, parsed.facility),
+            "severity" => append_u8(builder, index, parsed.severity),
+            "timestamp" => append_datetime(builder, index, parsed.timestamp.as_ref()),
+            "hostname" => append_string(builder, index, parsed.hostname),
+            "app_name" => append_string(builder, index, parsed.app_name),
+            "proc_id" => append_string(builder, index, parsed.proc_id),
+            "msg_id" => append_string(builder, index, parsed.msg_id),
+            "structured_data" => append_string(builder, index, parsed.structured_data),
+            "message" => append_string(builder, index, Some(parsed.message)),
             unknown => Err(format!("unsupported SYSLOG schema field '{unknown}'")),
         }
         .map_err(|reason| decode_error(codec, reason))?;
     }
-    builder
-        .finish_row()
-        .and_then(|()| builder.finish())
-        .map_err(|reason| decode_error(codec, reason))
+    Ok(())
 }
 
 fn prepare_append(builder: &mut RuntimeRecordBatchBuilder, index: usize) -> Result<(), String> {

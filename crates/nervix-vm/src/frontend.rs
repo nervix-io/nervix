@@ -1,4 +1,10 @@
-use ahash_compile_time::{HashSet, HashSetExt};
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Converting semantic Models once into programs accepted by the expression VM.
+//! - **Depends on.** The vocabulary, Arrow schemas, and the VM's program types.
+//! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
+
+use ahash::{HashSet, HashSetExt};
 use arrow_schema::{DataType, Schema, TimeUnit};
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -8,9 +14,9 @@ use nervix_models::{
     UnaryOperator as ModelUnaryOperator,
 };
 
-use super::{
+use crate::program::{
     BinaryOp, CaseArm, Expr, FieldRef, FunctionName, Invocation, Literal, Program, Span,
-    SpannedExpr, SpannedInvocation, SpannedNode, UnaryOp, ast::spanned,
+    SpannedExpr, SpannedInvocation, SpannedNode, UnaryOp, spanned,
 };
 
 #[derive(Debug, Clone, Copy)]

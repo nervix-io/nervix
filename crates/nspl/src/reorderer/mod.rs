@@ -9,10 +9,10 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
-        duration_lit, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, render_vm_program_tokens, reorderer_name, reorderer_ref,
-        suggest_from, suggestions_from_errors, tok, vm_program_error_message,
+        duration_lit, expression_error_message, filter_where_clause, flushed_processor_outputs,
+        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, render_expression_tokens, reorderer_name, reorderer_ref,
+        suggest_from, suggestions_from_errors, tok,
     },
 };
 
@@ -43,8 +43,8 @@ fn by_exprs<'src>()
                 .labelled("reorder_by"),
         )
         .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_vm_program_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+            crate::parse_expression_list(&render_expression_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
 }
 

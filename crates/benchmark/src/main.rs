@@ -16,8 +16,7 @@ use nervix_benchmark::{
     LoadedBenchmark, NERVIX_METRICS_PROMETHEUS_FILE, NERVIX_METRICS_REPORT_FILE,
     NervixMetricsReport, RunSettings, provision_topics,
 };
-use nervix_client_core::{Client, ConnectOptions};
-use nervix_nspl::client_statement::parse_client_statement_sources;
+use nervix_client_core::{Client, ConnectOptions, split_query_statements};
 use nervix_test_environment::{
     ContainerMode, ContainerReadiness, DependencyEnvironment, KAFKA_ADDR, KAFKA_DOCKER_ADDR,
     KAFKA_DOCKER_NETWORK, ManagedContainerInfo, configure_process_lifecycle,
@@ -1030,15 +1029,15 @@ impl Subject {
         graph: &str,
         output_path: &Path,
     ) -> Result<()> {
-        let statements = parse_client_statement_sources(graph)
+        let statements = split_query_statements(graph)
             .map_err(|error| anyhow!("failed to split the benchmark graph: {error}"))?;
         ensure!(
             !statements.is_empty(),
             "benchmark graph contains no statements"
         );
         let mut transcript = String::new();
-        for statement in &statements {
-            let source = graph[statement.span.clone()].trim();
+        for statement in statements {
+            let source = statement.trim();
             let outcome = client
                 .execute(source)
                 .await

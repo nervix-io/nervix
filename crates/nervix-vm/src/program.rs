@@ -1,14 +1,70 @@
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The typed program vocabulary consumed by the expression compiler and runtime.
+//! - **Depends on.** Primitive Rust and Arrow value types.
+//! - **Must not know.** NSPL tokens, parser diagnostics, Models, or the execution graph.
+
 use std::{
     cmp::Ordering,
+    fmt,
     hash::{Hash, Hasher},
+    ops::{Deref, DerefMut, Range},
 };
 
 use arrow_schema::DataType;
-use chumsky::span::{SimpleSpan, Spanned};
 use strum::{AsRefStr, EnumString};
 
-pub type Span = SimpleSpan<usize>;
-pub type SpannedNode<T> = Spanned<T, Span>;
+/// Identifies one semantic operation in a lowered VM program.
+///
+/// The range is assigned by the VM frontend and is independent of source text. Runtime side
+/// errors use it to recover the route-local operation metadata prepared by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl From<Range<usize>> for Span {
+    fn from(range: Range<usize>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<Span> for Range<usize> {
+    fn from(span: Span) -> Self {
+        span.start..span.end
+    }
+}
+
+impl fmt::Display for Span {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}..{}", self.start, self.end)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SpannedNode<T> {
+    pub inner: T,
+    pub span: Span,
+}
+
+impl<T> Deref for SpannedNode<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> DerefMut for SpannedNode<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 pub type SpannedExpr = SpannedNode<Expr>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -78,11 +134,12 @@ pub struct CaseArm {
     pub result: SpannedExpr,
 }
 
-/// Compares two expressions ignoring their source spans.
+/// Compares two expressions ignoring their operation ranges.
 ///
-/// Spans record where an expression was written, not what it computes. Two routes of the same
-/// node spell an identical `LOOKUP_HASH_MAP` key at different offsets, so span-sensitive
-/// comparison would report them as distinct and defeat any sharing keyed on expression identity.
+/// Ranges locate route-local operation metadata, not what an expression computes. Two routes of
+/// the same node can lower an identical `LOOKUP_HASH_MAP` key at different positions, so
+/// range-sensitive comparison would report them as distinct and defeat any sharing keyed on
+/// expression identity.
 fn cmp_spanned(left: &SpannedExpr, right: &SpannedExpr) -> Ordering {
     left.inner.cmp(&right.inner)
 }
@@ -580,9 +637,5 @@ pub enum BinaryOp {
 }
 
 pub(crate) fn spanned<T>(inner: T, span: Span) -> SpannedNode<T> {
-    Spanned { inner, span }
-}
-
-pub(crate) fn merge_spans(left: &Span, right: &Span) -> Span {
-    (left.start..right.end).into()
+    SpannedNode { inner, span }
 }

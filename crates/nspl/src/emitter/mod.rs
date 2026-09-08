@@ -19,7 +19,7 @@ use crate::{
         collection_ref, duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
         from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
         kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
-        nonzero_u64_value, queue_ref, relay_ref, render_vm_program_tokens, retry_policy,
+        nonzero_u64_value, queue_ref, relay_ref, render_expression_tokens, retry_policy,
         route_construction, string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref,
         where_expression, where_only_route_construction, word_raw,
     },
@@ -241,9 +241,9 @@ fn sqs_fifo_group_expression<'src>()
         .collect::<Vec<_>>()
         .labelled("fifo_group_expression")
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, crate::parser_support::vm_program_error_message(error))
+                Rich::custom(span, crate::parser_support::expression_error_message(error))
             })
         })
         .boxed()
@@ -471,9 +471,9 @@ fn clickhouse_value_expr<'src>()
         .collect::<Vec<_>>()
         .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>())
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, crate::parser_support::vm_program_error_message(error))
+                Rich::custom(span, crate::parser_support::expression_error_message(error))
             })
         })
 }

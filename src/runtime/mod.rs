@@ -11,10 +11,9 @@
 //! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
 //!   run and runs it.
 //!
-//! This module breaks its own contract twice. It reads Models directly rather than consuming a
-//! planned execution, and it names `nervix_nspl::vm_program` to lower routes the registry has
-//! already lowered once. A planner between the control state and the runtime, and one shared VM
-//! frontend, close both; `just ratchet` counts what is left.
+//! This module breaks its own contract: it reads Models directly rather than consuming a planned
+//! execution. A planner between the control state and the runtime closes that boundary;
+//! `just ratchet` counts what is left.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -84,18 +83,6 @@ use nervix_models::{
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
-use nervix_nspl::{
-    vm_program::{
-        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
-        SemanticNamespaces, Span as VmSpan, SpannedExpr, lower_branch_construction,
-        lower_finalized_output_filter, lower_generated_route, lower_route_construction,
-        lower_set_only_route, lower_transforming_route,
-    },
-    window_processor::aggregate::{
-        WindowAggregateDemand, WindowAggregateFunction, WindowAggregateProgram,
-        WindowAggregateStorageKind, lower_window_assignments,
-    },
-};
 use nervix_roto::UdfExecutor;
 #[cfg(test)]
 use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
@@ -103,11 +90,21 @@ use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileNamespace as VmCompileNamespace,
     CompileOptions as VmCompileOptions, CompiledProgram as VmCompiledProgram,
     ExecutionContext as VmExecutionContext, FunctionInjector as VmFunctionInjector,
-    OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity,
+    OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity, SemanticNamespaces,
     TypedArray as VmTypedArray, TypedBatch as VmTypedBatch,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program_with_options_for_bindings_with_sensitivity,
     execute_program_with_selection_in_context,
     infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
+    lower_branch_construction, lower_finalized_output_filter, lower_generated_route,
+    lower_route_construction, lower_set_only_route, lower_transforming_route,
+    program::{
+        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
+        Span as VmSpan, SpannedExpr,
+    },
+    window::{
+        WindowAggregateDemand, WindowAggregateFunction, WindowAggregateProgram,
+        WindowAggregateStorageKind, lower_window_assignments,
+    },
 };
 use nervix_wasm::{
     DomainClock as WasmDomainClock, WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit,
@@ -147,8 +144,8 @@ use crate::{
     },
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool, RuntimeRecordBatch,
-        RuntimeRecordMetadata, RuntimeRow, RuntimeValue, RuntimeValueColumn,
-        compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
+        RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeValue,
+        RuntimeValueColumn, compile_codec_with_protobuf, compile_schema, decode_with_codec,
         parse_as_type_from_arrow, runtime_value_arrow_array, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
@@ -367,7 +364,7 @@ use ingest_group::{
     BranchedEntrypointInput, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
     IngestorRouteRuntimes, RawIngestDispatch, branched_branch_filter_blocking,
     branched_branch_plan_blocking, branched_entrypoint_batch_from_inputs_blocking,
-    decode_ingested_payload, decode_ingested_payload_owned,
+    decode_ingested_payload,
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
