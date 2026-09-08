@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 class BenchmarkWorkflowTests(unittest.TestCase):
-    def test_no_docker_label_skips_pr_pipeline_until_removed(self) -> None:
+    def test_no_docker_label_skips_pr_pipeline(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
         trigger, jobs = workflow.split("\njobs:", maxsplit=1)
         meta = jobs.split("\n  meta:", maxsplit=1)[1]
@@ -14,18 +14,14 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         reporter = reporter.split("\n  publish-manifest:", maxsplit=1)[0]
 
         self.assertIn(
-            "types: [opened, synchronize, reopened, labeled, unlabeled]",
+            "types: [opened, synchronize, reopened, labeled]",
             trigger,
         )
         self.assertIn(
             "!contains(github.event.pull_request.labels.*.name, 'no-docker')",
             meta,
         )
-        self.assertIn(
-            "github.event.action != 'unlabeled' || "
-            "github.event.label.name == 'no-docker'",
-            " ".join(meta.split()),
-        )
+        self.assertIn("github.event_name != 'pull_request'", meta)
         self.assertIn(
             "!contains(github.event.pull_request.labels.*.name, 'no-docker')",
             reporter,
