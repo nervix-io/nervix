@@ -82,7 +82,10 @@ impl QueuedFrame {
 impl WireFrame {
     /// The whole frame's length, which is what the length prefix on the socket declares.
     fn framed_len(&self) -> Result<u32, TransportError> {
-        let body = self.body.as_ref().map_or(0, ChargedBytes::len);
+        let body = match &self.body {
+            Some(body) => body.len(),
+            None => 0,
+        };
         let total = self.header.len().checked_add(body).ok_or_else(|| {
             TransportError::Encode("wire frame exceeds an addressable size".to_string())
         })?;
@@ -109,7 +112,10 @@ impl WireFrame {
     /// How much transient memory this frame occupies while it waits its turn on a connection.
     pub(crate) fn queued_bytes(&self) -> u64 {
         let header: u64 = self.header.len().arch_into();
-        let body: u64 = self.body.as_ref().map_or(0, ChargedBytes::len).arch_into();
+        let body: u64 = match &self.body {
+            Some(body) => body.len().arch_into(),
+            None => 0,
+        };
         header
             .checked_add(body)
             .verified("both lengths come from one frame, which the frame limit bounds")

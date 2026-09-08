@@ -448,3 +448,55 @@ async fn an_operation_limit_stops_a_writer_before_its_class_does() {
         "the writer never charged past the operation limit"
     );
 }
+
+/// A writer that reserves room to grow into must not keep that room once it is done. A frame the
+/// size of a heartbeat holds its own bytes, not the granule its writer started with.
+#[tokio::test]
+async fn freezing_a_buffer_returns_the_room_the_writer_did_not_use() {
+    let executor = small_executor();
+    let reservation = executor
+        .try_reserve(MemoryClass::Management, 4096)
+        .expect("the management class is empty");
+    let mut buffer = BudgetedBuffer::with_limit(reservation, 64 * 1024);
+    buffer
+        .write_all(&[7_u8; 5])
+        .expect("a heartbeat-sized write fits");
+    assert_eq!(executor.snapshot().management_memory.reserved_bytes, 4096);
+
+    let frozen = crate::ChargedBytes::from_buffer(buffer);
+
+    assert_eq!(frozen.len(), 5);
+    assert_eq!(
+        executor.snapshot().management_memory.reserved_bytes,
+        5,
+        "the charge narrows to the bytes the writer actually produced"
+    );
+    drop(frozen);
+    assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
+}
+
+/// Shrinking is what keeps a class usable under churn: a thousand small frames must not exhaust a
+/// budget sized for the operations it actually has to hold.
+#[tokio::test]
+async fn many_small_frames_do_not_exhaust_the_class_that_backs_them() {
+    let executor = small_executor();
+    let capacity = executor.snapshot().management_memory.capacity_bytes;
+    let mut frozen = Vec::new();
+    for _ in 0..2048 {
+        let reservation = executor
+            .try_reserve(MemoryClass::Management, 4096)
+            .expect("a small frame is always admitted while the class holds its own size");
+        let mut buffer = BudgetedBuffer::with_limit(reservation, 64 * 1024);
+        buffer.write_all(&[1_u8; 50]).expect("a small write fits");
+        frozen.push(crate::ChargedBytes::from_buffer(buffer));
+    }
+    let reserved = executor.snapshot().management_memory.reserved_bytes;
+    assert_eq!(reserved, 2048 * 50);
+    assert!(
+        reserved < capacity / 4,
+        "two thousand small frames leave the class with room for the work that must not be blocked"
+    );
+    executor
+        .try_reserve(MemoryClass::Management, 4096)
+        .expect("a connection handshake still gets its reservation");
+}

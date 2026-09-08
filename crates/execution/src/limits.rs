@@ -96,15 +96,19 @@ impl Default for WorkerCounts {
     /// One reserved control and consensus worker each, data and bulk concurrency at the greater of
     /// one and the available CPU count minus one, and two workers for ordinary filesystem work.
     fn default() -> Self {
-        let available = std::thread::available_parallelism()
-            .map(NonZeroUsize::get)
-            .unwrap_or(1);
+        let available = match std::thread::available_parallelism() {
+            Ok(available) => available.get(),
+            Err(_) => 1,
+        };
         // One CPU is reserved for control and consensus work; a single-CPU node still runs one
         // data and one bulk worker, because refusing to run either is not a useful bound.
-        let data = available
-            .checked_sub(1)
-            .and_then(NonZeroUsize::new)
-            .unwrap_or(NonZeroUsize::MIN);
+        let data = match available.checked_sub(1) {
+            Some(remaining) => match NonZeroUsize::new(remaining) {
+                Some(data) => data,
+                None => NonZeroUsize::MIN,
+            },
+            None => NonZeroUsize::MIN,
+        };
         Self {
             control_cpu: NonZeroUsize::MIN,
             data_cpu: data,
@@ -233,11 +237,21 @@ impl ExecutionConfig {
     pub(crate) fn validate(self) -> Result<ValidatedConfig, Report<ExecutionConfigError>> {
         // A blocked channel must not exhaust the capacity another maximum-size channel needs, so
         // the relay budget holds two independent maximum-size operations.
-        let relay_required = self
-            .limits
-            .relay_operation_bytes()
-            .and_then(|operation| operation.checked_mul(2))
-            .ok_or_else(|| Report::new(ExecutionConfigError::UnaddressableRelayOperation))?;
+        let relay_required = match self.limits.relay_operation_bytes() {
+            Some(operation) => match operation.checked_mul(2) {
+                Some(pair) => pair,
+                None => {
+                    return Err(Report::new(
+                        ExecutionConfigError::UnaddressableRelayOperation,
+                    ));
+                }
+            },
+            None => {
+                return Err(Report::new(
+                    ExecutionConfigError::UnaddressableRelayOperation,
+                ));
+            }
+        };
         Ok(ValidatedConfig {
             workers: self.workers,
             budgets: ValidatedBudgets {

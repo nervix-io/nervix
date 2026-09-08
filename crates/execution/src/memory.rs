@@ -195,6 +195,29 @@ impl Reservation {
             })),
         }
     }
+
+    /// Give back everything above `bytes`.
+    ///
+    /// A writer charges ahead of itself so it can grow without asking per byte, and most writers
+    /// stop well short of what they asked for. Returning the difference is what keeps the charge a
+    /// measure of the allocation rather than of the room the writer reserved to work in: a
+    /// five-byte heartbeat that started with a four-kibibyte reservation must not hold four
+    /// kibibytes of its class for as long as it is queued.
+    pub fn shrink_to(&mut self, bytes: u64) {
+        let Ok(target) = u32::try_from(bytes) else {
+            return;
+        };
+        let Some(excess) = self.bytes.checked_sub(target) else {
+            return;
+        };
+        if excess == 0 {
+            return;
+        }
+        // Dropping the split permits returns them to the class.
+        if self.permit.split(excess.arch_into()).is_some() {
+            self.bytes = target;
+        }
+    }
 }
 
 /// An incremental writer produced more than the operation it belongs to is allowed to.
@@ -354,9 +377,12 @@ impl ChargedBytes {
         }
     }
 
-    /// Freeze what an incremental writer produced, keeping the charge it grew under.
+    /// Freeze what an incremental writer produced, narrowing its charge to the bytes it actually
+    /// wrote. The room the writer reserved to grow into goes back to its class here, so a queued
+    /// frame holds its own size and nothing more.
     pub fn from_buffer(buffer: BudgetedBuffer) -> Self {
-        let (bytes, reservation) = buffer.into_parts();
+        let (bytes, mut reservation) = buffer.into_parts();
+        reservation.shrink_to(bytes.len().arch_into());
         Self::from_owned(bytes, reservation)
     }
 
