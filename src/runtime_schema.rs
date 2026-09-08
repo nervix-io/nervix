@@ -774,6 +774,25 @@ impl CompiledCodecBatchEncoder<'_> {
     }
 }
 
+/// The bytes a batch's columns actually hold.
+///
+/// Every relay size limit is written in these terms: `MAX BATCH SIZE`, the relay metrics, and the
+/// decoded bound a peer's body is held to. Arrow's `get_array_memory_size` reports the capacity a
+/// decoder allocated instead, which for a string column runs many times the data it carries, so a
+/// limit expressed in payload bytes must never be enforced with it.
+pub(crate) fn batch_payload_bytes(batch: &RecordBatch) -> u64 {
+    batch
+        .columns()
+        .iter()
+        .map(|column| {
+            let Ok(bytes) = column.to_data().get_slice_memory_size() else {
+                return u64::MAX;
+            };
+            bytes.arch_into()
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
 impl RuntimeRecordBatch {
     pub(crate) fn from_record_batch(
         expected_schema: StdArc<ArrowSchema>,
@@ -798,16 +817,7 @@ impl RuntimeRecordBatch {
     }
 
     pub(crate) fn estimated_bytes(&self) -> u64 {
-        self.batch
-            .columns()
-            .iter()
-            .map(|column| {
-                let Ok(bytes) = column.to_data().get_slice_memory_size() else {
-                    return u64::MAX;
-                };
-                bytes.arch_into()
-            })
-            .fold(0_u64, u64::saturating_add)
+        batch_payload_bytes(&self.batch)
     }
 
     pub(crate) fn from_rows<'a>(

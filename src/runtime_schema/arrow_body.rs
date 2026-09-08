@@ -22,7 +22,7 @@ use error_stack::{Report, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use thiserror::Error;
 
-use super::{CompiledSchema, RuntimeRecordBatch};
+use super::{CompiledSchema, RuntimeRecordBatch, batch_payload_bytes};
 
 /// Why a relay body could not be produced or consumed.
 #[derive(Debug, Error)]
@@ -237,7 +237,7 @@ async fn decode_body(
                         limit: contract.max_sections.get(),
                     }));
                 }
-                let section: u64 = batch.get_array_memory_size().arch_into();
+                let section = batch_payload_bytes(&batch);
                 decoded = decoded.checked_add(section).ok_or_else(|| {
                     Report::new(ArrowBodyError::DecodedTooLarge {
                         size: u64::MAX,

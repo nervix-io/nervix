@@ -940,7 +940,6 @@ impl RelayBoundaryServices {
             )
             .await;
         if let Err(reason) = admission_result {
-            tracing::warn!(probe = "admitted_failed", reason = %reason, "PROBE admitted dispatch failed");
             for ack_id in registered_ack_ids {
                 dispatcher.clear_pending_ack(ack_id);
             }
@@ -2770,6 +2769,77 @@ mod tests {
 
         assert!(allocated_bytes > payload_bytes);
         assert_eq!(batch.estimated_bytes(), payload_bytes);
+    }
+
+    /// A decoded relay body is held to the payload its columns carry, not to the capacity Arrow
+    /// allocated while decoding them.
+    ///
+    /// Every relay size limit is written in payload terms: `MAX BATCH SIZE`, the relay metrics and
+    /// the decoded bound a peer's body is measured against. The two numbers diverge widely for
+    /// string columns, so a guard that compared the allocated capacity against a payload limit
+    /// refused bodies the relay had itself produced, and the caller dropped the whole batch.
+    #[tokio::test]
+    async fn a_decoded_body_is_bounded_by_the_payload_it_carries() {
+        use nervix_execution::{ExecutionConfig, OperationLimits};
+        use ubyte::ByteUnit;
+
+        let schema = test_schema(&[
+            ("tenant", ParseAsType::String),
+            ("user_id", ParseAsType::U32),
+        ]);
+        let batch = RelayRecordBatch::single(
+            Arc::clone(&schema),
+            None,
+            test_runtime_row([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+                ("user_id".to_string(), RuntimeValue::U32(42)),
+            ]),
+            AckSet::empty(),
+        )
+        .expect("relay batch should build");
+
+        let generous = Executor::default();
+        let body = batch
+            .batch
+            .encode_arrow_ipc(&generous)
+            .await
+            .expect("the body should encode");
+        let decoded = schema
+            .decode_arrow_body(&generous, body.clone())
+            .await
+            .expect("the body should decode under the default limits");
+        let payload = decoded.estimated_bytes();
+        let allocated = decoded
+            .batch()
+            .columns()
+            .iter()
+            .map(|column| -> u64 { column.get_array_memory_size().arch_into() })
+            .sum::<u64>();
+        assert!(
+            allocated > payload,
+            "the batch must over-allocate for this bound to distinguish the two measures"
+        );
+
+        // A bound the payload fits and the allocation does not. Measured the old way this body
+        // was refused; measured the way the relay sizes its own batches it is accepted.
+        let midpoint = payload
+            .checked_add(allocated.abs_diff(payload) / 2)
+            .expect("two column sizes sum below the address space");
+        let executor = Executor::new(ExecutionConfig {
+            limits: OperationLimits {
+                relay_decoded_bytes: ByteUnit::Byte(midpoint),
+                ..OperationLimits::default()
+            },
+            ..ExecutionConfig::default()
+        })
+        .expect("a decoded bound below the default holds the default budgets");
+        schema
+            .decode_arrow_body(&executor, body)
+            .await
+            .expect("a body whose payload fits the decoded bound decodes");
     }
 
     /// A relay batch delivered to three destinations is encoded once and shared.
