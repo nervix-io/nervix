@@ -24,6 +24,8 @@ mod workers;
 
 use std::sync::Arc as StdArc;
 
+use arch_into::ArchInto as _;
+use error_stack::Report;
 use meticulous::ResultExt as _;
 use thiserror::Error;
 use triomphe::Arc;
@@ -93,7 +95,7 @@ impl Executor {
     /// Build the executor from limits that are validated together, so a node whose budgets cannot
     /// hold the largest operation it is configured to accept fails at startup instead of stalling
     /// on the first one.
-    pub fn new(config: ExecutionConfig) -> Result<Self, ExecutionConfigError> {
+    pub fn new(config: ExecutionConfig) -> Result<Self, Report<ExecutionConfigError>> {
         let validated = config.validate()?;
         Ok(Self {
             inner: Arc::new(ExecutorInner {
@@ -148,7 +150,7 @@ impl Executor {
         &self,
         class: MemoryClass,
         bytes: u64,
-    ) -> Result<Reservation, AdmissionError> {
+    ) -> Result<Reservation, Report<AdmissionError>> {
         self.budget(class).try_reserve(bytes)
     }
 
@@ -158,21 +160,43 @@ impl Executor {
         &self,
         class: MemoryClass,
         bytes: u64,
-    ) -> Result<Reservation, AdmissionError> {
+    ) -> Result<Reservation, Report<AdmissionError>> {
         self.budget(class).reserve(bytes).await
+    }
+
+    /// Charge `class` for an allocation the caller already holds, and take ownership of it. The
+    /// bytes are not copied: the charge simply starts covering them.
+    pub async fn charge_owned(
+        &self,
+        class: MemoryClass,
+        bytes: Vec<u8>,
+    ) -> Result<ChargedBytes, Report<AdmissionError>> {
+        let reservation = self.reserve(class, bytes.len().arch_into()).await?;
+        Ok(ChargedBytes::from_owned(bytes, reservation))
+    }
+
+    /// The same, refusing rather than waiting when the class is full.
+    pub fn try_charge_owned(
+        &self,
+        class: MemoryClass,
+        bytes: Vec<u8>,
+    ) -> Result<ChargedBytes, Report<AdmissionError>> {
+        let reservation = self.try_reserve(class, bytes.len().arch_into())?;
+        Ok(ChargedBytes::from_owned(bytes, reservation))
     }
 
     /// Run one CPU job on `class`'s workers, holding `reservation` until the work actually exits.
     ///
-    /// The job runs off the async workers entirely. It is handed a [`Cancellation`] to check
-    /// between its own bounded units: when the caller stops awaiting, the flag is raised, but the
-    /// reservation stays charged until the job returns, because its allocation is still live.
+    /// The job runs off the async workers entirely. It is handed the reservation it allocates
+    /// under, and a [`Cancellation`] to check between its own bounded units: when the caller stops
+    /// awaiting, the flag is raised, but the charge stays held until the job returns, because its
+    /// allocation is still live.
     pub async fn run_cpu<T>(
         &self,
         class: CpuClass,
         reservation: Reservation,
-        job: impl FnOnce(&Cancellation) -> T + Send + 'static,
-    ) -> Result<T, ExecutionError>
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
     where
         T: Send + 'static,
     {
@@ -185,8 +209,8 @@ impl Executor {
         &self,
         class: StorageClass,
         reservation: Reservation,
-        job: impl FnOnce(&Cancellation) -> T + Send + 'static,
-    ) -> Result<T, ExecutionError>
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
     where
         T: Send + 'static,
     {

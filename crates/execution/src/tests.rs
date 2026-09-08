@@ -59,7 +59,7 @@ fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     })
     .expect_err("a relay budget that cannot hold two maximum operations is rejected");
     assert_eq!(
-        error,
+        *error.current_context(),
         ExecutionConfigError::BudgetBelowOperation {
             class: "relay",
             operation: "pair of relay operations",
@@ -80,7 +80,7 @@ fn a_management_budget_below_one_event_fails_to_start() {
     })
     .expect_err("a management budget below one event is rejected");
     assert_eq!(
-        error,
+        *error.current_context(),
         ExecutionConfigError::BudgetBelowOperation {
             class: "management",
             operation: "management event",
@@ -99,11 +99,14 @@ async fn a_reservation_holds_its_class_until_it_is_dropped() {
         .expect("the whole class is available");
     assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, capacity);
     assert_eq!(
-        executor.try_reserve(MemoryClass::Bulk, 1).err(),
-        Some(AdmissionError::BudgetExhausted {
+        *executor
+            .try_reserve(MemoryClass::Bulk, 1)
+            .expect_err("a full class refuses another byte")
+            .current_context(),
+        AdmissionError::BudgetExhausted {
             class: "bulk",
             requested: 1,
-        })
+        }
     );
     drop(reservation);
     assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
@@ -118,7 +121,7 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
         .await
         .expect_err("an operation the class can never hold is refused");
     assert_eq!(
-        error,
+        *error.current_context(),
         AdmissionError::ExceedsBudget {
             class: "management",
             requested: capacity + 1,
@@ -157,11 +160,15 @@ async fn occupied_bulk_execution_does_not_delay_control_execution() {
     let bulk_executor = executor.clone();
     let bulk = tokio::spawn(async move {
         bulk_executor
-            .run_cpu(CpuClass::Bulk, bulk_reservation, move |_cancellation| {
-                started.notify_waiters();
-                // The bulk worker is deliberately occupied for the whole of the control request.
-                let _ = bulk_released.blocking_recv();
-            })
+            .run_cpu(
+                CpuClass::Bulk,
+                bulk_reservation,
+                move |_charge, _cancellation| {
+                    started.notify_waiters();
+                    // The bulk worker is deliberately occupied for the whole of the control request.
+                    let _ = bulk_released.blocking_recv();
+                },
+            )
             .await
             .expect("the bulk job runs")
     });
@@ -175,7 +182,7 @@ async fn occupied_bulk_execution_does_not_delay_control_execution() {
         .expect("management capacity is reserved");
     let control = tokio::time::timeout(
         Duration::from_secs(5),
-        executor.run_cpu(CpuClass::Control, control_reservation, |_| 7_u32),
+        executor.run_cpu(CpuClass::Control, control_reservation, |_, _| 7_u32),
     )
     .await
     .expect("control execution completes while bulk execution is occupied")
@@ -199,7 +206,7 @@ async fn a_job_dropped_while_queued_releases_its_reservation() {
     let occupied = executor.clone();
     let running = tokio::spawn(async move {
         occupied
-            .run_cpu(CpuClass::Data, occupying, move |_| {
+            .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
                 let _ = released.blocking_recv();
             })
             .await
@@ -217,7 +224,7 @@ async fn a_job_dropped_while_queued_releases_its_reservation() {
     let waiting = executor.clone();
     let cancelled = tokio::spawn(async move {
         waiting
-            .run_cpu(CpuClass::Data, queued, |_| ())
+            .run_cpu(CpuClass::Data, queued, |_, _| ())
             .await
             .expect("the queued job either runs or is dropped")
     });
@@ -255,7 +262,7 @@ async fn a_running_job_observes_cancellation_and_keeps_its_charge_until_it_exits
     let waiting_snapshot = executor.clone();
     let task = tokio::spawn(async move {
         running
-            .run_cpu(CpuClass::Data, reservation, move |cancellation| {
+            .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
                 job_observed.store(1, Ordering::Release);
                 while cancellation.check().is_ok() {
                     std::thread::yield_now();
@@ -290,7 +297,7 @@ async fn a_full_wait_queue_is_typed_backpressure_rather_than_unbounded_growth() 
     let occupied = executor.clone();
     let running = tokio::spawn(async move {
         occupied
-            .run_cpu(CpuClass::Data, occupying, move |_| {
+            .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
                 let _ = released.blocking_recv();
             })
             .await
@@ -305,7 +312,7 @@ async fn a_full_wait_queue_is_typed_backpressure_rather_than_unbounded_growth() 
         .expect("the relay class has room");
     let waiting = executor.clone();
     let pending =
-        tokio::spawn(async move { waiting.run_cpu(CpuClass::Data, queued, |_| ()).await });
+        tokio::spawn(async move { waiting.run_cpu(CpuClass::Data, queued, |_, _| ()).await });
     while executor.snapshot().data_cpu.pending == 0 {
         tokio::task::yield_now().await;
     }
@@ -314,11 +321,15 @@ async fn a_full_wait_queue_is_typed_backpressure_rather_than_unbounded_growth() 
         .try_reserve(MemoryClass::Relay, 1024)
         .expect("the relay class has room");
     let error = executor
-        .run_cpu(CpuClass::Data, refused, |_| ())
+        .run_cpu(CpuClass::Data, refused, |_, _| ())
         .await
         .expect_err("the single wait slot is already taken");
     assert!(
-        matches!(error, crate::ExecutionError::QueueFull { class, pending } if class == "data_cpu" && pending == 1),
+        matches!(
+            error.current_context(),
+            crate::ExecutionError::QueueFull { class, pending }
+                if *class == "data_cpu" && *pending == 1
+        ),
         "expected typed queue backpressure, got {error}"
     );
 
@@ -345,7 +356,7 @@ async fn consensus_storage_runs_its_jobs_in_admission_order() {
         let order = StdArc::clone(&order);
         handles.push(
             executor
-                .run_storage(StorageClass::Consensus, reservation, move |_| {
+                .run_storage(StorageClass::Consensus, reservation, move |_charge, _| {
                     order.lock().push(index);
                 })
                 .await,

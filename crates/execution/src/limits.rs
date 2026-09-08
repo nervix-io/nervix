@@ -2,6 +2,7 @@
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
+use error_stack::Report;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
@@ -98,9 +99,12 @@ impl Default for WorkerCounts {
         let available = std::thread::available_parallelism()
             .map(NonZeroUsize::get)
             .unwrap_or(1);
-        let data = NonZeroUsize::new(available.saturating_sub(1))
-            .unwrap_or(NonZeroUsize::MIN)
-            .max(NonZeroUsize::MIN);
+        // One CPU is reserved for control and consensus work; a single-CPU node still runs one
+        // data and one bulk worker, because refusing to run either is not a useful bound.
+        let data = available
+            .checked_sub(1)
+            .and_then(NonZeroUsize::new)
+            .unwrap_or(NonZeroUsize::MIN);
         Self {
             control_cpu: NonZeroUsize::MIN,
             data_cpu: data,
@@ -226,14 +230,14 @@ pub enum ExecutionConfigError {
 }
 
 impl ExecutionConfig {
-    pub(crate) fn validate(self) -> Result<ValidatedConfig, ExecutionConfigError> {
+    pub(crate) fn validate(self) -> Result<ValidatedConfig, Report<ExecutionConfigError>> {
         // A blocked channel must not exhaust the capacity another maximum-size channel needs, so
         // the relay budget holds two independent maximum-size operations.
         let relay_required = self
             .limits
             .relay_operation_bytes()
             .and_then(|operation| operation.checked_mul(2))
-            .ok_or(ExecutionConfigError::UnaddressableRelayOperation)?;
+            .ok_or_else(|| Report::new(ExecutionConfigError::UnaddressableRelayOperation))?;
         Ok(ValidatedConfig {
             workers: self.workers,
             budgets: ValidatedBudgets {
@@ -272,18 +276,19 @@ fn permits(
     budget: ByteUnit,
     operation: &'static str,
     required: u64,
-) -> Result<u32, ExecutionConfigError> {
+) -> Result<u32, Report<ExecutionConfigError>> {
     let budget = budget.as_u64();
     if budget == 0 {
-        return Err(ExecutionConfigError::EmptyBudget { class });
+        return Err(Report::new(ExecutionConfigError::EmptyBudget { class }));
     }
     if budget < required {
-        return Err(ExecutionConfigError::BudgetBelowOperation {
+        return Err(Report::new(ExecutionConfigError::BudgetBelowOperation {
             class,
             operation,
             budget,
             required,
-        });
+        }));
     }
-    u32::try_from(budget).map_err(|_| ExecutionConfigError::BudgetTooLarge { class, budget })
+    u32::try_from(budget)
+        .map_err(|_| Report::new(ExecutionConfigError::BudgetTooLarge { class, budget }))
 }

@@ -174,6 +174,37 @@ pub(super) enum RelayBoundaryFanout {
     BranchCollapse(Arc<BranchCollapseNode>),
 }
 
+/// One destination's share of a relay fanout.
+///
+/// The body is a parameter rather than something this builds, because the fanout encodes it once
+/// and every destination carries a handle to that one allocation. Only the target relay and the
+/// acknowledgement obligations differ between destinations.
+pub(super) struct RoutedDelivery<'a> {
+    pub(super) domain: &'a DomainName,
+    pub(super) consumer: &'a RemoteRuntimeConsumer,
+    pub(super) batch: &'a RelayRecordBatch,
+    pub(super) batch_ipc: ChargedBytes,
+    pub(super) acks: Vec<Option<RemoteAckRegistration>>,
+}
+
+pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
+    RelayPayload {
+        kind: RelayPayloadKind::Routed,
+        domain: delivery.domain.clone(),
+        relay: delivery.consumer.relay.clone(),
+        key: BranchKey::to_remote_key(&delivery.batch.key),
+        batch_ipc: delivery.batch_ipc,
+        metadata: delivery
+            .batch
+            .metadata
+            .iter()
+            .map(RuntimeRecordMetadata::to_remote)
+            .collect(),
+        acks: delivery.acks,
+        admission: None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct RemoteRuntimeConsumer {
     pub(super) node_id: ClusterNodeName,
@@ -863,11 +894,11 @@ impl RelayBoundaryServices {
             return Err(Box::new(batch.clone()));
         };
         let _slot = self.ingress_slot.lock().await;
-        let batch_ipc = match batch.batch.to_arrow_ipc_bytes() {
+        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
             Ok(bytes) => bytes,
             Err(error) => {
                 for ack in batch.acks.iter() {
-                    ack.no_ack(error.clone());
+                    ack.no_ack(error.to_string());
                 }
                 return Err(Box::new(batch.clone()));
             }
@@ -990,39 +1021,47 @@ impl RelayBoundaryServices {
         if remote_runtime_consumers.is_empty() {
             return Ok(());
         }
+        let Some(dispatcher) = &self.remote_dispatcher else {
+            if remote_runtime_consumers
+                .iter()
+                .any(|consumer| consumer.mode == AckMode::Attached)
+            {
+                for ack in batch.acks.iter() {
+                    ack.no_ack("remote dispatcher unavailable for attached delivery");
+                }
+                return Err(Box::new(batch.clone()));
+            }
+            return Ok(());
+        };
+        // Every consumer of this relay receives the same columns; only the acknowledgement
+        // obligations differ. The body is therefore encoded once for the whole fanout and each
+        // destination carries a handle to that one allocation.
+        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if remote_runtime_consumers
+                    .iter()
+                    .any(|consumer| consumer.mode == AckMode::Attached)
+                {
+                    for ack in batch.acks.iter() {
+                        ack.no_ack(error.to_string());
+                    }
+                    return Err(Box::new(batch.clone()));
+                }
+                warn!(
+                    error = %error,
+                    "failed to serialize detached remote relay batch"
+                );
+                return Ok(());
+            }
+        };
         for consumer in remote_runtime_consumers.iter() {
             tokio::task::consume_budget().await;
             let outbound_slot = self.outbound_slot(&consumer.node_id);
             let _slot = outbound_slot.lock().await;
-            let Some(dispatcher) = &self.remote_dispatcher else {
-                if consumer.mode == AckMode::Attached {
-                    for ack in batch.acks.iter() {
-                        ack.no_ack("remote dispatcher unavailable for attached delivery");
-                    }
-                    return Err(Box::new(batch.clone()));
-                }
-                continue;
-            };
             let remote_batch = match consumer.mode {
                 AckMode::Attached => batch.attached(),
                 AckMode::Detached => batch.detached(),
-            };
-            let batch_ipc = match remote_batch.batch.to_arrow_ipc_bytes() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    if consumer.mode == AckMode::Attached {
-                        for ack in remote_batch.acks.iter() {
-                            ack.no_ack(error.clone());
-                        }
-                        return Err(Box::new(batch.clone()));
-                    }
-                    warn!(
-                        error = %error,
-                        target_node = %consumer.node_id,
-                        "failed to serialize detached remote relay batch"
-                    );
-                    continue;
-                }
             };
             let remote_acks = if consumer.mode == AckMode::Attached {
                 let Some(local_node_id) = dispatcher.local_node_id() else {
@@ -1049,20 +1088,13 @@ impl RelayBoundaryServices {
             let result = dispatcher
                 .dispatch_admitted_relay_payload(
                     &consumer.node_id,
-                    RelayPayload {
-                        kind: RelayPayloadKind::Routed,
-                        domain: domain.clone(),
-                        relay: consumer.relay.clone(),
-                        key: BranchKey::to_remote_key(&remote_batch.key),
-                        batch_ipc,
-                        metadata: remote_batch
-                            .metadata
-                            .iter()
-                            .map(RuntimeRecordMetadata::to_remote)
-                            .collect(),
+                    routed_payload(RoutedDelivery {
+                        domain,
+                        consumer,
+                        batch: &remote_batch,
+                        batch_ipc: batch_ipc.clone(),
                         acks: remote_acks.clone(),
-                        admission: None,
-                    },
+                    }),
                 )
                 .await;
 
@@ -2267,7 +2299,8 @@ mod tests {
         let batch_ipc = schema
             .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(42))]])
             .expect("batch should build")
-            .to_arrow_ipc_bytes()
+            .encode_arrow_ipc(runtime.executor())
+            .await
             .expect("batch ipc should serialize");
 
         let key = u32_branch_key("user_id", 42);
@@ -2730,5 +2763,121 @@ mod tests {
 
         assert!(allocated_bytes > payload_bytes);
         assert_eq!(batch.estimated_bytes(), payload_bytes);
+    }
+
+    /// A relay batch delivered to three destinations is encoded once and shared.
+    ///
+    /// The body every destination carries is the same allocation, not three copies of the same
+    /// bytes, and it decodes back to exactly the fields, nulls and branch the source batch had.
+    /// Only the target relay and the acknowledgement obligations differ per destination.
+    #[tokio::test]
+    async fn a_three_destination_fanout_shares_one_encoded_body() {
+        let executor = Executor::default();
+        let schema = Arc::new(compile_schema(&CreateSchema {
+            name: named::<SchemaName>("orders"),
+            fields: vec![
+                nervix_models::SchemaField {
+                    name: named("user_id"),
+                    ty: ParseAsType::U32,
+                    optional: false,
+                    sensitive: false,
+                },
+                nervix_models::SchemaField {
+                    name: named("note"),
+                    ty: ParseAsType::String,
+                    optional: true,
+                    sensitive: true,
+                },
+            ],
+        }));
+        let key = u32_branch_key("user_id", 7);
+        // The optional field is left uninitialized, so it finalizes as a typed null and the
+        // fanout has a null to preserve.
+        let batch = RelayRecordBatch {
+            key: key.clone(),
+            keys: vec![key.clone()],
+            batch: Arc::new(
+                schema
+                    .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(7))]])
+                    .expect("the fanout test batch should build"),
+            ),
+            metadata: vec![
+                test_runtime_row([("user_id".to_string(), RuntimeValue::U32(7))])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(11))
+                    .metadata()
+                    .clone(),
+            ],
+            acks: vec![AckSet::empty()],
+        };
+
+        let admitted_before = executor.snapshot().data_cpu.admitted;
+        let body = batch
+            .batch
+            .encode_arrow_ipc(&executor)
+            .await
+            .expect("the fanout body should encode");
+        assert_eq!(
+            executor
+                .snapshot()
+                .data_cpu
+                .admitted
+                .checked_sub(admitted_before)
+                .expect("the admitted count only grows"),
+            1,
+            "one batch is one encode, however many destinations receive it"
+        );
+
+        let domain = domain("default");
+        let consumers = ["one", "two", "three"].map(|relay| RemoteRuntimeConsumer {
+            node_id: ClusterNodeName::parse(&format!("node-{relay}")).expect("valid name"),
+            relay: named::<RelayName>(relay),
+            mode: AckMode::Attached,
+        });
+        let payloads = consumers
+            .iter()
+            .enumerate()
+            .map(|(index, consumer)| {
+                routed_payload(RoutedDelivery {
+                    domain: &domain,
+                    consumer,
+                    batch: &batch,
+                    batch_ipc: body.clone(),
+                    acks: vec![Some(RemoteAckRegistration {
+                        ack_id: index.arch_into(),
+                        reply_node_id: ClusterNodeName::parse("node-source").expect("valid name"),
+                    })],
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for payload in &payloads[1..] {
+            assert!(
+                payload
+                    .batch_ipc
+                    .shares_allocation_with(&payloads[0].batch_ipc),
+                "every destination carries the one allocation the batch was encoded into"
+            );
+        }
+        for (index, payload) in payloads.iter().enumerate() {
+            assert_eq!(payload.relay, consumers[index].relay);
+            assert_eq!(payload.key, BranchKey::to_remote_key(&key));
+            assert_eq!(
+                payload.acks,
+                vec![Some(RemoteAckRegistration {
+                    ack_id: index.arch_into(),
+                    reply_node_id: ClusterNodeName::parse("node-source").expect("valid name"),
+                })],
+                "each destination owes its own acknowledgement"
+            );
+            let decoded = schema
+                .decode_arrow_body(&executor, payload.batch_ipc.clone())
+                .await
+                .expect("every destination decodes the shared body");
+            assert_eq!(decoded.batch(), batch.batch.batch());
+            assert!(
+                decoded.batch().column(1).is_null(0),
+                "the optional field stays a typed null through the fanout"
+            );
+        }
     }
 }

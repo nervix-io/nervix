@@ -3,6 +3,7 @@
 use std::{io, ops::Deref, sync::Arc as StdArc};
 
 use arch_into::ArchInto as _;
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -10,10 +11,10 @@ use triomphe::Arc;
 
 use crate::{MemoryClass, SemaphoreRef};
 
-/// How much of an incremental writer's growth is charged at a time. Charging every byte would put
-/// a semaphore acquisition in the middle of a serializer's inner loop; charging a granule keeps the
-/// overhead bounded while the writer still fails before it grows past its budget.
-const GROWTH_GRANULE: u64 = 64 * 1024;
+/// The smallest charge an incremental writer takes. Charging every byte would put a semaphore
+/// acquisition in the middle of a serializer's inner loop; charging at least this much keeps the
+/// overhead bounded while a small output still wastes little.
+const MINIMUM_GROWTH: u64 = 4 * 1024;
 
 /// Why an operation was not charged. An operation that is refused here has allocated nothing.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -71,46 +72,50 @@ impl MemoryBudget {
         }
     }
 
-    pub(crate) fn try_reserve(&self, bytes: u64) -> Result<Reservation, AdmissionError> {
+    pub(crate) fn try_reserve(&self, bytes: u64) -> Result<Reservation, Report<AdmissionError>> {
         let requested = self.checked_request(bytes)?;
         match StdArc::clone(&self.permits).try_acquire_many_owned(requested) {
             Ok(permit) => Ok(self.reservation(requested, permit)),
-            Err(TryAcquireError::NoPermits) => Err(AdmissionError::BudgetExhausted {
+            Err(TryAcquireError::NoPermits) => Err(Report::new(AdmissionError::BudgetExhausted {
                 class: self.class.as_str(),
                 requested: bytes,
-            }),
-            Err(TryAcquireError::Closed) => Err(AdmissionError::BudgetClosed {
+            })),
+            Err(TryAcquireError::Closed) => Err(Report::new(AdmissionError::BudgetClosed {
                 class: self.class.as_str(),
-            }),
+            })),
         }
     }
 
-    pub(crate) async fn reserve(&self, bytes: u64) -> Result<Reservation, AdmissionError> {
+    pub(crate) async fn reserve(&self, bytes: u64) -> Result<Reservation, Report<AdmissionError>> {
         let requested = self.checked_request(bytes)?;
         let permit = StdArc::clone(&self.permits)
             .acquire_many_owned(requested)
             .await
-            .map_err(|_| AdmissionError::BudgetClosed {
-                class: self.class.as_str(),
+            .map_err(|_| {
+                Report::new(AdmissionError::BudgetClosed {
+                    class: self.class.as_str(),
+                })
             })?;
         Ok(self.reservation(requested, permit))
     }
 
     /// Refuse an operation the class could never hold, rather than letting it wait for capacity
     /// that will never exist.
-    fn checked_request(&self, bytes: u64) -> Result<u32, AdmissionError> {
+    fn checked_request(&self, bytes: u64) -> Result<u32, Report<AdmissionError>> {
         let capacity = self.capacity.into();
-        let requested = u32::try_from(bytes).map_err(|_| AdmissionError::ExceedsBudget {
-            class: self.class.as_str(),
-            requested: bytes,
-            capacity,
-        })?;
-        if requested > self.capacity {
-            return Err(AdmissionError::ExceedsBudget {
+        let requested = u32::try_from(bytes).map_err(|_| {
+            Report::new(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
                 requested: bytes,
                 capacity,
-            });
+            })
+        })?;
+        if requested > self.capacity {
+            return Err(Report::new(AdmissionError::ExceedsBudget {
+                class: self.class.as_str(),
+                requested: bytes,
+                capacity,
+            }));
         }
         Ok(requested)
     }
@@ -149,43 +154,45 @@ impl Reservation {
     /// Charge the class for everything up to `bytes`, so an incremental writer knows it may grow
     /// to that size before it does. Growth that the class cannot back fails here, with the writer
     /// still holding only what it had.
-    pub fn grow_to(&mut self, bytes: u64) -> Result<(), AdmissionError> {
+    pub fn grow_to(&mut self, bytes: u64) -> Result<(), Report<AdmissionError>> {
         let capacity = self.capacity.into();
-        let target = u32::try_from(bytes).map_err(|_| AdmissionError::ExceedsBudget {
-            class: self.class.as_str(),
-            requested: bytes,
-            capacity,
+        let target = u32::try_from(bytes).map_err(|_| {
+            Report::new(AdmissionError::ExceedsBudget {
+                class: self.class.as_str(),
+                requested: bytes,
+                capacity,
+            })
         })?;
         if target <= self.bytes {
             return Ok(());
         }
         if target > self.capacity {
-            return Err(AdmissionError::ExceedsBudget {
+            return Err(Report::new(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
                 requested: bytes,
                 capacity,
-            });
+            }));
         }
-        let additional = target
-            .checked_sub(self.bytes)
-            .ok_or(AdmissionError::ExceedsBudget {
+        let additional = target.checked_sub(self.bytes).ok_or_else(|| {
+            Report::new(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
                 requested: bytes,
                 capacity,
-            })?;
+            })
+        })?;
         match StdArc::clone(&self.permits).try_acquire_many_owned(additional) {
             Ok(extra) => {
                 self.permit.merge(extra);
                 self.bytes = target;
                 Ok(())
             }
-            Err(TryAcquireError::NoPermits) => Err(AdmissionError::BudgetExhausted {
+            Err(TryAcquireError::NoPermits) => Err(Report::new(AdmissionError::BudgetExhausted {
                 class: self.class.as_str(),
                 requested: additional.into(),
-            }),
-            Err(TryAcquireError::Closed) => Err(AdmissionError::BudgetClosed {
+            })),
+            Err(TryAcquireError::Closed) => Err(Report::new(AdmissionError::BudgetClosed {
                 class: self.class.as_str(),
-            }),
+            })),
         }
     }
 }
@@ -242,6 +249,21 @@ impl BudgetedBuffer {
         (self.bytes, self.reservation)
     }
 
+    /// Charge and append `len` zeroed bytes, returning the new region for a reader to fill. A
+    /// reader that cannot be charged for the bytes it is about to receive never allocates room for
+    /// them.
+    pub fn extend_zeroed(&mut self, len: usize) -> io::Result<&mut [u8]> {
+        self.charge(len)?;
+        let start = self.bytes.len();
+        self.bytes.resize(
+            start
+                .checked_add(len)
+                .ok_or_else(|| io::Error::other("frame length exceeds an addressable size"))?,
+            0,
+        );
+        Ok(&mut self.bytes[start..])
+    }
+
     fn charge(&mut self, additional: usize) -> io::Result<()> {
         let written = u64::try_from(self.bytes.len()).map_err(io::Error::other)?;
         let additional = u64::try_from(additional).map_err(io::Error::other)?;
@@ -254,12 +276,22 @@ impl BudgetedBuffer {
                 required: target,
             }));
         }
-        // Round the charge up so a serializer's small writes do not each take the budget lock. A
-        // target so large that rounding it up overflows is charged exactly, and refused by the
-        // class ceiling on the next line.
-        let charged = target
-            .checked_next_multiple_of(GROWTH_GRANULE)
+        if target <= self.reservation.bytes() {
+            return Ok(());
+        }
+        // Grow geometrically, so a serializer that writes a megabyte in small pieces takes the
+        // budget a logarithmic number of times rather than once per piece, and a frame that writes
+        // a hundred bytes does not hold a granule it will never use. Doubling can overshoot the
+        // limit, which is where the charge stops.
+        let doubled = self
+            .reservation
+            .bytes()
+            .checked_mul(2)
+            .unwrap_or(self.limit);
+        let rounded = target
+            .checked_next_multiple_of(MINIMUM_GROWTH)
             .unwrap_or(target);
+        let charged = rounded.max(doubled).min(self.limit).max(target);
         self.reservation
             .grow_to(charged)
             .map_err(io::Error::other)?;
@@ -295,6 +327,8 @@ impl io::Write for BudgetedBuffer {
 #[derive(Clone, Debug)]
 pub struct ChargedBytes {
     allocation: Arc<ChargedAllocation>,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Debug)]
@@ -306,23 +340,58 @@ struct ChargedAllocation {
 }
 
 impl ChargedBytes {
-    /// Freeze what an incremental writer produced, keeping the charge it grew under.
-    pub fn from_buffer(buffer: BudgetedBuffer) -> Self {
-        let (bytes, reservation) = buffer.into_parts();
+    /// Take an allocation the caller already holds under a charge for its size, without copying
+    /// it. Used where bytes arrive from somewhere that produced them whole.
+    pub fn from_owned(bytes: Vec<u8>, reservation: Reservation) -> Self {
+        let end = bytes.len();
         Self {
             allocation: Arc::new(ChargedAllocation {
                 bytes,
                 _reservation: reservation,
             }),
+            start: 0,
+            end,
         }
     }
 
+    /// Freeze what an incremental writer produced, keeping the charge it grew under.
+    pub fn from_buffer(buffer: BudgetedBuffer) -> Self {
+        let (bytes, reservation) = buffer.into_parts();
+        Self::from_owned(bytes, reservation)
+    }
+
+    /// A window onto the same allocation, so a framed body is carried out of the frame it arrived
+    /// in without copying it into a second one.
+    pub fn slice(&self, start: usize, end: usize) -> Option<Self> {
+        if start > end {
+            return None;
+        }
+        let absolute_start = self.start.checked_add(start)?;
+        let absolute_end = self.start.checked_add(end)?;
+        if absolute_end > self.end {
+            return None;
+        }
+        Some(Self {
+            allocation: Arc::clone(&self.allocation),
+            start: absolute_start,
+            end: absolute_end,
+        })
+    }
+
+    /// Whether two handles name the same allocation, which is how a fanout proves it encoded its
+    /// body once and shared it rather than encoding it per destination.
+    pub fn shares_allocation_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.allocation, &other.allocation)
+    }
+
     pub fn len(&self) -> usize {
-        self.allocation.bytes.len()
+        self.end
+            .checked_sub(self.start)
+            .verified("every window is constructed with its start at or before its end")
     }
 
     pub fn is_empty(&self) -> bool {
-        self.allocation.bytes.is_empty()
+        self.len() == 0
     }
 }
 
@@ -330,13 +399,13 @@ impl Deref for ChargedBytes {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        &self.allocation.bytes
+        &self.allocation.bytes[self.start..self.end]
     }
 }
 
 impl AsRef<[u8]> for ChargedBytes {
     fn as_ref(&self) -> &[u8] {
-        &self.allocation.bytes
+        self
     }
 }
 
@@ -344,7 +413,7 @@ impl AsRef<[u8]> for ChargedBytes {
 /// not part of the value.
 impl PartialEq for ChargedBytes {
     fn eq(&self, other: &Self) -> bool {
-        self.allocation.bytes == other.allocation.bytes
+        **self == **other
     }
 }
 

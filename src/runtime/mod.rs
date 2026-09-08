@@ -52,6 +52,7 @@ use fjall::Database;
 use futures_util::stream::FuturesUnordered;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, RelayPayload, RelayPayloadKind, Transport,
     TransportMode as InterconnectTransportMode,
@@ -703,6 +704,10 @@ struct RuntimeInner {
     domain_drain_timeout: Duration,
     entity_gate_deadline: Duration,
     temp_dir: PathBuf,
+    /// The node's bounded execution and transient-memory admission. Every variable-size encode,
+    /// decode, validation and hash the runtime performs is submitted through it, so none of them
+    /// occupies an async worker and none of them allocates before it is charged.
+    executor: Executor,
     metrics: RuntimeMetrics,
 }
 

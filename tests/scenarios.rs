@@ -5170,6 +5170,58 @@ async fn when_these_nspl_commands_are_executed_on_node(
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
+/// Fill every bulk worker on a node and hold them, so the scenario can measure management work
+/// against a class that is genuinely full rather than one that merely looks busy.
+#[when(expr = "bulk execution on node {string} is occupied")]
+async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let occupancy = world.runtime_test_hooks.bulk_execution_occupancy.clone();
+    tokio::time::timeout(Duration::from_secs(30), occupancy.occupy(&node_name))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("bulk execution on '{node_id}' never filled its workers: {error}")
+        });
+}
+
+#[when(expr = "bulk execution on node {string} is released")]
+async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .runtime_test_hooks
+        .bulk_execution_occupancy
+        .release(&crate::common::cluster::node_name(&node_id));
+}
+
+/// Run NSPL on a node and require it to finish inside a bound, which is how a scenario states that
+/// one class of work was not admitted behind another.
+#[then(expr = "within {string} these NSPL commands complete on node {string}")]
+async fn then_nspl_commands_complete_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    let limit =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let commands = expand_placeholders(world, docstring(step));
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let started = Instant::now();
+    let session = tokio::time::timeout(
+        limit,
+        execute_nspl_commands_on_node(world, &node_id, &commands),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("NSPL commands on '{node_id}' did not complete within {limit:?}"))
+    .unwrap_or_else(|error| panic!("failed to execute NSPL commands on '{node_id}': {error:?}"));
+    world.last_cluster_operation_elapsed = Some(started.elapsed());
+    world.active_session = Some(session);
+    world.active_session_node = Some(node_id);
+    world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
+}
+
 #[given("the leader node is configured with these NSPL commands")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,

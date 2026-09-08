@@ -21,6 +21,9 @@ pub(super) struct RemoteDispatchRegistry {
 pub(super) struct RemoteDispatcher {
     pub(super) cluster: Arc<cluster::ClusterHandle>,
     pub(super) interconnect: Transport,
+    /// The same admission the attaching runtime holds, so a body this dispatcher encodes is
+    /// charged against the same budgets the runtime's own work is.
+    pub(super) executor: Executor,
     /// The same registry the attaching runtime holds, so an acknowledgement this dispatcher sent
     /// a correlation id for resolves against the entry the runtime is waiting on.
     pub(super) registry: Arc<RemoteDispatchRegistry>,
@@ -35,6 +38,12 @@ impl std::fmt::Debug for RemoteDispatcher {
 impl RemoteDispatcher {
     pub(super) const DISPATCH_RETRY_INTERVAL: Duration = Duration::from_millis(25);
     pub(super) const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The node's bounded execution and memory admission, which every body this dispatcher
+    /// encodes or decodes is submitted through.
+    pub(super) fn executor(&self) -> &Executor {
+        &self.executor
+    }
 
     pub(super) fn local_node_id(&self) -> Option<ClusterNodeName> {
         self.registry.local_node_id.read().clone()
@@ -133,7 +142,8 @@ impl RemoteDispatcher {
         let Some(local_node_id) = self.local_node_id() else {
             return;
         };
-        let batch_ipc = match batch.batch.to_arrow_ipc_bytes() {
+        // One encode for the whole fanout. Every interested node carries this same allocation.
+        let batch_ipc = match batch.batch.encode_arrow_ipc(self.executor()).await {
             Ok(bytes) => bytes,
             Err(error) => {
                 warn!(
@@ -279,6 +289,7 @@ impl Runtime {
         *self.inner.remote_dispatcher.write() = Some(Arc::new(RemoteDispatcher {
             cluster,
             interconnect,
+            executor: self.inner.executor.clone(),
             registry: self.inner.remote_dispatch.clone(),
         }));
     }
@@ -464,11 +475,12 @@ impl Runtime {
             });
         }
         let decoded_batch = schema
-            .arrow_batch_from_ipc_bytes(&remote.batch_ipc)
-            .map_err(|reason| RuntimeError::DecodeRemoteRelay {
+            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
+            .await
+            .map_err(|error| RuntimeError::DecodeRemoteRelay {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             })?;
         if remote.metadata.len() != decoded_batch.batch().num_rows() {
             return Err(RuntimeError::DecodeRemoteRelay {
@@ -580,11 +592,12 @@ impl Runtime {
             });
         };
         let decoded_batch = schema
-            .arrow_batch_from_ipc_bytes(&remote.batch_ipc)
-            .map_err(|reason| RuntimeError::DecodeRemoteRelay {
+            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
+            .await
+            .map_err(|error| RuntimeError::DecodeRemoteRelay {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             })?;
         if remote.metadata.len() != decoded_batch.batch().num_rows() {
             return Err(RuntimeError::DecodeRemoteRelay {

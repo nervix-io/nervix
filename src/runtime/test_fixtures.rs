@@ -367,7 +367,7 @@ pub(super) fn test_optional_schema(fields: &[OptionalTestField]) -> Arc<super::C
     }))
 }
 
-pub(super) fn wasm_input_for_records(
+pub(super) async fn wasm_input_for_records(
     schema: &Arc<super::CompiledSchema>,
     records: Vec<RuntimeRow>,
 ) -> (WasmEnvelope, super::WasmAckMap) {
@@ -382,10 +382,12 @@ pub(super) fn wasm_input_for_records(
     let batch = super::RelayRecordBatch::from_messages(Arc::clone(schema), messages)
         .expect("test relay batch must build");
     let mut next_token = 1;
-    wasm_envelope_from_relay_batch(&batch, &mut next_token).expect("WASM input envelope must build")
+    wasm_envelope_from_relay_batch(&Executor::default(), &batch, &mut next_token)
+        .await
+        .expect("WASM input envelope must build")
 }
 
-pub(super) fn wasm_input_for_values(
+pub(super) async fn wasm_input_for_values(
     schema: &Arc<super::CompiledSchema>,
     values: &[i32],
 ) -> (WasmEnvelope, super::WasmAckMap) {
@@ -393,7 +395,7 @@ pub(super) fn wasm_input_for_values(
         .iter()
         .map(|value| test_runtime_row([("value".to_string(), RuntimeValue::I32(*value))]))
         .collect();
-    wasm_input_for_records(schema, records)
+    wasm_input_for_records(schema, records).await
 }
 
 pub(super) fn wasm_input_acks(envelope: &WasmEnvelope) -> &WasmAckSidecar {

@@ -4,10 +4,11 @@ use std::{
     num::NonZeroUsize,
     sync::{
         Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -30,12 +31,15 @@ pub enum ExecutionError {
     JobPanicked { class: &'static str },
 }
 
-/// What one worker class is currently doing.
+/// What one worker class is currently doing, and how much it has done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerClassSnapshot {
     pub workers: usize,
     pub running: usize,
     pub pending: usize,
+    /// Jobs this class has admitted since the node started. A caller that must prove it submitted
+    /// one job rather than several reads the difference across its own operation.
+    pub admitted: u64,
 }
 
 /// A fixed number of workers, with a bounded number of jobs allowed to wait for one. Each class
@@ -47,6 +51,7 @@ pub(crate) struct WorkerPool {
     worker_permits: SemaphoreRef,
     queue_permits: SemaphoreRef,
     pending: StdArc<AtomicUsize>,
+    admitted: AtomicU64,
 }
 
 impl WorkerPool {
@@ -61,6 +66,7 @@ impl WorkerPool {
             worker_permits: StdArc::new(Semaphore::new(workers.get())),
             queue_permits: StdArc::new(Semaphore::new(pending_jobs.get())),
             pending: StdArc::new(AtomicUsize::new(0)),
+            admitted: AtomicU64::new(0),
         }
     }
 
@@ -73,6 +79,7 @@ impl WorkerPool {
                 .checked_sub(available)
                 .verified("worker permits are only taken and returned by this pool's own jobs"),
             pending: self.pending.load(Ordering::Acquire),
+            admitted: self.admitted.load(Ordering::Acquire),
         }
     }
 
@@ -80,42 +87,47 @@ impl WorkerPool {
     ///
     /// The order is deliberate. The queue slot is taken first, so a class can never accumulate an
     /// unbounded number of futures waiting in front of the blocking pool. `reservation` then moves
-    /// into the job itself: a submission dropped while it is still waiting releases the charge with
-    /// it, while a submission already running keeps the charge until the work actually exits.
+    /// into the job itself, which allocates under it: a submission dropped while it is still
+    /// waiting releases the charge with it, while a submission already running keeps the charge
+    /// until the work actually exits.
     pub(crate) async fn run<T>(
         &self,
         reservation: Reservation,
-        job: impl FnOnce(&Cancellation) -> T + Send + 'static,
-    ) -> Result<T, ExecutionError>
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
     where
         T: Send + 'static,
     {
         let queued = self.enter_queue()?;
+        self.admitted.fetch_add(1, Ordering::AcqRel);
         let worker = StdArc::clone(&self.worker_permits)
             .acquire_owned()
             .await
-            .map_err(|_| ExecutionError::PoolClosed {
-                class: self.class.as_str(),
+            .map_err(|_| {
+                Report::new(ExecutionError::PoolClosed {
+                    class: self.class.as_str(),
+                })
             })?;
         drop(queued);
         let cancellation = Cancellation::new();
         let signal = CancelOnDrop::new(cancellation.clone());
         let handle = tokio::task::spawn_blocking(move || {
-            let value = job(&cancellation);
-            // The allocation this job made is live until here, so its charge is released here and
-            // not when the caller stopped waiting.
-            drop(reservation);
+            // The job owns its charge while it runs, so the allocation it made is released when
+            // the work actually exits and not when the caller stopped waiting.
+            let value = job(reservation, &cancellation);
             drop(worker);
             value
         });
-        let value = handle.await.map_err(|_| ExecutionError::JobPanicked {
-            class: self.class.as_str(),
+        let value = handle.await.map_err(|_| {
+            Report::new(ExecutionError::JobPanicked {
+                class: self.class.as_str(),
+            })
         })?;
         signal.disarm();
         Ok(value)
     }
 
-    fn enter_queue(&self) -> Result<QueueSlot, ExecutionError> {
+    fn enter_queue(&self) -> Result<QueueSlot, Report<ExecutionError>> {
         match StdArc::clone(&self.queue_permits).try_acquire_owned() {
             Ok(permit) => {
                 self.pending.fetch_add(1, Ordering::AcqRel);
@@ -124,13 +136,13 @@ impl WorkerPool {
                     permit: Some(permit),
                 })
             }
-            Err(TryAcquireError::NoPermits) => Err(ExecutionError::QueueFull {
+            Err(TryAcquireError::NoPermits) => Err(Report::new(ExecutionError::QueueFull {
                 class: self.class.as_str(),
                 pending: self.pending.load(Ordering::Acquire),
-            }),
-            Err(TryAcquireError::Closed) => Err(ExecutionError::PoolClosed {
+            })),
+            Err(TryAcquireError::Closed) => Err(Report::new(ExecutionError::PoolClosed {
                 class: self.class.as_str(),
-            }),
+            })),
         }
     }
 }

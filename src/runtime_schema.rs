@@ -30,7 +30,6 @@ use arrow_array::{
     make_array, new_empty_array,
 };
 use arrow_data::transform::MutableArrayData;
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
     Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
@@ -65,6 +64,7 @@ use triomphe::Arc;
 
 use crate::jaq_program::{CompiledJaqProgram, JaqNativeFormat};
 
+mod arrow_body;
 mod syslog;
 
 #[derive(Debug, Clone)]
@@ -496,26 +496,6 @@ impl CompiledSchema {
             ));
         }
         Ok(())
-    }
-
-    pub fn arrow_batch_from_ipc_bytes(&self, bytes: &[u8]) -> Result<RuntimeRecordBatch, String> {
-        let mut reader =
-            StreamReader::try_new(Cursor::new(bytes), None).map_err(|error| error.to_string())?;
-        if reader.schema().as_ref() != self.arrow_schema.as_ref() {
-            return Err("arrow ipc schema does not match compiled schema".to_string());
-        }
-        let batch = match reader.next() {
-            Some(Ok(batch)) => batch,
-            Some(Err(error)) => return Err(error.to_string()),
-            None => return Err("arrow ipc payload contained no record batch".to_string()),
-        };
-        if let Some(next) = reader.next() {
-            return match next {
-                Ok(_) => Err("arrow ipc payload contained more than one record batch".to_string()),
-                Err(error) => Err(error.to_string()),
-            };
-        }
-        RuntimeRecordBatch::from_record_batch(self.arrow_schema.clone(), batch)
     }
 }
 
@@ -1065,43 +1045,6 @@ impl RuntimeRecordBatch {
         let batch =
             filter_record_batch(&self.batch, predicate).map_err(|error| error.to_string())?;
         Ok(Self { batch })
-    }
-
-    pub fn to_arrow_ipc_bytes(&self) -> Result<Vec<u8>, String> {
-        let mut bytes = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut bytes, self.schema_ref())
-                .map_err(|error| error.to_string())?;
-            writer
-                .write(&self.batch)
-                .map_err(|error| error.to_string())?;
-            writer.finish().map_err(|error| error.to_string())?;
-        }
-        Ok(bytes)
-    }
-
-    pub fn from_arrow_ipc_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let reader =
-            StreamReader::try_new(Cursor::new(bytes), None).map_err(|error| error.to_string())?;
-        let schema = reader.schema();
-        let batches = reader
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        if batches.is_empty() {
-            let batch = RecordBatch::try_new_with_options(
-                schema.clone(),
-                Vec::new(),
-                &RecordBatchOptions::new().with_row_count(Some(0)),
-            )
-            .map_err(|error| error.to_string())?;
-            return Ok(Self { batch });
-        }
-        let runtime_batches = batches
-            .into_iter()
-            .map(|batch| Self { batch })
-            .collect::<Vec<_>>();
-        let refs = runtime_batches.iter().collect::<Vec<_>>();
-        Self::concat(&refs)
     }
 
     pub fn concat(batches: &[&Self]) -> Result<Self, String> {

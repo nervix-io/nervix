@@ -25,6 +25,7 @@ use ahash::HashMap;
 use dashmap::{DashMap, mapref::entry::Entry};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use meticulous::ResultExt as _;
+use nervix_execution::{ChargedBytes, Executor};
 use nervix_models::{
     ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
     LookupName, ModelKind, ModelName, NodeRef, RelayName, RemoteAckRegistration,
@@ -65,6 +66,7 @@ pub use request::{
     RequestError,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
+use wire::{QueuedFrame, WireEnvelope};
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEND_QUEUE_CAPACITY: usize = 1024;
@@ -204,7 +206,10 @@ pub struct RelayPayload {
     pub domain: DomainName,
     pub relay: RelayName,
     pub key: Option<Vec<RemoteRuntimeField>>,
-    pub batch_ipc: Vec<u8>,
+    /// The batch's Arrow IPC body, encoded once and shared. Every destination in a fanout and
+    /// every retry of one delivery carries this same allocation, charged once, and writes a slice
+    /// of it to its socket.
+    pub batch_ipc: ChargedBytes,
     pub metadata: Vec<RemoteRuntimeRecordMetadata>,
     pub acks: Vec<Option<RemoteAckRegistration>>,
     pub admission: Option<RemoteAckRegistration>,
@@ -634,7 +639,9 @@ pub struct ReceivedEnvelope {
 #[derive(Debug)]
 struct ConnectionHandleInner {
     peer_addr: SocketAddr,
-    tx: mpsc::Sender<Envelope>,
+    tx: mpsc::Sender<QueuedFrame>,
+    /// The admission every frame is serialized and charged through before it joins the queue.
+    executor: Executor,
     connection_cancel: CancellationToken,
     admission_closed: CancellationToken,
     queue_admission_timeout: Duration,
@@ -648,7 +655,8 @@ pub struct ConnectionHandle {
 impl ConnectionHandle {
     fn new(
         peer_addr: SocketAddr,
-        tx: mpsc::Sender<Envelope>,
+        tx: mpsc::Sender<QueuedFrame>,
+        executor: Executor,
         connection_cancel: CancellationToken,
         admission_closed: CancellationToken,
         queue_admission_timeout: Duration,
@@ -657,6 +665,7 @@ impl ConnectionHandle {
             inner: Arc::new(ConnectionHandleInner {
                 peer_addr,
                 tx,
+                executor,
                 connection_cancel,
                 admission_closed,
                 queue_admission_timeout,
@@ -664,6 +673,13 @@ impl ConnectionHandle {
         }
     }
 
+    /// Serialize `envelope`, charge the bytes it will occupy, and queue the resulting frame.
+    ///
+    /// Serialization happens here, on the executor, rather than on the connection driver: the
+    /// driver only ever writes bytes that already exist, and the queue holds a frame whose exact
+    /// size is known and charged. Every wait inside — for the budget, for a worker, for a queue
+    /// slot — is covered by one admission deadline, so a peer that stops reading cannot make a
+    /// caller wait forever for capacity its own unwritten frames are holding.
     pub async fn send(&self, envelope: Envelope) -> Result<(), TransportError> {
         if self.inner.admission_closed.is_cancelled() {
             return Err(TransportError::ShuttingDown);
@@ -678,10 +694,26 @@ impl ConnectionHandle {
             _ = self.inner.connection_cancel.cancelled() => {
                 Err(TransportError::Closed(self.inner.peer_addr))
             }
-            result = timeout(self.inner.queue_admission_timeout, self.inner.tx.send(envelope)) => {
+            // Admission in the order the execution policy requires: serialize under a charge,
+            // charge the bytes the frame will occupy while it waits, then take the queue slot.
+            result = timeout(self.inner.queue_admission_timeout, async {
+                let frame =
+                    wire::encode_frame(&self.inner.executor, WireEnvelope::Payload(envelope))
+                        .await?;
+                let queued = self
+                    .inner
+                    .executor
+                    .reserve(frame.memory_class(), frame.queued_bytes())
+                    .await
+                    .map_err(|error| TransportError::Encode(error.to_string()))?;
+                self.inner
+                    .tx
+                    .send(QueuedFrame::new(frame, queued))
+                    .await
+                    .map_err(|_| TransportError::Closed(self.inner.peer_addr))
+            }) => {
                 match result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(_)) => Err(TransportError::Closed(self.inner.peer_addr)),
+                    Ok(outcome) => outcome,
                     Err(_) => Err(TransportError::QueueAdmissionTimeout {
                         peer: self.inner.peer_addr,
                         timeout: self.inner.queue_admission_timeout,
@@ -710,6 +742,10 @@ pub struct Transport {
 }
 
 struct TransportInner {
+    /// The node's bounded execution and memory admission. Every variable-size encode and decode
+    /// this transport performs is submitted through it, so none of them runs on an async worker
+    /// and none of them allocates before it is charged.
+    executor: Executor,
     mode: TransportMode,
     client_config: Option<StdArc<ClientConfig>>,
     server_config: Option<StdArc<ServerConfig>>,
@@ -895,6 +931,7 @@ impl Transport {
         identity: LocalIdentity,
         peer_verifier: PeerVerifier,
         options: TransportOptions,
+        executor: Executor,
     ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
         if let Some(error) = options.validation_error() {
             return Err(error);
@@ -910,6 +947,7 @@ impl Transport {
             None => (None, None),
         };
         let inner = Arc::new(TransportInner {
+            executor,
             mode,
             client_config,
             server_config,
@@ -990,6 +1028,7 @@ impl Transport {
                 let handle = ConnectionHandle::new(
                     target,
                     tx,
+                    self.inner.executor.clone(),
                     cancel.clone(),
                     self.inner.admission_closed.clone(),
                     self.inner.options.queue_admission_timeout,
@@ -1262,6 +1301,7 @@ mod tests {
 
     use ahash::HashMap;
     use error_stack::Report;
+    use nervix_execution::MemoryClass;
     use nervix_models::{DomainName, RelayName};
     use tokio::{
         sync::Notify,
@@ -1327,6 +1367,7 @@ mod tests {
         max_connections: usize,
     ) -> Arc<TransportInner> {
         Arc::new(TransportInner {
+            executor: Executor::default(),
             mode: TransportMode::Plain,
             client_config: None,
             server_config: None,
@@ -1354,13 +1395,19 @@ mod tests {
             .expect("incoming channel closed")
     }
 
-    fn dummy_stream_payload(stream: &str) -> RelayPayload {
+    fn charged_body(executor: &Executor, bytes: Vec<u8>) -> ChargedBytes {
+        executor
+            .try_charge_owned(MemoryClass::Relay, bytes)
+            .expect("the relay class has room for a test body")
+    }
+
+    fn dummy_stream_payload(executor: &Executor, stream: &str) -> RelayPayload {
         RelayPayload {
             kind: RelayPayloadKind::Routed,
             domain: DomainName::try_from("test").expect("valid domain"),
             relay: RelayName::try_from(stream).expect("valid relay name"),
             key: None,
-            batch_ipc: vec![1, 2, 3, 4],
+            batch_ipc: charged_body(executor, vec![1, 2, 3, 4]),
             metadata: vec![RemoteRuntimeRecordMetadata {
                 ingested_at_low_watermark: Timestamp::from_unix_nanos(1),
                 ingested_at_high_watermark: Timestamp::from_unix_nanos(2),
@@ -1438,6 +1485,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             TransportOptions::default(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -1448,6 +1496,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             TransportOptions::default(),
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -1621,6 +1670,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -1631,6 +1681,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -1641,7 +1692,7 @@ mod tests {
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("orders")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "orders")),
             )
             .await
             .expect("send a->b");
@@ -1653,12 +1704,15 @@ mod tests {
         );
         assert_eq!(
             first.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("orders"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "orders"))
         );
 
         first
             .reply
-            .send(Envelope::RelayPayload(dummy_stream_payload("orders")))
+            .send(Envelope::RelayPayload(dummy_stream_payload(
+                &Executor::default(),
+                "orders",
+            )))
             .await
             .expect("reply b->a");
 
@@ -1669,7 +1723,7 @@ mod tests {
         );
         assert_eq!(
             second.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("orders"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "orders"))
         );
 
         transport_a.shutdown().await;
@@ -1688,6 +1742,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -1698,6 +1753,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -1709,7 +1765,7 @@ mod tests {
                     transport_b.local_addr(),
                     "localhost",
                     TransportMode::Tls,
-                    Envelope::RelayPayload(dummy_stream_payload("metrics")),
+                    Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "metrics")),
                 )
                 .await
                 .expect("send");
@@ -1735,6 +1791,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -1745,6 +1802,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -1755,7 +1813,7 @@ mod tests {
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("metrics")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "metrics")),
             )
             .await
             .expect("initial send");
@@ -1770,7 +1828,10 @@ mod tests {
             )
             .expect("outbound handle should be reusable");
         handle
-            .send(Envelope::RelayPayload(dummy_stream_payload("metrics")))
+            .send(Envelope::RelayPayload(dummy_stream_payload(
+                &Executor::default(),
+                "metrics",
+            )))
             .await
             .expect("queued send should succeed");
 
@@ -1790,6 +1851,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -1800,6 +1862,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -1852,6 +1915,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b, &identity_c]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -1862,6 +1926,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -1872,6 +1937,7 @@ mod tests {
             identity_c.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport c");
@@ -1919,6 +1985,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -1929,6 +1996,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -1940,7 +2008,7 @@ mod tests {
                 target,
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("reconnect")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect")),
             )
             .await
             .expect("initial send");
@@ -1951,7 +2019,7 @@ mod tests {
         );
         assert_eq!(
             first.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect"))
         );
 
         transport_b.shutdown().await;
@@ -1961,7 +2029,7 @@ mod tests {
             target,
             "localhost",
             TransportMode::Tls,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect")),
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect")),
         );
 
         let (transport_b2, mut incoming_b2) = Transport::bind(
@@ -1971,6 +2039,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("restart transport b");
@@ -1983,7 +2052,7 @@ mod tests {
         );
         assert_eq!(
             second.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect"))
         );
 
         transport_a.shutdown().await;
@@ -1997,17 +2066,22 @@ mod tests {
         let (incoming_tx, _incoming_rx) = mpsc::channel(1);
         let inner = test_inner(identity_a, verifier_for(&[&identity_b]), incoming_tx, 1);
         let (client_io, mut peer_io) = tokio::io::duplex(64 * 1024);
+        let peer_executor = inner.executor.clone();
         let peer_task = tokio::spawn(async move {
-            let introduction = read_wire_envelope(&mut peer_io, DEFAULT_MAX_FRAME_BYTES)
-                .await
-                .expect("read client introduction");
+            let introduction =
+                read_wire_envelope(&mut peer_io, &peer_executor, DEFAULT_MAX_FRAME_BYTES)
+                    .await
+                    .expect("read client introduction");
             assert!(matches!(introduction, WireEnvelope::Introduction(_)));
-            write_wire_envelope(
-                &mut peer_io,
-                &WireEnvelope::Introduction(identity_b.signed_introduction()),
+            let peer_introduction = wire::encode_frame(
+                &peer_executor,
+                WireEnvelope::Introduction(identity_b.signed_introduction()),
             )
             .await
-            .expect("write peer introduction");
+            .expect("peer introduction should encode");
+            write_wire_envelope(&mut peer_io, &peer_introduction)
+                .await
+                .expect("write peer introduction");
         });
         let peer_addr = "127.0.0.1:12345".parse().unwrap();
         let (reply_tx, _reply_rx) = mpsc::channel(1);
@@ -2015,13 +2089,23 @@ mod tests {
         let reply_handle = ConnectionHandle::new(
             peer_addr,
             reply_tx,
+            inner.executor.clone(),
             cancel.clone(),
             inner.admission_closed.clone(),
             inner.options.queue_admission_timeout,
         );
         let (_send_tx, mut send_rx) = mpsc::channel(1);
-        let expected = Envelope::RelayPayload(dummy_stream_payload("retry"));
-        let mut retry_payload = Some(expected.clone());
+        let expected = Envelope::RelayPayload(dummy_stream_payload(&inner.executor, "retry"));
+        let expected_frame =
+            wire::encode_frame(&inner.executor, WireEnvelope::Payload(expected.clone()))
+                .await
+                .expect("the retried frame should encode");
+        let queued = inner
+            .executor
+            .reserve(MemoryClass::Relay, expected_frame.queued_bytes())
+            .await
+            .expect("the relay class has room for a test frame");
+        let mut retry_payload = Some(QueuedFrame::new(expected_frame, queued));
         let established = exchange_introductions(&inner, Box::new(client_io))
             .await
             .expect("connection handshake should complete");
@@ -2039,7 +2123,10 @@ mod tests {
         .expect_err("peer disconnect should fail the connection");
         peer_task.await.expect("peer task should complete");
 
-        assert_eq!(retry_payload, Some(expected));
+        assert!(
+            retry_payload.is_some(),
+            "a frame that never reached the socket is retried as it stands"
+        );
         assert!(
             inner.connected_peers.is_empty(),
             "failed connection must unregister its connected peer"
@@ -2062,6 +2149,7 @@ mod tests {
             identity_a,
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2078,6 +2166,7 @@ mod tests {
                 }
             }),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2088,7 +2177,7 @@ mod tests {
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("auth")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "auth")),
             )
             .await
             .expect("enqueue send");
@@ -2115,6 +2204,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2126,6 +2216,7 @@ mod tests {
             mode: TransportMode::Tls,
         };
         let inner = Arc::new(TransportInner {
+            executor: Executor::default(),
             mode: TransportMode::Tls,
             client_config: Some(test_tls().client_config.clone()),
             server_config: None,
@@ -2149,14 +2240,18 @@ mod tests {
             .expect("connect raw tls relay");
         let (mut reader, mut writer) = tokio::io::split(tls_stream);
 
-        write_wire_envelope(
-            &mut writer,
-            &WireEnvelope::Introduction(identity_b.signed_introduction()),
+        let introduction = wire::encode_frame(
+            &inner.executor,
+            WireEnvelope::Introduction(identity_b.signed_introduction()),
         )
         .await
-        .expect("send introduction");
+        .expect("introduction should encode");
+        write_wire_envelope(&mut writer, &introduction)
+            .await
+            .expect("send introduction");
         let peer = read_and_verify_introduction(
             &mut reader,
+            &inner.executor,
             DEFAULT_MAX_FRAME_BYTES,
             &verifier_for(&[&identity_a]),
         )
@@ -2166,7 +2261,9 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                match read_wire_envelope(&mut reader, DEFAULT_MAX_FRAME_BYTES).await {
+                match read_wire_envelope(&mut reader, &inner.executor, DEFAULT_MAX_FRAME_BYTES)
+                    .await
+                {
                     Ok(WireEnvelope::Ping) => {}
                     Ok(other) => panic!("unexpected frame before disconnect: {other:?}"),
                     Err(TransportError::Io(err)) if err.kind() == ErrorKind::UnexpectedEof => {

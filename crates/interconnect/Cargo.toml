@@ -34,3 +34,4 @@ triomphe = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ubyte = { workspace = true }

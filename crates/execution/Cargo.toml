@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 arch-into = { workspace = true }
+error-stack = { workspace = true }
 meticulous = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

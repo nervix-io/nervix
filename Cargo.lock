@@ -6560,6 +6560,7 @@ name = "nervix-execution"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "error-stack",
  "meticulous",
  "parking_lot",
  "thiserror 2.0.20",
@@ -6605,6 +6606,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "triomphe",
+ "ubyte",
 ]
 
 [[package]]
