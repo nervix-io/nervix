@@ -1164,13 +1164,12 @@ impl Cluster {
         publish_kafka_record(&self.dependencies, topic, Some(partition), payload, headers).await
     }
 
-    pub(crate) async fn publish_kafka_burst(
+    pub(crate) async fn publish_kafka_payloads(
         &self,
         topic: &str,
-        payload: &str,
-        count: usize,
+        payloads: &[String],
     ) -> io::Result<()> {
-        publish_kafka_burst(&self.dependencies, topic, payload, count).await
+        publish_kafka_payloads(&self.dependencies, topic, payloads).await
     }
 
     pub(crate) async fn publish_kafka_partition(
@@ -3511,11 +3510,11 @@ async fn publish_kafka_with_headers(
     publish_kafka_record(dependencies, topic, None, payload, headers).await
 }
 
-async fn publish_kafka_burst(
+/// Publishes every payload through one producer, so the ingestor polls them as one group.
+async fn publish_kafka_payloads(
     dependencies: &DependencyEndpoints,
     topic: &str,
-    payload: &str,
-    count: usize,
+    payloads: &[String],
 ) -> io::Result<()> {
     let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
@@ -3524,11 +3523,11 @@ async fn publish_kafka_burst(
         .set("request.timeout.ms", "5000")
         .create()
         .map_err(io::Error::other)?;
-    let mut deliveries = Vec::with_capacity(count);
-    for _ in 0..count {
+    let mut deliveries = Vec::with_capacity(payloads.len());
+    for payload in payloads {
         tokio::task::consume_budget().await;
         deliveries.push(producer.send(
-            FutureRecord::<(), str>::to(topic).payload(payload),
+            FutureRecord::<(), str>::to(topic).payload(payload.as_str()),
             Duration::from_secs(5),
         ));
     }
