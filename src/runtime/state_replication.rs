@@ -1184,12 +1184,20 @@ impl Runtime {
         }))
     }
 
+    /// Installs the fingerprint every runtime state of `schedule`'s domain is keyed by.
+    ///
+    /// A node the schedule still carries keeps its fingerprint throughout: each one is written
+    /// before any stale node is dropped, so a concurrent [`Self::state_placement`] always resolves
+    /// to the state the node already owns. Emptying the domain first would expose a window where a
+    /// scheduled node has no fingerprint, and a placement resolved in that window addresses a
+    /// different — empty — runtime state. Relocation rebuilds these while the relocating node's
+    /// own state task is still reading them, which is exactly when that window is observed.
     pub(in crate::runtime) fn install_state_schema_fingerprints(&self, schedule: &DomainSchedule) {
-        self.clear_state_schema_fingerprints(&schedule.domain);
         let start_version = match self.inner.domains.get(&schedule.domain) {
             Some(state) => state.start_version,
             None => 0,
         };
+        let mut scheduled = HashSet::default();
         for node in schedule.nodes.values() {
             let schema_fingerprint = if matches!(
                 node.config.as_ref(),
@@ -1203,37 +1211,57 @@ impl Runtime {
             } else {
                 node.schema_fingerprint
             };
-            self.inner.state_schema_fingerprints.insert(
-                DomainNodeRef::node_in(schedule.domain.clone(), node.kind, node.identifier.clone()),
-                schema_fingerprint,
+            let node_ref = DomainNodeRef::node_in(
+                schedule.domain.clone(),
+                node.kind(),
+                node.identifier.clone(),
             );
+            self.inner
+                .state_schema_fingerprints
+                .insert(node_ref.clone(), schema_fingerprint);
+            scheduled.insert(node_ref);
         }
+        self.retain_state_schema_fingerprints(&schedule.domain, &scheduled);
     }
 
+    /// The graph-driven form of [`Self::install_state_schema_fingerprints`], written the same way
+    /// and for the same reason: a node the graph still carries never loses its fingerprint.
     pub(super) fn install_state_schema_fingerprints_from_graph(
         &self,
         domain: &DomainName,
         graph: &ActiveGraph,
     ) {
-        self.clear_state_schema_fingerprints(domain);
+        let mut active = HashSet::default();
         for node in graph.nodes() {
+            let node_ref =
+                DomainNodeRef::node_in(domain.clone(), node.kind, node.identifier.clone());
             self.inner.state_schema_fingerprints.insert(
-                DomainNodeRef::node_in(domain.clone(), node.kind, node.identifier.clone()),
+                node_ref.clone(),
                 graph
                     .schema_fingerprint(node.kind, &node.identifier)
                     .unwrap_or([0; 32]),
             );
+            active.insert(node_ref);
         }
+        self.retain_state_schema_fingerprints(domain, &active);
     }
 
     pub(super) fn clear_state_schema_fingerprints(&self, domain: &DomainName) {
-        let keys = self
+        self.retain_state_schema_fingerprints(domain, &HashSet::default());
+    }
+
+    /// Drops the fingerprints of `domain` that `keep` no longer names, leaving the rest in place.
+    fn retain_state_schema_fingerprints(&self, domain: &DomainName, keep: &HashSet<DomainNodeRef>) {
+        let stale = self
             .inner
             .state_schema_fingerprints
             .iter()
-            .filter_map(|entry| (&entry.key().domain == domain).then(|| entry.key().clone()))
+            .filter_map(|entry| {
+                (&entry.key().domain == domain && !keep.contains(entry.key()))
+                    .then(|| entry.key().clone())
+            })
             .collect::<Vec<_>>();
-        for key in keys {
+        for key in stale {
             self.inner.state_schema_fingerprints.remove(&key);
         }
     }
@@ -1508,13 +1536,13 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use ahash::HashMap;
     use fjall::Database;
     use nervix_models::{
-        ClusterNodeName, CreateSchema, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType,
-        ScheduledNode, SchemaName, Timestamp,
+        ClusterNodeName, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType, ScheduledNode,
+        Timestamp,
     };
     use nonzero_ext::nonzero;
     use tempfile::tempdir;
@@ -2138,6 +2166,71 @@ mod tests {
         );
     }
 
+    /// Reinstalling a schedule must never leave a scheduled node without its fingerprint, even
+    /// for an instant. `state_placement` keys every runtime state by that fingerprint, so a reader
+    /// that resolves a placement while the map is being rebuilt would address a different state
+    /// and find it empty. Relocation rebuilds the fingerprints while the relay's own state task is
+    /// still running, which is exactly when that read happens.
+    #[test]
+    fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let identifier = named::<ModelName>("moving_state");
+        let schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
+                ScheduledNode::new(nervix_models::Model::Relay(nervix_models::CreateRelay {
+                    name: nervix_models::RelayName::from(&identifier.clone()),
+                    schema: nervix_models::SchemaName::from(&identifier.clone()),
+                    buffer: nonzero!(4usize),
+                    branching: nervix_models::RelayBranching::unbranched(),
+                    materialized_state: Some(
+                        nervix_models::MaterializedRelayState::LastByTimestamp,
+                    ),
+                }))
+                .with_schema_fingerprint([1; 32])
+                .placed_on(
+                    Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                ),
+            ],
+            Vec::new(),
+        );
+
+        let resolve = || {
+            runtime.state_placement(
+                &domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                &identifier,
+                None,
+            )
+        };
+        runtime.install_state_schema_fingerprints(&schedule);
+        let installed = resolve();
+
+        let reads_stopped = AtomicBool::new(false);
+        let missed = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !reads_stopped.load(Ordering::Relaxed) {
+                    if resolve() != installed {
+                        missed.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+            for _ in 0..2_000 {
+                runtime.install_state_schema_fingerprints(&schedule);
+            }
+            reads_stopped.store(true, Ordering::Release);
+        });
+
+        assert!(
+            !missed.load(Ordering::Relaxed),
+            "a placement resolved during a reinstall addressed a different runtime state"
+        );
+    }
+
     #[test]
     fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         let runtime = Runtime::default();
@@ -2146,20 +2239,26 @@ mod tests {
         let schedule = |fingerprint| {
             DomainSchedule::new(
                 domain.clone(),
-                vec![ScheduledNode {
-                    identifier: identifier.clone(),
-                    kind: ModelKind::Deduplicator,
-                    config: Box::new(nervix_models::Model::Schema(CreateSchema {
-                        name: SchemaName::from(&identifier.clone()),
-                        fields: Vec::new(),
-                    })),
-                    effective_branching: None,
-                    effective_branching_schema: None,
-                    schema_fingerprint: fingerprint,
-                    kafka_partition_schedule: None,
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                }],
+                vec![
+                    ScheduledNode::new(nervix_models::Model::Deduplicator(
+                        nervix_models::CreateDeduplicator {
+                            name: nervix_models::DeduplicatorName::from(&identifier.clone()),
+                            from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
+                            output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
+                            branched_by: nervix_models::BranchSelection::unbranched(),
+                            deduplicate_on: Vec::new(),
+                            max_time: "1m".to_string(),
+                            mode: nervix_models::AckMode::Attached,
+                            filter_where: None,
+                            materialized_state: Vec::new(),
+                        },
+                    ))
+                    .with_schema_fingerprint(fingerprint)
+                    .placed_on(
+                        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                        vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ),
+                ],
                 Vec::new(),
             )
         };

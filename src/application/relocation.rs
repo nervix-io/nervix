@@ -623,25 +623,19 @@ mod tests {
         let identifier = ModelName::try_from(name).expect("test name must be an identifier");
         let mut assigned_nodes = vec![node_name(primary)];
         assigned_nodes.extend(replicas.iter().map(|node| node_name(node)));
-        ScheduledNode {
-            identifier: identifier.clone(),
-            kind: ModelKind::Junction,
-            config: Box::new(Model::Junction(CreateJunction {
-                name: JunctionName::from(&identifier),
-                from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
-                output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
-                branched_by: nervix_models::BranchSelection::unbranched(),
-                mode: Default::default(),
-                filter_where: None,
-                materialized_state: Vec::new(),
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(ClusterNodeName::parse(primary).expect("valid node name")),
+        ScheduledNode::new(Model::Junction(CreateJunction {
+            name: JunctionName::from(&identifier),
+            from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
+            output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
+            branched_by: nervix_models::BranchSelection::unbranched(),
+            mode: Default::default(),
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }))
+        .placed_on(
+            Some(ClusterNodeName::parse(primary).expect("valid node name")),
             assigned_nodes,
-        }
+        )
     }
 
     fn schedule(nodes: Vec<ScheduledNode>) -> DomainSchedule {

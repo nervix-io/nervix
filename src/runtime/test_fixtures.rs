@@ -523,22 +523,11 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
     ipc
 }
 
-pub(super) fn scheduled_model(
-    kind: ModelKind,
-    identifier: ModelName,
-    model: nervix_models::Model,
-) -> ScheduledNode {
-    ScheduledNode {
-        identifier,
-        kind,
-        config: Box::new(model),
-        effective_branching: None,
-        effective_branching_schema: None,
-        schema_fingerprint: [0; 32],
-        kafka_partition_schedule: None,
-        primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-        assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-    }
+pub(super) fn scheduled_model(model: nervix_models::Model) -> ScheduledNode {
+    ScheduledNode::new(model).placed_on(
+        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+        vec![ClusterNodeName::parse("node-1").expect("valid name")],
+    )
 }
 
 pub(super) fn junction_branch_template(

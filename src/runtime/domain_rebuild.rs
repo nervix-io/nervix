@@ -281,9 +281,9 @@ impl Runtime {
         let remote_dispatcher = self.inner.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
-            .iter()
-            .map(|(node_ref, node)| (node_ref.clone(), (*node.config).clone()))
-            .collect::<HashMap<_, _>>();
+            .values()
+            .map(|node| (*node.config).clone())
+            .collect::<ModelIndex>();
         for node in schedule.nodes.values() {
             match node.config.as_ref() {
                 Model::Ingestor(ingestor) => {
@@ -317,7 +317,7 @@ impl Runtime {
             .compile_domain_udfs(
                 domain,
                 model_index
-                    .values()
+                    .models()
                     .filter_map(|model| {
                         if let Model::Udf(udf) = model {
                             Some(udf.clone())
@@ -788,7 +788,7 @@ impl Runtime {
         }
         let mut relay_owner_tasks = HashMap::new();
         for node in schedule.nodes.values() {
-            if node.kind != ModelKind::Relay || !node.executes_on(local_node_id) {
+            if node.kind() != ModelKind::Relay || !node.executes_on(local_node_id) {
                 continue;
             }
             let services = relay_services

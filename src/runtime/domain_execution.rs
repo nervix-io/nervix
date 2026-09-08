@@ -211,13 +211,13 @@ impl Runtime {
         let model_index = graph
             .nodes()
             .into_iter()
-            .map(|node| (node.node_ref(), (*node.config).clone()))
-            .collect::<HashMap<_, _>>();
+            .map(|node| (*node.config).clone())
+            .collect::<ModelIndex>();
         let udf_executor = self
             .compile_domain_udfs(
                 domain,
                 model_index
-                    .values()
+                    .models()
                     .filter_map(|model| {
                         if let Model::Udf(udf) = model {
                             Some(udf.clone())
@@ -758,18 +758,16 @@ impl Runtime {
                     graph
                         .nodes()
                         .into_iter()
-                        .map(|node| ScheduledNode {
-                            schema_fingerprint: graph
+                        .map(|node| {
+                            let fingerprint = graph
                                 .schema_fingerprint(node.kind, &node.identifier)
-                                .unwrap_or([0; 32]),
-                            identifier: node.identifier,
-                            kind: node.kind,
-                            config: Box::new((*node.config).clone()),
-                            effective_branching: node.effective_branching,
-                            effective_branching_schema: node.effective_branching_schema,
-                            kafka_partition_schedule: None,
-                            primary_node: None,
-                            assigned_nodes: Vec::new(),
+                                .unwrap_or([0; 32]);
+                            ScheduledNode::new((*node.config).clone())
+                                .with_effective_branching(
+                                    node.effective_branching,
+                                    node.effective_branching_schema,
+                                )
+                                .with_schema_fingerprint(fingerprint)
                         })
                         .collect::<Vec<_>>(),
                     Vec::new(),

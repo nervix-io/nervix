@@ -70,15 +70,15 @@ use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
     IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
     KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName,
-    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
+    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
     OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
     PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
-    ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp,
+    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};

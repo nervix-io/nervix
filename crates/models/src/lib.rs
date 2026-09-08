@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** Every NSPL Model, the validated name types, `Timestamp`, branch and node references,
-//!   structured message errors, and the canonical NSPL rendering of a Model.
+//!   the index that keys a domain's Models by the node each one configures, structured message
+//!   errors, and the canonical NSPL rendering of a Model.
 //! - **Depends on.** Serialization and primitive crates.
 //! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
 //!   no registry state, no Arrow array and no Tokio type belongs here.
@@ -16,6 +17,7 @@
 mod canonical;
 mod expression;
 mod message_error;
+mod model_index;
 mod names;
 mod node_ref;
 mod quiesce;
@@ -40,6 +42,7 @@ pub use expression::{
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };
+pub use model_index::ModelIndex;
 pub use names::{
     BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
     CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, DotPolicy,
@@ -111,14 +114,15 @@ pub use statement::{
     PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
     RedisPubSubIngestMode, RelayBranching, Relocation, RelocationMember,
     RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResolvedCodecWireFormat, RetryPolicy, S3ConfigEntry, ScheduledNode, ScheduledNodes,
-    SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
-    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UploadResource, VhostTlsResource,
-    WasmProcessorLimits, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    ResolvedCodecWireFormat, RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode,
+    ScheduledNodes, SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowPlacements,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsConfigEntry, SqsFifoGroup, SqsIngestMode, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry,
+    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaLookup, ZeroMqConfigEntry,
+    ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::Timestamp;
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
