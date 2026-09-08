@@ -233,11 +233,33 @@ use deduplicator::{
 use force_flush::{DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant};
 use http_client::HttpClientConfig;
 pub(crate) use ingestors::kafka::KafkaIngestor;
-use kafka_offset_state::{KafkaTopicPartition, ReplicatedKafkaOffsetState};
-use materialized_state::{
-    ReplicatedMaterializedRelayState, decode_materialized_stream_snapshot,
-    encode_materialized_stream_snapshot_entries,
+use kafka_offset_state::{
+    KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,
+    KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
+    ReplicatedKafkaOffsetState,
 };
+use materialized_state::{
+    MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
+    MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
+    MaterializedRelayStateRead, ReplicatedMaterializedRelayState,
+    decode_materialized_stream_snapshot, encode_materialized_stream_snapshot_entries,
+};
+
+/// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
+/// operations are absent from each capability.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod state_capability_compile_tests {
+    pub use super::{
+        kafka_offset_state::{
+            KafkaOffsetSnapshotInstaller, KafkaOffsetStateOriginator, KafkaOffsetStateRead,
+        },
+        materialized_state::{
+            MaterializedRelaySnapshotInstaller, MaterializedRelayStateOriginator,
+            MaterializedRelayStateRead,
+        },
+    };
+}
 use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
     matching_message_error_output,
@@ -420,8 +442,9 @@ use state_replication::{
     PendingStateSyncSender,
 };
 pub(crate) use state_store::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind, RuntimeStatePlacement,
-    RuntimeStateStore, StateReplicationRoles,
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind,
+    RuntimeStateOperationError, RuntimeStatePlacement, RuntimeStateStore, StateAssignmentAuthority,
+    StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
 };
 #[cfg(test)]
 use test_fixtures::{
