@@ -1,6 +1,6 @@
 {
   "as_casts": 3,
-  "bare_error_signatures": 866,
+  "bare_error_signatures": 863,
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 13,
   "files_over_3000_lines": 13,

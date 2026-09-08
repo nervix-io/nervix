@@ -157,6 +157,7 @@ struct ScenarioWorld {
     background_command_result:
         Option<AbortOnDropHandle<std::io::Result<nervix_proto::CommandResult>>>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    silent_interconnect_peers: Vec<tokio::net::TcpStream>,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -232,6 +233,10 @@ impl fmt::Debug for ScenarioWorld {
             .field(
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
+            )
+            .field(
+                "silent_interconnect_peer_count",
+                &self.silent_interconnect_peers.len(),
             )
             .finish()
     }
@@ -2914,6 +2919,49 @@ async fn when_node_is_stopped(world: &mut ScenarioWorld, node_id: String) {
         .stop_node(&node_id)
         .await
         .expect("failed to stop node");
+}
+
+#[when(expr = "node {string} is stopped while timing shutdown")]
+async fn when_node_is_stopped_while_timing_shutdown(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let started = Instant::now();
+    world
+        .cluster_mut()
+        .stop_node(&node_id)
+        .await
+        .expect("failed to stop node");
+    world.last_cluster_operation_elapsed = Some(started.elapsed());
+}
+
+#[when(expr = "node {string} is restarted {int} times with a new interconnect address")]
+async fn when_node_is_restarted_with_new_interconnect_addresses(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    repetitions: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    for _ in 0..repetitions {
+        tokio::task::consume_budget().await;
+        world
+            .cluster_mut()
+            .restart_node_with_new_interconnect_address(&node_id)
+            .await
+            .expect("failed to restart node with a new interconnect address");
+    }
+}
+
+#[when(expr = "a silent peer starts an interconnect handshake with node {string}")]
+async fn when_silent_peer_starts_interconnect_handshake(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer = world
+        .cluster()
+        .open_silent_interconnect_handshake(&node_id)
+        .await
+        .expect("failed to open silent interconnect handshake");
+    world.silent_interconnect_peers.push(peer);
 }
 
 #[when(expr = "node {string} begins stopping")]
