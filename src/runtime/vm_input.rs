@@ -290,14 +290,13 @@ pub(super) fn runtime_values_input_column<'a>(
     {
         let nanos = values
             .map(|value| match value {
-                Some(RuntimeValue::Datetime(value)) => {
-                    value.timestamp_nanos_opt().map(Some).ok_or_else(|| {
-                        format!(
-                            "FILTER-MAP input field '{}' datetime is out of nanosecond range",
-                            field.name()
-                        )
-                    })
-                }
+                Some(RuntimeValue::Datetime(value)) => match value.timestamp_nanos_opt() {
+                    Some(nanos) => Ok(Some(nanos)),
+                    None => Err(format!(
+                        "FILTER-MAP input field '{}' datetime is out of nanosecond range",
+                        field.name()
+                    )),
+                },
                 Some(value) => Err(format!(
                     "FILTER-MAP input field '{}' expected {:?}, got {}",
                     field.name(),

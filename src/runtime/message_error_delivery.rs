@@ -286,16 +286,15 @@ impl MessageErrorRouteTask {
             tokio::task::consume_budget().await;
             let now = self.now();
             let next_flush = self.next_flush();
-            let flush_wait = next_flush
-                .map(|deadline| {
-                    wall_duration_until_domain_deadline(
-                        &self.runtime,
-                        &self.route.domain,
-                        now,
-                        deadline,
-                    )
-                })
-                .unwrap_or(Duration::from_secs(86_400));
+            let flush_wait = match next_flush {
+                Some(deadline) => wall_duration_until_domain_deadline(
+                    &self.runtime,
+                    &self.route.domain,
+                    now,
+                    deadline,
+                ),
+                None => Duration::from_secs(86_400),
+            };
             tokio::select! {
                 biased;
                 // A signalled stop and a dropped sender both mean the owner is gone, and this

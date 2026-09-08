@@ -91,7 +91,7 @@ use nervix_vm::{
     CompileOptions as VmCompileOptions, CompiledProgram as VmCompiledProgram,
     ExecutionContext as VmExecutionContext, FunctionInjector as VmFunctionInjector,
     OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity, SemanticNamespaces,
-    TypedArray as VmTypedArray, TypedBatch as VmTypedBatch,
+    TypedArray as VmTypedArray, TypedBatch as VmTypedBatch, UdfSignatures as VmUdfSignatures,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program_with_options_for_bindings_with_sensitivity,
     execute_program_with_selection_in_context,
     infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
@@ -319,8 +319,8 @@ use branch_runtime::{
 };
 pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 use client_config::{
-    ParsedRetryPolicy, client_config_value, next_retry_delay, optional_bool_client_config_value,
-    optional_client_config_value,
+    ParsedRetryPolicy, client_config_entries, client_config_value, next_retry_delay,
+    optional_bool_client_config_value, optional_client_config_value,
 };
 use correlator::{
     CorrelatorMatchedBatch, CorrelatorOutputCompileContext, CorrelatorOutputContext,
@@ -491,7 +491,7 @@ use vm_compile::{
     compile_wasm_output_filter_map_program, compiled_message_error_sites,
     evaluate_constant_expression_vm, materialized_stream_specs_for_graph,
     referenced_materialized_stream_bindings, relay_branch_schema_for_runtime,
-    relay_schema_for_runtime, runtime_udf_compile_options,
+    relay_schema_for_runtime, runtime_udf_compile_options, runtime_udf_signatures,
 };
 use vm_input::{
     SharedBatchColumns, VmInputProjectionSources, compute_lookup_hash_map_columns,

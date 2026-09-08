@@ -278,9 +278,7 @@ impl OtelEmitter {
             scope,
             input_schema,
         } = init;
-        let config = resolved
-            .map(|config| config.entries.as_slice())
-            .unwrap_or(client.config.as_slice());
+        let config = client_config_entries(resolved, client.config.as_slice());
         let client = match Self::transport_from_config(config) {
             Ok(transport) => Some(OtelClient {
                 transport,
@@ -1627,16 +1625,16 @@ fn list_value(array: &ArrayRef, row: usize) -> Result<Option<ArrayRef>, String> 
         return Ok(None);
     }
     match array.data_type() {
-        DataType::List(_) => array
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .map(|array| Some(array.value(row)))
-            .ok_or_else(|| "OTEL array value has an invalid Arrow representation".to_string()),
-        DataType::FixedSizeList(_, _) => array
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .map(|array| Some(array.value(row)))
-            .ok_or_else(|| "OTEL array value has an invalid Arrow representation".to_string()),
+        DataType::List(_) => match array.as_any().downcast_ref::<ListArray>() {
+            Some(array) => Ok(Some(array.value(row))),
+            None => Err("OTEL array value has an invalid Arrow representation".to_string()),
+        },
+        DataType::FixedSizeList(_, _) => {
+            match array.as_any().downcast_ref::<FixedSizeListArray>() {
+                Some(array) => Ok(Some(array.value(row))),
+                None => Err("OTEL array value has an invalid Arrow representation".to_string()),
+            }
+        }
         ty => Err(format!("OTEL value requires ARRAY or VEC, found {ty}")),
     }
 }

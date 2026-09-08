@@ -419,6 +419,15 @@ build and the existing tests, and nothing in it changes behavior.
   clone of it pays one refcount per field, and on a hot path that cost is repeated per batch. A
   field keeps an `Arc` of its own only when a second owner outlives the handle's borrow, and the
   field says who that owner is. Never wrap a handle that is already one `Arc` in another `Arc`.
+- Take an `Option` or a `Result` apart with `match`, `if let`, `let ... else`, or `?`, and write
+  what follows as statements. Two adapters in a row are that branch spelled as a call — `map`
+  feeding `unwrap_or_default`, `and_then` feeding `ok_or_else` — and a closure whose body is a
+  block of statements is a sequence hidden inside one. `map_or` and `map_or_else` are a two-armed
+  match written as a single call, however short the arms are. Write the arms.
+- One adapter performing one transformation stays, because it decides nothing: a `map_err` or an
+  `ok_or_else` shaping a value on its way into `?`, an `unwrap_or` supplying a default. The rule
+  governs `Option` and `Result`, not sequences; `map`, `filter`, and `collect` over many elements
+  are a pipeline and stay as they are.
 - In `if` conditions, prefer `if let` or `if let` chains over `matches!` when they express the same
   logic cleanly. Use `matches!` when an `if let` form would be unclear or outside an `if`
   condition.
@@ -506,12 +515,13 @@ build and the existing tests, and nothing in it changes behavior.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
   `let _ =` instead of stating their class, `saturating_*` and `wrapping_*` calls outside the time
-  API, `Result<_, String>`, signatures returning a Nervix error without `Report`, node identities
-  carried as `String`, struct fields gated on `cfg(feature = "testing")`, parser references outside
-  the language edges, and `Model` references in the data plane, and CI fails when a count is above
-  `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run
-  `just ratchet --update` and commit the baseline in the same change; `just ratchet --show <count>`
-  lists the sites behind one count.
+  API, control flow written as `Option` and `Result` combinator chains, `Result<_, String>`,
+  signatures returning a Nervix error without `Report`, node identities carried as `String`, struct
+  fields gated on `cfg(feature = "testing")`, parser references outside the language edges, and
+  `Model` references in the data plane, and CI fails when a count is above `debt-baseline.json`. A
+  change may lower a count and never raise one. When a count falls, run `just ratchet --update` and
+  commit the baseline in the same change; `just ratchet --show <count>` lists the sites behind one
+  count.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
   benchmarks, cache troubleshooting, or retries.

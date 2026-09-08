@@ -545,9 +545,13 @@ impl WasmBranchInit {
     fn serialized_capacity_hint(&self) -> usize {
         const BRANCH_INIT_OVERHEAD: usize = 512;
 
+        let branch_key = match &self.branch_key {
+            Some(branch_key) => branch_key.len(),
+            None => 0,
+        };
         CapacityHint::of(self.domain_name.len())
             .plus(self.domain_type.len())
-            .plus(self.branch_key.as_ref().map_or(0, Vec::len))
+            .plus(branch_key)
             .plus(self.input_schema.serialized_capacity_hint())
             .plus_all(
                 self.output_schemas

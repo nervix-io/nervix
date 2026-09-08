@@ -555,8 +555,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         let inner = shape[batch_axis + 1..].iter().product::<usize>();
         let expected = outer
             .checked_mul(batch_size)
-            .and_then(|count| count.checked_mul(inner))
-            .ok_or_else(|| "batched tensor output element count overflowed".to_string())?;
+            .and_then(|count| count.checked_mul(inner));
+        let Some(expected) = expected else {
+            return Err("batched tensor output element count overflowed".to_string());
+        };
         if values.len() != expected {
             return Err(format!(
                 "batched output contains {} values, expected {}",

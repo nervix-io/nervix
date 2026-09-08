@@ -272,11 +272,10 @@ impl RelayProcessorNode {
                 .filter_map(|(relay, collector)| collector.is_due(now).then_some(relay.clone()))
                 .collect::<Vec<_>>();
             for relay in due_relays {
-                let batches = self
-                    .input_collectors
-                    .get_mut(&relay)
-                    .map(RuntimeInputCollector::take_pending)
-                    .unwrap_or_default();
+                let batches = match self.input_collectors.get_mut(&relay) {
+                    Some(collector) => collector.take_pending(),
+                    None => Vec::new(),
+                };
                 let Some(batch) = self.concat_collected_input(branch, &relay, batches) else {
                     continue;
                 };
@@ -299,11 +298,10 @@ impl RelayProcessorNode {
                 })
                 .collect::<Vec<_>>();
             for relay in pending_relays {
-                let batches = self
-                    .input_collectors
-                    .get_mut(&relay)
-                    .map(RuntimeInputCollector::take_pending)
-                    .unwrap_or_default();
+                let batches = match self.input_collectors.get_mut(&relay) {
+                    Some(collector) => collector.take_pending(),
+                    None => Vec::new(),
+                };
                 let Some(batch) = self.concat_collected_input(branch, &relay, batches) else {
                     continue;
                 };
@@ -365,22 +363,18 @@ impl RelayProcessorNode {
                 };
             let materialized_stream_specs =
                 materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
-            let current_branching = branch
-                .runtime
-                .inner
-                .executions
-                .get(&branch.domain)
-                .and_then(|execution| execution.relay_branchings.get(incoming_relay).cloned())
-                .unwrap_or_default();
+            let mut current_branching = Vec::new();
+            if let Some(execution) = branch.runtime.inner.executions.get(&branch.domain)
+                && let Some(branching) = execution.relay_branchings.get(incoming_relay)
+            {
+                current_branching = branching.clone();
+            }
             let current_branch_schema =
                 relay_branch_schema_for_runtime(&branch.runtime, &branch.domain, incoming_relay);
-            let available_lookups = branch
-                .runtime
-                .inner
-                .executions
-                .get(&branch.domain)
-                .map(|execution| execution.lookups.clone())
-                .unwrap_or_default();
+            let available_lookups = match branch.runtime.inner.executions.get(&branch.domain) {
+                Some(execution) => execution.lookups.clone(),
+                None => HashMap::default(),
+            };
             let udfs = branch
                 .runtime
                 .inner
@@ -1362,25 +1356,22 @@ impl RelayProcessorNode {
                     };
                     let materialized_stream_specs =
                         materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
-                    let current_branching = branch
-                        .runtime
-                        .inner
-                        .executions
-                        .get(&branch.domain)
-                        .and_then(|execution| execution.relay_branchings.get(left_relay).cloned())
-                        .unwrap_or_default();
+                    let mut current_branching = Vec::new();
+                    if let Some(execution) = branch.runtime.inner.executions.get(&branch.domain)
+                        && let Some(branching) = execution.relay_branchings.get(left_relay)
+                    {
+                        current_branching = branching.clone();
+                    }
                     let current_branch_schema = relay_branch_schema_for_runtime(
                         &branch.runtime,
                         &branch.domain,
                         left_relay,
                     );
-                    let available_lookups = branch
-                        .runtime
-                        .inner
-                        .executions
-                        .get(&branch.domain)
-                        .map(|execution| execution.lookups.clone())
-                        .unwrap_or_default();
+                    let available_lookups =
+                        match branch.runtime.inner.executions.get(&branch.domain) {
+                            Some(execution) => execution.lookups.clone(),
+                            None => HashMap::default(),
+                        };
                     let udfs = branch
                         .runtime
                         .inner

@@ -36,9 +36,7 @@ impl MqttEmitter {
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {
         let (client, mut eventloop) = Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
+            client_config_entries(resolved, client.config.as_slice()),
             &format!("{}-{}", context.domain.as_str(), context.emitter.as_str()),
             mode,
         )?;
@@ -116,9 +114,10 @@ impl MqttEmitter {
         let addr = emitter_config_value(config, "addr", || {
             "missing MQTT client config key 'addr'".to_string()
         })?;
-        let client_id = optional_client_config_value(config, "client_id")
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| default_client_id.to_string());
+        let client_id = match optional_client_config_value(config, "client_id") {
+            Some(client_id) => client_id.to_owned(),
+            None => default_client_id.to_string(),
+        };
 
         let mqtt_addr = Self::parse_addr(&addr)?;
         let mut options = MqttOptions::new(client_id, (mqtt_addr.host, mqtt_addr.port));
@@ -182,15 +181,17 @@ impl MqttEmitter {
                 url.scheme()
             )));
         };
-        let host = url
-            .host()
-            .map(|host| match host {
-                Host::Domain(domain) => domain.to_string(),
-                Host::Ipv4(addr) => addr.to_string(),
-                Host::Ipv6(addr) => addr.to_string(),
-            })
-            .filter(|host| !host.is_empty())
-            .ok_or_else(|| emitter_config_error(format!("missing host in MQTT addr '{addr}'")))?;
+        let host = match url.host() {
+            Some(Host::Domain(domain)) => domain.to_string(),
+            Some(Host::Ipv4(address)) => address.to_string(),
+            Some(Host::Ipv6(address)) => address.to_string(),
+            None => String::new(),
+        };
+        if host.is_empty() {
+            return Err(emitter_config_error(format!(
+                "missing host in MQTT addr '{addr}'"
+            )));
+        }
         let port = url
             .port()
             .ok_or_else(|| emitter_config_error(format!("missing port in MQTT addr '{addr}'")))?;

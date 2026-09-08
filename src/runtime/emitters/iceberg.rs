@@ -125,10 +125,12 @@ impl IcebergPreparedCommit {
             if self.matches_snapshot(current) {
                 return true;
             }
-            snapshot = current
-                .parent_snapshot_id()
-                .and_then(|parent| metadata.snapshot_by_id(parent))
-                .map(|parent| parent.as_ref());
+            snapshot = match current.parent_snapshot_id() {
+                Some(parent) => metadata
+                    .snapshot_by_id(parent)
+                    .map(|parent| parent.as_ref()),
+                None => None,
+            };
         }
         false
     }
@@ -413,14 +415,13 @@ impl IcebergEmitter {
         let mapped_schema = Self::mapped_arrow_schema(&program, values)?;
         let staging_dir = Self::create_staging_dir(context.runtime.temp_dir())?;
         let client_init = IcebergEmitterClientInit {
-            config: resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or_else(|| client.config()),
+            config: client_config_entries(resolved, client.config()),
             backend,
             catalog_client,
-            catalog_config: catalog_resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or_else(|| catalog_client.config.as_slice()),
+            catalog_config: client_config_entries(
+                catalog_resolved,
+                catalog_client.config.as_slice(),
+            ),
             context,
             table,
             location,
@@ -814,7 +815,10 @@ impl IcebergEmitter {
             .iter()
             .filter(|error| error.is_none())
             .count();
-        let actual_accepted_rows = accepted.as_ref().map_or(0, RecordBatch::num_rows);
+        let actual_accepted_rows = match accepted.as_ref() {
+            Some(accepted) => accepted.num_rows(),
+            None => 0,
+        };
         if actual_accepted_rows != expected_accepted_rows {
             return Err(
                 Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(

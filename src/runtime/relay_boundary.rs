@@ -1213,12 +1213,14 @@ pub(crate) fn scheduled_relay_owner_nodes(
     schedule: &DomainSchedule,
     relay: &RelayName,
 ) -> Vec<ClusterNodeName> {
-    schedule
+    let owner = schedule
         .nodes
         .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
-        .and_then(ScheduledNode::execution_node)
-        .map(|owner| vec![owner.clone()])
-        .unwrap_or_default()
+        .and_then(ScheduledNode::execution_node);
+    match owner {
+        Some(owner) => vec![owner.clone()],
+        None => Vec::new(),
+    }
 }
 
 impl Runtime {

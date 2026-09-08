@@ -152,11 +152,10 @@ enum ClientError {
 
 impl Completer for GrpcCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let prefix = self
-            .buffer_prefix
-            .lock()
-            .map(|value| value.clone())
-            .unwrap_or_default();
+        let prefix = match self.buffer_prefix.lock() {
+            Ok(prefix) => prefix.clone(),
+            Err(_) => String::new(),
+        };
         let combined = format!("{}{}", prefix, &line[..pos.min(line.len())]);
         let cursor = u32::try_from(combined.len()).unwrap_or(u32::MAX);
         let client = self.client.clone();
@@ -197,12 +196,14 @@ impl Completer for GrpcCompleter {
 
 fn word_start(line: &str, pos: usize) -> usize {
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    line[..pos.min(line.len())]
+    let boundary = line[..pos.min(line.len())]
         .char_indices()
         .rev()
-        .find(|(_, c)| !is_word(*c))
-        .map(|(idx, c)| idx + c.len_utf8())
-        .unwrap_or(0)
+        .find(|(_, c)| !is_word(*c));
+    match boundary {
+        Some((index, character)) => index + character.len_utf8(),
+        None => 0,
+    }
 }
 
 #[tokio::main]
@@ -394,10 +395,18 @@ fn complete_local_upload_paths(
     pos: usize,
     lookup_hint: Option<&AutocompleteSuggestion>,
 ) -> Option<Vec<Suggestion>> {
-    let path_fragment = lookup_hint
-        .map(|hint| hint.value.as_str())
-        .filter(|hint| !hint.is_empty() || line[..pos.min(line.len())].contains(" VERSION '"))
-        .or_else(|| upload_resource_path_fragment(line, pos))?;
+    let hinted = match lookup_hint {
+        Some(hint)
+            if !hint.value.is_empty() || line[..pos.min(line.len())].contains(" VERSION '") =>
+        {
+            Some(hint.value.as_str())
+        }
+        _ => None,
+    };
+    let path_fragment = match hinted {
+        Some(path_fragment) => path_fragment,
+        None => upload_resource_path_fragment(line, pos)?,
+    };
     // The suggested fragment may be longer than the text typed so far, in which case the
     // replacement span starts at the beginning of the line.
     let span_start = pos.saturating_sub(path_fragment.len());
@@ -407,16 +416,15 @@ fn complete_local_upload_paths(
     } else if path_fragment.ends_with(std::path::MAIN_SEPARATOR) || path_fragment.ends_with('/') {
         (expand_user_path(path), String::new())
     } else {
-        (
-            expand_user_path(
-                path.parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from(".")),
-            ),
-            path.file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default(),
-        )
+        let parent = match path.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => PathBuf::from("."),
+        };
+        let file_name = match path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => String::new(),
+        };
+        (expand_user_path(parent), file_name)
     };
     let Ok(entries) = std::fs::read_dir(&base_dir) else {
         return None;
@@ -470,9 +478,10 @@ fn expand_user_path(path: impl AsRef<Path>) -> PathBuf {
         return path.to_path_buf();
     };
     if raw == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
+        return match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home),
+            None => path.to_path_buf(),
+        };
     }
     if let Some(stripped) = raw.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")

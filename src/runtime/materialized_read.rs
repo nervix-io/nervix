@@ -544,12 +544,10 @@ impl Runtime {
         if dependencies.is_empty() {
             return Ok(MaterializedDependencyResolution::Ready(HashMap::default()));
         }
-        let owner_nodes = self
-            .inner
-            .executions
-            .get(domain)
-            .map(|execution| execution.materialized_stream_owner_nodes.clone())
-            .unwrap_or_default();
+        let owner_nodes = match self.inner.executions.get(domain) {
+            Some(execution) => execution.materialized_stream_owner_nodes.clone(),
+            None => HashMap::default(),
+        };
         let mut resolved = HashMap::default();
         let udfs = self.udf_executor(domain);
         for dependency in dependencies {

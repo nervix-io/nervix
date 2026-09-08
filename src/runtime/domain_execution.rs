@@ -343,10 +343,10 @@ impl Runtime {
                         relay.buffer,
                     )
                     .await;
-                let registry = expiring_state
-                    .as_ref()
-                    .map(|state| state.registry.clone())
-                    .unwrap_or_else(RelayRegistry::new);
+                let registry = match expiring_state.as_ref() {
+                    Some(state) => state.registry.clone(),
+                    None => RelayRegistry::new(),
+                };
                 relay_builders.insert(
                     relay.name.clone(),
                     RelayBoundaryBuilder {
@@ -746,6 +746,10 @@ impl Runtime {
                 )?);
         }
 
+        let start_version = match self.inner.domains.get(domain) {
+            Some(state) => state.start_version,
+            None => 0,
+        };
         self.install_domain_execution(
             domain,
             DomainExecution {
@@ -771,11 +775,7 @@ impl Runtime {
                     Vec::new(),
                 ),
                 passive_only: false,
-                start_version: self
-                    .inner
-                    .domains
-                    .get(domain)
-                    .map_or(0, |state| state.start_version),
+                start_version,
                 shutdown: shutdown_tx,
                 graph: domain_graph.clone(),
                 relay_registries,

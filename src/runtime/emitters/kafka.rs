@@ -27,11 +27,8 @@ impl KafkaEmitter {
         resolved: Option<&ResolvedClientConfig>,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
-        let producer = Self::producer_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )?;
+        let producer =
+            Self::producer_from_config(client_config_entries(resolved, client.config.as_slice()))?;
         Ok(Self {
             producer: Some(producer),
             mode,

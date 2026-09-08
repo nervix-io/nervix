@@ -29,12 +29,9 @@ impl RabbitMqEmitter {
         queue: &QueueName,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
-        let channel = Self::channel_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
-        .await?;
+        let channel =
+            Self::channel_from_config(client_config_entries(resolved, client.config.as_slice()))
+                .await?;
         channel
             .queue_declare(
                 queue.as_str().into(),

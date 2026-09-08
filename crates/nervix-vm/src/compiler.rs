@@ -509,6 +509,10 @@ impl Compiler {
                     field.data_type().clone(),
                     field.is_nullable(),
                 ));
+                let value = match reg {
+                    Some(reg) => ColumnValue::Initialized(reg),
+                    None => ColumnValue::Unsupported,
+                };
                 columns.insert(
                     match &binding.namespace {
                         CompileNamespace::User(namespace) => BoundFieldRef::User(FieldRef {
@@ -526,7 +530,7 @@ impl Compiler {
                         data_type: field.data_type().clone(),
                         nullable: field.is_nullable(),
                         sensitive: binding.sensitivity.is_sensitive(field.name()),
-                        value: reg.map_or(ColumnValue::Unsupported, ColumnValue::Initialized),
+                        value,
                     },
                 );
                 input_index += 1;
@@ -665,9 +669,10 @@ impl Compiler {
         mask: RegisterRef,
         span: Span,
     ) -> RegisterRef {
-        outer.map_or(mask, |outer| {
-            self.emit_boolean_binary(BinaryOp::And, outer, mask, span)
-        })
+        match outer {
+            Some(outer) => self.emit_boolean_binary(BinaryOp::And, outer, mask, span),
+            None => mask,
+        }
     }
 
     fn apply_options(&mut self, options: &CompileOptions) {
@@ -919,7 +924,7 @@ impl Compiler {
                 let left_type = self.infer_expr_type(left)?;
                 let right_type = self.infer_expr_type(right)?;
 
-                binary_output_type(*op, &left_type, &right_type).ok_or_else(|| {
+                let Some(output_type) = binary_output_type(*op, &left_type, &right_type) else {
                     let (code, message) = if left_type != right_type {
                         (
                             "type_mismatch",
@@ -935,12 +940,13 @@ impl Compiler {
                             format!("operator {op:?} is not valid for {:?}", left_type),
                         )
                     };
-                    CompileError {
+                    return Err(CompileError {
                         code,
                         message,
                         span: expr.span,
-                    }
-                })
+                    });
+                };
+                Ok(output_type)
             }
             Expr::Cast {
                 expr: inner,
@@ -1657,14 +1663,20 @@ impl Compiler {
             let condition_mask = eligible.or(outer_mask);
             let condition = self.with_error_mask(condition_mask, |compiler| {
                 let when = compiler.compile_expr(&branch.when)?;
-                Ok(operand_reg.map_or(when, |operand| {
-                    compiler.emit_boolean_binary(BinaryOp::Eq, operand, when, branch.when.span)
-                }))
+                Ok(match operand_reg {
+                    Some(operand) => {
+                        compiler.emit_boolean_binary(BinaryOp::Eq, operand, when, branch.when.span)
+                    }
+                    None => when,
+                })
             })?;
             let normalized = self.normalize_condition(condition, branch.when.span);
-            let selected = unmatched.map_or(normalized, |unmatched| {
-                self.emit_boolean_binary(BinaryOp::And, unmatched, normalized, span)
-            });
+            let selected = match unmatched {
+                Some(unmatched) => {
+                    self.emit_boolean_binary(BinaryOp::And, unmatched, normalized, span)
+                }
+                None => normalized,
+            };
             let selected = self.combine_with_outer_mask(outer_mask, selected, span);
             let value = self.compile_case_result(
                 Some(&branch.result),
@@ -1676,9 +1688,10 @@ impl Compiler {
                 mask: normalized,
                 value,
             });
-            matched = Some(matched.map_or(normalized, |matched| {
-                self.emit_boolean_binary(BinaryOp::Or, matched, normalized, span)
-            }));
+            matched = Some(match matched {
+                Some(matched) => self.emit_boolean_binary(BinaryOp::Or, matched, normalized, span),
+                None => normalized,
+            });
         }
 
         let else_mask = matched.map(|matched| {
