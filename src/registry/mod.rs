@@ -1183,14 +1183,15 @@ impl Registry {
             return Ok(None);
         };
         let stored_kind = model.kind();
-        M::from_model(model).map(Some).ok_or_else(|| {
-            Report::new(RegistryError::StoredModelKindMismatch {
+        let Some(model) = M::from_model(model) else {
+            return Err(Report::new(RegistryError::StoredModelKindMismatch {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 expected_kind: M::KIND.as_str(),
                 stored_kind: stored_kind.as_str(),
-            })
-        })
+            }));
+        };
+        Ok(Some(model))
     }
 
     /// The model named `identifier` in `domain` under a kind the caller learns at runtime.
