@@ -1,9 +1,11 @@
 use std::{fmt, sync::Arc};
 
 use arrow_schema::{DataType, Schema, TimeUnit};
-use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 
-use crate::semantics::BuiltinLowering;
+use crate::{
+    program::{BinaryOp, FunctionName, Span, UnaryOp},
+    semantics::BuiltinLowering,
+};
 
 macro_rules! declare_register_types {
     ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {

@@ -1220,7 +1220,7 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
         function: &FunctionName,
         _arguments: &[VmTypedArray],
         row_count: usize,
-        _span: nervix_nspl::vm_program::Span,
+        _span: nervix_vm::program::Span,
     ) -> Result<VmTypedArray, nervix_vm::RuntimeError> {
         let FunctionName::WindowAggregate(invocation) = function else {
             return Err(nervix_vm::RuntimeError::InvalidBatch {

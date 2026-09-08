@@ -66,7 +66,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
 ];
 
 /// Placeholders that stand for a free-form expression region: the enclosing parser swallows tokens
-/// up to a boundary and re-parses them through the separate `vm_program` grammar, so completion
+/// up to a boundary and re-parses them through the semantic expression grammar, so completion
 /// inside them is not grammar-derived and the walker has to supply a body itself.
 const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("correlate_expression", "left.nx_field = right.nx_field"),

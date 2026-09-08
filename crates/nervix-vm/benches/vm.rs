@@ -8,16 +8,22 @@ use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
-use nervix_nspl::vm_program::parse_program;
 use nervix_vm::{
-    CompileBinding, CompileOptions, CompiledProgram, TypedArray, TypedBatch,
-    compile_program_with_options_for_bindings, execute_program,
+    CompileBinding, CompileOptions, CompiledProgram, SemanticNamespaces, TypedArray, TypedBatch,
+    compile_program_with_options_for_bindings, execute_program, lower_route_construction,
+    program::{Program, SpannedNode},
 };
 use triomphe::Arc;
 
 /// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
 /// amortization curve below it and the cost of the blocking hop above it.
 const SWEEP_ROW_COUNTS: [usize; 6] = [64, 256, 1_024, 4_096, 16_384, 65_536];
+
+fn parse_program(source: &str) -> Result<SpannedNode<Program>, String> {
+    let construction =
+        nervix_nspl::parse_route_construction(source).map_err(|error| error.to_string())?;
+    lower_route_construction(&construction, SemanticNamespaces::new("input", "input"))
+}
 
 fn benchmark_row_i64(row: usize) -> i64 {
     i64::try_from(row).assured("benchmark row counts are fixed below i64::MAX")
@@ -324,8 +330,8 @@ fn long_tail_batch(row_count: usize) -> TypedBatch {
 
 fn compile_arithmetic(options: CompileOptions) -> Arc<CompiledProgram> {
     let program = parse_program(
-        "SET input.total = input.left + input.right, input.quotient = (input.left + input.right) \
-         / input.divisor, input.magnitude = abs(input.left - input.right) WHERE input.keep;",
+        "SET total = input.left + input.right, quotient = (input.left + input.right) / \
+         input.divisor, magnitude = abs(input.left - input.right) WHERE input.keep",
     )
     .expect("benchmark program must parse");
     compile_program_with_options_for_bindings(
@@ -340,9 +346,9 @@ fn compile_arithmetic(options: CompileOptions) -> Arc<CompiledProgram> {
 
 fn compile_float_arithmetic() -> Arc<CompiledProgram> {
     let program = parse_program(
-        "SET input.total = input.left + input.right, input.difference = input.left - input.right, \
-         input.product = input.left * input.right, input.quotient = input.left / input.divisor, \
-         input.remainder = input.left % input.divisor;",
+        "SET total = input.left + input.right, difference = input.left - input.right, product = \
+         input.left * input.right, quotient = input.left / input.divisor, remainder = input.left \
+         % input.divisor",
     )
     .expect("benchmark program must parse");
     compile_program_with_options_for_bindings(
@@ -356,10 +362,9 @@ fn compile_float_arithmetic() -> Arc<CompiledProgram> {
 }
 
 fn compile_nullable_casts() -> Arc<CompiledProgram> {
-    let program = parse_program(
-        "SET input.left_int = input.left AS INT64, input.right_f32 = input.right AS FLOAT32;",
-    )
-    .expect("benchmark program must parse");
+    let program =
+        parse_program("SET left_int = input.left AS INT64, right_f32 = input.right AS FLOAT32")
+            .expect("benchmark program must parse");
     compile_program_with_options_for_bindings(
         &program,
         nullable_cast_output_schema(),
@@ -372,10 +377,10 @@ fn compile_nullable_casts() -> Arc<CompiledProgram> {
 
 fn compile_string(options: CompileOptions) -> Arc<CompiledProgram> {
     let program = parse_program(
-        "SET input.chosen = coalesce(input.primary, input.fallback), input.was_null = \
-         is_null(input.primary), input.maybe = nullif(input.primary, input.fallback), input.has = \
-         contains(input.text, input.needle), input.starts = starts_with(input.text, \
-         input.prefix), input.ends = ends_with(input.text, input.suffix);",
+        "SET chosen = coalesce(input.primary, input.fallback), was_null = is_null(input.primary), \
+         maybe = nullif(input.primary, input.fallback), has = contains(input.text, input.needle), \
+         starts = starts_with(input.text, input.prefix), ends = ends_with(input.text, \
+         input.suffix)",
     )
     .expect("benchmark program must parse");
     compile_program_with_options_for_bindings(
@@ -390,14 +395,13 @@ fn compile_string(options: CompileOptions) -> Arc<CompiledProgram> {
 
 fn compile_long_tail() -> Arc<CompiledProgram> {
     let program = parse_program(
-        "SET input.translated = translate(input.text, input.from_chars, input.to_chars), \
-         input.hexed = to_hex(input.integer), input.lefted = left(input.text, input.count), \
-         input.righted = right(input.text, input.count), input.padded = lpad(input.text, \
-         input.width, input.fill), input.joined = concat(input.text, input.fill, input.text), \
-         input.piece = substr(input.text, input.start, input.length), input.digest = \
-         md5(input.text), input.titled = initcap(input.text), input.reversed = \
-         reverse(input.text), input.part = split_part(input.text, input.delimiter, input.count), \
-         input.position = strpos(input.text, input.needle), input.cosine = cos(input.numeric);",
+        "SET translated = translate(input.text, input.from_chars, input.to_chars), hexed = \
+         to_hex(input.integer), lefted = left(input.text, input.count), righted = \
+         right(input.text, input.count), padded = lpad(input.text, input.width, input.fill), \
+         joined = concat(input.text, input.fill, input.text), piece = substr(input.text, \
+         input.start, input.length), digest = md5(input.text), titled = initcap(input.text), \
+         reversed = reverse(input.text), part = split_part(input.text, input.delimiter, \
+         input.count), position = strpos(input.text, input.needle), cosine = cos(input.numeric)",
     )
     .expect("long-tail benchmark program must parse");
     compile_program_with_options_for_bindings(
@@ -414,8 +418,8 @@ fn compile_long_tail() -> Arc<CompiledProgram> {
 /// the paths that evaluate row by row rather than through an Arrow kernel.
 fn compile_numeric_compare() -> Arc<CompiledProgram> {
     let program = parse_program(
-        "SET input.total = input.left + input.right, input.quotient = input.left / input.divisor, \
-         input.magnitude = abs(input.left) WHERE input.left > input.divisor;",
+        "SET total = input.left + input.right, quotient = input.left / input.divisor, magnitude = \
+         abs(input.left) WHERE input.left > input.divisor",
     )
     .expect("benchmark program must parse");
     compile_program_with_options_for_bindings(
@@ -430,9 +434,9 @@ fn compile_numeric_compare() -> Arc<CompiledProgram> {
 
 fn compile_text_transform() -> Arc<CompiledProgram> {
     let program = parse_program(
-        "SET input.trimmed = trim(input.text), input.characters = length(input.text), \
-         input.replaced = replace(input.text, input.needle, input.suffix), input.number_text = \
-         input.number AS STRING, input.parsed_number = input.numeric_text AS INT64;",
+        "SET trimmed = trim(input.text), characters = length(input.text), replaced = \
+         replace(input.text, input.needle, input.suffix), number_text = input.number AS STRING, \
+         parsed_number = input.numeric_text AS INT64",
     )
     .expect("benchmark program must parse");
     compile_program_with_options_for_bindings(
@@ -447,9 +451,9 @@ fn compile_text_transform() -> Arc<CompiledProgram> {
 
 fn compile_list() -> Arc<CompiledProgram> {
     let program = parse_program(
-        "SET input.total = sum(input.values), input.first_value = first(input.values), \
-         input.last_value = last(input.values), input.nth_value = nth(input.values, input.index), \
-         input.value_count = count(input.values);",
+        "SET total = sum(input.values), first_value = first(input.values), last_value = \
+         last(input.values), nth_value = nth(input.values, input.index), value_count = \
+         count(input.values)",
     )
     .expect("benchmark program must parse");
     compile_program_with_options_for_bindings(

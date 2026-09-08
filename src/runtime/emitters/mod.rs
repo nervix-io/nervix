@@ -1102,7 +1102,7 @@ fn compile_sql_values_program(
             assignments,
             ..nervix_models::RouteConstruction::default()
         },
-        nervix_nspl::vm_program::SemanticNamespaces::new("input", namespace),
+        nervix_vm::SemanticNamespaces::new("input", namespace),
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),

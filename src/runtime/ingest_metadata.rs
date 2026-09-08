@@ -445,7 +445,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
         function: &FunctionName,
         arguments: &[VmTypedArray],
         row_count: usize,
-        _span: nervix_nspl::vm_program::Span,
+        _span: nervix_vm::program::Span,
     ) -> Result<VmTypedArray, nervix_vm::RuntimeError> {
         let [VmTypedArray::Utf8(names)] = arguments else {
             return Err(nervix_vm::RuntimeError::InvalidBatch {

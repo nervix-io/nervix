@@ -140,10 +140,8 @@ use nervix_nspl::{
     },
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
-    window_processor::aggregate::{
-        WindowAggregateDemand, WindowAggregateProgram, lower_window_assignments,
-    },
 };
+use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, lower_window_assignments};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -15644,9 +15642,9 @@ fn format_window_aggregate_demand(
     lines
 }
 
-fn format_window_aggregate_input(expr: &nervix_nspl::vm_program::Expr) -> String {
+fn format_window_aggregate_input(expr: &nervix_vm::program::Expr) -> String {
     match expr {
-        nervix_nspl::vm_program::Expr::FieldRef(field_ref) => {
+        nervix_vm::program::Expr::FieldRef(field_ref) => {
             format!("{}.{}", field_ref.relay, field_ref.field)
         }
         _ => format!("{expr:?}"),

@@ -19,7 +19,6 @@ meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-models = { workspace = true }
-nervix-nspl = { workspace = true }
 nervix-test-environment = { workspace = true }
 ordered-float = { workspace = true }
 parking_lot = { workspace = true }
