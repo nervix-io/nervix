@@ -657,6 +657,49 @@ mod tests {
 
     use super::*;
     use crate::metrics::RuntimeMetrics;
+
+    #[test]
+    fn a_reported_runtime_error_reaches_every_attached_observer() {
+        let events = RuntimeEvents::new();
+        let mut first = events.subscribe();
+        let mut second = events.subscribe();
+
+        events.report_error("ingestor 'orders' failed to decode a message");
+
+        for observer in [&mut first, &mut second] {
+            let RuntimeEvent::Error(message) = observer
+                .try_recv()
+                .expect("an attached observer must receive the report");
+            assert_eq!(message, "ingestor 'orders' failed to decode a message");
+        }
+    }
+
+    #[test]
+    fn reporting_a_runtime_error_with_no_observer_attached_still_returns() {
+        // The node reports failures before its fan-out task subscribes and after shutdown drops
+        // it. Neither window may take the reporting path down with it.
+        let events = RuntimeEvents::new();
+
+        events.report_error("emitter 'ledger' failed to publish");
+    }
+
+    #[test]
+    fn an_observer_that_attaches_later_sees_only_what_follows_it() {
+        let events = RuntimeEvents::new();
+        events.report_error("reported before anyone was listening");
+
+        let mut observer = events.subscribe();
+        events.report_error("reported after the observer attached");
+
+        let RuntimeEvent::Error(message) = observer
+            .try_recv()
+            .expect("the observer must receive the later report");
+        assert_eq!(message, "reported after the observer attached");
+        assert!(
+            observer.try_recv().is_err(),
+            "the bus must not replay reports that predate the observer"
+        );
+    }
     #[test]
     fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_state() {
         let dir = tempdir().expect("temp dir should open");

@@ -123,7 +123,7 @@ impl MessageErrorRouteRuntime {
         let _ = self.shutdown.send(true);
         let task = self.task.lock().take();
         if let Some(task) = task {
-            let _ = task.await;
+            task.join_after_shutdown("message error delivery").await;
         }
     }
 }
@@ -138,10 +138,7 @@ impl MessageErrorRouteTask {
     }
 
     fn report_failure(&self, acks: &[AckSet], reason: String) {
-        let _ = self
-            .runtime
-            .events()
-            .send(RuntimeEvent::Error(reason.clone()));
+        self.runtime.events().report_error(reason.clone());
         warn!(
             domain = self.route.domain.as_str(),
             node_kind = self.route.node.kind.as_str(),

@@ -11,7 +11,6 @@
 
 use std::{
     collections::VecDeque,
-    fmt,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -134,7 +133,8 @@ pub struct SubscriptionEvent {
     pub payload: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerEventLevel {
     Unspecified,
     Info,
@@ -759,6 +759,10 @@ impl Client {
             let progress_callback = on_progress.clone();
             tokio::spawn(async move {
                 let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+                // A build that fails or panics drops its end of the pipe, so the loop below sees
+                // a short archive and the server rejects the upload. The failure is reported by
+                // `upload_resource` rather than here, which is why neither this result nor the
+                // join below is turned into a second report.
                 let build_task = tokio::spawn(async move {
                     let _ = relay_upload_archive(&request_directory, writer).await;
                 });
@@ -1394,18 +1398,6 @@ impl CommandOutcomeKind {
             Ok(proto::CommandResultKind::TransactionDetached) => Self::TransactionDetached,
             Ok(proto::CommandResultKind::Unspecified) | Err(_) => Self::Unspecified,
         }
-    }
-}
-
-impl fmt::Display for ServerEventLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::Unspecified => "UNSPECIFIED",
-            Self::Info => "INFO",
-            Self::Warn => "WARN",
-            Self::Error => "ERROR",
-        };
-        f.write_str(label)
     }
 }
 

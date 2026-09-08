@@ -96,68 +96,9 @@ pub fn statement_parser<'src>()
         crate::schema::create_schema_parser()
             .map(|create| Statement::Create(create.map_body(Model::Schema).map_body(Box::new))),
     );
-    let clients = boxed_choice!(
-        crate::client::create_client_kafka_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientKafka).map_body(Box::new))
-        }),
-        crate::client::create_client_pulsar_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientPulsar).map_body(Box::new))
-        }),
-        crate::client::create_client_http_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientHttp).map_body(Box::new))),
-        crate::client::create_client_sentry_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientSentry).map_body(Box::new))
-        }),
-        crate::client::create_client_otel_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientOtel).map_body(Box::new))
-        }),
-        crate::client::create_client_prometheus_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientPrometheus).map_body(Box::new))
-        }),
-        crate::client::create_client_rabbitmq_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientRabbitMq).map_body(Box::new))
-        }),
-        crate::client::create_client_redis_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientRedis).map_body(Box::new))
-        }),
-        crate::client::create_client_mqtt_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientMqtt).map_body(Box::new))),
-        crate::client::create_client_nats_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientNats).map_body(Box::new))),
-        crate::client::create_client_zeromq_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientZeroMq).map_body(Box::new))
-        }),
-        crate::client::create_client_sqs_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientSqs).map_body(Box::new))),
-        crate::client::create_client_s3_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientS3).map_body(Box::new))),
-        crate::client::create_client_gcs_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientGcs).map_body(Box::new))),
-        crate::client::create_client_azure_blob_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientAzureBlob).map_body(Box::new))
-        }),
-        crate::client::create_client_iceberg_rest_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientIcebergRest).map_body(Box::new))
-        }),
-        crate::client::create_client_websockets_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientWebsockets).map_body(Box::new))
-        }),
-        crate::client::create_client_syslog_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientSyslog).map_body(Box::new))
-        }),
-        crate::client::create_client_clickhouse_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientClickHouse).map_body(Box::new))
-        }),
-        crate::client::create_client_postgres_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientPostgres).map_body(Box::new))
-        }),
-        crate::client::create_client_mysql_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientMySql).map_body(Box::new))
-        }),
-        crate::client::create_client_mongodb_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientMongoDb).map_body(Box::new))
-        }),
-    );
+    let clients = crate::client::create_client_model_parser()
+        .map(Statement::Create)
+        .boxed();
     let administration = boxed_choice!(
         crate::placement::alter_placement_parser().map(Statement::AlterPlacement),
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),

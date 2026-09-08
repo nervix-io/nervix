@@ -114,13 +114,13 @@ impl ZeroMqIngestor {
                             })
                             .await
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to dispatch buffered zeromq payload for ingestor '{}' in \
                                  domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         continue;
                     }
@@ -134,13 +134,13 @@ impl ZeroMqIngestor {
                             )
                             .await
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to flush accepted zeromq messages before quiescing \
                                  ingestor '{}' in domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
@@ -179,12 +179,12 @@ impl ZeroMqIngestor {
                                 )
                                 .await
                             {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                         }
                         frame = socket.recv() => {
@@ -224,12 +224,12 @@ impl ZeroMqIngestor {
                                             })
                                             .await
                                         {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                         }
                                             if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                 && let Err(error) = task_runtime
@@ -241,14 +241,14 @@ impl ZeroMqIngestor {
                                                     )
                                                     .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(
+                                                task_events.report_error(
                                                     format!(
                                                         "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
                                                     ),
-                                                ));
+                                                );
                                             }
                                     }
                                 }
@@ -266,12 +266,12 @@ impl ZeroMqIngestor {
                                         &task_ingestor,
                                         format!("zeromq receive failed: {error}"),
                                     );
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to receive zeromq message for ingestor '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     warn!(
                                         domain = task_domain.as_str(),
                                         ingestor = task_ingestor.as_str(),

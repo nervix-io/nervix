@@ -16,22 +16,21 @@ pub(super) enum IngestorRuntime {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 pub(crate) enum IngestorQuiesceCause {
+    #[strum(serialize = "entity hold")]
     EntityHold,
+    #[strum(serialize = "ownership handoff")]
     OwnershipHandoff,
+    #[strum(serialize = "domain pause")]
     DomainPause,
+    #[strum(serialize = "memory pressure")]
     MemoryPressure,
 }
 
 impl IngestorQuiesceCause {
     pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::EntityHold => "entity hold",
-            Self::OwnershipHandoff => "ownership handoff",
-            Self::DomainPause => "domain pause",
-            Self::MemoryPressure => "memory pressure",
-        }
+        self.into()
     }
 }
 

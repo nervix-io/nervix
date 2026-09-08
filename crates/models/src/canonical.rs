@@ -11,36 +11,31 @@ use crate::{
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AvroType, BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping,
+    ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint, EmitSink,
-    EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression,
-    FieldName, FieldScope, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
-    IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
-    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelName,
-    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
-    OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
-    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, QueueName,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RelayName, ResourceName, RetryPolicy, RouteConstruction, S3ConfigEntry,
-    SchemaField, SentryConfigEntry, SignalingProtocolName, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode,
-    WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, Expression, FieldName, FieldScope,
+    FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
+    Inheritance, InputCollectPolicy, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
+    MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
+    ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode,
+    RelayBranching, RelayName, ResourceName, RetryPolicy, RouteConstruction, SchemaField,
+    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, Statement, SubscriptionLiteral, TopicName, UnaryOperator, WebsocketsIngestMode,
+    WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -1087,268 +1082,56 @@ pub fn alter_avro_wire_schema_to_canonical_nspl(
     alter_wire_schema_to_nspl("AVRO", alter)
 }
 
-impl CreateClientKafka {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(kafka_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
+macro_rules! impl_standard_client_canonical_nspl {
+    ($($Client:ident => $type_label:literal,)+) => {
+        $(
+            impl $Client {
+                pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+                    let config = self
+                        .config
+                        .iter()
+                        .map(ClientConfigEntry::to_canonical_nspl)
+                        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                        .join(", ");
 
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE KAFKA{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
+                    Ok(clause_statement(
+                        format!("CREATE CLIENT {}", self.name.as_str()),
+                        vec![
+                            Clause::line(format!(
+                                "TYPE {}{}",
+                                $type_label,
+                                client_mount_clause(self.mount.as_ref()),
+                            )),
+                            Clause::braced("CONFIG", split_config_entries(&config)),
+                        ],
+                    ))
+                }
+            }
+        )+
+    };
 }
 
-impl CreateClientHttp {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(http_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE HTTP{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientSentry {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(sentry_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE SENTRY{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientOtel {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(otel_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE OTEL{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientPulsar {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(pulsar_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE PULSAR{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientMqtt {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(mqtt_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE MQTT{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientNats {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(nats_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE NATS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientPrometheus {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(prometheus_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE PROMETHEUS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientRabbitMq {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(rabbitmq_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE RABBITMQ{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientRedis {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(redis_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE REDIS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientZeroMq {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(zeromq_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE ZEROMQ{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientSqs {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(sqs_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE SQS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
+impl_standard_client_canonical_nspl! {
+    CreateClientKafka => "KAFKA",
+    CreateClientPulsar => "PULSAR",
+    CreateClientHttp => "HTTP",
+    CreateClientSentry => "SENTRY",
+    CreateClientOtel => "OTEL",
+    CreateClientPrometheus => "PROMETHEUS",
+    CreateClientMqtt => "MQTT",
+    CreateClientNats => "NATS",
+    CreateClientRabbitMq => "RABBITMQ",
+    CreateClientRedis => "REDIS",
+    CreateClientZeroMq => "ZEROMQ",
+    CreateClientSqs => "SQS",
+    CreateClientGcs => "GCS",
+    CreateClientAzureBlob => "AZURE_BLOB",
+    CreateClientIcebergRest => "ICEBERG_REST",
+    CreateClientSyslog => "SYSLOG",
+    CreateClientClickHouse => "CLICKHOUSE",
+    CreateClientPostgres => "POSTGRES",
+    CreateClientMySql => "MYSQL",
+    CreateClientMongoDb => "MONGODB",
 }
 
 impl CreateClientS3 {
@@ -1356,7 +1139,7 @@ impl CreateClientS3 {
         let config = self
             .config
             .iter()
-            .map(s3_entry_to_nspl)
+            .map(ClientConfigEntry::to_canonical_nspl)
             .collect::<Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
 
@@ -1369,78 +1152,12 @@ impl CreateClientS3 {
     }
 }
 
-impl CreateClientGcs {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(gcs_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE GCS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientAzureBlob {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(azure_blob_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE AZURE_BLOB{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientIcebergRest {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(kafka_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE ICEBERG_REST{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
 impl CreateClientWebsockets {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let config = self
             .config
             .iter()
-            .map(websockets_entry_to_nspl)
+            .map(ClientConfigEntry::to_canonical_nspl)
             .collect::<Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
 
@@ -1450,116 +1167,6 @@ impl CreateClientWebsockets {
                 Clause::line(format!(
                     "TYPE WEBSOCKETS{}{}",
                     signaling_protocol_clause(self.signaling_protocol.as_ref()),
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientSyslog {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(kafka_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE SYSLOG{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientClickHouse {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(clickhouse_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE CLICKHOUSE{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientPostgres {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(postgres_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE POSTGRES{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientMySql {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(mysql_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE MYSQL{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientMongoDb {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(mongodb_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE MONGODB{}",
                     client_mount_clause(self.mount.as_ref()),
                 )),
                 Clause::braced("CONFIG", split_config_entries(&config)),
@@ -1609,7 +1216,7 @@ impl CreateEndpoint {
             self.name.as_str(),
             self.on_vhost.as_str(),
             string_literal(&self.path),
-            endpoint_type_to_nspl(self.endpoint_type),
+            self.endpoint_type.as_ref(),
             signaling_protocol_clause(self.signaling_protocol.as_ref())
         ))
     }
@@ -1662,7 +1269,7 @@ impl SignalingWireFormat {
         let protobuf_config = config
             .config
             .iter()
-            .map(kafka_entry_to_nspl)
+            .map(ClientConfigEntry::to_canonical_nspl)
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
         Ok(format!(
@@ -1740,7 +1347,7 @@ impl CreateCodec {
                 let protobuf_config = config
                     .config
                     .iter()
-                    .map(kafka_entry_to_nspl)
+                    .map(ClientConfigEntry::to_canonical_nspl)
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
                 (
@@ -2964,26 +2571,12 @@ fn optional_suffix(optional: bool) -> &'static str {
     if optional { " OPTIONAL" } else { "" }
 }
 
-fn kafka_entry_to_nspl(entry: &KafkaConfigEntry) -> Result<String, CanonicalNsplError> {
-    let key = string_literal(&entry.key);
-    let value = string_literal(&entry.value);
-    Ok(format!("{key} = {value}"))
-}
-
-fn http_entry_to_nspl(entry: &HttpConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn sentry_entry_to_nspl(entry: &SentryConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn otel_entry_to_nspl(entry: &OtelConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn pulsar_entry_to_nspl(entry: &PulsarConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
+impl ClientConfigEntry {
+    fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let key = string_literal(&self.key);
+        let value = string_literal(&self.value);
+        Ok(format!("{key} = {value}"))
+    }
 }
 
 pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
@@ -3400,73 +2993,6 @@ impl EmitterPublishingMode {
             }
         }
     }
-}
-
-fn endpoint_type_to_nspl(endpoint_type: EndpointType) -> &'static str {
-    match endpoint_type {
-        EndpointType::Websockets => "WEBSOCKETS",
-        EndpointType::Http => "HTTP",
-    }
-}
-
-fn rabbitmq_entry_to_nspl(entry: &RabbitMqConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn redis_entry_to_nspl(entry: &RedisConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn mqtt_entry_to_nspl(entry: &MqttConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn nats_entry_to_nspl(entry: &NatsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn prometheus_entry_to_nspl(entry: &PrometheusConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn zeromq_entry_to_nspl(entry: &ZeroMqConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn sqs_entry_to_nspl(entry: &SqsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn s3_entry_to_nspl(entry: &S3ConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn gcs_entry_to_nspl(entry: &GcsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn azure_blob_entry_to_nspl(entry: &AzureBlobConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn websockets_entry_to_nspl(entry: &WebsocketsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn clickhouse_entry_to_nspl(entry: &ClickHouseConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn postgres_entry_to_nspl(entry: &PostgresConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn mysql_entry_to_nspl(entry: &MySqlConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn mongodb_entry_to_nspl(entry: &MongoDbConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
 }
 
 /// Splits a sink into the text that names it and the clauses that configure it.
@@ -3998,51 +3524,15 @@ fn string_literal(value: &str) -> String {
 }
 
 trait NativeTypeToNspl {
-    fn to_nspl_keyword(&self) -> &'static str;
+    fn to_nspl_keyword(&self) -> String;
 }
 
-impl NativeTypeToNspl for JsonType {
-    fn to_nspl_keyword(&self) -> &'static str {
-        match self {
-            Self::String => "STRING",
-            Self::Number => "NUMBER",
-            Self::Integer => "INTEGER",
-            Self::Object => "OBJECT",
-            Self::Array => "ARRAY",
-            Self::Boolean => "BOOLEAN",
-            Self::Null => "NULL",
-            Self::U8 => "U8",
-            Self::I8 => "I8",
-            Self::U16 => "U16",
-            Self::I16 => "I16",
-            Self::U32 => "U32",
-            Self::I32 => "I32",
-            Self::U64 => "U64",
-            Self::I64 => "I64",
-            Self::Datetime => "DATETIME",
-            Self::F32 => "F32",
-            Self::F64 => "F64",
-        }
-    }
-}
-
-impl NativeTypeToNspl for AvroType {
-    fn to_nspl_keyword(&self) -> &'static str {
-        match self {
-            Self::Null => "NULL",
-            Self::Boolean => "BOOLEAN",
-            Self::Int => "INT",
-            Self::Long => "LONG",
-            Self::Float => "FLOAT",
-            Self::Double => "DOUBLE",
-            Self::Bytes => "BYTES",
-            Self::String => "STRING",
-            Self::Record => "RECORD",
-            Self::Enum => "ENUM",
-            Self::Array => "ARRAY",
-            Self::Map => "MAP",
-            Self::Fixed => "FIXED",
-        }
+impl<T> NativeTypeToNspl for T
+where
+    T: AsRef<str>,
+{
+    fn to_nspl_keyword(&self) -> String {
+        self.as_ref().to_ascii_uppercase()
     }
 }
 

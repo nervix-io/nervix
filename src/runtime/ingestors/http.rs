@@ -144,13 +144,13 @@ impl HttpIngestor {
                         })
                         .await
                     {
-                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                        task_events.report_error(format!(
                             "failed to dispatch buffered http payload for ingestor '{}' in domain \
                              '{}': {}",
                             task_ingestor.as_str(),
                             task_domain.as_str(),
                             error
-                        )));
+                        ));
                     }
                     continue;
                 }
@@ -179,12 +179,12 @@ impl HttpIngestor {
                                         &task_ingestor,
                                         format!("http source returned status {status}"),
                                     );
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "http ingestor '{}' in domain '{}' received unexpected status {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         status
-                                    )));
+                                    ));
                                     warn!(
                                         domain = task_domain.as_str(),
                                         ingestor = task_ingestor.as_str(),
@@ -229,12 +229,12 @@ impl HttpIngestor {
                                                 })
                                                 .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                task_events.report_error(format!(
                                                     "failed to dispatch http payload for ingestor '{}' in domain '{}': {}",
                                                     task_ingestor.as_str(),
                                                     task_domain.as_str(),
                                                     error
-                                                )));
+                                                ));
                                             }
                                         }
                                     }
@@ -244,12 +244,12 @@ impl HttpIngestor {
                                             &task_ingestor,
                                             format!("http response body read failed: {error}"),
                                         );
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "failed to read http response body for ingestor '{}' in domain '{}': {}",
                                             task_ingestor.as_str(),
                                             task_domain.as_str(),
                                             error
-                                        )));
+                                        ));
                                         warn!(
                                             domain = task_domain.as_str(),
                                             ingestor = task_ingestor.as_str(),
@@ -265,12 +265,12 @@ impl HttpIngestor {
                                     &task_ingestor,
                                     format!("http request failed: {error}"),
                                 );
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to request http source for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 warn!(
                                     domain = task_domain.as_str(),
                                     ingestor = task_ingestor.as_str(),

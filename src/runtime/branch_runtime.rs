@@ -925,7 +925,7 @@ impl IngestorRouteRuntime {
         let _ = self.shutdown.send(true);
         let task = self.task.lock().take();
         if let Some(task) = task {
-            let _ = task.await;
+            task.join_after_shutdown("branch entrypoint").await;
         }
         self.branch_runtime.shutdown().await;
     }

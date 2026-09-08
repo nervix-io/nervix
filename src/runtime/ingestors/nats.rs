@@ -243,13 +243,13 @@ impl NatsIngestor {
                                 })
                                 .await
                             {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to dispatch buffered nats payload for ingestor '{}' \
                                      in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                             continue;
                         }
@@ -293,12 +293,12 @@ impl NatsIngestor {
                                     )
                                     .await
                                 {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                 }
                             }
                             message = subscriber.next() => {
@@ -345,12 +345,12 @@ impl NatsIngestor {
                                                 })
                                                 .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                task_events.report_error(format!(
                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                     task_ingestor.as_str(),
                                                     task_domain.as_str(),
                                                     error
-                                                )));
+                                                ));
                                             }
                                                 if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                     && let Err(error) = task_runtime
@@ -362,14 +362,14 @@ impl NatsIngestor {
                                                         )
                                                         .await
                                                 {
-                                                    let _ = task_events.send(RuntimeEvent::Error(
+                                                    task_events.report_error(
                                                         format!(
                                                             "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
                                                         ),
-                                                    ));
+                                                    );
                                                 }
                                         }
                                     }

@@ -327,8 +327,7 @@ impl Runtime {
         let mut errors = Vec::new();
         for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
             if let Some(side_error) = executed.batch.errors().row(output_row).first() {
-                let partial_output =
-                    vm_partial_output_row_to_runtime_batch(&executed.batch, output_row).ok();
+                let partial_output = captured_partial_output(&executed.batch, output_row);
                 let record = batch
                     .runtime_row(input_row)
                     .map_err(|error| PlannedGeneralError {

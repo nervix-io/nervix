@@ -690,6 +690,8 @@ async fn execute_upload_and_print(
 
     waiting_for_replication.store(true, Ordering::Relaxed);
     finished.store(true, Ordering::Relaxed);
+    // The task only renders the progress line, and `finished` has already told it to stop. Losing
+    // its join tells the operator nothing the upload outcome below does not already say.
     let _ = progress_task.await;
     let total_uploaded = uploaded.load(Ordering::Relaxed);
     clear_progress_line();

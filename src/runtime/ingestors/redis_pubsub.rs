@@ -194,13 +194,13 @@ impl RedisPubSubIngestor {
                             })
                             .await
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to dispatch buffered redis pubsub payload for ingestor \
                                  '{}' in domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         continue;
                     }
@@ -244,12 +244,12 @@ impl RedisPubSubIngestor {
                                 )
                                 .await
                             {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                         }
                         message = relay.next() => {
@@ -289,12 +289,12 @@ impl RedisPubSubIngestor {
                                             })
                                             .await
                                         {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                         }
                                             if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                 && let Err(error) = task_runtime
@@ -306,14 +306,14 @@ impl RedisPubSubIngestor {
                                                     )
                                                     .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(
+                                                task_events.report_error(
                                                     format!(
                                                         "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
                                                     ),
-                                                ));
+                                                );
                                             }
                                     }
                                 }

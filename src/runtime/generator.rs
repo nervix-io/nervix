@@ -253,7 +253,7 @@ pub(super) async fn execute_generator_program_on_context(
                 side_error.span,
                 MessageErrorOperation::Set,
             ),
-            partial_output: vm_partial_output_row_to_runtime_batch(&result.batch, 0).ok(),
+            partial_output: captured_partial_output(&result.batch, 0),
         });
     }
     let batch = vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &[0])?;
@@ -273,7 +273,7 @@ pub(super) struct GeneratorFlushContext<'a> {
     pub(super) output_schema: &'a Arc<CompiledSchema>,
     pub(super) output_registry: &'a RelayRegistry,
     pub(super) output_services: &'a Arc<RelayBoundaryServices>,
-    pub(super) task_events: &'a broadcast::Sender<RuntimeEvent>,
+    pub(super) task_events: &'a RuntimeEvents,
 }
 
 pub(super) async fn flush_generator_groups(
@@ -294,12 +294,12 @@ pub(super) async fn flush_generator_groups(
         let batch = match RelayRecordBatch::from_messages(output_schema.clone(), messages) {
             Ok(batch) => batch,
             Err(error) => {
-                let _ = task_events.send(RuntimeEvent::Error(format!(
+                task_events.report_error(format!(
                     "failed to build generator batch for '{}' in domain '{}': {}",
                     generator.as_str(),
                     domain.as_str(),
                     error
-                )));
+                ));
                 continue;
             }
         };
@@ -313,12 +313,12 @@ pub(super) async fn flush_generator_groups(
             )
             .await
         {
-            let _ = task_events.send(RuntimeEvent::Error(format!(
+            task_events.report_error(format!(
                 "failed to flush generator '{}' into relay '{}' in domain '{}'",
                 generator.as_str(),
                 output_relay.as_str(),
                 domain.as_str(),
-            )));
+            ));
             drop(error);
         }
     }
@@ -564,13 +564,13 @@ impl Runtime {
                         match current_domain_logical_time(clock, latest_tick.as_ref(), wall_now) {
                             Ok(value) => value,
                             Err(error) => {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to resolve generator domain clock for '{}' in domain \
                                      '{}': {}",
                                     task_generator.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 tokio::select! {
                                     changed = shutdown_rx.changed() => {
                                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -606,14 +606,14 @@ impl Runtime {
                         Ok(state) => state,
                         Err(error) => {
                             state_load_failed = true;
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to read materialized state for generator '{}' from relay \
                                  '{}' in domain '{}': {}",
                                 task_generator.as_str(),
                                 source_relay.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                             Vec::new()
                         }
                     };
@@ -650,22 +650,22 @@ impl Runtime {
                                 ) {
                                     Ok(Some(key)) => Some(key),
                                     Ok(None) => {
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "generator '{}' source relay '{}' record is missing \
                                              concrete branch fields",
                                             task_generator.as_str(),
                                             source_relay.as_str(),
-                                        )));
+                                        ));
                                         continue;
                                     }
                                     Err(error) => {
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "generator '{}' source relay '{}' has invalid \
                                              concrete branch fields: {}",
                                             task_generator.as_str(),
                                             source_relay.as_str(),
                                             error,
-                                        )));
+                                        ));
                                         continue;
                                     }
                                 }
@@ -732,14 +732,14 @@ impl Runtime {
                                     match source_schema.runtime_batch_from_remote(source_record) {
                                         Ok(decoded) => decoded,
                                         Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to decode generator '{}' source relay \
                                                  '{}' state in domain '{}': {}",
                                                 task_generator.as_str(),
                                                 source_relay.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                             continue;
                                         }
                                     };
@@ -749,14 +749,14 @@ impl Runtime {
                                 {
                                     Ok(context) => context,
                                     Err(error) => {
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "failed to prepare generator '{}' context in domain \
                                              '{}' branch '{}': {}",
                                             task_generator.as_str(),
                                             task_domain.as_str(),
                                             branch_key_display(&branch_key),
                                             error
-                                        )));
+                                        ));
                                         continue;
                                     }
                                 };
@@ -769,7 +769,7 @@ impl Runtime {
                                     let input = match route.project_input(&context, &branch_key) {
                                         Ok(input) => input,
                                         Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to prepare generator '{}' route '{}' \
                                                  input in domain '{}' branch '{}': {}",
                                                 task_generator.as_str(),
@@ -777,7 +777,7 @@ impl Runtime {
                                                 task_domain.as_str(),
                                                 branch_key_display(&branch_key),
                                                 error
-                                            )));
+                                            ));
                                             continue;
                                         }
                                     };
@@ -818,17 +818,15 @@ impl Runtime {
                                                         ) {
                                                         Ok(snapshot) => Some(snapshot),
                                                         Err(error) => {
-                                                            let _ = task_events.send(
-                                                                RuntimeEvent::Error(format!(
-                                                                    "failed to capture generator \
-                                                                     '{}' materialized state in \
-                                                                     domain '{}' branch '{}': {}",
-                                                                    task_generator.as_str(),
-                                                                    task_domain.as_str(),
-                                                                    branch_key_display(&branch_key),
-                                                                    error
-                                                                )),
-                                                            );
+                                                            task_events.report_error(format!(
+                                                                "failed to capture generator '{}' \
+                                                                 materialized state in domain \
+                                                                 '{}' branch '{}': {}",
+                                                                task_generator.as_str(),
+                                                                task_domain.as_str(),
+                                                                branch_key_display(&branch_key),
+                                                                error
+                                                            ));
                                                             continue;
                                                         }
                                                     };
@@ -872,7 +870,7 @@ impl Runtime {
                                                 .await;
                                         }
                                         Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to execute generator '{}' route '{}' in \
                                                  domain '{}' branch '{}': {}",
                                                 task_generator.as_str(),
@@ -880,7 +878,7 @@ impl Runtime {
                                                 task_domain.as_str(),
                                                 branch_key_display(&branch_key),
                                                 error
-                                            )));
+                                            ));
                                         }
                                     }
                                 }

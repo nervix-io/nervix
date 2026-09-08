@@ -247,28 +247,7 @@ impl Runtime {
                 Model::WireAvroSchema(wire_schema) => {
                     wire_schemas.insert_avro(wire_schema.clone());
                 }
-                Model::ClientKafka(_)
-                | Model::ClientPulsar(_)
-                | Model::ClientHttp(_)
-                | Model::ClientSentry(_)
-                | Model::ClientOtel(_)
-                | Model::ClientPrometheus(_)
-                | Model::ClientRabbitMq(_)
-                | Model::ClientRedis(_)
-                | Model::ClientMqtt(_)
-                | Model::ClientNats(_)
-                | Model::ClientZeroMq(_)
-                | Model::ClientSqs(_)
-                | Model::ClientWebsockets(_)
-                | Model::ClientClickHouse(_)
-                | Model::ClientPostgres(_)
-                | Model::ClientMySql(_)
-                | Model::ClientMongoDb(_)
-                | Model::ClientS3(_)
-                | Model::ClientGcs(_)
-                | Model::ClientAzureBlob(_)
-                | Model::ClientIcebergRest(_)
-                | Model::ClientSyslog(_) => {
+                model if model.kind() == ModelKind::Client => {
                     transports.insert(ClientName::from(&node.identifier), node.config.clone());
                 }
                 Model::Vhost(vhost) => {

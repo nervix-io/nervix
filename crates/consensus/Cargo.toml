@@ -21,6 +21,7 @@ reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

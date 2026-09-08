@@ -5,6 +5,7 @@ use nervix_models::{
     ResourceName, Statement, Timestamp, UserName,
 };
 use serde::{Deserialize, Serialize};
+use strum::IntoStaticStr;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +69,8 @@ pub struct TransactionCommitProgress {
     pub results: Vec<TransactionStepResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, IntoStaticStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionOutcome {
     Committed,
     Failed { failing_step: usize, error: String },
@@ -78,12 +80,7 @@ pub enum TransactionOutcome {
 
 impl TransactionOutcome {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Committed => "COMMITTED",
-            Self::Failed { .. } => "FAILED",
-            Self::Reverted => "REVERTED",
-            Self::Expired => "EXPIRED",
-        }
+        self.into()
     }
 }
 

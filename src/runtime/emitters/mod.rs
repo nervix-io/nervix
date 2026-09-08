@@ -1520,11 +1520,11 @@ fn emitter_service_url_has_scheme(
 
 impl EmitterSinkContext {
     fn report_init_error(&self, sink: &str, error: &str) {
-        let _ = self.runtime.events().send(RuntimeEvent::Error(format!(
+        self.runtime.events().report_error(format!(
             "failed to initialize {sink} emitter '{}' in domain '{}': {error}",
             self.emitter.as_str(),
             self.domain.as_str(),
-        )));
+        ));
         warn!(
             domain = self.domain.as_str(),
             emitter = self.emitter.as_str(),
@@ -1534,11 +1534,11 @@ impl EmitterSinkContext {
     }
 
     fn report_publish_error(&self, sink: &str, error: &str) {
-        let _ = self.runtime.events().send(RuntimeEvent::Error(format!(
+        self.runtime.events().report_error(format!(
             "failed to publish {sink} message for emitter '{}' in domain '{}': {error}",
             self.emitter.as_str(),
             self.domain.as_str(),
-        )));
+        ));
         warn!(
             domain = self.domain.as_str(),
             emitter = self.emitter.as_str(),
@@ -1548,11 +1548,11 @@ impl EmitterSinkContext {
     }
 
     fn report_flush_error(&self, sink: &str, error: &str) {
-        let _ = self.runtime.events().send(RuntimeEvent::Error(format!(
+        self.runtime.events().report_error(format!(
             "failed to flush {sink} rows for emitter '{}' in domain '{}': {error}",
             self.emitter.as_str(),
             self.domain.as_str(),
-        )));
+        ));
         warn!(
             domain = self.domain.as_str(),
             emitter = self.emitter.as_str(),
@@ -1565,10 +1565,7 @@ impl EmitterSinkContext {
         match Runtime::parse_runtime_node_flush_policy(&self.domain, kind, &self.emitter, policy) {
             Ok(policy) => Some(policy),
             Err(error) => {
-                let _ = self
-                    .runtime
-                    .events()
-                    .send(RuntimeEvent::Error(error.to_string()));
+                self.runtime.events().report_error(error.to_string());
                 warn!(
                     domain = self.domain.as_str(),
                     emitter = self.emitter.as_str(),
@@ -2625,11 +2622,11 @@ impl SinkEmitter {
                     "fault injector failed emitter '{}'",
                     context.emitter.as_str()
                 );
-                let _ = context.runtime.events().send(RuntimeEvent::Error(format!(
+                context.runtime.events().report_error(format!(
                     "{} in domain '{}'",
                     reason,
                     context.domain.as_str()
-                )));
+                ));
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),

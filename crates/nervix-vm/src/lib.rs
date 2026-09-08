@@ -11,6 +11,29 @@
 //! This crate breaks its own contract: it names `nervix_nspl::vm_program` for its own AST, spans
 //! and function names, so an engine depends on the language layer above it.
 
+/// Expands a consumer over the ordinary scalar types stored in typed VM registers.
+///
+/// Datetime and generic arrays have distinct Arrow type and ownership rules, so their handling
+/// remains next to those rules in each consumer.
+macro_rules! with_typed_registers {
+    ($consumer:ident) => {
+        $consumer! {
+            UInt8 => uint8, set_uint8, as_uint8, UInt8Array, DataType::UInt8;
+            Int8 => int8, set_int8, as_int8, Int8Array, DataType::Int8;
+            UInt16 => uint16, set_uint16, as_uint16, UInt16Array, DataType::UInt16;
+            Int16 => int16, set_int16, as_int16, Int16Array, DataType::Int16;
+            UInt32 => uint32, set_uint32, as_uint32, UInt32Array, DataType::UInt32;
+            Int32 => int32, set_int32, as_int32, Int32Array, DataType::Int32;
+            UInt64 => uint64, set_uint64, as_uint64, UInt64Array, DataType::UInt64;
+            Int64 => int64, set_int64, as_int64, Int64Array, DataType::Int64;
+            Float32 => float32, set_float32, as_float32, Float32Array, DataType::Float32;
+            Float64 => float64, set_float64, as_float64, Float64Array, DataType::Float64;
+            Boolean => boolean, set_boolean, as_boolean, BooleanArray, DataType::Boolean;
+            Utf8 => utf8, set_utf8, as_utf8, StringArray, DataType::Utf8;
+        }
+    };
+}
+
 mod batch;
 mod compiler;
 mod error;

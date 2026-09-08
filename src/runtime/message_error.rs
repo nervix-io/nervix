@@ -129,6 +129,30 @@ pub(super) fn preserved_message_error_branch(
     }
 }
 
+/// The `partial_output` view an error handler sees, for the callers that do not surface a failed
+/// capture in the error itself.
+///
+/// A capture that fails leaves the view absent, which the error record already models as an
+/// `Option`, so the recovery is defined rather than improvised. It is logged instead of dropped so
+/// that an absent view is never mistaken for a route that had nothing to capture. Callers that put
+/// the failure into the error reason call [`vm_partial_output_row_to_runtime_batch`] directly and
+/// keep the error.
+pub(super) fn captured_partial_output(
+    batch: &VmTypedBatch,
+    row: usize,
+) -> Option<RuntimeRecordBatch> {
+    match vm_partial_output_row_to_runtime_batch(batch, row) {
+        Ok(partial_output) => Some(partial_output),
+        Err(error) => {
+            debug!(
+                error,
+                row, "failed to capture the partial output view for a message error"
+            );
+            None
+        }
+    }
+}
+
 pub(super) fn vm_partial_output_row_to_runtime_batch(
     batch: &VmTypedBatch,
     row: usize,
@@ -296,13 +320,13 @@ impl Runtime {
                 message.acks.ack_success();
             }
             MessageErrorPolicy::Log => {
-                let _ = self.inner.events.send(RuntimeEvent::Error(format!(
+                self.inner.events.report_error(format!(
                     "{} '{}' message error in domain '{}': {}",
                     node_kind.as_str(),
                     node.as_str(),
                     domain.as_str(),
                     error.message
-                )));
+                ));
                 warn!(
                     domain = domain.as_str(),
                     node_kind = node_kind.as_str(),
@@ -331,7 +355,7 @@ impl Runtime {
                     .dispatch_message_error_to_dlq(context, relay, assignments)
                     .await
                 {
-                    let _ = self.inner.events.send(RuntimeEvent::Error(format!(
+                    self.inner.events.report_error(format!(
                         "{} '{}' failed to dispatch message error {} to DLQ '{}' in domain '{}': \
                          {}",
                         node_kind.as_str(),
@@ -340,7 +364,7 @@ impl Runtime {
                         relay.as_str(),
                         domain.as_str(),
                         dispatch_error
-                    )));
+                    ));
                     message.acks.no_ack(format!(
                         "{} '{}' failed to dispatch message error {} to DLQ '{}': {}",
                         node_kind.as_str(),
@@ -371,13 +395,13 @@ impl Runtime {
                 }
             }
             GeneralErrorPolicy::Log => {
-                let _ = self.inner.events.send(RuntimeEvent::Error(format!(
+                self.inner.events.report_error(format!(
                     "{} '{}' general error in domain '{}': {}",
                     node_kind.as_str(),
                     node.as_str(),
                     domain.as_str(),
                     reason
-                )));
+                ));
                 warn!(
                     domain = domain.as_str(),
                     node_kind = node_kind.as_str(),
@@ -402,13 +426,13 @@ impl Runtime {
         reason: String,
     ) {
         let node = node.into();
-        let _ = self.inner.events.send(RuntimeEvent::Error(format!(
+        self.inner.events.report_error(format!(
             "{} '{}' internal error in domain '{}': {}",
             node_kind.as_str(),
             node.as_str(),
             domain.as_str(),
             reason
-        )));
+        ));
         warn!(
             domain = domain.as_str(),
             node_kind = node_kind.as_str(),

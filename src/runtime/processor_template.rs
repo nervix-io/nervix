@@ -1,31 +1,37 @@
 use super::*;
 
-#[derive(Debug, Clone, Copy)]
-pub(super) enum ProcessorInputFilterKind {
-    FromWhere,
-    FilterWhere,
+macro_rules! declare_processor_input_filter_kinds {
+    ($($Kind:ident => $label:literal, $operation:ident;)+) => {
+        #[derive(Debug, Clone, Copy)]
+        pub(super) enum ProcessorInputFilterKind {
+            $($Kind,)+
+        }
+
+        impl ProcessorInputFilterKind {
+            pub(super) fn label(self) -> &'static str {
+                match self {
+                    $(Self::$Kind => $label,)+
+                }
+            }
+
+            pub(super) fn error_operation(self) -> MessageErrorOperation {
+                match self {
+                    $(Self::$Kind => MessageErrorOperation::$operation,)+
+                }
+            }
+        }
+    };
+}
+
+declare_processor_input_filter_kinds! {
+    FromWhere => "FROM WHERE", SourceWhere;
+    FilterWhere => "FILTER WHERE", FilterWhere;
 }
 
 pub(super) enum MaterializedDependencyResolution {
     Ready(HashMap<String, RuntimeValue>),
     Skip,
     Wait,
-}
-
-impl ProcessorInputFilterKind {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::FromWhere => "FROM WHERE",
-            Self::FilterWhere => "FILTER WHERE",
-        }
-    }
-
-    pub(super) fn error_operation(self) -> MessageErrorOperation {
-        match self {
-            Self::FromWhere => MessageErrorOperation::SourceWhere,
-            Self::FilterWhere => MessageErrorOperation::FilterWhere,
-        }
-    }
 }
 
 impl RelayProcessorOutputsNode {
