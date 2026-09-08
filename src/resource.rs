@@ -33,15 +33,31 @@ pub struct ResourceManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceManifestEntry {
     pub path: String,
-    pub entry_type: ResourceEntryType,
-    pub size: u64,
-    pub checksum: String,
+    pub content: ResourceEntryContent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResourceEntryType {
-    File,
+/// What one manifest entry names inside a version.
+///
+/// A directory has no bytes of its own, so it carries neither a size nor a checksum. A file
+/// carries both, and they always describe the same bytes because they are written together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResourceEntryContent {
     Directory,
+    File { size: u64, checksum: String },
+}
+
+impl ResourceEntryContent {
+    /// The bytes this entry contributes to its version's total. A directory contributes none.
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Directory => 0,
+            Self::File { size, .. } => *size,
+        }
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -284,10 +300,10 @@ impl ResourceStore {
         root_checksum: String,
         entries: Vec<ResourceManifestEntry>,
     ) -> Result<ResourceManifest, ResourceStoreError> {
-        let total_bytes = entries.iter().map(|entry| entry.size).sum();
+        let total_bytes = entries.iter().map(|entry| entry.content.size()).sum();
         let file_count = entries
             .iter()
-            .filter(|entry| entry.entry_type == ResourceEntryType::File)
+            .filter(|entry| entry.content.is_file())
             .count()
             .arch_into();
         let manifest_checksum = manifest_checksum(&entries)?;
@@ -339,8 +355,8 @@ async fn write_archive_file(
         header.set_gid(0);
 
         let entry_path = Path::new(&entry.path);
-        match entry.entry_type {
-            ResourceEntryType::Directory => {
+        match entry.content {
+            ResourceEntryContent::Directory => {
                 header.set_size(0);
                 header.set_mode(0o755);
                 header.set_entry_type(EntryType::Directory);
@@ -350,7 +366,7 @@ async fn write_archive_file(
                     .await
                     .map_err(|_| ResourceStoreError::WriteArchive)?;
             }
-            ResourceEntryType::File => {
+            ResourceEntryContent::File { .. } => {
                 let path = root.join(entry_path);
                 let size = tokio::fs::metadata(&path)
                     .await
@@ -468,9 +484,7 @@ fn collect_manifest_entries_recursive(
         if file_type.is_dir() {
             entries.push(ResourceManifestEntry {
                 path: relative.clone(),
-                entry_type: ResourceEntryType::Directory,
-                size: 0,
-                checksum: String::new(),
+                content: ResourceEntryContent::Directory,
             });
             collect_manifest_entries_recursive(root, &path, entries)?;
         } else if file_type.is_file() {
@@ -480,9 +494,10 @@ fn collect_manifest_entries_recursive(
                 .len();
             entries.push(ResourceManifestEntry {
                 path: relative,
-                entry_type: ResourceEntryType::File,
-                size,
-                checksum: checksum_file(&path)?,
+                content: ResourceEntryContent::File {
+                    size,
+                    checksum: checksum_file(&path)?,
+                },
             });
         }
     }
@@ -549,7 +564,7 @@ mod tests {
     use nervix_models::{ClusterNodeName, DomainName, ResourceId, ResourceName, Timestamp};
     use tempfile::{NamedTempFile, tempdir};
 
-    use super::{ResourceEntryType, ResourceStore, ResourceStoreError};
+    use super::{ResourceEntryContent, ResourceStore, ResourceStoreError};
 
     fn resource_id(domain: &str, identifier: &str, version: u64) -> ResourceId {
         ResourceId::new(
@@ -600,11 +615,14 @@ mod tests {
             "the same name in another domain must have its own content root"
         );
         assert!(manifest.entries.iter().any(|entry| {
-            entry.path == "proto" && entry.entry_type == ResourceEntryType::Directory
+            entry.path == "proto" && entry.content == ResourceEntryContent::Directory
         }));
-        assert!(manifest.entries.iter().any(|entry| {
-            entry.path == "model.onnx" && entry.entry_type == ResourceEntryType::File
-        }));
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .any(|entry| { entry.path == "model.onnx" && entry.content.is_file() })
+        );
     }
 
     #[tokio::test]

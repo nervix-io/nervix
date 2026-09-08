@@ -373,6 +373,10 @@ Feature: Emitter publishing modes
       """
       sink: CLICKHOUSE client=clickhouse_main table=clickhouse_events max_batch=2
       """
+    And the last command output contains
+      """
+      flush: FLUSH IMMEDIATE
+      """
     When these NSPL commands are executed on the leader node
       """
       SHOW CREATE EMITTER postgres_ack;

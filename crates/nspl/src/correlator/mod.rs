@@ -212,6 +212,8 @@ pub fn suggest_create_correlator(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::FlushPolicy;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -352,9 +354,8 @@ mod tests {
             parsed.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "IMMEDIATE"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Immediate
         );
     }
 
