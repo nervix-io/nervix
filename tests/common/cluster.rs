@@ -704,6 +704,44 @@ impl Cluster {
         handle.stop().await
     }
 
+    pub(crate) async fn restart_node_with_new_interconnect_address(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        self.stop_node(node_id).await?;
+        let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        handle.spec.reallocate_interconnect_ports()?;
+        self.start_node(node_id).await
+    }
+
+    pub(crate) async fn open_silent_interconnect_handshake(
+        &self,
+        node_id: &str,
+    ) -> io::Result<TcpStream> {
+        let handle = self.nodes.get(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        if handle.config.interconnect_mode != InternalTransportMode::Http {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the silent-handshake scenario requires the plain interconnect mode",
+            ));
+        }
+        let mut stream = TcpStream::connect(parse_addr(&handle.spec.interconnect_addr())?).await?;
+        let introduction_bytes: usize = stream.read_u32().await?.arch_into();
+        if introduction_bytes > 65_536 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("interconnect introduction is unexpectedly large: {introduction_bytes}"),
+            ));
+        }
+        let mut introduction = vec![0; introduction_bytes];
+        stream.read_exact(&mut introduction).await?;
+        Ok(stream)
+    }
+
     /// Signals a node to exit without waiting for the process. Scenarios that observe a
     /// transient reaction to owner loss must start observing while the node is still on its way
     /// down, because the leader reacts as soon as it sees the node go.
@@ -2156,6 +2194,22 @@ impl NodeSpec {
         self.cluster_api_https_port = ports.cluster_api_https;
         self.interconnect_port = ports.interconnect;
         self.interconnect_https_port = ports.interconnect_https;
+        Ok(())
+    }
+
+    fn reallocate_interconnect_ports(&mut self) -> io::Result<()> {
+        let mut ports = next_ports(2)?.into_iter();
+        let interconnect_port = ports
+            .next()
+            .ok_or_else(|| io::Error::other("interconnect port allocation returned no port"))?;
+        let interconnect_https_port = ports.next().ok_or_else(|| {
+            io::Error::other("interconnect HTTPS port allocation returned only one port")
+        })?;
+        let mut reserved = RESERVED_TEST_PORTS.lock();
+        reserved.remove(&self.interconnect_port);
+        reserved.remove(&self.interconnect_https_port);
+        self.interconnect_port = interconnect_port;
+        self.interconnect_https_port = interconnect_https_port;
         Ok(())
     }
 
@@ -3660,9 +3714,10 @@ async fn ensure_kafka_topic_partitions(
         )
         .await
         .map_err(io::Error::other)?;
+    let mut created_new = false;
     for result in created {
         match result {
-            Ok(_) => {}
+            Ok(_) => created_new = true,
             Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
             Err((topic_name, code)) => {
                 return Err(io::Error::other(format!(
@@ -3672,9 +3727,12 @@ async fn ensure_kafka_topic_partitions(
         }
     }
 
-    let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
     let expected = usize::try_from(partitions)
         .verified("the partition count was checked to be positive above");
+    if created_new {
+        return wait_for_kafka_topic_partitions(dependencies, topic, expected).await;
+    }
+    let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
     if current > expected {
         return Err(io::Error::other(format!(
             "kafka topic '{topic}' already has {current} partitions, cannot shrink to {expected}"

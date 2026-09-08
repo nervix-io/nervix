@@ -1,5 +1,3 @@
-use nervix_models::DomainName;
-
 use super::*;
 
 pub(in crate::runtime) mod endpoint;
@@ -33,66 +31,43 @@ use zeromq::ZeroMqIngestor;
 pub(in crate::runtime) struct IngestorStarter;
 
 impl IngestorStarter {
-    pub(in crate::runtime) async fn start_scheduled(
+    pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        source_model: Model,
-        ingestor: CreateIngestor,
-        kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+        plan: IngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        runtime.prepare_ingestor_quiescence(domain, &ingestor);
-        match (&source_model, &ingestor.source) {
-            (Model::ClientHttp(client), IngestSource::Http { .. }) => {
-                HttpIngestor::start(runtime, domain, client.clone(), ingestor).await
+        runtime.prepare_ingestor_quiescence(&plan.ingestor().domain, plan.ingestor());
+        match plan {
+            IngestorStartPlan::Http(plan) => HttpIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Kafka(plan) => {
+                let local_node_id = runtime.inner.remote_dispatch.local_node_id.read().clone();
+                let kafka_offset_state = plan.offset_state_placement.as_ref().and_then(|planned| {
+                    local_node_id
+                        .as_ref()
+                        .is_some_and(|local| Some(local) == planned.primary_node.as_ref())
+                        .then(|| {
+                            runtime
+                                .inner
+                                .replicated_kafka_offset_states
+                                .get(&planned.placement)
+                                .and_then(|state| {
+                                    ReplicatedKafkaOffsetState::current_originator(state.value())
+                                })
+                        })
+                        .flatten()
+                });
+                KafkaIngestor::start(runtime, plan, kafka_offset_state).await
             }
-            (Model::ClientKafka(client), IngestSource::Kafka { .. }) => {
-                KafkaIngestor::start(
-                    runtime,
-                    domain,
-                    client.clone(),
-                    ingestor,
-                    kafka_offset_state,
-                )
-                .await
-            }
-            (Model::ClientPulsar(client), IngestSource::Pulsar { .. }) => {
-                PulsarIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientPrometheus(client), IngestSource::Prometheus { .. }) => {
-                PrometheusIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientRabbitMq(client), IngestSource::RabbitMq { .. }) => {
-                RabbitMqIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientRedis(client), IngestSource::RedisPubSub { .. }) => {
-                RedisPubSubIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientMqtt(client), IngestSource::Mqtt { .. }) => {
-                MqttIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientNats(client), IngestSource::Nats { .. }) => {
-                NatsIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientZeroMq(client), IngestSource::ZeroMq { .. }) => {
-                ZeroMqIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientSqs(client), IngestSource::Sqs { .. }) => {
-                SqsIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientWebsockets(client), IngestSource::Websockets { .. }) => {
-                WebsocketsIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientSyslog(client), IngestSource::Syslog { .. }) => {
-                SyslogIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::Endpoint(endpoint), IngestSource::Endpoint { .. }) => {
-                EndpointIngestor::start(runtime, domain, endpoint.clone(), ingestor).await
-            }
-            _ => Err(RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: "source kind does not match ingestor source".to_string(),
-            }),
+            IngestorStartPlan::Pulsar(plan) => PulsarIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Prometheus(plan) => PrometheusIngestor::start(runtime, plan).await,
+            IngestorStartPlan::RabbitMq(plan) => RabbitMqIngestor::start(runtime, plan).await,
+            IngestorStartPlan::RedisPubSub(plan) => RedisPubSubIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Mqtt(plan) => MqttIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Nats(plan) => NatsIngestor::start(runtime, plan).await,
+            IngestorStartPlan::ZeroMq(plan) => ZeroMqIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Sqs(plan) => SqsIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Websockets(plan) => WebsocketsIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Syslog(plan) => SyslogIngestor::start(runtime, plan).await,
+            IngestorStartPlan::Endpoint(plan) => EndpointIngestor::start(runtime, plan).await,
         }
     }
 }

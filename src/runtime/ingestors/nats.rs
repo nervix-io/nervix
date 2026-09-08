@@ -1,7 +1,4 @@
-use std::num::NonZeroU64;
-
 use async_nats::Client as NatsClient;
-use nervix_models::DomainName;
 
 use super::super::*;
 
@@ -26,10 +23,17 @@ impl IngestMessageHeaders for NatsMessageHeaders<'_> {
 impl NatsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientNats,
-        ingestor: CreateIngestor,
+        plan: NatsIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let NatsIngestorStartPlan {
+            ingestor,
+            client,
+            subject,
+            queue_group,
+            instances,
+            mode: _,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -39,37 +43,6 @@ impl NatsIngestor {
             });
         }
 
-        /// The parts of a NATS ingest source this task drives, taken from the model once so the
-        /// rest of startup reads named values rather than re-matching the source.
-        struct NatsSource {
-            subject: nervix_models::SubjectName,
-            queue_group: nervix_models::QueueGroupName,
-            instances: NonZeroU64,
-        }
-
-        let NatsSource {
-            subject,
-            queue_group,
-            instances,
-        } = match &ingestor.source {
-            IngestSource::Nats {
-                subject,
-                queue_group,
-                instances,
-                ..
-            } => NatsSource {
-                subject: subject.clone(),
-                queue_group: queue_group.clone(),
-                instances: *instances,
-            },
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected NATS ingestor source".to_string(),
-                });
-            }
-        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
 
         let resolved_client = runtime

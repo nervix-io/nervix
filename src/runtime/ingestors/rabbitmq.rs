@@ -1,4 +1,4 @@
-use std::{borrow::Cow, num::NonZeroU64};
+use std::borrow::Cow;
 
 use lapin::{
     Connection, ConnectionProperties,
@@ -6,7 +6,6 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
-use nervix_models::DomainName;
 
 use super::super::*;
 
@@ -35,10 +34,16 @@ impl IngestMessageHeaders for RabbitMqDeliveryHeaders<'_> {
 impl RabbitMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientRabbitMq,
-        ingestor: CreateIngestor,
+        plan: RabbitMqIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let RabbitMqIngestorStartPlan {
+            ingestor,
+            client,
+            queue,
+            instances,
+            mode: ack_mode,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -55,37 +60,6 @@ impl RabbitMqIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
                 reason,
             })?;
-        /// The parts of a RabbitMQ ingest source this task drives, taken from the model once so
-        /// the rest of startup reads named values rather than re-matching the source.
-        struct RabbitMqSource {
-            queue: nervix_models::QueueName,
-            instances: NonZeroU64,
-            ack_mode: RabbitMqIngestMode,
-        }
-
-        let RabbitMqSource {
-            queue,
-            instances,
-            ack_mode,
-        } = match &ingestor.source {
-            IngestSource::RabbitMq {
-                queue,
-                instances,
-                mode,
-                ..
-            } => RabbitMqSource {
-                queue: queue.clone(),
-                instances: *instances,
-                ack_mode: mode.clone(),
-            },
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected RabbitMQ ingestor source".to_string(),
-                });
-            }
-        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,

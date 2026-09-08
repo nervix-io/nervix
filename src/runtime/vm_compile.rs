@@ -1685,7 +1685,8 @@ pub(super) fn compile_reorderer_program(
 pub(super) fn compile_ingestor_filter_map_program(
     domain: &DomainName,
     identifier: impl Into<ModelName>,
-    source: &IngestSource,
+    metadata_kind: IngestMetadataKind,
+    allow_header_reads: bool,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
@@ -1735,8 +1736,7 @@ pub(super) fn compile_ingestor_filter_map_program(
             .with_sensitivity(schemas.output_sensitivity.clone()),
     ];
     let writable_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
-    if let Some(metadata_schema) = IngestMetadataKind::for_source(source).integration_arrow_schema()
-    {
+    if let Some(metadata_schema) = metadata_kind.integration_arrow_schema() {
         bindings.push(VmCompileBinding::readonly(
             INGEST_METADATA_NAMESPACE,
             metadata_schema,
@@ -1785,7 +1785,7 @@ pub(super) fn compile_ingestor_filter_map_program(
         bindings,
         context.compile_options(VmCompileOptions {
             output_mode: VmOutputMode::ExplicitOnly,
-            allow_header_reads: ingest_source_supports_headers(source),
+            allow_header_reads,
             ..VmCompileOptions::default()
         }),
     )
@@ -2035,7 +2035,7 @@ pub(super) fn materialized_stream_specs_for_graph(
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;
-    use nervix_models::{CreateSchema, IngestSource, ModelName, ParseAsType, Timestamp};
+    use nervix_models::{CreateSchema, ModelName, ParseAsType, Timestamp};
     use triomphe::Arc;
 
     use super::*;
@@ -2120,13 +2120,8 @@ mod tests {
         let program = compile_ingestor_filter_map_program(
             &domain("default"),
             named::<ModelName>("logic_ingestor"),
-            &IngestSource::Endpoint {
-                endpoint: named("logic_endpoint"),
-                mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
-                },
-            },
+            IngestMetadataKind::Headers,
+            true,
             &construction("INHERIT tenant SET normalized = lower(input.raw)"),
             RuntimeVmSchemaPair {
                 input: input_schema.arrow_schema(),

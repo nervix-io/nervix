@@ -1501,7 +1501,7 @@ impl Runtime {
         ingestor: &IngestorName,
         topic: &str,
         consumer: &StreamConsumer,
-        state: &ReplicatedKafkaOffsetState,
+        state: &KafkaOffsetStateOriginator,
         instance_idx: u64,
     ) -> Result<(u64, bool), String> {
         let (start_version, last_start) = if let Some(domain_state) = self.inner.domains.get(domain)
@@ -1526,7 +1526,7 @@ impl Runtime {
             KafkaIngestor::resume_offsets_from_state(
                 consumer,
                 topic,
-                state,
+                state.read(),
                 missing_partition_timestamp,
             )?
         } else {

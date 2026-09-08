@@ -57,6 +57,7 @@ pub(crate) enum IngestMetadataKind {
 }
 
 impl IngestMetadataKind {
+    #[cfg(test)]
     pub(super) fn for_source(source: &IngestSource) -> Self {
         match source {
             IngestSource::Kafka { .. } => Self::Kafka,
@@ -617,20 +618,8 @@ mod tests {
         let program = compile_ingestor_filter_map_program(
             &domain("default"),
             named::<ModelName>("logic_ingestor"),
-            &IngestSource::Kafka {
-                client: named("logic_kafka"),
-                topic: named("logic_notifications"),
-                offset_mode: nervix_models::KafkaOffsetMode::Domain,
-                instances: nonzero!(1u64),
-                mode: nervix_models::KafkaIngestMode::AckSequential {
-                    timeout: "5s".to_string(),
-                    retry_policy: nervix_models::RetryPolicy {
-                        backoff: "100ms".to_string(),
-                        max_backoff: "200ms".to_string(),
-                    },
-                },
-                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-            },
+            IngestMetadataKind::Kafka,
+            true,
             &construction(
                 "INHERIT tenant SET topic = metadata.topic, partition = metadata.partition, \
                  offset = metadata.offset WHERE metadata.offset >= 0",
@@ -813,7 +802,8 @@ mod tests {
         let program = compile_ingestor_filter_map_program(
             &domain("default"),
             named::<ModelName>("header_ingestor"),
-            &source,
+            IngestMetadataKind::for_source(&source),
+            ingest_source_supports_headers(&source),
             &construction(
                 "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \
                  count(read_headers(lower(input.header_name))) WHERE read_header(\"tenant\") = \
