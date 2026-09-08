@@ -663,7 +663,7 @@ struct RuntimeInner {
     #[cfg(feature = "testing")]
     transaction_binding_drops: Arc<test_hooks::TransactionBindingDropInjector>,
     #[cfg(feature = "testing")]
-    transaction_commit_pauses: Arc<test_hooks::TransactionCommitPauseInjector>,
+    command_pauses: Arc<test_hooks::CommandPauseInjector>,
     #[cfg(feature = "testing")]
     entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
     #[cfg(feature = "testing")]

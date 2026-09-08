@@ -21,8 +21,8 @@ use crate::{FieldName, ParseAsType, UdfName};
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum UdfLanguage {
-    #[strum(serialize = "ROTO_0_11")]
-    Roto0_11,
+    #[strum(serialize = "ROTO_0_13")]
+    Roto0_13,
 }
 
 #[derive(

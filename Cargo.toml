@@ -428,7 +428,10 @@ reedline = "0.36"
 regex = "1"
 reqwest = "0.13"
 rkyv = "0.8"
-roto = "0.12"
+# The fork raises Roto's Cranelift floor from 0.127 to 0.136, which carries the x86_64 JIT fixes
+# the workspace previously supplied by patching Cranelift itself.
+# https://codeberg.org/glebpom/roto/src/branch/cranelift-upgrade-0.136
+roto = { branch = "cranelift-upgrade-0.136", git = "https://codeberg.org/glebpom/roto.git", version = "0.12" }
 rpassword = "7"
 rstest = "0.26.1"
 # This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.
@@ -504,10 +507,6 @@ zeromq = "0.4"
 # The archived 2.0.1 release triggers Rust's future-incompatibility lint; this is the focused fix
 # from https://github.com/GnomedDev/proc-macro-error-2/pull/14.
 proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
-# https://github.com/bytecodealliance/wasmtime/pull/13975 and https://github.com/glebpom/wasmtime/pull/1
-cranelift = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
-cranelift-codegen = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
-cranelift-jit = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 
 [profile.release]
 panic = "unwind"
