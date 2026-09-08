@@ -263,18 +263,21 @@ impl RequestState {
         reply: &ConnectionHandle,
         request: RequestEnvelope,
     ) {
+        if inner.admission_closed.is_cancelled() {
+            return;
+        }
         let handler = self
             .handlers
             .get(request.request.as_str())
             .map(|handler| handler.value().clone());
         let peer_node_id = peer_node_id.clone();
         let reply = reply.clone();
-        let shutdown = inner.shutdown.clone();
+        let force_close = inner.force_close.clone();
         let tasks = inner.tasks.clone();
         tasks.spawn(async move {
             let result = if let Some(handler) = handler {
                 tokio::select! {
-                    _ = shutdown.cancelled() => return,
+                    _ = force_close.cancelled() => return,
                     result = handler.handle(
                         RequestContext {
                             peer_node_id: peer_node_id.clone(),
@@ -291,7 +294,7 @@ impl RequestState {
                 result,
             });
             tokio::select! {
-                _ = shutdown.cancelled() => {}
+                _ = force_close.cancelled() => {}
                 result = reply.send(super::Envelope::Control(response)) => {
                     if let Err(error) = result {
                         debug!(%error, %peer_node_id, "failed to return interconnect response");
@@ -401,6 +404,7 @@ impl Transport {
     /// Replaces the membership snapshot used to cancel requests whose target has left.
     pub fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
         self.inner.requests.replace_live_nodes(live_nodes);
+        self.retire_departed_connections(live_nodes);
     }
 
     /// Sends `message` to an authenticated cluster node and waits for its associated response.
@@ -412,7 +416,7 @@ impl Transport {
     where
         M: InterconnectRequest,
     {
-        if self.inner.shutdown.is_cancelled() {
+        if self.inner.admission_closed.is_cancelled() {
             return Err(Report::new(RequestError::ShuttingDown {
                 node: node.clone(),
                 request: M::NAME,
@@ -444,7 +448,7 @@ impl Transport {
 
         loop {
             tokio::task::consume_budget().await;
-            if self.inner.shutdown.is_cancelled() {
+            if self.inner.admission_closed.is_cancelled() {
                 return Err(Report::new(RequestError::ShuttingDown {
                     node: node.clone(),
                     request: M::NAME,
@@ -462,10 +466,10 @@ impl Transport {
                 .inner
                 .connected_peers
                 .get(node)
-                .and_then(|connections| connections.last().cloned());
+                .and_then(|connections| connections.values().next().cloned());
             let Some(connection) = connection else {
                 tokio::select! {
-                    _ = self.inner.shutdown.cancelled() => {
+                    _ = self.inner.admission_closed.cancelled() => {
                         return Err(Report::new(RequestError::ShuttingDown {
                             node: node.clone(),
                             request: M::NAME,
@@ -487,7 +491,7 @@ impl Transport {
             };
 
             let send_result = tokio::select! {
-                _ = self.inner.shutdown.cancelled() => {
+                _ = self.inner.admission_closed.cancelled() => {
                     return Err(Report::new(RequestError::ShuttingDown {
                         node: node.clone(),
                         request: M::NAME,
@@ -508,13 +512,15 @@ impl Transport {
             };
             match send_result {
                 Some(Ok(())) => break,
-                Some(Err(_)) => unregister_connected_peer(&self.inner, node, &connection),
-                None => {}
+                Some(Err(super::TransportError::Closed(_))) => {
+                    unregister_connected_peer(&self.inner, node, &connection);
+                }
+                Some(Err(_)) | None => {}
             }
         }
 
         let outcome = tokio::select! {
-            _ = self.inner.shutdown.cancelled() => {
+            _ = self.inner.admission_closed.cancelled() => {
                 return Err(Report::new(RequestError::ShuttingDown {
                     node: node.clone(),
                     request: M::NAME,
