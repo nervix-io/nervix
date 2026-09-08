@@ -282,16 +282,14 @@ impl Runtime {
         }
 
         let resources = self.inner.resource_versions.read();
-        resources
-            .latest_version(domain, identifier)
-            .map(|version| ResourceId::new(domain.clone(), identifier.clone(), version))
-            .ok_or_else(|| {
-                format!(
-                    "resource '{}' has no installed versions in domain '{}'",
-                    identifier.as_str(),
-                    domain.as_str()
-                )
-            })
+        let Some(version) = resources.latest_version(domain, identifier) else {
+            return Err(format!(
+                "resource '{}' has no installed versions in domain '{}'",
+                identifier.as_str(),
+                domain.as_str()
+            ));
+        };
+        Ok(ResourceId::new(domain.clone(), identifier.clone(), version))
     }
 
     pub(crate) fn resolve_client_config(

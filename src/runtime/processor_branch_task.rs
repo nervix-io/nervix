@@ -491,16 +491,15 @@ pub(super) fn spawn_processor_branch_task(
     let (stop_tx, stop_rx) = mpsc::channel(1);
     let processor = template.source.clone();
     let (snapshot_shutdown_tx, _) = watch::channel(false);
-    let spawned = branch
-        .processors
-        .get(&ModelName::from(&processor))
-        .map(|processor| {
+    let spawned = match branch.processors.get(&ModelName::from(&processor)) {
+        Some(processor) => {
             processor.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx)
-        })
-        .unwrap_or(SpawnedSnapshotTask {
+        }
+        None => SpawnedSnapshotTask {
             task: None,
             requests: None,
-        });
+        },
+    };
     let snapshot_task = ProcessorSnapshotTask {
         shutdown_tx: snapshot_shutdown_tx,
         task: spawned.task,
@@ -587,12 +586,12 @@ pub(super) async fn run_processor_branch_task(
             quiesce_gauges.observe(&branch, &processor);
             continue;
         }
-        let sleep_duration = branch
-            .next_deadline()
-            .map(|deadline| {
+        let sleep_duration = match branch.next_deadline() {
+            Some(deadline) => {
                 wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline)
-            })
-            .unwrap_or(PROCESSOR_BRANCH_TASK_IDLE_SLEEP);
+            }
+            None => PROCESSOR_BRANCH_TASK_IDLE_SLEEP,
+        };
         let has_pending_materialized = branch.processor_has_pending_materialized(&processor);
         tokio::select! {
             biased;
@@ -687,11 +686,10 @@ pub(super) async fn run_processor_branch_task(
         Some(ProcessorBranchStopMode::Handoff(response)) => {
             let restored_at = handoff_timestamp
                 .verified("the handoff arm above captured the timestamp for this same stop mode");
-            let pending_materialized = branch
-                .processors
-                .get_mut(&processor)
-                .map(|processor| std::mem::take(&mut processor.pending_materialized))
-                .unwrap_or_default();
+            let pending_materialized = match branch.processors.get_mut(&processor) {
+                Some(processor) => std::mem::take(&mut processor.pending_materialized),
+                None => VecDeque::new(),
+            };
             let handoff = ProcessorBranchHandoff {
                 key: branch.key.clone(),
                 restored_at,

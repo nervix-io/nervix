@@ -11,11 +11,10 @@ impl ZeroMqEmitter {
         client: &CreateClientZeroMq,
         resolved: Option<&ResolvedClientConfig>,
     ) -> EmitterRuntimeResult<Self> {
-        let socket = Self::push_socket_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
+        let socket = Self::push_socket_from_config(client_config_entries(
+            resolved,
+            client.config.as_slice(),
+        ))
         .await?;
         Ok(Self {
             socket: Some(socket),
@@ -45,9 +44,10 @@ impl ZeroMqEmitter {
     }
 
     fn bind_from_config(config: &[nervix_models::ClientConfigEntry]) -> bool {
-        optional_client_config_value(config, "bind")
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        match optional_client_config_value(config, "bind") {
+            Some(value) => value.eq_ignore_ascii_case("true"),
+            None => false,
+        }
     }
 
     pub(in crate::runtime) async fn publish(

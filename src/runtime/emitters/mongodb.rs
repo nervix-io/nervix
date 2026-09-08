@@ -36,11 +36,10 @@ impl MongoDbEmitter {
         values: &[MongoDbValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let client = match Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
+        let client = match Self::client_from_config(client_config_entries(
+            resolved,
+            client.config.as_slice(),
+        ))
         .await
         {
             Ok(client) => Some(client),
@@ -87,10 +86,15 @@ impl MongoDbEmitter {
                     .build(),
             ));
         }
-        let database = optional_client_config_value(config, "database")
-            .map(ToOwned::to_owned)
-            .or_else(|| options.default_database.clone())
-            .ok_or_else(|| emitter_config_error("missing MongoDB client config key 'database'"))?;
+        let database = match optional_client_config_value(config, "database") {
+            Some(database) => Some(database.to_owned()),
+            None => options.default_database.clone(),
+        };
+        let Some(database) = database else {
+            return Err(emitter_config_error(
+                "missing MongoDB client config key 'database'",
+            ));
+        };
         let client = MongoDbClient::with_options(options).map_err(|source| {
             emitter_init_error(format!("failed to build MongoDB client: {source}"))
         })?;

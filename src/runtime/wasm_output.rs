@@ -296,7 +296,10 @@ impl WasmOutputValidator<'_> {
             return Err(WasmOutputError::EmptyOutputGroup { envelope_index });
         }
         let generated_batch = self.decode_generated_batch(&generated_arrow_ipc_batch)?;
-        let generated_column_count = generated_batch.as_ref().map_or(0, RecordBatch::num_columns);
+        let generated_column_count = match generated_batch.as_ref() {
+            Some(generated_batch) => generated_batch.num_columns(),
+            None => 0,
+        };
         let mut referenced_generated_columns = vec![false; generated_column_count];
         let mut materialized = Vec::with_capacity(outputs.len());
         for output in outputs {
@@ -359,8 +362,10 @@ impl WasmOutputValidator<'_> {
             .enumerate()
             .map(|(field_index, (column, destination_field))| match column {
                 WasmOutputColumnRef::Generated { column_index } => {
-                    let generated_column_count =
-                        generated_batch.map_or(0, RecordBatch::num_columns);
+                    let generated_column_count = match generated_batch {
+                        Some(generated_batch) => generated_batch.num_columns(),
+                        None => 0,
+                    };
                     let generated_index = column_index.arch_into();
                     let Some(generated_batch) = generated_batch else {
                         return Err(WasmOutputError::GeneratedColumnOutOfRange {
@@ -779,27 +784,32 @@ pub(super) async fn dispatch_wasm_output_route(
             &context.branch.domain,
             context.graph,
         );
-        let current_branching = context
+        let mut current_branching = Vec::new();
+        if let Some(execution) = context
             .branch
             .runtime
             .inner
             .executions
             .get(&context.branch.domain)
-            .and_then(|execution| execution.relay_branchings.get(primary_input_relay).cloned())
-            .unwrap_or_default();
+            && let Some(branching) = execution.relay_branchings.get(primary_input_relay)
+        {
+            current_branching = branching.clone();
+        }
         let current_branch_schema = relay_branch_schema_for_runtime(
             &context.branch.runtime,
             &context.branch.domain,
             primary_input_relay,
         );
-        let available_lookups = context
+        let available_lookups = match context
             .branch
             .runtime
             .inner
             .executions
             .get(&context.branch.domain)
-            .map(|execution| execution.lookups.clone())
-            .unwrap_or_default();
+        {
+            Some(execution) => execution.lookups.clone(),
+            None => HashMap::default(),
+        };
         let udfs = context
             .branch
             .runtime
@@ -921,14 +931,16 @@ pub(super) async fn dispatch_wasm_output_route(
         .ok()
         .flatten()
         .unwrap_or_else(current_timestamp);
-    let owner_nodes = context
+    let owner_nodes = match context
         .branch
         .runtime
         .inner
         .executions
         .get(&context.branch.domain)
-        .map(|execution| execution.materialized_stream_owner_nodes.clone())
-        .unwrap_or_default();
+    {
+        Some(execution) => execution.materialized_stream_owner_nodes.clone(),
+        None => HashMap::default(),
+    };
     let side_inputs = match context
         .branch
         .runtime
@@ -1448,13 +1460,13 @@ pub(super) fn relay_batch_from_wasm_output(
         let source_context = row
             .source_token
             .and_then(|source_token| ack_map.get(&source_token.0));
-        metadata.push(source_context.map_or_else(
-            || {
+        metadata.push(match source_context {
+            Some(context) => context.metadata.clone(),
+            None => {
                 let now = current_timestamp();
                 RuntimeRecordMetadata::from_ingested_at_watermarks(now, now)
-            },
-            |context| context.metadata.clone(),
-        ));
+            }
+        });
         let mut row_ack_sets = Vec::with_capacity(row.tokens.len());
         for token in row.tokens {
             let remaining_uses = token_use_counts.get_mut(&token.0).verified(

@@ -900,10 +900,10 @@ impl<'a> Builder<'a> {
 
     fn default_lane(&self, segment: &Segment) -> i32 {
         let gutter = self.slots[segment.from].column;
-        self.gutter_x
-            .get(gutter)
-            .copied()
-            .map_or(0, |x| x + SOURCE_PLUG + LANE_PITCH)
+        match self.gutter_x.get(gutter) {
+            Some(x) => x + SOURCE_PLUG + LANE_PITCH,
+            None => 0,
+        }
     }
 
     /// Give every turning edge its own vertical line inside the gutter, ordered so that no two

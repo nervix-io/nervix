@@ -969,6 +969,9 @@ impl PulsarIngestor {
                 first_error = Some(error.to_string());
             }
         }
-        first_error.map_or(Ok(()), Err)
+        match first_error {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
     }
 }

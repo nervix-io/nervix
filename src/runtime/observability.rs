@@ -472,14 +472,14 @@ impl Runtime {
     ) -> Result<IngestorDescribe, String> {
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
         let quiesce_control = self.ingestor_quiesce_control(domain, ingestor);
-        let quiesce_state = quiesce_control
-            .as_ref()
-            .and_then(|control| control.cause())
-            .map(|cause| cause.as_str().to_string());
-        let quiesce_counters = quiesce_control
-            .as_ref()
-            .map(|control| control.counters())
-            .unwrap_or_default();
+        let quiesce_state = match quiesce_control.as_ref() {
+            Some(control) => control.cause().map(|cause| cause.as_str().to_string()),
+            None => None,
+        };
+        let quiesce_counters = match quiesce_control.as_ref() {
+            Some(control) => control.counters(),
+            None => IngestorQuiesceCounters::default(),
+        };
         if !self.inner.executions.contains_key(domain) {
             if let Some(error) = self.inner.domain_instantiation_errors.get(domain) {
                 return Err(error.value().clone());

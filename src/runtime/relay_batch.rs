@@ -560,8 +560,10 @@ fn delivery_observation_from_timestamps(
     let mut domain_timestamp: Option<Timestamp> = None;
     let mut latency_seconds = Vec::with_capacity(timestamps.size_hint().0);
     for timestamp in timestamps {
-        domain_timestamp =
-            Some(domain_timestamp.map_or(timestamp, |current| current.max(timestamp)));
+        domain_timestamp = Some(match domain_timestamp {
+            Some(current) => current.max(timestamp),
+            None => timestamp,
+        });
         if let Ok(duration) = now
             .into_datetime()
             .signed_duration_since(timestamp.into_datetime())

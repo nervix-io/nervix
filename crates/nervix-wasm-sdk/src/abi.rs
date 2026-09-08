@@ -360,8 +360,10 @@ pub fn read_emit() -> i32 {
 
 pub fn dump_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     guarded(false, |core| {
-        let saved_state =
-            slot.with(|instance| instance.as_ref().map(P::save_state).unwrap_or_default());
+        let saved_state = slot.with(|instance| match instance.as_ref() {
+            Some(instance) => P::save_state(instance),
+            None => Vec::new(),
+        });
         let snapshot = GuestSnapshot {
             processed_batches: core.processed_batches,
             processed_rows: core.processed_rows,

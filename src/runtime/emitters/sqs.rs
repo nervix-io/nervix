@@ -69,25 +69,29 @@ impl PreparedSqsRecord {
         if let Some(group_id) = group_id.as_deref() {
             SqsEmitter::validate_group_id(group_id)?;
         }
+        let group_id_len = match group_id.as_ref() {
+            Some(group_id) => group_id.len(),
+            None => 0,
+        };
         let encoded_bytes = body
             .len()
             .checked_add(
                 attributes
                     .iter()
                     .map(|(name, value)| {
+                        let value_len = match value.string_value() {
+                            Some(value) => value.len(),
+                            None => 0,
+                        };
                         name.len()
                             .checked_add(value.data_type().len())
-                            .and_then(|size| {
-                                size.checked_add(
-                                    value.string_value().map(str::len).unwrap_or_default(),
-                                )
-                            })
+                            .and_then(|size| size.checked_add(value_len))
                             .assured(ENCODED_IN_MEMORY)
                     })
                     .try_fold(0_usize, usize::checked_add)
                     .assured(ENCODED_IN_MEMORY),
             )
-            .and_then(|size| size.checked_add(group_id.as_ref().map_or(0, String::len)))
+            .and_then(|size| size.checked_add(group_id_len))
             .assured(ENCODED_IN_MEMORY);
         if encoded_bytes > SQS_MAX_REQUEST_BYTES {
             return Err(format!(
@@ -112,12 +116,9 @@ impl SqsEmitter {
         queue: &str,
         mode: SqsPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
-        let client = Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
-        .await?;
+        let client =
+            Self::client_from_config(client_config_entries(resolved, client.config.as_slice()))
+                .await?;
         let queue_url = Self::queue_url(&client, queue).await?;
         Ok(Self {
             client,
@@ -193,15 +194,20 @@ impl SqsEmitter {
     }
 
     async fn queue_url(client: &SqsClient, queue: &str) -> EmitterRuntimeResult<String> {
-        client
+        let queue_url = client
             .get_queue_url()
             .queue_name(queue)
             .send()
             .await
             .map_err(emitter_publish_error)?
             .queue_url()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| emitter_publish_error(format!("SQS queue '{queue}' has no URL")))
+            .map(ToOwned::to_owned);
+        match queue_url {
+            Some(queue_url) => Ok(queue_url),
+            None => Err(emitter_publish_error(format!(
+                "SQS queue '{queue}' has no URL"
+            ))),
+        }
     }
 
     pub(super) async fn publish(
@@ -416,9 +422,15 @@ impl SqsEmitter {
     }
 
     fn batch_entry_index(id: &str, record_count: usize) -> Option<usize> {
-        id.strip_prefix('m')
-            .and_then(|index| index.parse::<usize>().ok())
-            .filter(|index| *index < record_count)
+        let index = id.strip_prefix('m')?;
+        let Ok(index) = index.parse::<usize>() else {
+            return None;
+        };
+        if index < record_count {
+            Some(index)
+        } else {
+            None
+        }
     }
 
     fn is_record_failure(sender_fault: bool, code: &str, message: Option<&str>) -> bool {

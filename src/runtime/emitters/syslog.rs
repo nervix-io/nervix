@@ -39,9 +39,7 @@ impl SyslogEmitter {
         client: &CreateClientSyslog,
         resolved: Option<&ResolvedClientConfig>,
     ) -> EmitterRuntimeResult<Self> {
-        let entries = resolved
-            .map(|resolved| resolved.entries.as_slice())
-            .unwrap_or(client.config.as_slice());
+        let entries = client_config_entries(resolved, client.config.as_slice());
         let config = SyslogClientConfig::parse(entries, SyslogDirection::Emit)
             .map_err(emitter_config_error)?;
         let sender = Self::connect(&config).await?;

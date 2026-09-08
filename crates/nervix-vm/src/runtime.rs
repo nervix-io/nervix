@@ -1684,21 +1684,21 @@ impl<'a> ListColumn<'a> {
             });
         };
         match array.data_type() {
-            DataType::List(_) => array
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .map(Self::Variable)
-                .ok_or_else(|| RuntimeError::InvalidBatch {
+            DataType::List(_) => match array.as_any().downcast_ref::<ListArray>() {
+                Some(array) => Ok(Self::Variable(array)),
+                None => Err(RuntimeError::InvalidBatch {
                     message: "list data type is not backed by ListArray".to_string(),
                 }),
-            DataType::FixedSizeList(_, _) => array
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .map(Self::Fixed)
-                .ok_or_else(|| RuntimeError::InvalidBatch {
-                    message: "fixed-size list data type is not backed by FixedSizeListArray"
-                        .to_string(),
-                }),
+            },
+            DataType::FixedSizeList(_, _) => {
+                match array.as_any().downcast_ref::<FixedSizeListArray>() {
+                    Some(array) => Ok(Self::Fixed(array)),
+                    None => Err(RuntimeError::InvalidBatch {
+                        message: "fixed-size list data type is not backed by FixedSizeListArray"
+                            .to_string(),
+                    }),
+                }
+            }
             other => Err(RuntimeError::InvalidBatch {
                 message: format!("list builtin requires ARRAY or VEC input, found {other:?}"),
             }),
@@ -2196,12 +2196,10 @@ fn execute_ascii(input: &StringArray) -> Int64Array {
         if input.is_null(row) {
             builder.append_null();
         } else {
-            let value = input
-                .value(row)
-                .chars()
-                .next()
-                .map(|ch| i64::from(u32::from(ch)))
-                .unwrap_or(0);
+            let value = match input.value(row).chars().next() {
+                Some(character) => i64::from(u32::from(character)),
+                None => 0,
+            };
             builder.append_value(value);
         }
     }
@@ -2686,12 +2684,13 @@ fn execute_pad(
         result.clear();
         // The reservation is only a hint: a requested pad width that cannot be sized in
         // `usize` leaves the buffer to grow as the fill is written.
-        result.reserve(
-            missing
-                .checked_mul(fill.len())
-                .and_then(|padding| source.len().checked_add(padding))
-                .unwrap_or(source.len()),
-        );
+        let mut reservation = source.len();
+        if let Some(padding) = missing.checked_mul(fill.len())
+            && let Some(reserved) = source.len().checked_add(padding)
+        {
+            reservation = reserved;
+        }
+        result.reserve(reservation);
         if pad_left {
             result.extend(fill.chars().cycle().take(missing));
             result.push_str(source);
@@ -3042,10 +3041,12 @@ fn execute_substr(
         };
         // SQL positions count from one, so a start at or before the first position begins at
         // the start of the string.
-        let begin = start
-            .checked_sub(1)
-            .and_then(|offset| usize::try_from(offset).ok())
-            .unwrap_or(0);
+        let mut begin = 0;
+        if let Some(offset) = start.checked_sub(1)
+            && let Ok(offset) = usize::try_from(offset)
+        {
+            begin = offset;
+        }
         let length = length.map(|value| {
             usize::try_from(value.max(0))
                 .assured("a non-negative i64 fits usize on every supported host architecture")
@@ -3233,20 +3234,23 @@ fn integral_value_at(input: &TypedArray, row: usize) -> Result<Option<i64>, Runt
 }
 
 fn string_prefix(value: &str, count: usize) -> &str {
-    let end = value
-        .char_indices()
-        .nth(count)
-        .map_or(value.len(), |(index, _)| index);
+    let end = match value.char_indices().nth(count) {
+        Some((index, _)) => index,
+        None => value.len(),
+    };
     &value[..end]
 }
 
 fn string_substr(value: &str, start: usize, length: Option<usize>) -> &str {
-    let start = value
-        .char_indices()
-        .nth(start)
-        .map_or(value.len(), |(index, _)| index);
+    let start = match value.char_indices().nth(start) {
+        Some((index, _)) => index,
+        None => value.len(),
+    };
     let remaining = &value[start..];
-    length.map_or(remaining, |length| string_prefix(remaining, length))
+    match length {
+        Some(length) => string_prefix(remaining, length),
+        None => remaining,
+    }
 }
 
 fn string_left(value: &str, count: i64) -> &str {
@@ -3260,11 +3264,10 @@ fn string_left(value: &str, count: i64) -> &str {
         if remove == 0 {
             return value;
         }
-        let end = value
-            .char_indices()
-            .rev()
-            .nth(remove - 1)
-            .map_or(0, |(index, _)| index);
+        let end = match value.char_indices().rev().nth(remove - 1) {
+            Some((index, _)) => index,
+            None => 0,
+        };
         &value[..end]
     }
 }
@@ -3275,18 +3278,17 @@ fn string_right(value: &str, count: i64) -> &str {
         if keep == 0 {
             return &value[value.len()..];
         }
-        let start = value
-            .char_indices()
-            .rev()
-            .nth(keep - 1)
-            .map_or(0, |(index, _)| index);
+        let start = match value.char_indices().rev().nth(keep - 1) {
+            Some((index, _)) => index,
+            None => 0,
+        };
         &value[start..]
     } else {
         let skip = count.unsigned_abs().arch_into();
-        let start = value
-            .char_indices()
-            .nth(skip)
-            .map_or(value.len(), |(index, _)| index);
+        let start = match value.char_indices().nth(skip) {
+            Some((index, _)) => index,
+            None => value.len(),
+        };
         &value[start..]
     }
 }

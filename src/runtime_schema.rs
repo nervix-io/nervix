@@ -1536,13 +1536,21 @@ pub(crate) fn parse_as_type_from_arrow(
         ArrowDataType::List(element) => Ok(ParseAsType::Vec {
             element: Box::new(parse_as_type_from_arrow(element.data_type())?),
         }),
-        ArrowDataType::FixedSizeList(element, len) => Ok(ParseAsType::Array {
-            element: Box::new(parse_as_type_from_arrow(element.data_type())?),
-            len: u32::try_from(*len)
-                .ok()
-                .and_then(NonZeroU32::new)
-                .ok_or_else(|| Report::new(ArrowTypeError::EmptyFixedSizeList { len: *len }))?,
-        }),
+        ArrowDataType::FixedSizeList(element, len) => {
+            let size = match u32::try_from(*len) {
+                Ok(size) => NonZeroU32::new(size),
+                Err(_) => None,
+            };
+            let Some(size) = size else {
+                return Err(Report::new(ArrowTypeError::EmptyFixedSizeList {
+                    len: *len,
+                }));
+            };
+            Ok(ParseAsType::Array {
+                element: Box::new(parse_as_type_from_arrow(element.data_type())?),
+                len: size,
+            })
+        }
         other => Err(Report::new(ArrowTypeError::Unsupported {
             data_type: other.clone(),
         })),

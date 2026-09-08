@@ -224,15 +224,13 @@ impl SeriesKey {
     }
 
     fn description(&self) -> String {
+        let physical_node = match &self.physical_node_id {
+            Some(physical_node) => physical_node.as_str(),
+            None => ABSENT_LABEL,
+        };
         format!(
-            "{} '{}' direction '{}' relay '{}' on '{}'",
-            self.target_kind,
-            self.target,
-            self.direction,
-            self.relay,
-            self.physical_node_id
-                .as_ref()
-                .map_or(ABSENT_LABEL, ClusterNodeName::as_str)
+            "{} '{}' direction '{}' relay '{}' on '{physical_node}'",
+            self.target_kind, self.target, self.direction, self.relay,
         )
     }
 
