@@ -19,7 +19,9 @@ use async_tar::{
     Archive as AsyncTarArchive, Builder as AsyncTarBuilder, EntryType, Header, HeaderMode,
 };
 use blake3::Hasher;
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{ClusterNodeName, ResourceId, ResourceVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -63,6 +65,9 @@ impl ResourceEntryContent {
 #[derive(Debug, Clone)]
 pub struct ResourceStore {
     root: PathBuf,
+    /// The node's bounded execution and memory admission. Walking, reading and hashing a version's
+    /// contents is bulk work, so it is admitted and charged rather than run on an async worker.
+    executor: Executor,
 }
 
 /// Where one resource version is installed: the directory it will finally occupy, the staging
@@ -118,13 +123,45 @@ pub enum ResourceStoreError {
     JoinBlockingTask,
     #[error("resource path escapes bundle root")]
     InvalidResourcePath,
+    #[error("the node has no bulk capacity for this resource version")]
+    BulkAdmission,
+    #[error("reading the resource version was cancelled")]
+    Cancelled,
 }
 
 impl ResourceStore {
-    pub fn open(root: impl AsRef<Path>) -> Result<Self, ResourceStoreError> {
+    pub fn open(
+        root: impl AsRef<Path>,
+        executor: Executor,
+    ) -> Result<Self, Report<ResourceStoreError>> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root).map_err(|_| ResourceStoreError::CreateRoot)?;
-        Ok(Self { root })
+        fs::create_dir_all(&root).map_err(|_| Report::new(ResourceStoreError::CreateRoot))?;
+        Ok(Self { root, executor })
+    }
+
+    /// Walk, read and hash one version's installed contents on the node's bulk workers.
+    ///
+    /// This is the only entry point for that work. It is charged before it allocates, and it stops
+    /// between files when the caller stops waiting rather than reading a whole tree it will
+    /// discard.
+    async fn manifest_entries(
+        &self,
+        content_root: PathBuf,
+    ) -> Result<Vec<ResourceManifestEntry>, Report<ResourceStoreError>> {
+        let reservation = self
+            .executor
+            .reserve(
+                MemoryClass::Bulk,
+                self.executor.limits().bulk_chunk_bytes.as_u64(),
+            )
+            .await
+            .change_context(ResourceStoreError::BulkAdmission)?;
+        self.executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                collect_manifest_entries(&content_root, cancellation)
+            })
+            .await
+            .change_context(ResourceStoreError::JoinBlockingTask)?
     }
 
     pub async fn install_from_directory(
@@ -133,13 +170,13 @@ impl ResourceStore {
         source_dir: impl AsRef<Path>,
         created_by_node: ClusterNodeName,
         created_at: Timestamp,
-    ) -> Result<ResourceManifest, ResourceStoreError> {
+    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
         let source_dir = source_dir.as_ref();
         if !source_dir.exists() {
-            return Err(ResourceStoreError::MissingSource);
+            return Err(Report::new(ResourceStoreError::MissingSource));
         }
         if !source_dir.is_dir() {
-            return Err(ResourceStoreError::InvalidSource);
+            return Err(Report::new(ResourceStoreError::InvalidSource));
         }
 
         let install = self
@@ -161,25 +198,35 @@ impl ResourceStore {
         self.version_root(id).join("archive.tar")
     }
 
-    pub fn remove_version(&self, id: &ResourceId) -> Result<(), ResourceStoreError> {
+    pub fn remove_version(&self, id: &ResourceId) -> Result<(), Report<ResourceStoreError>> {
         let install_root = self.version_root(id);
         if install_root.exists() {
-            fs::remove_dir_all(&install_root).map_err(|_| ResourceStoreError::DeleteResourceDir)?;
+            fs::remove_dir_all(&install_root)
+                .map_err(|_| Report::new(ResourceStoreError::DeleteResourceDir))?;
         }
         let staging_root = self.staging_root(id);
         if staging_root.exists() {
-            fs::remove_dir_all(&staging_root).map_err(|_| ResourceStoreError::DeleteResourceDir)?;
+            fs::remove_dir_all(&staging_root)
+                .map_err(|_| Report::new(ResourceStoreError::DeleteResourceDir))?;
         }
         Ok(())
     }
 
-    pub fn read_archive_bytes(&self, id: &ResourceId) -> Result<Vec<u8>, ResourceStoreError> {
-        fs::read(self.archive_path(id)).map_err(|_| ResourceStoreError::ReadArchive)
+    pub fn read_archive_bytes(
+        &self,
+        id: &ResourceId,
+    ) -> Result<Vec<u8>, Report<ResourceStoreError>> {
+        fs::read(self.archive_path(id)).map_err(|_| Report::new(ResourceStoreError::ReadArchive))
     }
 
-    pub fn read_manifest(&self, id: &ResourceId) -> Result<ResourceManifest, ResourceStoreError> {
-        let bytes = fs::read(self.manifest_path(id)).map_err(|_| ResourceStoreError::ReadFile)?;
-        serde_json::from_slice(&bytes).map_err(|_| ResourceStoreError::SerializeManifest)
+    pub fn read_manifest(
+        &self,
+        id: &ResourceId,
+    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
+        let bytes = fs::read(self.manifest_path(id))
+            .map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| Report::new(ResourceStoreError::SerializeManifest))
     }
 
     pub async fn install_from_archive_path(
@@ -189,7 +236,7 @@ impl ResourceStore {
         root_checksum: String,
         created_by_node: ClusterNodeName,
         created_at: Timestamp,
-    ) -> Result<ResourceManifest, ResourceStoreError> {
+    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
         let archive_path = archive_path.as_ref().to_path_buf();
         let install = self
             .prepare_install(id, created_by_node, created_at)
@@ -197,12 +244,9 @@ impl ResourceStore {
         let staged_archive_path = install.staging_root.join("archive.tar");
         tokio::fs::copy(&archive_path, &staged_archive_path)
             .await
-            .map_err(|_| ResourceStoreError::WriteArchive)?;
+            .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
         unpack_archive_path(&staged_archive_path, &install.content_root).await?;
-        let content_root = install.content_root.clone();
-        let entries = tokio::task::spawn_blocking(move || collect_manifest_entries(&content_root))
-            .await
-            .map_err(|_| ResourceStoreError::JoinBlockingTask)??;
+        let entries = self.manifest_entries(install.content_root.clone()).await?;
         self.finalize_install_with_root_checksum(install, root_checksum, entries)
             .await
     }
@@ -211,7 +255,7 @@ impl ResourceStore {
         &self,
         id: &ResourceId,
         path: &str,
-    ) -> Result<PathBuf, ResourceStoreError> {
+    ) -> Result<PathBuf, Report<ResourceStoreError>> {
         let relative = sanitize_relative_path(path)?;
         Ok(self.content_root(id).join(relative))
     }
@@ -234,24 +278,24 @@ impl ResourceStore {
     async fn prepare_install_paths(
         &self,
         id: &ResourceId,
-    ) -> Result<InstallPaths, ResourceStoreError> {
+    ) -> Result<InstallPaths, Report<ResourceStoreError>> {
         let install_root = self.version_root(id);
         if install_root.exists() {
             tokio::fs::remove_dir_all(&install_root)
                 .await
-                .map_err(|_| ResourceStoreError::RenameResourceDir)?;
+                .map_err(|_| Report::new(ResourceStoreError::RenameResourceDir))?;
         }
 
         let staging_root = self.staging_root(id);
         if staging_root.exists() {
             tokio::fs::remove_dir_all(&staging_root)
                 .await
-                .map_err(|_| ResourceStoreError::RenameResourceDir)?;
+                .map_err(|_| Report::new(ResourceStoreError::RenameResourceDir))?;
         }
         let content_root = staging_root.join("content");
         tokio::fs::create_dir_all(&content_root)
             .await
-            .map_err(|_| ResourceStoreError::CreateResourceDir)?;
+            .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
         Ok(InstallPaths {
             install_root,
             staging_root,
@@ -264,7 +308,7 @@ impl ResourceStore {
         id: ResourceId,
         created_by_node: ClusterNodeName,
         created_at: Timestamp,
-    ) -> Result<PendingInstall, ResourceStoreError> {
+    ) -> Result<PendingInstall, Report<ResourceStoreError>> {
         let paths = self.prepare_install_paths(&id).await?;
         Ok(PendingInstall {
             id,
@@ -279,11 +323,8 @@ impl ResourceStore {
     async fn finalize_install(
         &self,
         install: PendingInstall,
-    ) -> Result<ResourceManifest, ResourceStoreError> {
-        let content_root = install.content_root.clone();
-        let entries = tokio::task::spawn_blocking(move || collect_manifest_entries(&content_root))
-            .await
-            .map_err(|_| ResourceStoreError::JoinBlockingTask)??;
+    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
+        let entries = self.manifest_entries(install.content_root.clone()).await?;
         let root_checksum = write_archive_file(
             &install.content_root,
             &entries,
@@ -299,7 +340,7 @@ impl ResourceStore {
         install: PendingInstall,
         root_checksum: String,
         entries: Vec<ResourceManifestEntry>,
-    ) -> Result<ResourceManifest, ResourceStoreError> {
+    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
         let total_bytes = entries.iter().map(|entry| entry.content.size()).sum();
         let file_count = entries
             .iter()
@@ -319,19 +360,19 @@ impl ResourceStore {
         let manifest = ResourceManifest { resource, entries };
         let manifest_path = install.staging_root.join("manifest.json");
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-            .map_err(|_| ResourceStoreError::SerializeManifest)?;
+            .map_err(|_| Report::new(ResourceStoreError::SerializeManifest))?;
         tokio::fs::write(&manifest_path, manifest_bytes)
             .await
-            .map_err(|_| ResourceStoreError::WriteManifest)?;
+            .map_err(|_| Report::new(ResourceStoreError::WriteManifest))?;
 
         if let Some(parent) = install.install_root.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|_| ResourceStoreError::CreateResourceDir)?;
+                .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
         }
         tokio::fs::rename(&install.staging_root, &install.install_root)
             .await
-            .map_err(|_| ResourceStoreError::RenameResourceDir)?;
+            .map_err(|_| Report::new(ResourceStoreError::RenameResourceDir))?;
         Ok(manifest)
     }
 }
@@ -340,10 +381,10 @@ async fn write_archive_file(
     root: &Path,
     entries: &[ResourceManifestEntry],
     destination: &Path,
-) -> Result<String, ResourceStoreError> {
+) -> Result<String, Report<ResourceStoreError>> {
     let file = tokio::fs::File::create(destination)
         .await
-        .map_err(|_| ResourceStoreError::WriteArchive)?;
+        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
     let mut archive = AsyncTarBuilder::new(file);
     archive.mode(HeaderMode::Deterministic);
 
@@ -364,13 +405,13 @@ async fn write_archive_file(
                 archive
                     .append_data(&mut header, entry_path, tokio::io::empty())
                     .await
-                    .map_err(|_| ResourceStoreError::WriteArchive)?;
+                    .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
             }
             ResourceEntryContent::File { .. } => {
                 let path = root.join(entry_path);
                 let size = tokio::fs::metadata(&path)
                     .await
-                    .map_err(|_| ResourceStoreError::ReadFile)?
+                    .map_err(|_| Report::new(ResourceStoreError::ReadFile))?
                     .len();
                 header.set_size(size);
                 header.set_mode(0o644);
@@ -378,11 +419,11 @@ async fn write_archive_file(
                 header.set_cksum();
                 let file = tokio::fs::File::open(&path)
                     .await
-                    .map_err(|_| ResourceStoreError::ReadFile)?;
+                    .map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
                 archive
                     .append_data(&mut header, entry_path, file)
                     .await
-                    .map_err(|_| ResourceStoreError::WriteArchive)?;
+                    .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
             }
         }
     }
@@ -390,22 +431,25 @@ async fn write_archive_file(
     let _file = archive
         .into_inner()
         .await
-        .map_err(|_| ResourceStoreError::WriteArchive)?;
+        .map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
     checksum_path(destination).await
 }
 
-async fn unpack_archive_path(path: &Path, destination: &Path) -> Result<(), ResourceStoreError> {
+async fn unpack_archive_path(
+    path: &Path,
+    destination: &Path,
+) -> Result<(), Report<ResourceStoreError>> {
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(|_| ResourceStoreError::ReadArchive)?;
+        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
     let archive = AsyncTarArchive::new(file);
     archive
         .unpack(destination)
         .await
-        .map_err(|_| ResourceStoreError::InvalidArchive)
+        .map_err(|_| Report::new(ResourceStoreError::InvalidArchive))
 }
 
-fn sanitize_relative_path(path: &str) -> Result<PathBuf, ResourceStoreError> {
+fn sanitize_relative_path(path: &str) -> Result<PathBuf, Report<ResourceStoreError>> {
     let candidate = Path::new(path);
     let mut clean = PathBuf::new();
     for component in candidate.components() {
@@ -413,7 +457,7 @@ fn sanitize_relative_path(path: &str) -> Result<PathBuf, ResourceStoreError> {
             Component::Normal(part) => clean.push(part),
             Component::CurDir => {}
             Component::RootDir | Component::ParentDir | Component::Prefix(_) => {
-                return Err(ResourceStoreError::InvalidResourcePath);
+                return Err(Report::new(ResourceStoreError::InvalidResourcePath));
             }
         }
     }
@@ -423,17 +467,17 @@ fn sanitize_relative_path(path: &str) -> Result<PathBuf, ResourceStoreError> {
 async fn copy_directory_recursive(
     source: &Path,
     destination: &Path,
-) -> Result<(), ResourceStoreError> {
+) -> Result<(), Report<ResourceStoreError>> {
     tokio::fs::create_dir_all(destination)
         .await
-        .map_err(|_| ResourceStoreError::CreateResourceDir)?;
+        .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
     let mut entries = tokio::fs::read_dir(source)
         .await
-        .map_err(|_| ResourceStoreError::ReadDirectory)?;
+        .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
     while let Some(entry) = entries
         .next_entry()
         .await
-        .map_err(|_| ResourceStoreError::ReadDirectory)?
+        .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?
     {
         tokio::task::consume_budget().await;
         let source_path = entry.path();
@@ -441,26 +485,29 @@ async fn copy_directory_recursive(
         let file_type = entry
             .file_type()
             .await
-            .map_err(|_| ResourceStoreError::ReadDirectory)?;
+            .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
         if file_type.is_dir() {
             Box::pin(copy_directory_recursive(&source_path, &destination_path)).await?;
         } else if file_type.is_file() {
             if let Some(parent) = destination_path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|_| ResourceStoreError::CreateResourceDir)?;
+                    .map_err(|_| Report::new(ResourceStoreError::CreateResourceDir))?;
             }
             tokio::fs::copy(&source_path, &destination_path)
                 .await
-                .map_err(|_| ResourceStoreError::ReadFile)?;
+                .map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
         }
     }
     Ok(())
 }
 
-fn collect_manifest_entries(root: &Path) -> Result<Vec<ResourceManifestEntry>, ResourceStoreError> {
+fn collect_manifest_entries(
+    root: &Path,
+    cancellation: &Cancellation,
+) -> Result<Vec<ResourceManifestEntry>, Report<ResourceStoreError>> {
     let mut entries = Vec::new();
-    collect_manifest_entries_recursive(root, root, &mut entries)?;
+    collect_manifest_entries_recursive(root, root, &mut entries, cancellation)?;
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
 }
@@ -469,13 +516,20 @@ fn collect_manifest_entries_recursive(
     root: &Path,
     current: &Path,
     entries: &mut Vec<ResourceManifestEntry>,
-) -> Result<(), ResourceStoreError> {
-    for entry in fs::read_dir(current).map_err(|_| ResourceStoreError::ReadDirectory)? {
-        let entry = entry.map_err(|_| ResourceStoreError::ReadDirectory)?;
+    cancellation: &Cancellation,
+) -> Result<(), Report<ResourceStoreError>> {
+    for entry in
+        fs::read_dir(current).map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?
+    {
+        // One directory entry is the bounded unit this work is cancelled between.
+        cancellation
+            .check()
+            .map_err(|_| Report::new(ResourceStoreError::Cancelled))?;
+        let entry = entry.map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
         let path = entry.path();
         let file_type = entry
             .file_type()
-            .map_err(|_| ResourceStoreError::ReadDirectory)?;
+            .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?;
         let relative = path
             .strip_prefix(root)
             .verified("the walk only yields entries below the root it started from")
@@ -486,11 +540,11 @@ fn collect_manifest_entries_recursive(
                 path: relative.clone(),
                 content: ResourceEntryContent::Directory,
             });
-            collect_manifest_entries_recursive(root, &path, entries)?;
+            collect_manifest_entries_recursive(root, &path, entries, cancellation)?;
         } else if file_type.is_file() {
             let size = entry
                 .metadata()
-                .map_err(|_| ResourceStoreError::ReadFile)?
+                .map_err(|_| Report::new(ResourceStoreError::ReadFile))?
                 .len();
             entries.push(ResourceManifestEntry {
                 path: relative,
@@ -504,14 +558,14 @@ fn collect_manifest_entries_recursive(
     Ok(())
 }
 
-fn checksum_file(path: &Path) -> Result<String, ResourceStoreError> {
-    let mut file = fs::File::open(path).map_err(|_| ResourceStoreError::ReadFile)?;
+fn checksum_file(path: &Path) -> Result<String, Report<ResourceStoreError>> {
+    let mut file = fs::File::open(path).map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
     let mut hasher = Hasher::new();
     let mut buffer = [0u8; 8192];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|_| ResourceStoreError::ReadFile)?;
+            .map_err(|_| Report::new(ResourceStoreError::ReadFile))?;
         if read == 0 {
             break;
         }
@@ -521,10 +575,10 @@ fn checksum_file(path: &Path) -> Result<String, ResourceStoreError> {
     Ok(encode_hex(hash.as_bytes()))
 }
 
-async fn checksum_path(path: &Path) -> Result<String, ResourceStoreError> {
+async fn checksum_path(path: &Path) -> Result<String, Report<ResourceStoreError>> {
     let mut file = tokio::fs::File::open(path)
         .await
-        .map_err(|_| ResourceStoreError::ReadArchive)?;
+        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
     let mut hasher = Hasher::new();
     let mut buffer = [0u8; 8192];
     loop {
@@ -532,7 +586,7 @@ async fn checksum_path(path: &Path) -> Result<String, ResourceStoreError> {
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(|_| ResourceStoreError::ReadArchive)?;
+            .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
         if read == 0 {
             break;
         }
@@ -542,8 +596,11 @@ async fn checksum_path(path: &Path) -> Result<String, ResourceStoreError> {
     Ok(encode_hex(hash.as_bytes()))
 }
 
-fn manifest_checksum(entries: &[ResourceManifestEntry]) -> Result<String, ResourceStoreError> {
-    let bytes = serde_json::to_vec(entries).map_err(|_| ResourceStoreError::SerializeManifest)?;
+fn manifest_checksum(
+    entries: &[ResourceManifestEntry],
+) -> Result<String, Report<ResourceStoreError>> {
+    let bytes = serde_json::to_vec(entries)
+        .map_err(|_| Report::new(ResourceStoreError::SerializeManifest))?;
     let mut hasher = Hasher::new();
     hasher.update(&bytes);
     let hash = hasher.finalize();
@@ -561,6 +618,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use nervix_execution::Executor;
     use nervix_models::{ClusterNodeName, DomainName, ResourceId, ResourceName, Timestamp};
     use tempfile::{NamedTempFile, tempdir};
 
@@ -588,7 +646,8 @@ mod tests {
         .expect("proto file should be written");
 
         let install_root = tempdir().expect("install tempdir");
-        let store = ResourceStore::open(install_root.path()).expect("store should open");
+        let store = ResourceStore::open(install_root.path(), Executor::default())
+            .expect("store should open");
         let manifest = store
             .install_from_directory(
                 resource_id("tenant", "fraud_model", 1),
@@ -639,7 +698,8 @@ mod tests {
         .expect("proto file should be written");
 
         let install_root = tempdir().expect("install tempdir");
-        let store = ResourceStore::open(install_root.path()).expect("store should open");
+        let store = ResourceStore::open(install_root.path(), Executor::default())
+            .expect("store should open");
         let source_id = resource_id("tenant", "fraud_model", 1);
         let source_manifest = store
             .install_from_directory(
@@ -704,7 +764,8 @@ mod tests {
         .expect("proto file should be written");
 
         let install_root = tempdir().expect("install tempdir");
-        let store = ResourceStore::open(install_root.path()).expect("store should open");
+        let store = ResourceStore::open(install_root.path(), Executor::default())
+            .expect("store should open");
         let source_id = resource_id("tenant", "fraud_model", 1);
         let source_manifest = store
             .install_from_directory(
@@ -747,11 +808,15 @@ mod tests {
     #[test]
     fn resolve_content_path_rejects_parent_segments() {
         let install_root = tempdir().expect("install tempdir");
-        let store = ResourceStore::open(install_root.path()).expect("store should open");
+        let store = ResourceStore::open(install_root.path(), Executor::default())
+            .expect("store should open");
 
         let err = store
             .resolve_content_path(&resource_id("tenant", "fraud_model", 7), "../escape")
             .expect_err("parent segments must be rejected");
-        assert!(matches!(err, ResourceStoreError::InvalidResourcePath));
+        assert!(matches!(
+            err.current_context(),
+            ResourceStoreError::InvalidResourcePath
+        ));
     }
 }

@@ -85,6 +85,7 @@ use nervix_consensus::{
     VoteRequest as RaftVoteRequest,
 };
 use nervix_dataflow_graph::{DataflowGraph, DataflowNodeHealth, DataflowNodeStatus};
+use nervix_execution::MemoryClass;
 use nervix_interconnect::{
     ControlEnvelope, DataflowNodeStatusEnvelope,
     DataflowNodeStatusRequest as RemoteDataflowNodeStatusRequest,
@@ -3118,7 +3119,9 @@ enum PendingClusterCommand {
     EntityGateRelease(oneshot::Sender<Result<(), String>>),
     DescribeMetrics(oneshot::Sender<Result<RemoteDescribeMetricsEnvelope, String>>),
     DescribeLookup(oneshot::Sender<Result<LookupDescribeEnvelope, String>>),
-    LookupQuery(oneshot::Sender<Result<Option<runtime_schema::RuntimeRecordBatch>, String>>),
+    /// The remote lookup's encoded Arrow body. The waiting caller decodes it, because
+    /// decoding is admitted work and the interconnect reader must not perform it.
+    LookupQuery(oneshot::Sender<Result<Option<Vec<u8>>, String>>),
     SubscriptionInterestVisibility(oneshot::Sender<bool>),
 }
 
@@ -8084,7 +8087,8 @@ impl SessionServiceImpl {
             }
             match tokio::time::timeout(Duration::from_secs(5), rx).await {
                 Ok(Ok(result)) => match result {
-                    Ok(record) => return Ok(record),
+                    Ok(None) => return Ok(None),
+                    Ok(Some(bytes)) => return self.decode_lookup_record(bytes).await.map(Some),
                     Err(message) => errors.push(message),
                 },
                 Ok(Err(_)) => errors.push("lookup response channel closed".to_string()),
@@ -8120,17 +8124,26 @@ impl SessionServiceImpl {
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let result = match response.result {
-                Ok(Some(bytes)) => {
-                    runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes).map(Some)
-                }
-                Ok(None) => Ok(None),
-                Err(error) => Err(error),
-            };
             sender
-                .send(result)
+                .send(response.result)
                 .means_peer_left("lookup query requester");
         }
+    }
+
+    /// Decode one remote lookup answer through the node's admission, so a large answer is charged
+    /// and runs off the async workers like every other body.
+    async fn decode_lookup_record(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<runtime_schema::RuntimeRecordBatch, String> {
+        let executor = self.inner.runtime.executor();
+        let body = executor
+            .charge_owned(MemoryClass::Commands, bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        runtime_schema::RuntimeRecordBatch::decode_arrow_ipc(executor, body)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// The configuration this session's bound transaction has queued for `domain`. Queued
@@ -17899,16 +17912,25 @@ fn web_console_advertise_url(
     format!("{scheme}://{addr}")
 }
 
+/// What a scenario run records beyond the node's own default.
+///
+/// The interconnect reports why a connection attempt failed at `debug`: a refused dial, a setup
+/// deadline, a rejected handshake. A scenario that fails on "peer never became connected" is
+/// undiagnosable without those lines — the cluster status only says the peer is unavailable, not
+/// what went wrong reaching it — and the failures that need them appear under whole-suite load,
+/// where re-running the feature alone does not reproduce them. They are per connection event
+/// rather than per message, so keeping them on costs a handful of lines per scenario.
+const TEST_TRACE_FILTER: &str = "nervix_interconnect=debug";
+
 pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let file = Arc::new(ParkingMutex::new(file));
     let make_writer = BoxMakeWriter::new(move || SharedFileWriter(file.clone()));
     fmt()
         .with_ansi(false)
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(DEFAULT_TRACE_FILTER)),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}"))
+        }))
         .with_writer(make_writer)
         .try_init()
         .discarded(
@@ -18171,12 +18193,6 @@ impl Application {
                 err
             })
             .change_context(AppError::OpenRegistry)?;
-        let resource_store = Arc::new(
-            ResourceStore::open(db_path.join("resources")).map_err(|err| {
-                error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
-                Report::new(AppError::OpenResourceStore)
-            })?,
-        );
         let registry = Arc::new(
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
                 Ok(registry) => registry,
@@ -18196,6 +18212,12 @@ impl Application {
             error!(error = %error, "failed to initialize runtime persistence");
             Report::new(AppError::OpenRuntimeState)
         })?;
+        let resource_store = Arc::new(
+            ResourceStore::open(db_path.join("resources"), runtime.executor().clone()).map_err(|err| {
+                error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
+                Report::new(AppError::OpenResourceStore)
+            })?,
+        );
         let mut startup = ApplicationStartup {
             db,
             resource_store,
@@ -18285,6 +18307,7 @@ impl Application {
             interconnect_identity,
             peer_verifier,
             Default::default(),
+            startup.runtime.executor().clone(),
         )
         .await
         .change_context(AppError::StartInterconnect);
@@ -18350,6 +18373,9 @@ impl Application {
             interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
+        runtime_test_hooks
+            .bulk_execution_occupancy
+            .register(node_id.clone(), runtime.executor().clone());
 
         let cluster_for_reconcile = cluster.clone();
         let consensus_for_reconcile = consensus.proposer();
@@ -19479,7 +19505,17 @@ impl Application {
                                 let result =
                                     service_for_interconnect.handle_lookup_request(request.clone()).await;
                                 let result = match result {
-                                    Ok(Some(record)) => record.to_arrow_ipc_bytes().map(Some),
+                                    Ok(Some(record)) => {
+                                        match record
+                                            .encode_arrow_ipc(
+                                                service_for_interconnect.inner.runtime.executor(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(body) => Ok(Some(body.to_vec())),
+                                            Err(error) => Err(error.to_string()),
+                                        }
+                                    }
                                     Ok(None) => Ok(None),
                                     Err(error) => Err(error),
                                 };
@@ -19908,7 +19944,9 @@ mod tests {
             domain: DomainName::parse("default").expect("valid domain"),
             relay: named("incoming"),
             key: None,
-            batch_ipc: Vec::new(),
+            batch_ipc: nervix_execution::Executor::default()
+                .try_charge_owned(MemoryClass::Relay, Vec::new())
+                .expect("an empty test body always fits the relay class"),
             metadata: Vec::new(),
             acks: Vec::new(),
             admission: None,
@@ -20161,6 +20199,7 @@ mod tests {
             identity,
             verifier,
             Default::default(),
+            nervix_execution::Executor::default(),
         )
         .await
         .expect("test transport should bind");
@@ -20405,7 +20444,11 @@ mod tests {
             &consensus,
             registry.clone(),
             Arc::new(
-                ResourceStore::open(path.join("resources")).expect("resource store should open"),
+                ResourceStore::open(
+                    path.join("resources"),
+                    nervix_execution::Executor::default(),
+                )
+                .expect("resource store should open"),
             ),
             interconnect,
         );
@@ -23350,7 +23393,11 @@ mod tests {
             &consensus,
             registry.clone(),
             Arc::new(
-                ResourceStore::open(path.join("resources")).expect("resource store should open"),
+                ResourceStore::open(
+                    path.join("resources"),
+                    nervix_execution::Executor::default(),
+                )
+                .expect("resource store should open"),
             ),
             interconnect,
         );
@@ -23512,7 +23559,11 @@ mod tests {
             &consensus,
             registry.clone(),
             Arc::new(
-                ResourceStore::open(path.join("resources")).expect("resource store should open"),
+                ResourceStore::open(
+                    path.join("resources"),
+                    nervix_execution::Executor::default(),
+                )
+                .expect("resource store should open"),
             ),
             interconnect,
         );
@@ -23672,7 +23723,11 @@ mod tests {
             &consensus,
             registry.clone(),
             Arc::new(
-                ResourceStore::open(path.join("resources")).expect("resource store should open"),
+                ResourceStore::open(
+                    path.join("resources"),
+                    nervix_execution::Executor::default(),
+                )
+                .expect("resource store should open"),
             ),
             interconnect,
         );
@@ -23805,7 +23860,11 @@ mod tests {
             .await
             .expect("single-node consensus should initialize");
         let resource_store = Arc::new(
-            ResourceStore::open(path.join("resources")).expect("resource store should open"),
+            ResourceStore::open(
+                path.join("resources"),
+                nervix_execution::Executor::default(),
+            )
+            .expect("resource store should open"),
         );
         let source_v1 = path.join("resource-source-v1");
         std::fs::create_dir_all(source_v1.join("nested"))

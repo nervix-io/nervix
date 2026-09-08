@@ -11,18 +11,23 @@ use std::{
     task::{Context, Poll},
 };
 
+use nervix_execution::{ExecutionConfig, Executor, MemoryBudgets, MemoryClass, OperationLimits};
 use tokio::{
-    io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadBuf},
     net::{TcpListener, TcpStream},
     sync::{Notify, mpsc},
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
+use ubyte::ByteUnit;
 
 use super::*;
-use crate::connection::{
-    ReconnectBackoff, drive_connection, establish_outbound_connection, exchange_introductions,
-    register_connected_peer, unregister_connected_peer,
+use crate::{
+    connection::{
+        ReconnectBackoff, drive_connection, establish_outbound_connection, exchange_introductions,
+        register_connected_peer, unregister_connected_peer,
+    },
+    wire::{QueuedFrame, WireEnvelope, encode_frame, read_wire_envelope, write_wire_envelope},
 };
 
 #[derive(Default)]
@@ -112,12 +117,32 @@ impl AsyncWrite for ObservedIo {
     }
 }
 
-fn framed_wire_bytes(envelope: &WireEnvelope) -> Vec<u8> {
-    let payload = encode_wire_envelope(envelope).expect("test wire envelope should encode");
+async fn framed_wire_bytes(executor: &Executor, envelope: WireEnvelope) -> Vec<u8> {
+    let wire = encode_frame(executor, envelope)
+        .await
+        .expect("test wire envelope should encode");
+    let mut payload = wire.header().to_vec();
+    if let Some(body) = wire.body() {
+        payload.extend_from_slice(body);
+    }
     let frame_size = u32::try_from(payload.len()).expect("test frame should fit in u32");
     let mut frame = frame_size.to_be_bytes().to_vec();
     frame.extend(payload);
     frame
+}
+
+/// Queue an already-encoded frame the way the connection handle does.
+async fn queue_frame(executor: &Executor, tx: &mpsc::Sender<QueuedFrame>, envelope: WireEnvelope) {
+    let frame = encode_frame(executor, envelope)
+        .await
+        .expect("test wire envelope should encode");
+    let queued = executor
+        .reserve(MemoryClass::Commands, frame.queued_bytes())
+        .await
+        .expect("the commands class has room for a test frame");
+    tx.send(QueuedFrame::new(frame, queued))
+        .await
+        .expect("queue opposite-direction frame");
 }
 
 async fn wait_until_connected(inner: &TransportInner, node: &ClusterNodeName) {
@@ -152,6 +177,7 @@ async fn partial_frame_read_survives_an_opposite_direction_write() {
     let reply_handle = ConnectionHandle::new(
         peer_addr,
         outgoing_tx.clone(),
+        inner.executor.clone(),
         cancel.clone(),
         inner.admission_closed.clone(),
         inner.options.queue_admission_timeout,
@@ -179,20 +205,24 @@ async fn partial_frame_read_survives_an_opposite_direction_write() {
         result
     });
 
-    let introduction = read_wire_envelope(&mut peer_stream, DEFAULT_MAX_FRAME_BYTES)
-        .await
-        .expect("read local introduction");
+    let introduction =
+        read_wire_envelope(&mut peer_stream, &inner.executor, DEFAULT_MAX_FRAME_BYTES)
+            .await
+            .expect("read local introduction");
     assert!(matches!(introduction, WireEnvelope::Introduction(_)));
-    write_wire_envelope(
-        &mut peer_stream,
-        &WireEnvelope::Introduction(identity_b.signed_introduction()),
+    let peer_introduction = encode_frame(
+        &inner.executor,
+        WireEnvelope::Introduction(identity_b.signed_introduction()),
     )
     .await
-    .expect("write peer introduction");
+    .expect("peer introduction should encode");
+    write_wire_envelope(&mut peer_stream, &peer_introduction)
+        .await
+        .expect("write peer introduction");
     wait_until_connected(&inner, identity_b.node_id()).await;
 
-    let expected = Envelope::RelayPayload(dummy_stream_payload("fragmented_read"));
-    let frame = framed_wire_bytes(&WireEnvelope::Payload(expected.clone()));
+    let expected = Envelope::RelayPayload(dummy_stream_payload(&inner.executor, "fragmented_read"));
+    let frame = framed_wire_bytes(&inner.executor, WireEnvelope::Payload(expected.clone())).await;
     let split_at = 12;
     let partial_read_observed = observation.read_observed.notified();
     observation.observe_next_read(true);
@@ -203,12 +233,14 @@ async fn partial_frame_read_survives_an_opposite_direction_write() {
     partial_read_observed.await;
     sleep(PING_INTERVAL + Duration::from_millis(25)).await;
 
-    outgoing_tx
-        .send(Envelope::Control(ControlEnvelope::Terminate))
-        .await
-        .expect("queue opposite-direction frame");
+    queue_frame(
+        &inner.executor,
+        &outgoing_tx,
+        WireEnvelope::Payload(Envelope::Control(ControlEnvelope::Terminate)),
+    )
+    .await;
     loop {
-        match read_wire_envelope(&mut peer_stream, DEFAULT_MAX_FRAME_BYTES)
+        match read_wire_envelope(&mut peer_stream, &inner.executor, DEFAULT_MAX_FRAME_BYTES)
             .await
             .expect("read opposite-direction frame")
         {
@@ -250,6 +282,7 @@ async fn partial_frame_write_survives_an_opposite_direction_read() {
     let reply_handle = ConnectionHandle::new(
         peer_addr,
         outgoing_tx.clone(),
+        inner.executor.clone(),
         cancel.clone(),
         inner.admission_closed.clone(),
         inner.options.queue_admission_timeout,
@@ -277,39 +310,51 @@ async fn partial_frame_write_survives_an_opposite_direction_read() {
         result
     });
 
-    let introduction = read_wire_envelope(&mut peer_stream, DEFAULT_MAX_FRAME_BYTES)
-        .await
-        .expect("read local introduction");
+    let introduction =
+        read_wire_envelope(&mut peer_stream, &inner.executor, DEFAULT_MAX_FRAME_BYTES)
+            .await
+            .expect("read local introduction");
     assert!(matches!(introduction, WireEnvelope::Introduction(_)));
-    write_wire_envelope(
-        &mut peer_stream,
-        &WireEnvelope::Introduction(identity_b.signed_introduction()),
+    let peer_introduction = encode_frame(
+        &inner.executor,
+        WireEnvelope::Introduction(identity_b.signed_introduction()),
     )
     .await
-    .expect("write peer introduction");
+    .expect("peer introduction should encode");
+    write_wire_envelope(&mut peer_stream, &peer_introduction)
+        .await
+        .expect("write peer introduction");
     wait_until_connected(&inner, identity_b.node_id()).await;
 
-    let mut payload = dummy_stream_payload("fragmented_write");
-    payload.batch_ipc = vec![7; 4 * 1024];
+    let mut payload = dummy_stream_payload(&inner.executor, "fragmented_write");
+    payload.batch_ipc = inner
+        .executor
+        .try_charge_owned(MemoryClass::Relay, vec![7; 4 * 1024])
+        .expect("the relay class has room for a test body");
     let expected = Envelope::RelayPayload(payload);
     let partial_write_observed = observation.partial_write_observed.notified();
     observation.observe_next_partial_write();
-    outgoing_tx
-        .send(expected.clone())
-        .await
-        .expect("queue large frame");
+    queue_frame(
+        &inner.executor,
+        &outgoing_tx,
+        WireEnvelope::Payload(expected.clone()),
+    )
+    .await;
     partial_write_observed.await;
     sleep(PING_INTERVAL + Duration::from_millis(25)).await;
 
     let opposite_read_observed = observation.read_observed.notified();
     observation.observe_next_read(false);
-    write_wire_envelope(&mut peer_stream, &WireEnvelope::Ping)
+    let ping = encode_frame(&inner.executor, WireEnvelope::Ping)
+        .await
+        .expect("a ping frame should encode");
+    write_wire_envelope(&mut peer_stream, &ping)
         .await
         .expect("write opposite-direction ping");
     opposite_read_observed.await;
 
     loop {
-        match read_wire_envelope(&mut peer_stream, DEFAULT_MAX_FRAME_BYTES)
+        match read_wire_envelope(&mut peer_stream, &inner.executor, DEFAULT_MAX_FRAME_BYTES)
             .await
             .expect("read large frame without framing corruption")
         {
@@ -331,6 +376,7 @@ async fn partial_frame_write_survives_an_opposite_direction_read() {
 
 #[tokio::test]
 async fn silent_inbound_handshake_cannot_prevent_shutdown() {
+    let executor = Executor::default();
     let identity = test_identity(&ClusterNodeName::parse("node-a").expect("valid name"));
     let (transport, _incoming) = Transport::bind(
         "127.0.0.1:0".parse().expect("valid listen address"),
@@ -339,13 +385,14 @@ async fn silent_inbound_handshake_cannot_prevent_shutdown() {
         identity,
         PeerVerifier::new(|_| None),
         TransportOptions::default(),
+        executor.clone(),
     )
     .await
     .expect("bind transport");
     let mut silent_peer = TcpStream::connect(transport.local_addr())
         .await
         .expect("connect silent peer");
-    let introduction = read_wire_envelope(&mut silent_peer, DEFAULT_MAX_FRAME_BYTES)
+    let introduction = read_wire_envelope(&mut silent_peer, &executor, DEFAULT_MAX_FRAME_BYTES)
         .await
         .expect("server should begin its handshake");
     assert!(matches!(introduction, WireEnvelope::Introduction(_)));
@@ -357,6 +404,7 @@ async fn silent_inbound_handshake_cannot_prevent_shutdown() {
 
 #[tokio::test]
 async fn peer_departure_releases_its_outbound_connection_permit() {
+    let executor = Executor::default();
     let options = TransportOptions {
         max_connections: 1,
         ..TransportOptions::default()
@@ -374,6 +422,7 @@ async fn peer_departure_releases_its_outbound_connection_permit() {
         identity_a.clone(),
         verifier_for(&[&identity_b, &identity_c]),
         options.clone(),
+        executor.clone(),
     )
     .await
     .expect("bind transport a");
@@ -390,6 +439,7 @@ async fn peer_departure_releases_its_outbound_connection_permit() {
         identity_c,
         verifier_for(&[&identity_a]),
         options,
+        executor.clone(),
     )
     .await
     .expect("bind transport c");
@@ -401,7 +451,7 @@ async fn peer_departure_releases_its_outbound_connection_permit() {
             departed_addr,
             "localhost",
             TransportMode::Plain,
-            Envelope::RelayPayload(dummy_stream_payload("before_departure")),
+            Envelope::RelayPayload(dummy_stream_payload(&executor, "before_departure")),
         )
         .await
         .expect("queue data while the first peer's introduction is incomplete");
@@ -416,7 +466,7 @@ async fn peer_departure_releases_its_outbound_connection_permit() {
                     transport_c.local_addr(),
                     "localhost",
                     TransportMode::Plain,
-                    Envelope::RelayPayload(dummy_stream_payload("after_departure")),
+                    Envelope::RelayPayload(dummy_stream_payload(&executor, "after_departure")),
                 )
                 .await
             {
@@ -431,7 +481,7 @@ async fn peer_departure_releases_its_outbound_connection_permit() {
     let received = recv_one(&mut incoming_c).await;
     assert_eq!(
         received.envelope,
-        Envelope::RelayPayload(dummy_stream_payload("after_departure"))
+        Envelope::RelayPayload(dummy_stream_payload(&executor, "after_departure"))
     );
 
     transport_a.shutdown().await;
@@ -441,6 +491,7 @@ async fn peer_departure_releases_its_outbound_connection_permit() {
 
 #[tokio::test]
 async fn repeated_address_replacement_reaps_drivers_and_reuses_the_permit() {
+    let executor = Executor::default();
     let options = TransportOptions {
         max_connections: 1,
         ..TransportOptions::default()
@@ -456,6 +507,7 @@ async fn repeated_address_replacement_reaps_drivers_and_reuses_the_permit() {
         identity_a.clone(),
         verifier_for(&[&identity_b]),
         options.clone(),
+        executor.clone(),
     )
     .await
     .expect("bind transport a");
@@ -471,6 +523,7 @@ async fn repeated_address_replacement_reaps_drivers_and_reuses_the_permit() {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options.clone(),
+            executor.clone(),
         )
         .await
         .expect("bind replacement peer");
@@ -488,7 +541,7 @@ async fn repeated_address_replacement_reaps_drivers_and_reuses_the_permit() {
                         target.addr,
                         &target.server_name,
                         target.mode,
-                        Envelope::RelayPayload(dummy_stream_payload("replacement")),
+                        Envelope::RelayPayload(dummy_stream_payload(&executor, "replacement")),
                     )
                     .await
                 {
@@ -503,7 +556,7 @@ async fn repeated_address_replacement_reaps_drivers_and_reuses_the_permit() {
         let received = recv_one(&mut incoming).await;
         assert_eq!(
             received.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("replacement")),
+            Envelope::RelayPayload(dummy_stream_payload(&executor, "replacement")),
             "replacement {replacement} should receive exactly one payload"
         );
         timeout(Duration::from_secs(2), async {
@@ -530,10 +583,12 @@ async fn repeated_address_replacement_reaps_drivers_and_reuses_the_permit() {
 
 #[tokio::test]
 async fn send_queue_admission_is_deadline_bound() {
+    let executor = Executor::default();
     let (tx, _rx) = mpsc::channel(1);
     let handle = ConnectionHandle::new(
         "127.0.0.1:12345".parse().expect("valid peer address"),
         tx,
+        executor.clone(),
         CancellationToken::new(),
         CancellationToken::new(),
         Duration::from_millis(25),
@@ -552,8 +607,70 @@ async fn send_queue_admission_is_deadline_bound() {
     ));
 }
 
+/// A peer that never drains its connection cannot make the node hold more queued bytes than the
+/// class backing them, however many item slots the queue still has.
+#[tokio::test]
+async fn a_consumer_that_never_drains_is_stopped_by_the_queue_byte_budget() {
+    let limits = OperationLimits {
+        relay_encoded_bytes: ByteUnit::Kibibyte(64),
+        relay_decoded_bytes: ByteUnit::Kibibyte(64),
+        relay_scratch_bytes: ByteUnit::Kibibyte(64),
+        ..OperationLimits::default()
+    };
+    let executor = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            relay: ByteUnit::Kibibyte(384),
+            ..MemoryBudgets::default()
+        },
+        limits,
+        ..ExecutionConfig::default()
+    })
+    .expect("a relay budget holding two maximum operations is valid");
+    // The item budget is far larger than the byte budget, so only the byte budget can stop this.
+    let (tx, _rx) = mpsc::channel(1024);
+    let handle = ConnectionHandle::new(
+        "127.0.0.1:12345".parse().expect("valid peer address"),
+        tx,
+        executor.clone(),
+        CancellationToken::new(),
+        CancellationToken::new(),
+        Duration::from_millis(25),
+    );
+
+    let mut queued = 0_u64;
+    // Bounded so a class that never fills fails the test instead of looping forever.
+    for _ in 0..64 {
+        let Ok(body) = executor.try_charge_owned(MemoryClass::Relay, vec![9; 32 * 1024]) else {
+            break;
+        };
+        let mut payload = dummy_stream_payload(&executor, "never_drained");
+        payload.batch_ipc = body;
+        let Ok(()) = handle.send(Envelope::RelayPayload(payload)).await else {
+            break;
+        };
+        queued += 32 * 1024;
+        assert!(
+            queued <= ByteUnit::Kibibyte(384).as_u64(),
+            "the queue grew past the class that backs it"
+        );
+    }
+
+    assert!(queued > 0, "the queue accepted at least one frame");
+    assert!(
+        executor.snapshot().relay_memory.reserved_bytes > 0,
+        "the frames that were admitted still hold the bytes they occupy"
+    );
+    assert!(
+        executor
+            .try_reserve(MemoryClass::Relay, ByteUnit::Kibibyte(64).as_u64())
+            .is_err(),
+        "a consumer that never drains leaves no relay capacity for another maximum-size operation"
+    );
+}
+
 #[tokio::test]
 async fn silent_outbound_tls_handshake_reaches_the_setup_deadline() {
+    let executor = Executor::default();
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind silent tls peer");
@@ -574,6 +691,7 @@ async fn silent_outbound_tls_handshake_reaches_the_setup_deadline() {
         identity,
         PeerVerifier::new(|_| None),
         options,
+        executor.clone(),
     )
     .await
     .expect("bind transport");
@@ -605,6 +723,7 @@ async fn silent_outbound_tls_handshake_reaches_the_setup_deadline() {
 
 #[tokio::test]
 async fn outbound_connection_rejects_a_different_authenticated_peer() {
+    let executor = Executor::default();
     let node_a = ClusterNodeName::parse("node-a").expect("valid name");
     let node_b = ClusterNodeName::parse("node-b").expect("valid name");
     let node_c = ClusterNodeName::parse("node-c").expect("valid name");
@@ -618,6 +737,7 @@ async fn outbound_connection_rejects_a_different_authenticated_peer() {
         identity_a.clone(),
         verifier_for(&[&identity_b, &identity_c]),
         TransportOptions::default(),
+        executor.clone(),
     )
     .await
     .expect("bind transport a");
@@ -628,6 +748,7 @@ async fn outbound_connection_rejects_a_different_authenticated_peer() {
         identity_c,
         verifier_for(&[&identity_a]),
         TransportOptions::default(),
+        executor.clone(),
     )
     .await
     .expect("bind transport c");
@@ -638,7 +759,7 @@ async fn outbound_connection_rejects_a_different_authenticated_peer() {
             transport_c.local_addr(),
             "localhost",
             TransportMode::Plain,
-            Envelope::RelayPayload(dummy_stream_payload("wrong_peer")),
+            Envelope::RelayPayload(dummy_stream_payload(&executor, "wrong_peer")),
         )
         .await
         .expect("queue data for the expected peer");

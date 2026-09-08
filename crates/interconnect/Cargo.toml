@@ -17,6 +17,7 @@ error-stack = { workspace = true }
 fastrand = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
 parking_lot = { workspace = true }
@@ -34,3 +35,4 @@ triomphe = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ubyte = { workspace = true }

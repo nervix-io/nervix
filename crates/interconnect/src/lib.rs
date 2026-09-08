@@ -22,15 +22,15 @@ use std::{
 };
 
 use ahash::HashMap;
-use arch_into::ArchInto as _;
 use dashmap::{DashMap, mapref::entry::Entry};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use meticulous::ResultExt as _;
+use nervix_execution::{ChargedBytes, Executor};
 use nervix_models::{
     ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
     LookupName, ModelKind, ModelName, NodeRef, RelayName, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeElementValue, RemoteRuntimeField,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, ResourceName, SubscriptionBinding, Timestamp,
+    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
+    SubscriptionBinding, Timestamp,
 };
 use nervix_recovery::{Discarded as _, Reported as _};
 use rand_core::OsRng;
@@ -44,7 +44,6 @@ use rustls_pki_types::pem::{Error as PemError, PemObject};
 use strum::{FromRepr, IntoStaticStr};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Semaphore, mpsc},
     time::timeout,
@@ -55,6 +54,7 @@ use triomphe::Arc;
 
 mod connection;
 mod request;
+mod wire;
 
 #[cfg(test)]
 use connection::{connect_outbound_stream, drive_connection, exchange_introductions};
@@ -67,6 +67,7 @@ pub use request::{
     RequestError,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
+use wire::{QueuedFrame, WireEnvelope};
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEND_QUEUE_CAPACITY: usize = 1024;
@@ -206,7 +207,10 @@ pub struct RelayPayload {
     pub domain: DomainName,
     pub relay: RelayName,
     pub key: Option<Vec<RemoteRuntimeField>>,
-    pub batch_ipc: Vec<u8>,
+    /// The batch's Arrow IPC body, encoded once and shared. Every destination in a fanout and
+    /// every retry of one delivery carries this same allocation, charged once, and writes a slice
+    /// of it to its socket.
+    pub batch_ipc: ChargedBytes,
     pub metadata: Vec<RemoteRuntimeRecordMetadata>,
     pub acks: Vec<Option<RemoteAckRegistration>>,
     pub admission: Option<RemoteAckRegistration>,
@@ -636,7 +640,9 @@ pub struct ReceivedEnvelope {
 #[derive(Debug)]
 struct ConnectionHandleInner {
     peer_addr: SocketAddr,
-    tx: mpsc::Sender<Envelope>,
+    tx: mpsc::Sender<QueuedFrame>,
+    /// The admission every frame is serialized and charged through before it joins the queue.
+    executor: Executor,
     connection_cancel: CancellationToken,
     admission_closed: CancellationToken,
     queue_admission_timeout: Duration,
@@ -650,7 +656,8 @@ pub struct ConnectionHandle {
 impl ConnectionHandle {
     fn new(
         peer_addr: SocketAddr,
-        tx: mpsc::Sender<Envelope>,
+        tx: mpsc::Sender<QueuedFrame>,
+        executor: Executor,
         connection_cancel: CancellationToken,
         admission_closed: CancellationToken,
         queue_admission_timeout: Duration,
@@ -659,6 +666,7 @@ impl ConnectionHandle {
             inner: Arc::new(ConnectionHandleInner {
                 peer_addr,
                 tx,
+                executor,
                 connection_cancel,
                 admission_closed,
                 queue_admission_timeout,
@@ -666,6 +674,13 @@ impl ConnectionHandle {
         }
     }
 
+    /// Serialize `envelope`, charge the bytes it will occupy, and queue the resulting frame.
+    ///
+    /// Serialization happens here, on the executor, rather than on the connection driver: the
+    /// driver only ever writes bytes that already exist, and the queue holds a frame whose exact
+    /// size is known and charged. Every wait inside — for the budget, for a worker, for a queue
+    /// slot — is covered by one admission deadline, so a peer that stops reading cannot make a
+    /// caller wait forever for capacity its own unwritten frames are holding.
     pub async fn send(&self, envelope: Envelope) -> Result<(), TransportError> {
         if self.inner.admission_closed.is_cancelled() {
             return Err(TransportError::ShuttingDown);
@@ -680,10 +695,26 @@ impl ConnectionHandle {
             _ = self.inner.connection_cancel.cancelled() => {
                 Err(TransportError::Closed(self.inner.peer_addr))
             }
-            result = timeout(self.inner.queue_admission_timeout, self.inner.tx.send(envelope)) => {
+            // Admission in the order the execution policy requires: serialize under a charge,
+            // charge the bytes the frame will occupy while it waits, then take the queue slot.
+            result = timeout(self.inner.queue_admission_timeout, async {
+                let frame =
+                    wire::encode_frame(&self.inner.executor, WireEnvelope::Payload(envelope))
+                        .await?;
+                let queued = self
+                    .inner
+                    .executor
+                    .reserve(frame.memory_class(), frame.queued_bytes())
+                    .await
+                    .map_err(|error| TransportError::Encode(error.to_string()))?;
+                self.inner
+                    .tx
+                    .send(QueuedFrame::new(frame, queued))
+                    .await
+                    .map_err(|_| TransportError::Closed(self.inner.peer_addr))
+            }) => {
                 match result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(_)) => Err(TransportError::Closed(self.inner.peer_addr)),
+                    Ok(outcome) => outcome,
                     Err(_) => Err(TransportError::QueueAdmissionTimeout {
                         peer: self.inner.peer_addr,
                         timeout: self.inner.queue_admission_timeout,
@@ -712,6 +743,10 @@ pub struct Transport {
 }
 
 struct TransportInner {
+    /// The node's bounded execution and memory admission. Every variable-size encode and decode
+    /// this transport performs is submitted through it, so none of them runs on an async worker
+    /// and none of them allocates before it is charged.
+    executor: Executor,
     mode: TransportMode,
     client_config: Option<StdArc<ClientConfig>>,
     server_config: Option<StdArc<ServerConfig>>,
@@ -889,13 +924,6 @@ impl SignedIntroduction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum WireEnvelope {
-    Introduction(SignedIntroduction),
-    Ping,
-    Payload(Envelope),
-}
-
 impl Transport {
     pub async fn bind(
         listen_addr: SocketAddr,
@@ -904,6 +932,7 @@ impl Transport {
         identity: LocalIdentity,
         peer_verifier: PeerVerifier,
         options: TransportOptions,
+        executor: Executor,
     ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
         if let Some(error) = options.validation_error() {
             return Err(error);
@@ -919,6 +948,7 @@ impl Transport {
             None => (None, None),
         };
         let inner = Arc::new(TransportInner {
+            executor,
             mode,
             client_config,
             server_config,
@@ -999,6 +1029,7 @@ impl Transport {
                 let handle = ConnectionHandle::new(
                     target,
                     tx,
+                    self.inner.executor.clone(),
                     cancel.clone(),
                     self.inner.admission_closed.clone(),
                     self.inner.options.queue_admission_timeout,
@@ -1172,693 +1203,6 @@ fn configure_socket(stream: &TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)
 }
 
-async fn write_wire_envelope<W>(
-    writer: &mut W,
-    envelope: &WireEnvelope,
-) -> Result<(), TransportError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let bytes = encode_wire_envelope(envelope)?;
-    let frame_size = u32::try_from(bytes.len()).map_err(|_| {
-        TransportError::Encode(format!(
-            "wire envelope length {} exceeds u32::MAX",
-            bytes.len()
-        ))
-    })?;
-    writer
-        .write_u32(frame_size)
-        .await
-        .map_err(TransportError::Io)?;
-    writer.write_all(&bytes).await.map_err(TransportError::Io)?;
-    writer.flush().await.map_err(TransportError::Io)
-}
-
-async fn read_wire_envelope<R>(
-    reader: &mut R,
-    max_frame_bytes: usize,
-) -> Result<WireEnvelope, TransportError>
-where
-    R: AsyncRead + Unpin,
-{
-    let frame_size = reader
-        .read_u32()
-        .await
-        .map_err(TransportError::Io)?
-        .arch_into();
-    if frame_size > max_frame_bytes {
-        return Err(TransportError::FrameTooLarge {
-            size: frame_size,
-            limit: max_frame_bytes,
-        });
-    }
-    let mut bytes = vec![0u8; frame_size];
-    reader
-        .read_exact(&mut bytes)
-        .await
-        .map_err(TransportError::Io)?;
-    decode_wire_envelope(&bytes)
-}
-
-async fn read_and_verify_introduction<R>(
-    reader: &mut R,
-    max_frame_bytes: usize,
-    verifier: &PeerVerifier,
-) -> Result<ClusterNodeName, TransportError>
-where
-    R: AsyncRead + Unpin,
-{
-    match read_wire_envelope(reader, max_frame_bytes).await? {
-        WireEnvelope::Introduction(intro) => intro.verify(verifier),
-        WireEnvelope::Ping => Err(TransportError::InvalidHandshake(
-            "first message must be an introduction".to_string(),
-        )),
-        WireEnvelope::Payload(_) => Err(TransportError::InvalidHandshake(
-            "first message must be an introduction".to_string(),
-        )),
-    }
-}
-
-fn encode_wire_envelope(envelope: &WireEnvelope) -> Result<Vec<u8>, TransportError> {
-    match envelope {
-        WireEnvelope::Introduction(intro) => {
-            let mut bytes = vec![WIRE_TAG_INTRODUCTION];
-            bytes.extend(
-                rkyv::to_bytes::<rkyv::rancor::Error>(intro)
-                    .map(|value| value.to_vec())
-                    .map_err(|err| TransportError::Encode(err.to_string()))?,
-            );
-            Ok(bytes)
-        }
-        WireEnvelope::Ping => Ok(vec![WIRE_TAG_PING]),
-        WireEnvelope::Payload(Envelope::RelayPayload(payload)) => {
-            let mut bytes = vec![WIRE_TAG_RELAY_PAYLOAD];
-            encode_stream_payload(payload, &mut bytes)?;
-            Ok(bytes)
-        }
-        WireEnvelope::Payload(Envelope::Ack(ack)) => {
-            let mut bytes = vec![WIRE_TAG_ACK];
-            bytes.extend(
-                rkyv::to_bytes::<rkyv::rancor::Error>(ack)
-                    .map(|value| value.to_vec())
-                    .map_err(|err| TransportError::Encode(err.to_string()))?,
-            );
-            Ok(bytes)
-        }
-        WireEnvelope::Payload(Envelope::Control(control)) => {
-            let mut bytes = vec![WIRE_TAG_CONTROL];
-            bytes.extend(
-                rkyv::to_bytes::<rkyv::rancor::Error>(control)
-                    .map(|value| value.to_vec())
-                    .map_err(|err| TransportError::Encode(err.to_string()))?,
-            );
-            Ok(bytes)
-        }
-    }
-}
-
-fn decode_wire_envelope(bytes: &[u8]) -> Result<WireEnvelope, TransportError> {
-    let Some((&tag, payload)) = bytes.split_first() else {
-        return Err(TransportError::Decode("wire frame is empty".to_string()));
-    };
-    match tag {
-        WIRE_TAG_INTRODUCTION => {
-            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-            aligned.extend_from_slice(payload);
-            let introduction =
-                rkyv::from_bytes::<SignedIntroduction, rkyv::rancor::Error>(&aligned)
-                    .map_err(|err| TransportError::Decode(err.to_string()))?;
-            Ok(WireEnvelope::Introduction(introduction))
-        }
-        WIRE_TAG_PING => {
-            if !payload.is_empty() {
-                return Err(TransportError::Decode(
-                    "ping wire frame must not contain payload".to_string(),
-                ));
-            }
-            Ok(WireEnvelope::Ping)
-        }
-        WIRE_TAG_RELAY_PAYLOAD => Ok(WireEnvelope::Payload(Envelope::RelayPayload(
-            decode_stream_payload(payload)?,
-        ))),
-        WIRE_TAG_ACK => {
-            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-            aligned.extend_from_slice(payload);
-            let ack = rkyv::from_bytes::<RemoteAckResolution, rkyv::rancor::Error>(&aligned)
-                .map_err(|err| TransportError::Decode(err.to_string()))?;
-            Ok(WireEnvelope::Payload(Envelope::Ack(ack)))
-        }
-        WIRE_TAG_CONTROL => {
-            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-            aligned.extend_from_slice(payload);
-            let control = rkyv::from_bytes::<ControlEnvelope, rkyv::rancor::Error>(&aligned)
-                .map_err(|err| TransportError::Decode(err.to_string()))?;
-            Ok(WireEnvelope::Payload(Envelope::Control(control)))
-        }
-        _ => Err(TransportError::Decode(format!(
-            "unknown wire envelope tag {tag}"
-        ))),
-    }
-}
-
-fn encode_stream_payload(
-    payload: &RelayPayload,
-    bytes: &mut Vec<u8>,
-) -> Result<(), TransportError> {
-    bytes.push(payload.kind.wire_tag());
-    encode_string(bytes, payload.domain.as_str())?;
-    encode_string(bytes, payload.relay.as_str())?;
-    encode_branch_key(bytes, &payload.key)?;
-    encode_len(bytes, payload.metadata.len())?;
-    for metadata in &payload.metadata {
-        bytes.extend_from_slice(
-            &metadata
-                .ingested_at_low_watermark
-                .unix_nanos()
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(
-            &metadata
-                .ingested_at_high_watermark
-                .unix_nanos()
-                .to_be_bytes(),
-        );
-    }
-    encode_len(bytes, payload.acks.len())?;
-    for ack in &payload.acks {
-        match ack {
-            Some(ack) => {
-                bytes.push(1);
-                bytes.extend_from_slice(&ack.ack_id.to_be_bytes());
-                encode_string(bytes, ack.reply_node_id.as_str())?;
-            }
-            None => bytes.push(0),
-        }
-    }
-    match &payload.admission {
-        Some(admission) => {
-            bytes.push(1);
-            bytes.extend_from_slice(&admission.ack_id.to_be_bytes());
-            encode_string(bytes, admission.reply_node_id.as_str())?;
-        }
-        None => bytes.push(0),
-    }
-    encode_bytes(bytes, &payload.batch_ipc)?;
-    Ok(())
-}
-
-fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
-    let mut cursor = WireCursor::new(bytes);
-    let kind = RelayPayloadKind::from_wire_tag(cursor.read_u8()?)?;
-    let domain_raw = cursor.read_string()?;
-    let relay_raw = cursor.read_string()?;
-    let key = cursor.read_branch_key()?;
-    let metadata_count = cursor.read_len()?;
-    let mut metadata = Vec::with_capacity(metadata_count);
-    for _ in 0..metadata_count {
-        metadata.push(RemoteRuntimeRecordMetadata {
-            ingested_at_low_watermark: Timestamp::from_unix_nanos(cursor.read_i64()?),
-            ingested_at_high_watermark: Timestamp::from_unix_nanos(cursor.read_i64()?),
-        });
-    }
-    let ack_count = cursor.read_len()?;
-    let mut acks = Vec::with_capacity(ack_count);
-    for _ in 0..ack_count {
-        match cursor.read_u8()? {
-            0 => acks.push(None),
-            1 => {
-                let ack_id = cursor.read_u64()?;
-                let reply_node_raw = cursor.read_string()?;
-                let reply_node_id =
-                    ClusterNodeName::try_from(reply_node_raw.as_str()).map_err(|error| {
-                        TransportError::Decode(format!(
-                            "invalid node id '{reply_node_raw}': {error}"
-                        ))
-                    })?;
-                acks.push(Some(RemoteAckRegistration {
-                    ack_id,
-                    reply_node_id,
-                }));
-            }
-            flag => {
-                return Err(TransportError::Decode(format!(
-                    "invalid relay ack presence flag {flag}"
-                )));
-            }
-        }
-    }
-    let admission = match cursor.read_u8()? {
-        0 => None,
-        1 => {
-            let ack_id = cursor.read_u64()?;
-            let reply_node_raw = cursor.read_string()?;
-            let reply_node_id =
-                ClusterNodeName::try_from(reply_node_raw.as_str()).map_err(|error| {
-                    TransportError::Decode(format!("invalid node id '{reply_node_raw}': {error}"))
-                })?;
-            Some(RemoteAckRegistration {
-                ack_id,
-                reply_node_id,
-            })
-        }
-        flag => {
-            return Err(TransportError::Decode(format!(
-                "invalid relay admission presence flag {flag}"
-            )));
-        }
-    };
-    let batch_ipc = cursor.read_bytes()?.to_vec();
-    cursor.finish()?;
-    let domain = DomainName::try_from(domain_raw.as_str()).map_err(|error| {
-        TransportError::Decode(format!("invalid domain '{domain_raw}': {error}"))
-    })?;
-    let relay = RelayName::try_from(relay_raw.as_str()).map_err(|error| {
-        TransportError::Decode(format!("invalid relay identifier '{relay_raw}': {error}"))
-    })?;
-    Ok(RelayPayload {
-        kind,
-        domain,
-        relay,
-        key,
-        batch_ipc,
-        metadata,
-        acks,
-        admission,
-    })
-}
-
-fn encode_len(bytes: &mut Vec<u8>, len: usize) -> Result<(), TransportError> {
-    let len = u32::try_from(len)
-        .map_err(|_| TransportError::Encode(format!("length {len} exceeds u32::MAX")))?;
-    bytes.extend_from_slice(&len.to_be_bytes());
-    Ok(())
-}
-
-fn encode_branch_key(
-    bytes: &mut Vec<u8>,
-    key: &Option<Vec<RemoteRuntimeField>>,
-) -> Result<(), TransportError> {
-    let Some(fields) = key else {
-        bytes.push(0);
-        return Ok(());
-    };
-    if fields.is_empty() {
-        return Err(TransportError::Encode(
-            "branch key must contain at least one field".to_string(),
-        ));
-    }
-    bytes.push(1);
-    encode_len(bytes, fields.len())?;
-    for field in fields {
-        encode_string(bytes, field.name.as_str())?;
-        encode_remote_value(bytes, &field.value)?;
-    }
-    Ok(())
-}
-
-fn encode_remote_value(
-    bytes: &mut Vec<u8>,
-    value: &RemoteRuntimeValue,
-) -> Result<(), TransportError> {
-    match value {
-        RemoteRuntimeValue::U8(value) => {
-            bytes.push(0);
-            bytes.push(*value);
-        }
-        RemoteRuntimeValue::I8(value) => {
-            bytes.push(1);
-            bytes.push(value.to_be_bytes()[0]);
-        }
-        RemoteRuntimeValue::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::I16(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::U32(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::I32(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::U64(value) => {
-            bytes.push(6);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::I64(value) => {
-            bytes.push(7);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::Bool(value) => {
-            bytes.push(8);
-            bytes.push(u8::from(*value));
-        }
-        RemoteRuntimeValue::String(value) => {
-            bytes.push(9);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeValue::Datetime(value) => {
-            bytes.push(10);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeValue::F32(value) => {
-            bytes.push(11);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeValue::F64(value) => {
-            bytes.push(12);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeValue::Array(values) => {
-            bytes.push(13);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-        RemoteRuntimeValue::Vec(values) => {
-            bytes.push(14);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn encode_remote_element_value(
-    bytes: &mut Vec<u8>,
-    value: &RemoteRuntimeElementValue,
-) -> Result<(), TransportError> {
-    match value {
-        RemoteRuntimeElementValue::U8(value) => {
-            bytes.push(0);
-            bytes.push(*value);
-        }
-        RemoteRuntimeElementValue::I8(value) => {
-            bytes.push(1);
-            bytes.push(value.to_be_bytes()[0]);
-        }
-        RemoteRuntimeElementValue::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::I16(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::U32(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::I32(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::U64(value) => {
-            bytes.push(6);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::I64(value) => {
-            bytes.push(7);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::Bool(value) => {
-            bytes.push(8);
-            bytes.push(u8::from(*value));
-        }
-        RemoteRuntimeElementValue::String(value) => {
-            bytes.push(9);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeElementValue::Datetime(value) => {
-            bytes.push(10);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeElementValue::F32(value) => {
-            bytes.push(11);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeElementValue::F64(value) => {
-            bytes.push(12);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeElementValue::Array(values) => {
-            bytes.push(13);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-        RemoteRuntimeElementValue::Vec(values) => {
-            bytes.push(14);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn encode_bytes(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), TransportError> {
-    encode_len(bytes, value.len())?;
-    bytes.extend_from_slice(value);
-    Ok(())
-}
-
-fn encode_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), TransportError> {
-    encode_bytes(bytes, value.as_bytes())
-}
-
-struct WireCursor<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> WireCursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn read_u8(&mut self) -> Result<u8, TransportError> {
-        let bytes = self.read_exact(1)?;
-        Ok(bytes[0])
-    }
-
-    fn read_i8(&mut self) -> Result<i8, TransportError> {
-        Ok(i8::from_be_bytes([self.read_u8()?]))
-    }
-
-    fn read_u16(&mut self) -> Result<u16, TransportError> {
-        let bytes = self.read_exact(2)?;
-        let mut raw = [0u8; 2];
-        raw.copy_from_slice(bytes);
-        Ok(u16::from_be_bytes(raw))
-    }
-
-    fn read_i16(&mut self) -> Result<i16, TransportError> {
-        let bytes = self.read_exact(2)?;
-        let mut raw = [0u8; 2];
-        raw.copy_from_slice(bytes);
-        Ok(i16::from_be_bytes(raw))
-    }
-
-    fn read_u32(&mut self) -> Result<u32, TransportError> {
-        let bytes = self.read_exact(4)?;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(bytes);
-        Ok(u32::from_be_bytes(raw))
-    }
-
-    fn read_i32(&mut self) -> Result<i32, TransportError> {
-        let bytes = self.read_exact(4)?;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(bytes);
-        Ok(i32::from_be_bytes(raw))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, TransportError> {
-        let bytes = self.read_exact(8)?;
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(bytes);
-        Ok(u64::from_be_bytes(raw))
-    }
-
-    fn read_i64(&mut self) -> Result<i64, TransportError> {
-        let bytes = self.read_exact(8)?;
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(bytes);
-        Ok(i64::from_be_bytes(raw))
-    }
-
-    fn read_f32(&mut self) -> Result<f32, TransportError> {
-        Ok(f32::from_bits(self.read_u32()?))
-    }
-
-    fn read_f64(&mut self) -> Result<f64, TransportError> {
-        Ok(f64::from_bits(self.read_u64()?))
-    }
-
-    fn read_len(&mut self) -> Result<usize, TransportError> {
-        Ok(self.read_u32()?.arch_into())
-    }
-
-    fn read_bytes(&mut self) -> Result<&'a [u8], TransportError> {
-        let len = self.read_len()?;
-        self.read_exact(len)
-    }
-
-    fn read_string(&mut self) -> Result<String, TransportError> {
-        let bytes = self.read_bytes()?;
-        String::from_utf8(bytes.to_vec()).map_err(|error| {
-            TransportError::Decode(format!("invalid utf-8 in wire frame: {error}"))
-        })
-    }
-
-    fn read_branch_key(&mut self) -> Result<Option<Vec<RemoteRuntimeField>>, TransportError> {
-        match self.read_u8()? {
-            0 => Ok(None),
-            1 => {
-                let len = self.read_len()?;
-                if len == 0 {
-                    return Err(TransportError::Decode(
-                        "branch key must contain at least one field".to_string(),
-                    ));
-                }
-                let mut fields = Vec::with_capacity(len);
-                for _ in 0..len {
-                    fields.push(RemoteRuntimeField {
-                        name: self.read_string()?,
-                        value: self.read_remote_value()?,
-                    });
-                }
-                Ok(Some(fields))
-            }
-            flag => Err(TransportError::Decode(format!(
-                "invalid branch key presence flag {flag}"
-            ))),
-        }
-    }
-
-    fn read_remote_value(&mut self) -> Result<RemoteRuntimeValue, TransportError> {
-        match self.read_u8()? {
-            0 => Ok(RemoteRuntimeValue::U8(self.read_u8()?)),
-            1 => Ok(RemoteRuntimeValue::I8(self.read_i8()?)),
-            2 => Ok(RemoteRuntimeValue::U16(self.read_u16()?)),
-            3 => Ok(RemoteRuntimeValue::I16(self.read_i16()?)),
-            4 => Ok(RemoteRuntimeValue::U32(self.read_u32()?)),
-            5 => Ok(RemoteRuntimeValue::I32(self.read_i32()?)),
-            6 => Ok(RemoteRuntimeValue::U64(self.read_u64()?)),
-            7 => Ok(RemoteRuntimeValue::I64(self.read_i64()?)),
-            8 => match self.read_u8()? {
-                0 => Ok(RemoteRuntimeValue::Bool(false)),
-                1 => Ok(RemoteRuntimeValue::Bool(true)),
-                value => Err(TransportError::Decode(format!(
-                    "invalid bool value {value} in branch key"
-                ))),
-            },
-            9 => Ok(RemoteRuntimeValue::String(self.read_string()?)),
-            10 => Ok(RemoteRuntimeValue::Datetime(self.read_string()?)),
-            11 => Ok(RemoteRuntimeValue::F32(self.read_f32()?)),
-            12 => Ok(RemoteRuntimeValue::F64(self.read_f64()?)),
-            13 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeValue::Array(values))
-            }
-            14 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeValue::Vec(values))
-            }
-            tag => Err(TransportError::Decode(format!(
-                "unknown branch key value tag {tag}"
-            ))),
-        }
-    }
-
-    fn read_remote_element_value(&mut self) -> Result<RemoteRuntimeElementValue, TransportError> {
-        match self.read_u8()? {
-            0 => Ok(RemoteRuntimeElementValue::U8(self.read_u8()?)),
-            1 => Ok(RemoteRuntimeElementValue::I8(self.read_i8()?)),
-            2 => Ok(RemoteRuntimeElementValue::U16(self.read_u16()?)),
-            3 => Ok(RemoteRuntimeElementValue::I16(self.read_i16()?)),
-            4 => Ok(RemoteRuntimeElementValue::U32(self.read_u32()?)),
-            5 => Ok(RemoteRuntimeElementValue::I32(self.read_i32()?)),
-            6 => Ok(RemoteRuntimeElementValue::U64(self.read_u64()?)),
-            7 => Ok(RemoteRuntimeElementValue::I64(self.read_i64()?)),
-            8 => match self.read_u8()? {
-                0 => Ok(RemoteRuntimeElementValue::Bool(false)),
-                1 => Ok(RemoteRuntimeElementValue::Bool(true)),
-                value => Err(TransportError::Decode(format!(
-                    "invalid bool value {value} in branch key element"
-                ))),
-            },
-            9 => Ok(RemoteRuntimeElementValue::String(self.read_string()?)),
-            10 => Ok(RemoteRuntimeElementValue::Datetime(self.read_string()?)),
-            11 => Ok(RemoteRuntimeElementValue::F32(self.read_f32()?)),
-            12 => Ok(RemoteRuntimeElementValue::F64(self.read_f64()?)),
-            13 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeElementValue::Array(values))
-            }
-            14 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeElementValue::Vec(values))
-            }
-            tag => Err(TransportError::Decode(format!(
-                "unknown branch key element value tag {tag}"
-            ))),
-        }
-    }
-
-    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], TransportError> {
-        let Some(end) = self.offset.checked_add(len) else {
-            return Err(TransportError::Decode(
-                "wire frame length overflow".to_string(),
-            ));
-        };
-        if end > self.bytes.len() {
-            return Err(TransportError::Decode(
-                "wire frame ended unexpectedly".to_string(),
-            ));
-        }
-        let slice = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(slice)
-    }
-
-    fn finish(&self) -> Result<(), TransportError> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(TransportError::Decode(
-                "wire frame contained trailing bytes".to_string(),
-            ))
-        }
-    }
-}
-
 fn introduction_message(node_id: &ClusterNodeName) -> Vec<u8> {
     let node_id = node_id.as_str();
     let mut data = Vec::with_capacity(4 + node_id.len());
@@ -1964,6 +1308,7 @@ mod tests {
 
     use ahash::HashMap;
     use error_stack::Report;
+    use nervix_execution::MemoryClass;
     use nervix_models::{DomainName, RelayName};
     use tokio::{
         sync::Notify,
@@ -1971,6 +1316,9 @@ mod tests {
     };
 
     use super::*;
+    use crate::wire::{
+        WireEnvelope, read_and_verify_introduction, read_wire_envelope, write_wire_envelope,
+    };
 
     mod connection_lifetime;
 
@@ -2026,6 +1374,7 @@ mod tests {
         max_connections: usize,
     ) -> Arc<TransportInner> {
         Arc::new(TransportInner {
+            executor: Executor::default(),
             mode: TransportMode::Plain,
             client_config: None,
             server_config: None,
@@ -2053,13 +1402,19 @@ mod tests {
             .expect("incoming channel closed")
     }
 
-    fn dummy_stream_payload(stream: &str) -> RelayPayload {
+    fn charged_body(executor: &Executor, bytes: Vec<u8>) -> ChargedBytes {
+        executor
+            .try_charge_owned(MemoryClass::Relay, bytes)
+            .expect("the relay class has room for a test body")
+    }
+
+    fn dummy_stream_payload(executor: &Executor, stream: &str) -> RelayPayload {
         RelayPayload {
             kind: RelayPayloadKind::Routed,
             domain: DomainName::try_from("test").expect("valid domain"),
             relay: RelayName::try_from(stream).expect("valid relay name"),
             key: None,
-            batch_ipc: vec![1, 2, 3, 4],
+            batch_ipc: charged_body(executor, vec![1, 2, 3, 4]),
             metadata: vec![RemoteRuntimeRecordMetadata {
                 ingested_at_low_watermark: Timestamp::from_unix_nanos(1),
                 ingested_at_high_watermark: Timestamp::from_unix_nanos(2),
@@ -2137,6 +1492,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             TransportOptions::default(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2147,6 +1503,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             TransportOptions::default(),
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2308,47 +1665,6 @@ mod tests {
         transport_b.shutdown().await;
     }
 
-    #[test]
-    fn relay_payload_branch_key_roundtrips_native_fields() {
-        let mut payload = dummy_stream_payload("orders");
-        payload.key = Some(vec![
-            RemoteRuntimeField {
-                name: "tenant".to_string(),
-                value: RemoteRuntimeValue::String("acme".to_string()),
-            },
-            RemoteRuntimeField {
-                name: "user_id".to_string(),
-                value: RemoteRuntimeValue::U32(42),
-            },
-        ]);
-
-        let mut bytes = Vec::new();
-        encode_stream_payload(&payload, &mut bytes).expect("payload should encode");
-        let decoded = decode_stream_payload(&bytes).expect("payload should decode");
-
-        assert_eq!(decoded, payload);
-    }
-
-    #[test]
-    fn relay_payload_without_branch_key_roundtrips_as_absent() {
-        let payload = dummy_stream_payload("orders");
-        let mut bytes = Vec::new();
-        encode_stream_payload(&payload, &mut bytes).expect("payload should encode");
-        let decoded = decode_stream_payload(&bytes).expect("payload should decode");
-
-        assert_eq!(decoded.key, None);
-        assert_eq!(decoded, payload);
-    }
-
-    #[test]
-    fn relay_payload_empty_branch_key_is_rejected() {
-        let mut bytes = Vec::new();
-        let error = encode_branch_key(&mut bytes, &Some(Vec::new()))
-            .expect_err("empty branch key must be rejected");
-
-        assert!(error.to_string().contains("at least one field"));
-    }
-
     #[tokio::test]
     async fn bidirectional_send_and_receive_roundtrips() {
         let options = TransportOptions::default();
@@ -2361,6 +1677,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2371,6 +1688,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2381,7 +1699,7 @@ mod tests {
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("orders")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "orders")),
             )
             .await
             .expect("send a->b");
@@ -2393,12 +1711,15 @@ mod tests {
         );
         assert_eq!(
             first.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("orders"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "orders"))
         );
 
         first
             .reply
-            .send(Envelope::RelayPayload(dummy_stream_payload("orders")))
+            .send(Envelope::RelayPayload(dummy_stream_payload(
+                &Executor::default(),
+                "orders",
+            )))
             .await
             .expect("reply b->a");
 
@@ -2409,7 +1730,7 @@ mod tests {
         );
         assert_eq!(
             second.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("orders"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "orders"))
         );
 
         transport_a.shutdown().await;
@@ -2428,6 +1749,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2438,6 +1760,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2449,7 +1772,7 @@ mod tests {
                     transport_b.local_addr(),
                     "localhost",
                     TransportMode::Tls,
-                    Envelope::RelayPayload(dummy_stream_payload("metrics")),
+                    Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "metrics")),
                 )
                 .await
                 .expect("send");
@@ -2475,6 +1798,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2485,6 +1809,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2495,7 +1820,7 @@ mod tests {
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("metrics")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "metrics")),
             )
             .await
             .expect("initial send");
@@ -2510,7 +1835,10 @@ mod tests {
             )
             .expect("outbound handle should be reusable");
         handle
-            .send(Envelope::RelayPayload(dummy_stream_payload("metrics")))
+            .send(Envelope::RelayPayload(dummy_stream_payload(
+                &Executor::default(),
+                "metrics",
+            )))
             .await
             .expect("queued send should succeed");
 
@@ -2530,6 +1858,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2540,6 +1869,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2592,6 +1922,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b, &identity_c]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2602,6 +1933,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2612,6 +1944,7 @@ mod tests {
             identity_c.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport c");
@@ -2659,6 +1992,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2669,6 +2003,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2680,7 +2015,7 @@ mod tests {
                 target,
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("reconnect")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect")),
             )
             .await
             .expect("initial send");
@@ -2691,7 +2026,7 @@ mod tests {
         );
         assert_eq!(
             first.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect"))
         );
 
         transport_b.shutdown().await;
@@ -2701,7 +2036,7 @@ mod tests {
             target,
             "localhost",
             TransportMode::Tls,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect")),
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect")),
         );
 
         let (transport_b2, mut incoming_b2) = Transport::bind(
@@ -2711,6 +2046,7 @@ mod tests {
             identity_b.clone(),
             verifier_for(&[&identity_a]),
             options,
+            Executor::default(),
         )
         .await
         .expect("restart transport b");
@@ -2723,7 +2059,7 @@ mod tests {
         );
         assert_eq!(
             second.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect"))
+            Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "reconnect"))
         );
 
         transport_a.shutdown().await;
@@ -2737,17 +2073,22 @@ mod tests {
         let (incoming_tx, _incoming_rx) = mpsc::channel(1);
         let inner = test_inner(identity_a, verifier_for(&[&identity_b]), incoming_tx, 1);
         let (client_io, mut peer_io) = tokio::io::duplex(64 * 1024);
+        let peer_executor = inner.executor.clone();
         let peer_task = tokio::spawn(async move {
-            let introduction = read_wire_envelope(&mut peer_io, DEFAULT_MAX_FRAME_BYTES)
-                .await
-                .expect("read client introduction");
+            let introduction =
+                read_wire_envelope(&mut peer_io, &peer_executor, DEFAULT_MAX_FRAME_BYTES)
+                    .await
+                    .expect("read client introduction");
             assert!(matches!(introduction, WireEnvelope::Introduction(_)));
-            write_wire_envelope(
-                &mut peer_io,
-                &WireEnvelope::Introduction(identity_b.signed_introduction()),
+            let peer_introduction = wire::encode_frame(
+                &peer_executor,
+                WireEnvelope::Introduction(identity_b.signed_introduction()),
             )
             .await
-            .expect("write peer introduction");
+            .expect("peer introduction should encode");
+            write_wire_envelope(&mut peer_io, &peer_introduction)
+                .await
+                .expect("write peer introduction");
         });
         let peer_addr = "127.0.0.1:12345".parse().unwrap();
         let (reply_tx, _reply_rx) = mpsc::channel(1);
@@ -2755,13 +2096,23 @@ mod tests {
         let reply_handle = ConnectionHandle::new(
             peer_addr,
             reply_tx,
+            inner.executor.clone(),
             cancel.clone(),
             inner.admission_closed.clone(),
             inner.options.queue_admission_timeout,
         );
         let (_send_tx, mut send_rx) = mpsc::channel(1);
-        let expected = Envelope::RelayPayload(dummy_stream_payload("retry"));
-        let mut retry_payload = Some(expected.clone());
+        let expected = Envelope::RelayPayload(dummy_stream_payload(&inner.executor, "retry"));
+        let expected_frame =
+            wire::encode_frame(&inner.executor, WireEnvelope::Payload(expected.clone()))
+                .await
+                .expect("the retried frame should encode");
+        let queued = inner
+            .executor
+            .reserve(MemoryClass::Relay, expected_frame.queued_bytes())
+            .await
+            .expect("the relay class has room for a test frame");
+        let mut retry_payload = Some(QueuedFrame::new(expected_frame, queued));
         let established = exchange_introductions(&inner, Box::new(client_io))
             .await
             .expect("connection handshake should complete");
@@ -2779,7 +2130,10 @@ mod tests {
         .expect_err("peer disconnect should fail the connection");
         peer_task.await.expect("peer task should complete");
 
-        assert_eq!(retry_payload, Some(expected));
+        assert!(
+            retry_payload.is_some(),
+            "a frame that never reached the socket is retried as it stands"
+        );
         assert!(
             inner.connected_peers.is_empty(),
             "failed connection must unregister its connected peer"
@@ -2802,6 +2156,7 @@ mod tests {
             identity_a,
             verifier_for(&[&identity_b]),
             options.clone(),
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2818,6 +2173,7 @@ mod tests {
                 }
             }),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport b");
@@ -2828,7 +2184,7 @@ mod tests {
                 transport_b.local_addr(),
                 "localhost",
                 TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("auth")),
+                Envelope::RelayPayload(dummy_stream_payload(&Executor::default(), "auth")),
             )
             .await
             .expect("enqueue send");
@@ -2855,6 +2211,7 @@ mod tests {
             identity_a.clone(),
             verifier_for(&[&identity_b]),
             options,
+            Executor::default(),
         )
         .await
         .expect("bind transport a");
@@ -2866,6 +2223,7 @@ mod tests {
             mode: TransportMode::Tls,
         };
         let inner = Arc::new(TransportInner {
+            executor: Executor::default(),
             mode: TransportMode::Tls,
             client_config: Some(test_tls().client_config.clone()),
             server_config: None,
@@ -2889,14 +2247,18 @@ mod tests {
             .expect("connect raw tls relay");
         let (mut reader, mut writer) = tokio::io::split(tls_stream);
 
-        write_wire_envelope(
-            &mut writer,
-            &WireEnvelope::Introduction(identity_b.signed_introduction()),
+        let introduction = wire::encode_frame(
+            &inner.executor,
+            WireEnvelope::Introduction(identity_b.signed_introduction()),
         )
         .await
-        .expect("send introduction");
+        .expect("introduction should encode");
+        write_wire_envelope(&mut writer, &introduction)
+            .await
+            .expect("send introduction");
         let peer = read_and_verify_introduction(
             &mut reader,
+            &inner.executor,
             DEFAULT_MAX_FRAME_BYTES,
             &verifier_for(&[&identity_a]),
         )
@@ -2906,7 +2268,9 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                match read_wire_envelope(&mut reader, DEFAULT_MAX_FRAME_BYTES).await {
+                match read_wire_envelope(&mut reader, &inner.executor, DEFAULT_MAX_FRAME_BYTES)
+                    .await
+                {
                     Ok(WireEnvelope::Ping) => {}
                     Ok(other) => panic!("unexpected frame before disconnect: {other:?}"),
                     Err(TransportError::Io(err)) if err.kind() == ErrorKind::UnexpectedEof => {

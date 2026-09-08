@@ -118,6 +118,7 @@ impl Runtime {
                     .entity_gate_deadline
                     .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
                 temp_dir,
+                executor: Executor::default(),
                 metrics: RuntimeMetrics::default(),
             }),
         })
@@ -125,6 +126,11 @@ impl Runtime {
 
     pub fn metrics(&self) -> RuntimeMetrics {
         self.inner.metrics.clone()
+    }
+
+    /// The node's bounded execution and transient-memory admission.
+    pub fn executor(&self) -> &Executor {
+        &self.inner.executor
     }
 
     /// The directory connectors stage local files in before they publish them.

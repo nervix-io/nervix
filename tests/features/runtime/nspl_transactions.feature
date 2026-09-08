@@ -548,7 +548,11 @@ Feature: NSPL transactions
 
   Scenario: An orphaned transaction expires and retains its outcome
     Given the transaction idle timeout is configured as "250ms"
-    And the transaction tombstone retention is configured as "1s"
+    # The scenario has to notice EXPIRED and then attach before the tombstone is swept, so the
+    # retention has to cover a poll interval plus a client round trip. One second did not, and the
+    # attach intermittently found the transaction already unknown. Removal still lands well inside
+    # the ten seconds the "eventually removed" step allows.
+    And the transaction tombstone retention is configured as "5s"
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
