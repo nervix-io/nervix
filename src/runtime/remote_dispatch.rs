@@ -142,23 +142,15 @@ impl RemoteDispatcher {
         let Some(local_node_id) = self.local_node_id() else {
             return;
         };
-        // One encode for the whole fanout. Every interested node carries this same allocation.
-        let batch_ipc = match batch.batch.encode_arrow_ipc(self.executor()).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                warn!(
-                    domain = domain.as_str(),
-                    relay = relay.as_str(),
-                    error = %error,
-                    "failed to serialize remote subscription batch"
-                );
-                return;
-            }
-        };
         let interested_nodes = self
             .cluster
             .nodes_with_subscription_interest(domain.as_str(), relay.as_str())
             .await;
+        // One encode for the whole fanout. Every interested node carries this same allocation,
+        // and the first one serializes it inside its own outbound slot: the slot is what orders
+        // the batches a node receives, so an encode performed ahead of it lets a later batch
+        // overtake an earlier one.
+        let mut encoded_body: Option<ChargedBytes> = None;
         for node_id in interested_nodes {
             tokio::task::consume_budget().await;
             if node_id == local_node_id || excluded_nodes.contains(&node_id) {
@@ -166,6 +158,24 @@ impl RemoteDispatcher {
             }
             let outbound_slot = services.outbound_slot(&node_id);
             let _slot = outbound_slot.lock().await;
+            let batch_ipc = match encoded_body.clone() {
+                Some(bytes) => bytes,
+                None => match batch.batch.encode_arrow_ipc(self.executor()).await {
+                    Ok(bytes) => {
+                        encoded_body = Some(bytes.clone());
+                        bytes
+                    }
+                    Err(error) => {
+                        warn!(
+                            domain = domain.as_str(),
+                            relay = relay.as_str(),
+                            error = %error,
+                            "failed to serialize remote subscription batch"
+                        );
+                        return;
+                    }
+                },
+            };
             if let Err(error) = self
                 .dispatch_admitted_relay_payload(
                     &node_id,

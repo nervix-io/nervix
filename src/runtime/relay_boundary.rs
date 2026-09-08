@@ -940,6 +940,7 @@ impl RelayBoundaryServices {
             )
             .await;
         if let Err(reason) = admission_result {
+            tracing::warn!(probe = "admitted_failed", reason = %reason, "PROBE admitted dispatch failed");
             for ack_id in registered_ack_ids {
                 dispatcher.clear_pending_ack(ack_id);
             }
@@ -1034,31 +1035,43 @@ impl RelayBoundaryServices {
             return Ok(());
         };
         // Every consumer of this relay receives the same columns; only the acknowledgement
-        // obligations differ. The body is therefore encoded once for the whole fanout and each
+        // obligations differ, so the body is encoded once for the whole fanout and each
         // destination carries a handle to that one allocation.
-        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                if remote_runtime_consumers
-                    .iter()
-                    .any(|consumer| consumer.mode == AckMode::Attached)
-                {
-                    for ack in batch.acks.iter() {
-                        ack.no_ack(error.to_string());
-                    }
-                    return Err(Box::new(batch.clone()));
-                }
-                warn!(
-                    error = %error,
-                    "failed to serialize detached remote relay batch"
-                );
-                return Ok(());
-            }
-        };
+        //
+        // The encode happens inside the first destination's outbound slot rather than ahead of
+        // the loop. A destination's slot is what orders the batches published to it, and an
+        // encode is long enough that hoisting it out lets a later batch finish serializing first
+        // and reach the slot ahead of an earlier one, delivering the relay out of order.
+        let mut encoded_body: Option<ChargedBytes> = None;
         for consumer in remote_runtime_consumers.iter() {
             tokio::task::consume_budget().await;
             let outbound_slot = self.outbound_slot(&consumer.node_id);
             let _slot = outbound_slot.lock().await;
+            let batch_ipc = match encoded_body.clone() {
+                Some(bytes) => bytes,
+                None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+                    Ok(bytes) => {
+                        encoded_body = Some(bytes.clone());
+                        bytes
+                    }
+                    Err(error) => {
+                        if remote_runtime_consumers
+                            .iter()
+                            .any(|consumer| consumer.mode == AckMode::Attached)
+                        {
+                            for ack in batch.acks.iter() {
+                                ack.no_ack(error.to_string());
+                            }
+                            return Err(Box::new(batch.clone()));
+                        }
+                        warn!(
+                            error = %error,
+                            "failed to serialize detached remote relay batch"
+                        );
+                        return Ok(());
+                    }
+                },
+            };
             let remote_batch = match consumer.mode {
                 AckMode::Attached => batch.attached(),
                 AckMode::Detached => batch.detached(),

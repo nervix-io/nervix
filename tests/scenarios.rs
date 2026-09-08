@@ -13848,6 +13848,55 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
         "sequential broker assertion must include at least one header"
     );
 
+    let deadline = Instant::now() + duration + Duration::from_secs(45);
+    {
+        let mut seen: Vec<u64> = Vec::with_capacity(count);
+        let observer = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion");
+        while seen.len() < count {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let Some(message) = observer
+                .try_next_message(deadline.saturating_duration_since(now))
+                .await
+                .expect("failed while waiting for sequential broker message")
+            else {
+                break;
+            };
+            let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
+                .expect("broker payload is not valid JSON");
+            seen.push(
+                payload
+                    .get(&field)
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("sequence field"),
+            );
+        }
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let inversions = seen.windows(2).filter(|w| w[0] > w[1]).count();
+        let first_20 = seen.iter().take(20).copied().collect::<Vec<_>>();
+        let jumps = seen
+            .windows(2)
+            .filter(|w| w[0] > w[1])
+            .take(10)
+            .map(|w| format!("{}->{}", w[0], w[1]))
+            .collect::<Vec<_>>();
+        panic!(
+            "DIAGNOSTIC: received={} distinct={} expected={count} inversions={inversions} \
+             first20={first_20:?} first_backward_steps={jumps:?} min={:?} max={:?}",
+            seen.len(),
+            sorted.len(),
+            sorted.first(),
+            sorted.last(),
+        );
+    }
+    #[allow(unreachable_code)]
     let deadline = Instant::now() + duration;
     for expected_sequence in 1..=count {
         tokio::task::consume_budget().await;

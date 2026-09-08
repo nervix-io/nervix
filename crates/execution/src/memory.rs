@@ -86,8 +86,25 @@ impl MemoryBudget {
         }
     }
 
+    /// Charge `bytes`, waiting only when the class cannot satisfy the request outright.
+    ///
+    /// The immediate attempt comes first because the frequent case is a small frame against a
+    /// class with room, and an `await` there costs a scheduler round trip per frame rather than
+    /// the permits themselves. Taking room that is already free lets a request overtake one
+    /// queued for more than the class currently has; within a class every request is bounded by
+    /// the same operation limit, so what is overtaken is a request the class could not have
+    /// admitted anyway.
     pub(crate) async fn reserve(&self, bytes: u64) -> Result<Reservation, Report<AdmissionError>> {
         let requested = self.checked_request(bytes)?;
+        match StdArc::clone(&self.permits).try_acquire_many_owned(requested) {
+            Ok(permit) => return Ok(self.reservation(requested, permit)),
+            Err(TryAcquireError::Closed) => {
+                return Err(Report::new(AdmissionError::BudgetClosed {
+                    class: self.class.as_str(),
+                }));
+            }
+            Err(TryAcquireError::NoPermits) => {}
+        }
         let permit = StdArc::clone(&self.permits)
             .acquire_many_owned(requested)
             .await
