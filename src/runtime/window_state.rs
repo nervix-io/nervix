@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nervix_models::Timestamp;
-use nervix_nspl::window_processor::aggregate::WindowAggregateProgram;
+use nervix_vm::window::WindowAggregateProgram;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{

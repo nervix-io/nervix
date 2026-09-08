@@ -471,12 +471,10 @@ mod tests {
                     create.body.as_ref()
             {
                 for output in window_processor.output_routes.outputs() {
-                    crate::window_processor::aggregate::lower_window_assignments(
-                        &output.construction,
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!("{name} window aggregate should lower: {error}")
-                    });
+                    nervix_vm::window::lower_window_assignments(&output.construction)
+                        .unwrap_or_else(|error| {
+                            panic!("{name} window aggregate should lower: {error}")
+                        });
                 }
             }
         }

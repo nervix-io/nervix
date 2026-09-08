@@ -4,7 +4,7 @@ use arch_into::ArchInto as _;
 use nervix_benchmark::{
     BenchmarkCatalog, KafkaRenderInputs, LoadShape, LoadedBenchmark, RunSettings,
 };
-use nervix_nspl::client_statement::parse_client_statement_sources;
+use nervix_client_core::split_query_statements;
 
 const LANES: u32 = 16;
 
@@ -19,10 +19,10 @@ fn load(slug: &str) -> LoadedBenchmark {
 }
 
 fn statements_starting_with(source: &str, prefix: &str) -> usize {
-    parse_client_statement_sources(source)
-        .unwrap_or_else(|error| panic!("rendered Nervix graph should parse: {error:?}"))
+    split_query_statements(source)
+        .unwrap_or_else(|error| panic!("rendered Nervix graph should parse: {error}"))
         .iter()
-        .filter(|statement| statement.source(source).starts_with(prefix))
+        .filter(|statement| statement.starts_with(prefix))
         .count()
 }
 

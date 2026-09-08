@@ -295,8 +295,8 @@ impl Runtime {
                 {
                     "src/application.rs": "fn parse() { nervix_nspl::parse_expression(\"a\"); }\n",
                     "crates/nervix-cli/src/lib.rs": "use nervix_nspl::Token;\n",
-                    "src/runtime/mod.rs": "use nervix_nspl::vm_program::Program;\n",
-                    "crates/nervix-vm/src/lib.rs": "fn lower(p: nervix_nspl::vm_program::Program) {}\n",
+                    "src/runtime/mod.rs": "fn parse() { nervix_nspl::parse_expression(\"a\"); }\n",
+                    "crates/nervix-vm/src/lib.rs": "fn lower() { nervix_nspl::parse_route_construction(\"SET a = 1\"); }\n",
                 },
             )
 

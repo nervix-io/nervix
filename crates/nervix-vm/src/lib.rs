@@ -8,9 +8,6 @@
 //! - **Must not know.** Relays, branches, connectors, schedules or the registry. It runs one
 //!   program against the bindings it was handed.
 //!
-//! This crate breaks its own contract: it names `nervix_nspl::vm_program` for its own AST, spans
-//! and function names, so an engine depends on the language layer above it.
-
 /// Expands a consumer over the ordinary scalar types stored in typed VM registers.
 ///
 /// Datetime and generic arrays have distinct Arrow type and ownership rules, so their handling
@@ -37,9 +34,12 @@ macro_rules! with_typed_registers {
 mod batch;
 mod compiler;
 mod error;
+mod frontend;
 mod ir;
+pub mod program;
 mod runtime;
 mod semantics;
+pub mod window;
 
 pub use batch::{TypedArray, TypedBatch};
 pub use compiler::{
@@ -54,6 +54,11 @@ pub use compiler::{
 };
 pub use error::{
     CompileError, ErrorCode, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, SideError,
+};
+pub use frontend::{
+    SemanticNamespaces, lower_branch_construction, lower_expression, lower_finalized_output_filter,
+    lower_generated_route, lower_route_construction, lower_set_only_route,
+    lower_transforming_route,
 };
 pub use ir::{
     CompiledProgram, InputBinding, Instruction, InstructionKind, InvocationBinding, OutputBinding,
@@ -72,3 +77,17 @@ pub use semantics::{
     builtin_function_semantics, builtin_signature, cast_descriptor, cast_semantics, expr_semantics,
     unary_descriptor, unary_op_semantics,
 };
+
+#[cfg(test)]
+mod test_support {
+    use crate::{
+        SemanticNamespaces, lower_route_construction,
+        program::{Program, SpannedNode},
+    };
+
+    pub(crate) fn parse_program(source: &str) -> Result<SpannedNode<Program>, String> {
+        let construction =
+            nervix_nspl::parse_route_construction(source).map_err(|error| error.to_string())?;
+        lower_route_construction(&construction, SemanticNamespaces::new("input", "input"))
+    }
+}
