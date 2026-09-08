@@ -233,9 +233,6 @@ impl IngestorStartPlan {
         scheduled: &ScheduledNode,
         source_model: &Model,
     ) -> Result<Self, Report<IngestorStartPlanError>> {
-        if scheduled.kind != ModelKind::Ingestor {
-            return Err(Report::new(IngestorStartPlanError::NotIngestor));
-        }
         let Model::Ingestor(ingestor) = scheduled.config.as_ref() else {
             return Err(Report::new(IngestorStartPlanError::NotIngestor));
         };
@@ -336,7 +333,7 @@ impl IngestorStartPlan {
                         placement: RuntimeStatePlacement {
                             domain: domain.clone(),
                             state: RuntimeStateKind::KafkaOffset,
-                            kind: node.kind,
+                            kind: node.kind(),
                             identifier: node.identifier.clone(),
                             schema_fingerprint: [0; 32],
                             branch_key: None,
@@ -635,17 +632,7 @@ mod tests {
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };
-        ScheduledNode {
-            identifier: ModelName::from(&ingestor.name),
-            kind: ModelKind::Ingestor,
-            config: Box::new(Model::Ingestor(ingestor)),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: None,
-            assigned_nodes: Vec::new(),
-        }
+        ScheduledNode::new(Model::Ingestor(ingestor))
     }
 
     fn instances() -> NonZeroU64 {

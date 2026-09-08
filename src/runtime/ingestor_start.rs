@@ -91,7 +91,7 @@ impl Runtime {
             }
 
             for node in schedule.nodes.values() {
-                if node.kind != ModelKind::Ingestor
+                if node.kind() != ModelKind::Ingestor
                     || !Self::scheduled_node_executes_locally(node, local_node_id.as_ref())
                 {
                     continue;
@@ -388,9 +388,9 @@ impl Runtime {
         let model_index = execution
             .schedule
             .nodes
-            .iter()
-            .map(|(node_ref, node)| (node_ref.clone(), (*node.config).clone()))
-            .collect::<HashMap<_, _>>();
+            .values()
+            .map(|node| (*node.config).clone())
+            .collect::<ModelIndex>();
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution
             .branched_ingestors
@@ -526,9 +526,9 @@ mod tests {
         CodecWireFormat, CreateClientMqtt, CreateCodec, CreateIngestor, CreateJsonWireSchema,
         CreateRelay, CreateSchema, DomainConfig, DomainPace, DomainSchedule, DomainState,
         DomainStatus, GeneralErrorPolicy, IngestSource, IngestorName, JsonType, ModelKind,
-        ModelName, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
-        ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, SchemaField, SchemaName,
-        WireSchemaField, WireSchemaName,
+        MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType, ProcessorOutputs,
+        RelayBranching, RelayName, RetryPolicy, SchemaField, SchemaName, WireSchemaField,
+        WireSchemaName,
     };
     use nonzero_ext::nonzero;
 
@@ -567,23 +567,17 @@ mod tests {
                 &ClusterSchedule::from_iter([DomainSchedule::new(
                     domain.clone(),
                     vec![
-                        scheduled_model(
-                            ModelKind::Schema,
-                            ModelName::from(&schema.clone()),
-                            nervix_models::Model::Schema(CreateSchema {
-                                name: schema.clone(),
-                                fields: vec![SchemaField {
-                                    name: named("user_id"),
-                                    ty: ParseAsType::I64,
-                                    optional: false,
-                                    sensitive: false,
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::WireJsonSchema,
-                            ModelName::from(&wire_schema),
-                            nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
+                        scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                            name: schema.clone(),
+                            fields: vec![SchemaField {
+                                name: named("user_id"),
+                                ty: ParseAsType::I64,
+                                optional: false,
+                                sensitive: false,
+                            }],
+                        })),
+                        scheduled_model(nervix_models::Model::WireJsonSchema(
+                            CreateJsonWireSchema {
                                 name: wire_schema.clone(),
                                 strictness: Default::default(),
                                 fields: vec![WireSchemaField {
@@ -591,78 +585,62 @@ mod tests {
                                     ty: JsonType::Integer,
                                     optional: false,
                                 }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Codec,
-                            ModelName::from(&codec),
-                            nervix_models::Model::Codec(CreateCodec {
-                                name: codec.clone(),
-                                wire_format: CodecWireFormat::Json {
-                                    wire_schema: wire_schema.clone(),
+                            },
+                        )),
+                        scheduled_model(nervix_models::Model::Codec(CreateCodec {
+                            name: codec.clone(),
+                            wire_format: CodecWireFormat::Json {
+                                wire_schema: wire_schema.clone(),
+                            },
+                            schema: schema.clone(),
+                            encoding_rules: Vec::new(),
+                        })),
+                        scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                            name: relay.clone(),
+                            schema: schema.clone(),
+                            buffer: nonzero!(2usize),
+                            branching: RelayBranching::unbranched(),
+                            materialized_state: None,
+                        })),
+                        scheduled_model(nervix_models::Model::ClientMqtt(CreateClientMqtt {
+                            name: client.clone(),
+                            mount: None,
+                            config: vec![
+                                ClientConfigEntry {
+                                    key: "addr".to_string(),
+                                    value: "mqtt://127.0.0.1:1883".to_string(),
                                 },
-                                schema: schema.clone(),
-                                encoding_rules: Vec::new(),
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Relay,
-                            ModelName::from(&relay),
-                            nervix_models::Model::Relay(CreateRelay {
-                                name: relay.clone(),
-                                schema: schema.clone(),
-                                buffer: nonzero!(2usize),
-                                branching: RelayBranching::unbranched(),
-                                materialized_state: None,
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Client,
-                            ModelName::from(&client),
-                            nervix_models::Model::ClientMqtt(CreateClientMqtt {
-                                name: client.clone(),
-                                mount: None,
-                                config: vec![
-                                    ClientConfigEntry {
-                                        key: "addr".to_string(),
-                                        value: "mqtt://127.0.0.1:1883".to_string(),
-                                    },
-                                    ClientConfigEntry {
-                                        key: "client_id".to_string(),
-                                        value: "fixed-client".to_string(),
-                                    },
-                                ],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Ingestor,
-                            ModelName::from(&ingestor),
-                            nervix_models::Model::Ingestor(CreateIngestor {
-                                name: ingestor.clone(),
-                                output_routes: with_inherit_all(ProcessorOutputs::single(
-                                    relay.clone(),
-                                ))
-                                .with_flush_policy(FlushPolicy::Each {
-                                    interval: "100ms".to_string(),
-                                    max_batch_size: "1MiB".to_string(),
-                                })
-                                .with_branch(OutputBranch::Unbranched),
-                                decode_using_codec: codec.clone(),
-                                timestamp_source: None,
-                                source: IngestSource::Mqtt {
-                                    client,
-                                    topic: "notifications".to_string(),
-                                    instances: nonzero!(2u64),
-                                    mode: MqttIngestMode::NoAckSequential {
-                                        session: MqttSession::Clean,
-                                        qos: MqttQos::AtMostOnce,
-                                    },
-                                    quiesce: nervix_models::IngestQuiesceMode::Drop,
+                                ClientConfigEntry {
+                                    key: "client_id".to_string(),
+                                    value: "fixed-client".to_string(),
                                 },
-                                general_error_policy: GeneralErrorPolicy::Log,
-                                filter_where: None,
-                            }),
-                        ),
+                            ],
+                        })),
+                        scheduled_model(nervix_models::Model::Ingestor(CreateIngestor {
+                            name: ingestor.clone(),
+                            output_routes: with_inherit_all(ProcessorOutputs::single(
+                                relay.clone(),
+                            ))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
+                            .with_branch(OutputBranch::Unbranched),
+                            decode_using_codec: codec.clone(),
+                            timestamp_source: None,
+                            source: IngestSource::Mqtt {
+                                client,
+                                topic: "notifications".to_string(),
+                                instances: nonzero!(2u64),
+                                mode: MqttIngestMode::NoAckSequential {
+                                    session: MqttSession::Clean,
+                                    qos: MqttQos::AtMostOnce,
+                                },
+                                quiesce: nervix_models::IngestQuiesceMode::Drop,
+                            },
+                            general_error_policy: GeneralErrorPolicy::Log,
+                            filter_where: None,
+                        })),
                     ],
                     Vec::new(),
                 )]),
@@ -719,23 +697,17 @@ mod tests {
                 &ClusterSchedule::from_iter([DomainSchedule::new(
                     domain.clone(),
                     vec![
-                        scheduled_model(
-                            ModelKind::Schema,
-                            ModelName::from(&schema.clone()),
-                            nervix_models::Model::Schema(CreateSchema {
-                                name: schema.clone(),
-                                fields: vec![SchemaField {
-                                    name: named("user_id"),
-                                    ty: ParseAsType::I64,
-                                    optional: false,
-                                    sensitive: false,
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::WireJsonSchema,
-                            ModelName::from(&wire_schema),
-                            nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
+                        scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                            name: schema.clone(),
+                            fields: vec![SchemaField {
+                                name: named("user_id"),
+                                ty: ParseAsType::I64,
+                                optional: false,
+                                sensitive: false,
+                            }],
+                        })),
+                        scheduled_model(nervix_models::Model::WireJsonSchema(
+                            CreateJsonWireSchema {
                                 name: wire_schema.clone(),
                                 strictness: Default::default(),
                                 fields: vec![WireSchemaField {
@@ -743,75 +715,59 @@ mod tests {
                                     ty: JsonType::Integer,
                                     optional: false,
                                 }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Codec,
-                            ModelName::from(&codec),
-                            nervix_models::Model::Codec(CreateCodec {
-                                name: codec.clone(),
-                                wire_format: CodecWireFormat::Json {
-                                    wire_schema: wire_schema.clone(),
-                                },
-                                schema: schema.clone(),
-                                encoding_rules: Vec::new(),
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Relay,
-                            ModelName::from(&relay),
-                            nervix_models::Model::Relay(CreateRelay {
-                                name: relay.clone(),
-                                schema: schema.clone(),
-                                buffer: nonzero!(2usize),
-                                branching: RelayBranching::unbranched(),
-                                materialized_state: None,
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Client,
-                            ModelName::from(&client),
-                            nervix_models::Model::ClientMqtt(CreateClientMqtt {
-                                name: client.clone(),
-                                mount: None,
-                                config: vec![ClientConfigEntry {
-                                    key: "addr".to_string(),
-                                    value: "mqtt://127.0.0.1:1883".to_string(),
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Ingestor,
-                            ModelName::from(&ingestor),
-                            nervix_models::Model::Ingestor(CreateIngestor {
-                                name: ingestor.clone(),
-                                output_routes: with_inherit_all(ProcessorOutputs::single(
-                                    relay.clone(),
-                                ))
-                                .with_flush_policy(FlushPolicy::Each {
-                                    interval: "100ms".to_string(),
-                                    max_batch_size: "1MiB".to_string(),
-                                })
-                                .with_branch(OutputBranch::Unbranched),
-                                decode_using_codec: codec.clone(),
-                                timestamp_source: None,
-                                source: IngestSource::Mqtt {
-                                    client,
-                                    topic: "notifications".to_string(),
-                                    instances: nonzero!(1u64),
-                                    mode: MqttIngestMode::AckSequential {
-                                        timeout: "oops".to_string(),
-                                        retry_policy: RetryPolicy {
-                                            backoff: "100ms".to_string(),
-                                            max_backoff: "200ms".to_string(),
-                                        },
+                            },
+                        )),
+                        scheduled_model(nervix_models::Model::Codec(CreateCodec {
+                            name: codec.clone(),
+                            wire_format: CodecWireFormat::Json {
+                                wire_schema: wire_schema.clone(),
+                            },
+                            schema: schema.clone(),
+                            encoding_rules: Vec::new(),
+                        })),
+                        scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                            name: relay.clone(),
+                            schema: schema.clone(),
+                            buffer: nonzero!(2usize),
+                            branching: RelayBranching::unbranched(),
+                            materialized_state: None,
+                        })),
+                        scheduled_model(nervix_models::Model::ClientMqtt(CreateClientMqtt {
+                            name: client.clone(),
+                            mount: None,
+                            config: vec![ClientConfigEntry {
+                                key: "addr".to_string(),
+                                value: "mqtt://127.0.0.1:1883".to_string(),
+                            }],
+                        })),
+                        scheduled_model(nervix_models::Model::Ingestor(CreateIngestor {
+                            name: ingestor.clone(),
+                            output_routes: with_inherit_all(ProcessorOutputs::single(
+                                relay.clone(),
+                            ))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
+                            .with_branch(OutputBranch::Unbranched),
+                            decode_using_codec: codec.clone(),
+                            timestamp_source: None,
+                            source: IngestSource::Mqtt {
+                                client,
+                                topic: "notifications".to_string(),
+                                instances: nonzero!(1u64),
+                                mode: MqttIngestMode::AckSequential {
+                                    timeout: "oops".to_string(),
+                                    retry_policy: RetryPolicy {
+                                        backoff: "100ms".to_string(),
+                                        max_backoff: "200ms".to_string(),
                                     },
-                                    quiesce: nervix_models::IngestQuiesceMode::Drop,
                                 },
-                                general_error_policy: GeneralErrorPolicy::Log,
-                                filter_where: None,
-                            }),
-                        ),
+                                quiesce: nervix_models::IngestQuiesceMode::Drop,
+                            },
+                            general_error_policy: GeneralErrorPolicy::Log,
+                            filter_where: None,
+                        })),
                     ],
                     Vec::new(),
                 )]),

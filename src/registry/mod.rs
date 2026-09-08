@@ -41,16 +41,18 @@ use nervix_models::{
     ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat,
     CorrelationTimeoutAction, CreateAvroWireSchema, CreateBranch, CreateCborWireSchema,
     CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateLookup, CreatePlacement,
-    CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, DomainName,
-    DomainSchedule, DropModel, EmitSink, EndpointName, EndpointType, Expression, FieldName,
-    FlushPolicy, IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
+    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup,
+    CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, DomainName, DomainSchedule,
+    DropModel, EmitSink, EndpointName, EndpointType, Expression, FieldName, FlushPolicy,
+    IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
     MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    ModelChangeAspect, ModelKind, ModelName, NodeRef, OtelAggregationTemporality, OtelMetricKind,
-    OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementName,
-    PlacementPolicy, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayName,
-    ResolvedCodecWireFormat, RouteConstruction, ScheduledNode, ScheduledNodes, SchemaField,
-    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, WireSchemaLookup, WireSchemaName,
+    ModelChangeAspect, ModelIndex, ModelKind, ModelName, NodeRef, OtelAggregationTemporality,
+    OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
+    PlacementGroupSchedule, PlacementName, PlacementPolicy, ProcessorOutput, ProcessorOutputs,
+    QuiesceLevel, RelayName, ResolvedCodecWireFormat, RouteConstruction, ScheduledNode,
+    ScheduledNodes, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup,
+    UniquelyKindedModel, VhostName, WireSchemaLookup, WireSchemaName,
 };
 use nervix_roto::signatures_for as udf_signatures_for;
 use nervix_vm::{
@@ -82,11 +84,8 @@ const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
 const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
 
-fn udf_compile_options(
-    models: &HashMap<NodeRef, Model>,
-    mut options: CompileOptions,
-) -> CompileOptions {
-    options.udf_signatures = udf_signatures_for(models.values().filter_map(|model| match model {
+fn udf_compile_options(models: &ModelIndex, mut options: CompileOptions) -> CompileOptions {
+    options.udf_signatures = udf_signatures_for(models.models().filter_map(|model| match model {
         Model::Udf(udf) => Some(udf),
         _ => None,
     }));
@@ -124,15 +123,20 @@ pub enum RegistryError {
     ConcurrentMutation { domain: String },
     #[error("model '{identifier}' does not exist in domain '{domain}'")]
     NotFound { domain: String, identifier: String },
+    /// Stored bytes that decode to a model of a kind other than the one their key names.
+    ///
+    /// The registry writes every model under the key the model itself reports, so this is corrupt
+    /// storage rather than configuration a domain can hold. It is reported instead of read so the
+    /// stored shape is recreated rather than reinterpreted.
     #[error(
-        "model '{identifier}' in domain '{domain}' expected kind {expected_kind}, found \
-         {actual_kind}"
+        "model '{identifier}' in domain '{domain}' is stored under kind {expected_kind} but \
+         decodes as {stored_kind}"
     )]
-    InvalidModelKind {
+    StoredModelKindMismatch {
         domain: String,
         identifier: String,
         expected_kind: &'static str,
-        actual_kind: &'static str,
+        stored_kind: &'static str,
     },
     #[error(
         "model '{identifier}' in domain '{domain}' requires missing {expected_kind} '{reference}'"
@@ -142,17 +146,6 @@ pub enum RegistryError {
         identifier: String,
         expected_kind: &'static str,
         reference: String,
-    },
-    #[error(
-        "model '{identifier}' in domain '{domain}' expected {expected_kind} '{reference}', found \
-         {actual_kind}"
-    )]
-    InvalidReferenceKind {
-        domain: String,
-        identifier: String,
-        expected_kind: &'static str,
-        reference: String,
-        actual_kind: &'static str,
     },
     #[error("active configuration graph for domain '{domain}' contains a cycle")]
     ConfigurationCycle { domain: String },
@@ -204,10 +197,19 @@ pub enum RegistryError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One model as storage holds it, with the domain that owns it.
+///
+/// The node the model configures is read from the model rather than carried beside it, because the
+/// key it is stored under is decoded from the model's own kind and name when the record is read.
 struct StoredModelRecord {
     domain: DomainName,
-    key: NodeRef,
     model: Model,
+}
+
+impl StoredModelRecord {
+    fn node(&self) -> NodeRef {
+        self.model.node_ref()
+    }
 }
 
 pub struct Registry {
@@ -280,10 +282,11 @@ impl Registry {
         }
 
         for record in &stored {
+            let node = record.node();
             info!(
                 domain = record.domain.as_str(),
-                model = record.key.identifier.as_str(),
-                kind = record.key.kind.as_str(),
+                model = node.identifier.as_str(),
+                kind = node.kind.as_str(),
                 "loaded persisted model"
             );
         }
@@ -387,7 +390,7 @@ impl Registry {
             let changes = runtime_changes_for_domain(
                 &domain,
                 Some(domain_state.graph.clone()),
-                &HashMap::new(),
+                &ModelIndex::new(),
                 &domain_state.models,
             );
             if changes.graph.is_some() || !changes.changes.is_empty() {
@@ -406,13 +409,8 @@ impl Registry {
             let models = domain_schedule
                 .nodes
                 .values()
-                .map(|node| {
-                    (
-                        NodeRef::new(node.kind, node.identifier.clone()),
-                        node.config.as_ref().clone(),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
+                .map(|node| node.config.as_ref().clone())
+                .collect::<ModelIndex>();
             self.synchronize_domain_models(&domain_schedule.domain, models)?;
         }
         let stale_domains = self
@@ -424,7 +422,7 @@ impl Registry {
             .cloned()
             .collect::<Vec<_>>();
         for domain in stale_domains {
-            self.synchronize_domain_models(&domain, HashMap::new())?;
+            self.synchronize_domain_models(&domain, ModelIndex::new())?;
         }
         Ok(())
     }
@@ -432,7 +430,7 @@ impl Registry {
     fn synchronize_domain_models(
         &self,
         domain: &DomainName,
-        models: HashMap<NodeRef, Model>,
+        models: ModelIndex,
     ) -> Result<(), Report<RegistryError>> {
         let _commit_guard = self.commit_lock.lock();
         let current_models = self
@@ -440,8 +438,8 @@ impl Registry {
             .list_models(domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         if current_models == models {
             return Ok(());
         }
@@ -458,8 +456,8 @@ impl Registry {
             })
             .collect::<HashMap<_, _>>();
         let drops = current_models
-            .keys()
-            .filter(|key| !models.contains_key(*key))
+            .nodes()
+            .filter(|key| !models.contains(key))
             .cloned()
             .collect::<HashSet<_>>();
         self.storage
@@ -562,8 +560,8 @@ impl Registry {
 
         let current_models = existing
             .iter()
-            .map(|record| (record.key.clone(), record.model.clone()))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model.clone())
+            .collect::<ModelIndex>();
         let current_state = self.build_domain_state(domain, &current_models)?;
         let mut candidate = current_models.clone();
         let mut mutation_quiesce_levels = Vec::with_capacity(mutations.len());
@@ -582,7 +580,7 @@ impl Registry {
                         "staging model create from batch"
                     );
 
-                    if candidate.contains_key(&key) {
+                    if candidate.contains(&key) {
                         warn!(
                             domain = domain.as_str(),
                             model = identifier.as_str(),
@@ -595,10 +593,9 @@ impl Registry {
                         }));
                     }
 
-                    candidate.insert(key, model.as_ref().clone());
+                    candidate.insert(model.as_ref().clone());
                 }
                 RegistryMutation::AlterSchema(alter) => {
-                    let key = NodeRef::new(ModelKind::Schema, alter.schema.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.schema.as_str(),
@@ -606,18 +603,12 @@ impl Registry {
                         "staging schema alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) =
+                        candidate.configured_mut::<CreateSchema>(alter.schema.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Schema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::Schema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -629,7 +620,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterWireJsonSchema(alter) => {
-                    let key = NodeRef::new(ModelKind::WireJsonSchema, alter.schema.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.schema.as_str(),
@@ -637,18 +627,20 @@ impl Registry {
                         "staging JSON wire schema alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) = candidate.narrowed_mut(
+                        ModelKind::WireJsonSchema,
+                        alter.schema.clone(),
+                        |model| {
+                            if let Model::WireJsonSchema(schema) = model {
+                                Some(schema)
+                            } else {
+                                None
+                            }
+                        },
+                    ) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::WireJsonSchema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::WireJsonSchema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -660,19 +652,20 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterWireCborSchema(alter) => {
-                    let key = NodeRef::new(ModelKind::WireCborSchema, alter.schema.clone());
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) = candidate.narrowed_mut(
+                        ModelKind::WireCborSchema,
+                        alter.schema.clone(),
+                        |model| {
+                            if let Model::WireCborSchema(schema) = model {
+                                Some(schema)
+                            } else {
+                                None
+                            }
+                        },
+                    ) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::WireCborSchema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::WireCborSchema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -684,19 +677,12 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterWireAvroSchema(alter) => {
-                    let key = NodeRef::new(ModelKind::WireAvroSchema, alter.schema.clone());
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) =
+                        candidate.configured_mut::<CreateAvroWireSchema>(alter.schema.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::WireAvroSchema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::WireAvroSchema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -708,7 +694,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterRelay(alter) => {
-                    let key = NodeRef::new(ModelKind::Relay, alter.relay.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.relay.as_str(),
@@ -716,22 +701,14 @@ impl Registry {
                         "staging relay alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(relay) = candidate.configured_mut::<CreateRelay>(alter.relay.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.relay.as_str().to_string(),
                         }));
                     };
-                    let before = model.clone();
-
-                    let Model::Relay(relay) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.relay.as_str().to_string(),
-                            expected_kind: ModelKind::Relay.as_str(),
-                            actual_kind: model.kind().as_str(),
-                        }));
-                    };
+                    let before = Model::Relay(relay.clone());
                     relay.apply_alter(alter).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
@@ -739,13 +716,12 @@ impl Registry {
                             reason: error.to_string(),
                         })
                     })?;
-                    let after = model.clone();
+                    let after = Model::Relay(relay.clone());
                     ensure_placement_member_shape_change_allowed(
                         domain, &before, &after, &candidate,
                     )?;
                 }
                 RegistryMutation::AlterJunction(alter) => {
-                    let key = NodeRef::new(ModelKind::Junction, alter.junction.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.junction.as_str(),
@@ -753,18 +729,12 @@ impl Registry {
                         "staging junction alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(junction) =
+                        candidate.configured_mut::<CreateJunction>(alter.junction.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.junction.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Junction(junction) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.junction.as_str().to_string(),
-                            expected_kind: ModelKind::Junction.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     junction.apply_alter(alter).map_err(|error| {
@@ -776,7 +746,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterDeduplicator(alter) => {
-                    let key = NodeRef::new(ModelKind::Deduplicator, alter.deduplicator.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.deduplicator.as_str(),
@@ -784,18 +753,12 @@ impl Registry {
                         "staging deduplicator alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(deduplicator) =
+                        candidate.configured_mut::<CreateDeduplicator>(alter.deduplicator.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.deduplicator.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Deduplicator(deduplicator) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.deduplicator.as_str().to_string(),
-                            expected_kind: ModelKind::Deduplicator.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     deduplicator.apply_alter(alter).map_err(|error| {
@@ -807,7 +770,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterReorderer(alter) => {
-                    let key = NodeRef::new(ModelKind::Reorderer, alter.reorderer.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.reorderer.as_str(),
@@ -815,18 +777,12 @@ impl Registry {
                         "staging reorderer alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(reorderer) =
+                        candidate.configured_mut::<CreateReorderer>(alter.reorderer.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.reorderer.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Reorderer(reorderer) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.reorderer.as_str().to_string(),
-                            expected_kind: ModelKind::Reorderer.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     reorderer.apply_alter(alter).map_err(|error| {
@@ -838,7 +794,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterEmitter(alter) => {
-                    let key = NodeRef::new(ModelKind::Emitter, alter.emitter.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.emitter.as_str(),
@@ -846,18 +801,12 @@ impl Registry {
                         "staging emitter alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(emitter) =
+                        candidate.configured_mut::<CreateEmitter>(alter.emitter.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.emitter.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Emitter(emitter) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.emitter.as_str().to_string(),
-                            expected_kind: ModelKind::Emitter.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     emitter.apply_alter(alter).map_err(|error| {
@@ -869,7 +818,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterIngestor(alter) => {
-                    let key = NodeRef::new(ModelKind::Ingestor, alter.ingestor.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.ingestor.as_str(),
@@ -877,21 +825,15 @@ impl Registry {
                         "staging ingestor alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(ingestor) =
+                        candidate.configured_mut::<CreateIngestor>(alter.ingestor.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.ingestor.as_str().to_string(),
                         }));
                     };
-                    let before = model.clone();
-                    let Model::Ingestor(ingestor) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.ingestor.as_str().to_string(),
-                            expected_kind: ModelKind::Ingestor.as_str(),
-                            actual_kind: model.kind().as_str(),
-                        }));
-                    };
+                    let before = Model::Ingestor(ingestor.clone());
                     ingestor.apply_alter(alter).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
@@ -899,13 +841,12 @@ impl Registry {
                             reason: error.to_string(),
                         })
                     })?;
-                    let after = model.clone();
+                    let after = Model::Ingestor(ingestor.clone());
                     ensure_placement_member_shape_change_allowed(
                         domain, &before, &after, &candidate,
                     )?;
                 }
                 RegistryMutation::AlterReingestor(alter) => {
-                    let key = NodeRef::new(ModelKind::Reingestor, alter.reingestor.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.reingestor.as_str(),
@@ -913,18 +854,12 @@ impl Registry {
                         "staging reingestor alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(reingestor) =
+                        candidate.configured_mut::<CreateReingestor>(alter.reingestor.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.reingestor.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Reingestor(reingestor) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.reingestor.as_str().to_string(),
-                            expected_kind: ModelKind::Reingestor.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     reingestor.apply_alter(alter).map_err(|error| {
@@ -936,7 +871,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterGenerator(alter) => {
-                    let key = NodeRef::new(ModelKind::Generator, alter.generator.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.generator.as_str(),
@@ -944,18 +878,12 @@ impl Registry {
                         "staging generator alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(generator) =
+                        candidate.configured_mut::<CreateGenerator>(alter.generator.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.generator.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Generator(generator) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.generator.as_str().to_string(),
-                            expected_kind: ModelKind::Generator.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     generator.apply_alter(alter).map_err(|error| {
@@ -974,35 +902,34 @@ impl Registry {
                         kind = ModelKind::Placement.as_str(),
                         "staging placement alter from batch"
                     );
-                    let Some(mut model) = candidate.remove(&key) else {
+                    // A placement alteration may rename it, and the index keys a model by its own
+                    // name, so the entry leaves the index and re-enters under the resulting name.
+                    let Some(placement) =
+                        candidate.configured_mut::<CreatePlacement>(key.identifier.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.placement.as_str().to_string(),
                         }));
                     };
-                    let Model::Placement(placement) = &mut model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.placement.as_str().to_string(),
-                            expected_kind: ModelKind::Placement.as_str(),
-                            actual_kind: model.kind().as_str(),
-                        }));
-                    };
-                    placement.apply_alter(alter).map_err(|error| {
+                    let mut altered = placement.clone();
+                    altered.apply_alter(alter).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: alter.placement.as_str().to_string(),
                             reason: error.to_string(),
                         })
                     })?;
+                    let model = Model::Placement(altered);
                     let next_key = model.node_ref();
-                    if next_key != key && candidate.contains_key(&next_key) {
+                    if next_key != key && candidate.contains(&next_key) {
                         return Err(Report::new(RegistryError::AlreadyExists {
                             domain: domain.as_str().to_string(),
                             identifier: model.name().as_str().to_string(),
                         }));
                     }
-                    candidate.insert(next_key, model);
+                    let _ = candidate.remove(&key);
+                    candidate.insert(model);
                 }
                 RegistryMutation::Drop(drop) => {
                     let key = NodeRef::new(drop.kind, drop.name.clone());
@@ -1013,7 +940,7 @@ impl Registry {
                         "staging model drop from batch"
                     );
 
-                    if !candidate.contains_key(&key) {
+                    if !candidate.contains(&key) {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: drop.name.as_str().to_string(),
@@ -1047,8 +974,8 @@ impl Registry {
         }
 
         let drops_in_batch = current_models
-            .keys()
-            .filter(|key| !candidate.contains_key(*key))
+            .nodes()
+            .filter(|key| !candidate.contains(key))
             .cloned()
             .collect::<HashSet<_>>();
 
@@ -1127,8 +1054,8 @@ impl Registry {
             .list_models(&planned.domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         if current_models != planned.base_models {
             return Err(Report::new(RegistryError::ConcurrentMutation {
                 domain: planned.domain.as_str().to_string(),
@@ -1192,8 +1119,8 @@ impl Registry {
             .list_models(&planned.domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         if current_models != planned.domain_state.models {
             return Err(Report::new(RegistryError::ConcurrentMutation {
                 domain: planned.domain.as_str().to_string(),
@@ -1212,8 +1139,8 @@ impl Registry {
             })
             .collect::<HashMap<_, _>>();
         let drops = current_models
-            .keys()
-            .filter(|key| !planned.base_models.contains_key(*key))
+            .nodes()
+            .filter(|key| !planned.base_models.contains(key))
             .cloned()
             .collect::<HashSet<_>>();
         self.storage
@@ -1240,7 +1167,39 @@ impl Registry {
         Ok(runtime_changes)
     }
 
-    pub fn get(
+    /// The `M` named `identifier` in `domain`, when the domain configures one.
+    ///
+    /// `M` names the kind the read is keyed by, so a hit is an `M` and the caller has no second
+    /// outcome to answer for. Stored bytes that decode to another kind are corrupt storage rather
+    /// than configuration a domain can hold, and they surface here once as
+    /// [`RegistryError::StoredModelKindMismatch`].
+    pub fn get<M: UniquelyKindedModel>(
+        &self,
+        domain: &DomainName,
+        identifier: impl Into<ModelName>,
+    ) -> Result<Option<M>, Report<RegistryError>> {
+        let identifier = identifier.into();
+        let Some(model) = self.get_of_kind(domain, M::KIND, identifier.clone())? else {
+            return Ok(None);
+        };
+        let stored_kind = model.kind();
+        let Some(model) = M::from_model(model) else {
+            return Err(Report::new(RegistryError::StoredModelKindMismatch {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                expected_kind: M::KIND.as_str(),
+                stored_kind: stored_kind.as_str(),
+            }));
+        };
+        Ok(Some(model))
+    }
+
+    /// The model named `identifier` in `domain` under a kind the caller learns at runtime.
+    ///
+    /// `SHOW CREATE` takes the kind from the statement it is rendering, so it reads the union and
+    /// renders whatever the domain stores. Every read that names its kind in its own source uses
+    /// [`Self::get`] instead.
+    pub fn get_of_kind(
         &self,
         domain: &DomainName,
         kind: ModelKind,
@@ -1249,6 +1208,21 @@ impl Registry {
         let identifier = identifier.into();
         self.storage
             .get(domain, kind, identifier)
+            .change_context(RegistryError::LoadStoredModels)
+    }
+
+    /// Whether `domain` already configures a model of `kind` named `identifier`.
+    ///
+    /// `CREATE ... IF NOT EXISTS` only asks whether the name is taken, so it never decodes the
+    /// stored model to find out.
+    pub fn contains(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        identifier: impl Into<ModelName>,
+    ) -> Result<bool, Report<RegistryError>> {
+        self.storage
+            .contains(domain, kind, identifier)
             .change_context(RegistryError::LoadStoredModels)
     }
 
@@ -1308,12 +1282,12 @@ impl Registry {
             .list_models(domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         for mutation in queued {
             mutation.fold_into_models(&mut models);
         }
-        Ok(models.into_values().collect())
+        Ok(models.into_iter().map(|(_, model)| model).collect())
     }
 
     pub fn active_graph(&self, domain: &DomainName) -> Option<ActiveGraph> {
@@ -1363,7 +1337,7 @@ impl Registry {
     fn build_domain_state(
         &self,
         domain: &DomainName,
-        models: &HashMap<NodeRef, Model>,
+        models: &ModelIndex,
     ) -> Result<DomainState, Report<RegistryError>> {
         DomainState::build(domain, models)
     }
@@ -1377,8 +1351,8 @@ impl Registry {
 }
 
 fn classify_quiesce(
-    base: &HashMap<NodeRef, Model>,
-    candidate: &HashMap<NodeRef, Model>,
+    base: &ModelIndex,
+    candidate: &ModelIndex,
     candidate_graph: &ActiveGraph,
 ) -> QuiescePlan {
     let mut level = QuiesceLevel::Dynamic;
@@ -1406,7 +1380,7 @@ fn classify_quiesce(
         });
     }
 
-    for key in candidate.keys().filter(|key| !base.contains_key(*key)) {
+    for key in candidate.nodes().filter(|key| !base.contains(key)) {
         level = level.max(ModelChangeAspect::EntityCreated.quiesce_level());
         affected_entities.push(NodeRef {
             kind: key.kind,
@@ -1521,10 +1495,10 @@ impl RegistryMutation {
     /// Fold this mutation into `models` without validating the outcome. An alteration that no
     /// longer applies leaves the stored model as it was, so a description of queued configuration
     /// never fails on an intermediate state its later statements repair.
-    fn fold_into_models(&self, models: &mut HashMap<NodeRef, Model>) {
+    fn fold_into_models(&self, models: &mut ModelIndex) {
         match self {
             Self::Create(model) => {
-                models.insert(model.node_ref(), model.as_ref().clone());
+                models.insert(model.as_ref().clone());
             }
             Self::Drop(_) => {
                 models.remove(&self.target_key());
@@ -1534,8 +1508,7 @@ impl RegistryMutation {
                     return;
                 };
                 self.apply_alteration(&mut model);
-                let resulting = self.resulting_key().unwrap_or_else(|| self.target_key());
-                models.insert(resulting, model);
+                models.insert(model);
             }
         }
     }
@@ -1605,7 +1578,7 @@ pub struct PlannedMutations {
     domain: DomainName,
     batch_size: usize,
     operation_name: String,
-    base_models: HashMap<NodeRef, Model>,
+    base_models: ModelIndex,
     domain_state: DomainState,
     models_to_persist: HashMap<NodeRef, RegistryPersistMutation>,
     drops_in_batch: HashSet<NodeRef>,
@@ -1685,13 +1658,13 @@ struct RegistryState {
 
 impl RegistryState {
     fn from_records(records: Vec<StoredModelRecord>) -> Result<Self, Report<RegistryError>> {
-        let mut grouped = HashMap::<DomainName, HashMap<NodeRef, Model>>::new();
+        let mut grouped = HashMap::<DomainName, ModelIndex>::new();
 
         for record in records {
             grouped
                 .entry(record.domain)
                 .or_default()
-                .insert(record.key, record.model);
+                .insert(record.model);
         }
 
         let mut domains = HashMap::new();
@@ -1706,15 +1679,12 @@ impl RegistryState {
 
 #[derive(Debug, Clone)]
 struct DomainState {
-    models: HashMap<NodeRef, Model>,
+    models: ModelIndex,
     graph: ActiveGraph,
 }
 
 impl DomainState {
-    fn build(
-        domain: &DomainName,
-        models: &HashMap<NodeRef, Model>,
-    ) -> Result<Self, Report<RegistryError>> {
+    fn build(domain: &DomainName, models: &ModelIndex) -> Result<Self, Report<RegistryError>> {
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let mut indices = HashMap::new();
 
@@ -3259,13 +3229,13 @@ struct EffectivePlacementPlan {
 impl PlacementAnalysis {
     fn build(
         domain: &DomainName,
-        models: &HashMap<NodeRef, Model>,
+        models: &ModelIndex,
         indices: &HashMap<NodeRef, NodeIndex>,
         graph: &mut DiGraph<ActiveNode, EdgeKind>,
     ) -> Result<Self, Report<RegistryError>> {
         let topology = PlacementTopology::build(models, indices, graph);
         let mut placement_models = models
-            .values()
+            .models()
             .filter_map(|model| match model {
                 Model::Placement(placement) => Some(placement.clone()),
                 _ => None,
@@ -3515,7 +3485,7 @@ struct PlacementTopology {
 
 impl PlacementTopology {
     fn build(
-        models: &HashMap<NodeRef, Model>,
+        models: &ModelIndex,
         indices: &HashMap<NodeRef, NodeIndex>,
         graph: &DiGraph<ActiveNode, EdgeKind>,
     ) -> Self {
@@ -3726,7 +3696,7 @@ fn resolve_placement_members(
     domain: &DomainName,
     placement: &CreatePlacement,
     members: &[ModelName],
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
 ) -> Result<Vec<ResolvedPlacementMember>, Report<RegistryError>> {
     let mut resolved = Vec::new();
     let mut seen = HashSet::default();
@@ -3743,7 +3713,7 @@ fn resolve_placement_member(
     domain: &DomainName,
     placement: &CreatePlacement,
     member: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
 ) -> Result<ResolvedPlacementMember, Report<RegistryError>> {
     let mut eligible = Vec::new();
     let mut cluster_wide_ingestor = false;
@@ -3835,7 +3805,7 @@ fn ensure_placement_member_shape_change_allowed(
     domain: &DomainName,
     before: &Model,
     after: &Model,
-    candidate_models: &HashMap<NodeRef, Model>,
+    candidate_models: &ModelIndex,
 ) -> Result<(), Report<RegistryError>> {
     if !is_placement_eligible_member_model(before) || is_placement_eligible_member_model(after) {
         return Ok(());
@@ -3843,7 +3813,7 @@ fn ensure_placement_member_shape_change_allowed(
 
     let member = after.name();
     let mut placements = Vec::new();
-    for model in candidate_models.values() {
+    for model in candidate_models.models() {
         let Model::Placement(placement) = model else {
             continue;
         };
@@ -4024,13 +3994,8 @@ impl ActiveGraph {
         let models = schedule
             .nodes
             .values()
-            .map(|node| {
-                (
-                    NodeRef::new(node.kind, node.identifier.clone()),
-                    node.config.as_ref().clone(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+            .map(|node| node.config.as_ref().clone())
+            .collect::<ModelIndex>();
         DomainState::build(&schedule.domain, &models).map(|state| state.graph)
     }
 
@@ -4357,17 +4322,10 @@ impl ActiveGraph {
                     *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
                 }
             }
-            let scheduled_node = ScheduledNode {
-                identifier: node.identifier,
-                kind: node.kind,
-                config: Box::new((*node.config).clone()),
-                effective_branching: node.effective_branching,
-                effective_branching_schema: node.effective_branching_schema,
-                schema_fingerprint: self.schema_fingerprint_for_index(index),
-                kafka_partition_schedule: None,
-                primary_node,
-                assigned_nodes,
-            };
+            let scheduled_node = ScheduledNode::new((*node.config).clone())
+                .with_effective_branching(node.effective_branching, node.effective_branching_schema)
+                .with_schema_fingerprint(self.schema_fingerprint_for_index(index))
+                .placed_on(primary_node, assigned_nodes);
             scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
         let placement_groups = placement
@@ -4917,7 +4875,7 @@ fn validate_ingestor_source(
 fn validate_emitter_publishing_contract(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     emitter: &CreateEmitter,
 ) -> Result<(), Report<RegistryError>> {
     let invalid = |reason: String| {
@@ -5174,7 +5132,7 @@ fn validate_otel_mapping_contract(
 fn validate_sqs_fifo_group_expression(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -5393,7 +5351,7 @@ fn is_schedulable_model(model: &Model) -> bool {
 fn validate_branch_model(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
     parse_branch_ttl(domain, identifier, &branch.ttl)?;
@@ -5417,7 +5375,7 @@ fn parse_branch_ttl(
 fn ensure_branch_schema_exists(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
     let Some(Model::Schema(_)) =
@@ -5576,7 +5534,7 @@ fn parse_window_bound_duration(
 struct ModelValidationContext<'location, 'models> {
     domain: &'location DomainName,
     identifier: &'location ModelName,
-    models: &'models HashMap<NodeRef, Model>,
+    models: &'models ModelIndex,
 }
 
 fn processor_input_schemas<'inputs, 'models>(
@@ -5732,7 +5690,7 @@ fn processor_first_input_relay<'a>(
 fn ensure_window_processor_output_schemas(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     window_processor: &CreateWindowProcessor,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
@@ -5756,7 +5714,7 @@ fn ensure_window_processor_output_schemas(
 fn ensure_wasm_processor_output_schemas(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     processor: &nervix_models::CreateWasmProcessor,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
@@ -5799,7 +5757,7 @@ fn ensure_wasm_processor_output_schemas(
 fn effective_wasm_output_filter_map_schema(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     input_schemas: &[(&RelayName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
@@ -5889,7 +5847,7 @@ fn effective_wasm_output_filter_map_schema(
 fn validate_window_processor_output(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     input_schemas: &[(&RelayName, &CreateSchema)],
@@ -5988,7 +5946,7 @@ fn validate_window_processor_output(
 fn validate_window_route_where(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -6423,6 +6381,18 @@ impl ModelStorage {
         deserialize_value(raw.as_ref()).map(Some)
     }
 
+    fn contains(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        identifier: impl Into<ModelName>,
+    ) -> Result<bool, Report<RegistryError>> {
+        let key = encode_key(domain, kind, identifier.into())?;
+        self.index
+            .contains_key(key)
+            .change_context(RegistryError::ReadValue)
+    }
+
     fn list_identifiers(
         &self,
         domain: &DomainName,
@@ -6441,11 +6411,12 @@ impl ModelStorage {
                 continue;
             }
 
-            if !record.key.identifier.as_str().starts_with(&prefix) {
+            let identifier = record.model.name();
+            if !identifier.as_str().starts_with(&prefix) {
                 continue;
             }
 
-            out.push(record.key.identifier);
+            out.push(identifier);
         }
 
         out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -6488,11 +6459,20 @@ impl ModelStorage {
             let identifier =
                 ModelName::parse(&key.identifier).change_context(RegistryError::DecodeKey)?;
 
-            records.push(StoredModelRecord {
-                domain,
-                key: NodeRef::new(kind, identifier),
-                model,
-            });
+            // Every model is written under the key it reports, so a stored pair that disagrees is
+            // corrupt storage. Checking it once here is what lets every reader below take the node
+            // from the model and never reconcile the two again.
+            let stored = NodeRef::new(kind, identifier);
+            if stored != model.node_ref() {
+                return Err(Report::new(RegistryError::StoredModelKindMismatch {
+                    domain: domain.as_str().to_string(),
+                    identifier: stored.identifier.as_str().to_string(),
+                    expected_kind: stored.kind.as_str(),
+                    stored_kind: model.kind().as_str(),
+                }));
+            }
+
+            records.push(StoredModelRecord { domain, model });
         }
 
         Ok(records)
@@ -6541,7 +6521,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 fn expect_kind(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     referenced: impl Into<ModelName>,
     expected_kind: ModelKind,
@@ -6558,7 +6538,7 @@ fn expect_kind(
 fn expect_node(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     referenced: &NodeRef,
 ) -> Result<NodeIndex, Report<RegistryError>> {
@@ -6579,7 +6559,7 @@ fn expect_node(
 fn add_message_error_policy_edges(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
@@ -6606,7 +6586,7 @@ struct MessageErrorSchemas<'a> {
 fn validate_model_message_error_policies(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     model: &Model,
 ) -> Result<(), Report<RegistryError>> {
     let validate_outputs = |outputs: &ProcessorOutputs,
@@ -6793,7 +6773,7 @@ fn validate_model_message_error_policies(
 fn validate_transforming_processor_message_errors(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     inputs: &nervix_models::ProcessorInputs,
     outputs: &ProcessorOutputs,
     branch: &BranchSelection,
@@ -6826,7 +6806,7 @@ fn validate_transforming_processor_message_errors(
 fn validate_message_error_policy(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     policy: &MessageErrorPolicy,
     schemas: MessageErrorSchemas<'_>,
     expected_branch: Option<&BranchName>,
@@ -6994,7 +6974,7 @@ fn model_materialized_state_dependencies(model: &Model) -> &[MaterializedStateDe
 fn add_materialized_state_dependency_edges(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
@@ -7030,7 +7010,7 @@ fn add_materialized_state_dependency_edges(
 fn validate_materialized_state_default(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     dependency: &MaterializedStateDependency,
 ) -> Result<(), Report<RegistryError>> {
     let MaterializedStatePolicy::Default(assignments) = &dependency.policy else {
@@ -7120,7 +7100,7 @@ fn validate_materialized_state_default(
 
 fn expression_contains_nondeterministic_or_side_effect_call(
     expression: &Expression,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
 ) -> bool {
     match expression {
         Expression::Literal(_) | Expression::Field(_) => false,
@@ -7402,7 +7382,7 @@ fn add_udf_dependency_edges(
 fn add_output_message_error_policy_edges(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
@@ -7425,7 +7405,7 @@ fn add_output_message_error_policy_edges(
 fn add_correlation_timeout_action_edges(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
@@ -7443,25 +7423,19 @@ fn add_correlation_timeout_action_edges(
 fn expect_schema_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     referenced: &SchemaName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
-    match models.get(&NodeRef::new(ModelKind::Schema, referenced.clone())) {
-        Some(Model::Schema(schema)) => Ok(schema),
-        Some(model) => Err(Report::new(RegistryError::InvalidReferenceKind {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Schema.as_str(),
-            reference: referenced.as_str().to_string(),
-            actual_kind: model.kind().as_str(),
-        })),
-        None => Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Schema.as_str(),
-            reference: referenced.as_str().to_string(),
-        })),
-    }
+    models
+        .configured::<CreateSchema>(referenced.clone())
+        .ok_or_else(|| {
+            Report::new(RegistryError::MissingReference {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                expected_kind: ModelKind::Schema.as_str(),
+                reference: referenced.as_str().to_string(),
+            })
+        })
 }
 
 /// The wire schemas of a domain's proposed configuration, as a codec's format looks them up.
@@ -7472,7 +7446,7 @@ fn expect_schema_model<'a>(
 struct DomainModelWireSchemas<'a> {
     domain: &'a DomainName,
     identifier: &'a ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
 }
 
 impl<'a> DomainModelWireSchemas<'a> {
@@ -7482,23 +7456,16 @@ impl<'a> DomainModelWireSchemas<'a> {
         referenced: &WireSchemaName,
         extract: impl Fn(&'a Model) -> Option<&'a CreateWireSchema<T>>,
     ) -> Result<&'a CreateWireSchema<T>, Report<RegistryError>> {
-        match self.models.get(&NodeRef::new(kind, referenced.clone())) {
-            Some(model) => extract(model).ok_or_else(|| {
-                Report::new(RegistryError::InvalidReferenceKind {
+        self.models
+            .narrowed(kind, referenced.clone(), extract)
+            .ok_or_else(|| {
+                Report::new(RegistryError::MissingReference {
                     domain: self.domain.as_str().to_string(),
                     identifier: self.identifier.as_str().to_string(),
                     expected_kind: kind.as_str(),
                     reference: referenced.as_str().to_string(),
-                    actual_kind: model.kind().as_str(),
                 })
-            }),
-            None => Err(Report::new(RegistryError::MissingReference {
-                domain: self.domain.as_str().to_string(),
-                identifier: self.identifier.as_str().to_string(),
-                expected_kind: kind.as_str(),
-                reference: referenced.as_str().to_string(),
-            })),
-        }
+            })
     }
 }
 
@@ -7539,26 +7506,20 @@ impl WireSchemaLookup for DomainModelWireSchemas<'_> {
 fn expect_codec_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     referenced: impl Into<ModelName>,
 ) -> Result<&'a CreateCodec, Report<RegistryError>> {
     let referenced = referenced.into();
-    match models.get(&NodeRef::new(ModelKind::Codec, referenced.clone())) {
-        Some(Model::Codec(codec)) => Ok(codec),
-        Some(model) => Err(Report::new(RegistryError::InvalidReferenceKind {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Codec.as_str(),
-            reference: referenced.as_str().to_string(),
-            actual_kind: model.kind().as_str(),
-        })),
-        None => Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Codec.as_str(),
-            reference: referenced.as_str().to_string(),
-        })),
-    }
+    models
+        .configured::<CreateCodec>(referenced.clone())
+        .ok_or_else(|| {
+            Report::new(RegistryError::MissingReference {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                expected_kind: ModelKind::Codec.as_str(),
+                reference: referenced.as_str().to_string(),
+            })
+        })
 }
 
 fn ensure_codec_supports_decoding(
@@ -7631,7 +7592,7 @@ fn ensure_codec_supports_encoding(
 fn schema_for_codec_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     codec_id: &CodecName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let codec = expect_codec_model(domain, identifier, models, codec_id)?;
@@ -7641,28 +7602,16 @@ fn schema_for_codec_model<'a>(
 fn schema_for_ack_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     relay_id: &RelayName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
-    let relay = match models.get(&NodeRef::new(ModelKind::Relay, relay_id.clone())) {
-        Some(Model::Relay(relay)) => relay,
-        Some(model) => {
-            return Err(Report::new(RegistryError::InvalidReferenceKind {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Relay.as_str(),
-                reference: relay_id.as_str().to_string(),
-                actual_kind: model.kind().as_str(),
-            }));
-        }
-        None => {
-            return Err(Report::new(RegistryError::MissingReference {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Relay.as_str(),
-                reference: relay_id.as_str().to_string(),
-            }));
-        }
+    let Some(relay) = models.configured::<CreateRelay>(relay_id.clone()) else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Relay.as_str(),
+            reference: relay_id.as_str().to_string(),
+        }));
     };
 
     expect_schema_model(domain, identifier, models, &relay.schema)
@@ -7671,28 +7620,16 @@ fn schema_for_ack_model<'a>(
 fn schema_for_lookup_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     lookup_id: &LookupName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
-    let lookup = match models.get(&NodeRef::new(ModelKind::Lookup, lookup_id.clone())) {
-        Some(Model::Lookup(lookup)) => lookup,
-        Some(model) => {
-            return Err(Report::new(RegistryError::InvalidReferenceKind {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Lookup.as_str(),
-                reference: lookup_id.as_str().to_string(),
-                actual_kind: model.kind().as_str(),
-            }));
-        }
-        None => {
-            return Err(Report::new(RegistryError::MissingReference {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Lookup.as_str(),
-                reference: lookup_id.as_str().to_string(),
-            }));
-        }
+    let Some(lookup) = models.configured::<CreateLookup>(lookup_id.clone()) else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Lookup.as_str(),
+            reference: lookup_id.as_str().to_string(),
+        }));
     };
 
     schema_for_codec_model(domain, identifier, models, &lookup.decode_using_codec)
@@ -7798,7 +7735,7 @@ fn ensure_processor_output_flush_policies(
 fn add_processor_output_edges(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
@@ -7823,7 +7760,7 @@ fn add_processor_output_edges(
 fn add_output_branch_dependency_edges(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
@@ -7849,7 +7786,7 @@ fn add_output_branch_dependency_edges(
 fn validate_filter_where_for_internal_schemas(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     filter_where: Option<&Expression>,
@@ -7874,7 +7811,7 @@ fn validate_filter_where_for_internal_schemas(
 fn validate_ingestor_filter_where_for_internal_schemas(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     filter_where: Option<&Expression>,
@@ -7927,7 +7864,7 @@ fn validate_ingestor_filter_where_for_internal_schemas(
 fn validate_from_where_for_internal_schemas(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     from_where: &[nervix_models::ProcessorInputWhere],
@@ -7946,7 +7883,7 @@ fn validate_from_where_for_internal_schemas(
 fn validate_scoped_from_where_for_internal_schemas(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     from_where: &[nervix_models::ProcessorInputWhere],
@@ -8104,7 +8041,7 @@ fn validate_where_program_for_scoped_internal_schemas(
 fn effective_processor_output_filter_map_schema(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     input_schemas: &[(&RelayName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
@@ -8225,7 +8162,7 @@ fn ensure_processor_output_schemas(
 fn effective_emitter_filter_map_schema(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     emitter: &nervix_models::CreateEmitter,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
@@ -8395,7 +8332,7 @@ struct LookupHashMapCallSite {
 fn rewrite_lookup_hash_map_program(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     parsed: &nervix_vm::program::SpannedNode<Program>,
 ) -> Result<LookupHashMapRewriteResult, Report<RegistryError>> {
     let mut next_field = 0usize;
@@ -8451,7 +8388,7 @@ fn rewrite_lookup_hash_map_program(
 fn rewrite_lookup_hash_map_expr(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     expr: &SpannedExpr,
     calls: &mut Vec<LookupHashMapCallSite>,
     next_field: &mut usize,
@@ -8734,7 +8671,7 @@ fn collect_program_field_refs(program: &nervix_vm::program::Program) -> Vec<(Str
 fn referenced_materialized_stream_bindings(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     excluded_namespaces: &HashSet<String>,
     program_label: &str,
@@ -8821,7 +8758,7 @@ fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
 fn ensure_stream_is_materialized(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     relay: &RelayName,
 ) -> Result<(), Report<RegistryError>> {
     let Some(Model::Relay(ack_model)) = models.get(&NodeRef::new(ModelKind::Relay, relay.clone()))
@@ -8848,7 +8785,7 @@ fn ensure_stream_is_materialized(
 fn validate_generator_output(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     generator: &CreateGenerator,
     output: &ProcessorOutput,
 ) -> Result<(), Report<RegistryError>> {
@@ -8921,7 +8858,7 @@ fn validate_generator_output(
 fn effective_ingestor_output_filter_map_schema(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     ingestor: &CreateIngestor,
     input_schema: &CreateSchema,
     output: &ProcessorOutput,
@@ -9295,7 +9232,7 @@ fn ensure_equal_internal_schema(
 fn ensure_deduplicator_key_compiles(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     deduplicator: &CreateDeduplicator,
     input_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
@@ -9375,7 +9312,7 @@ fn ensure_deduplicator_key_compiles(
 fn validate_correlator(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     correlator: &CreateCorrelator,
     left_schemas: &[(&RelayName, &CreateSchema)],
     right_schemas: &[(&RelayName, &CreateSchema)],
@@ -9436,7 +9373,7 @@ fn validate_correlator(
 fn validate_correlate_where_for_internal_schemas(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     correlator: &CreateCorrelator,
     left_schemas: &[(&RelayName, &CreateSchema)],
     right_schemas: &[(&RelayName, &CreateSchema)],
@@ -9669,7 +9606,7 @@ fn validate_correlator_output(
 fn validate_correlator_timeout_action(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     input_schema: &CreateSchema,
     action: &CorrelationTimeoutAction,
     relation: &str,
@@ -9684,7 +9621,7 @@ fn validate_correlator_timeout_action(
 fn ensure_inferencer_input_mappings(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     processor: &CreateInferencer,
     input_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
@@ -9768,7 +9705,7 @@ fn ensure_inferencer_input_mappings(
 fn validate_inferencer_output_filter_map(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -9956,7 +9893,7 @@ fn ensure_ingestor_timestamp_source(
 fn relay_declared_branch<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     relay: &RelayName,
 ) -> Result<Option<&'a BranchName>, Report<RegistryError>> {
     let Some(Model::Relay(relay_model)) =
@@ -9975,7 +9912,7 @@ fn relay_declared_branch<'a>(
 fn relay_declared_branch_schema<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     relay: &RelayName,
 ) -> Result<Option<&'a CreateSchema>, Report<RegistryError>> {
     let Some(Model::Relay(relay_model)) =
@@ -10008,7 +9945,7 @@ fn relay_declared_branch_schema<'a>(
 fn ensure_output_branch(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
@@ -10140,7 +10077,7 @@ fn ensure_output_branch(
 
 fn validate_vhost_hostnames(
     domain: &DomainName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
 ) -> Result<(), Report<RegistryError>> {
     let mut owners = HashMap::<String, VhostName>::new();
 
@@ -10179,7 +10116,7 @@ fn validate_vhost_hostnames(
 
 fn validate_endpoint_paths(
     domain: &DomainName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
 ) -> Result<(), Report<RegistryError>> {
     let mut routes = HashMap::<(VhostName, String), EndpointName>::new();
 
@@ -10209,7 +10146,7 @@ fn validate_endpoint_paths(
 
 fn infer_stream_branchings(
     domain: &DomainName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
@@ -10409,7 +10346,7 @@ fn infer_stream_branchings(
 
 fn validate_processing_branch_selections(
     domain: &DomainName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     indices: &HashMap<NodeRef, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
@@ -10615,7 +10552,7 @@ struct ProcessorBranchingCheck<'a> {
     domain: &'a DomainName,
     identifier: &'a ModelName,
     model_kind: &'a str,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     indices: &'a HashMap<NodeRef, NodeIndex>,
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
 }
@@ -10825,7 +10762,7 @@ impl BranchReference for OutputBranch {
 fn resolved_output_branches(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     outputs: &ProcessorOutputs,
 ) -> Result<Vec<(RelayName, ResolvedBranching)>, Report<RegistryError>> {
     outputs
@@ -10852,7 +10789,7 @@ fn resolved_output_branches(
 fn resolved_branch_selection(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     branched_by: &dyn BranchReference,
 ) -> Result<ResolvedBranching, Report<RegistryError>> {
     let Some(branch_ref) = branched_by.branch_ref() else {
@@ -10873,7 +10810,7 @@ fn resolved_branch_selection(
 fn branch_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     branch_ref: &BranchName,
 ) -> Result<&'a CreateBranch, Report<RegistryError>> {
     let Some(Model::Branch(branch)) =
@@ -10892,7 +10829,7 @@ fn branch_model<'a>(
 fn schema_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &'a HashMap<NodeRef, Model>,
+    models: &'a ModelIndex,
     schema_ref: &SchemaName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let Some(Model::Schema(schema)) =
@@ -10925,7 +10862,7 @@ fn model_branch_selection(model: &Model) -> Option<&dyn BranchReference> {
 fn branching_schema_fields(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &HashMap<NodeRef, Model>,
+    models: &ModelIndex,
     branch_schema: &SchemaName,
 ) -> Result<Vec<FieldName>, Report<RegistryError>> {
     let Some(Model::Schema(schema)) =
@@ -11395,8 +11332,8 @@ fn parse_as_is_integer(ty: &ParseAsType) -> bool {
 fn runtime_changes_for_domain(
     domain: &DomainName,
     graph: Option<ActiveGraph>,
-    current_models: &HashMap<NodeRef, Model>,
-    candidate_models: &HashMap<NodeRef, Model>,
+    current_models: &ModelIndex,
+    candidate_models: &ModelIndex,
 ) -> RuntimeChanges {
     let current_ingestor_ids = SortedSet::from_unsorted(
         current_models
@@ -11562,14 +11499,14 @@ mod tests {
         FlushPolicy, GeneralErrorPolicy, IngestSource, IngestTimestampSource, IngestorName,
         Inheritance, InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode,
         KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
-        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, ModelName, MqttIngestMode,
-        MqttQos, MqttSession, NodeRef, OtelAggregationTemporality, OtelMetric, OtelMetricKind,
-        OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName, RelayBranching, RelayName,
-        RetryPolicy, ScheduledNode, SchemaField, SchemaName, SignalingProtobufConfig,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-        SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName, WireSchemaField,
-        WireSchemaName,
+        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
+        MqttIngestMode, MqttQos, MqttSession, NodeRef, OtelAggregationTemporality, OtelMetric,
+        OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName,
+        RelayBranching, RelayName, RetryPolicy, ScheduledNode, SchemaField, SchemaName,
+        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName,
+        WireSchemaField, WireSchemaName,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -12463,7 +12400,7 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        let models = HashMap::default();
+        let models = ModelIndex::new();
 
         emitter.publishing_mode = EmitterPublishingMode::NoAck {
             retry_policy: RetryPolicy {
@@ -12568,7 +12505,7 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let models = HashMap::default();
+        let models = ModelIndex::new();
 
         *emitter.sink = EmitSink::Otel {
             client: named("otel_main"),
@@ -12778,7 +12715,7 @@ mod tests {
         let error = super::effective_emitter_filter_map_schema(
             &domain,
             &ModelName::from(&emitter.name),
-            &HashMap::default(),
+            &ModelIndex::new(),
             &emitter,
             &schema,
             &schema,
@@ -12792,7 +12729,7 @@ mod tests {
         let error = super::effective_emitter_filter_map_schema(
             &domain,
             &ModelName::from(&emitter.name),
-            &HashMap::default(),
+            &ModelIndex::new(),
             &emitter,
             &schema,
             &schema,
@@ -12807,7 +12744,7 @@ mod tests {
         super::effective_emitter_filter_map_schema(
             &domain,
             &ModelName::from(&emitter.name),
-            &HashMap::default(),
+            &ModelIndex::new(),
             &emitter,
             &schema,
             &schema,
@@ -12983,9 +12920,8 @@ mod tests {
 
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &ns,
-                    ModelKind::Schema,
                     ModelName::parse("shared_name").expect("valid model name"),
                 )
                 .expect("schema read should succeed")
@@ -12993,7 +12929,7 @@ mod tests {
         );
         assert!(
             registry
-                .get(
+                .get_of_kind(
                     &ns,
                     ModelKind::Client,
                     ModelName::parse("shared_name").expect("valid model name"),
@@ -13091,7 +13027,7 @@ mod tests {
             .put(&ns, ModelKind::Client, &ModelName::from(&id), &model)
             .expect("create should succeed");
         let loaded = registry
-            .get(&ns, ModelKind::Client, &id)
+            .get_of_kind(&ns, ModelKind::Client, &id)
             .expect("read should succeed")
             .expect("model should exist");
 
@@ -13151,10 +13087,10 @@ mod tests {
         let reopened = Registry::open(&replica_path).expect("replica registry should reopen");
         assert_eq!(
             reopened
-                .get(&domain, ModelKind::Ingestor, named::<ModelName>("ing"))
+                .get::<CreateIngestor>(&domain, named::<ModelName>("ing"))
                 .expect("replica model read should succeed"),
             source
-                .get(&domain, ModelKind::Ingestor, named::<ModelName>("ing"))
+                .get::<CreateIngestor>(&domain, named::<ModelName>("ing"))
                 .expect("source model read should succeed")
         );
 
@@ -13217,17 +13153,10 @@ mod tests {
         );
         assert!(changes.graph.is_some());
 
-        let stored = registry
-            .get(
-                &domain,
-                ModelKind::Relay,
-                named::<ModelName>("notifications"),
-            )
+        let stored_relay = registry
+            .get::<CreateRelay>(&domain, named::<ModelName>("notifications"))
             .expect("read should succeed")
             .expect("relay should exist");
-        let Model::Relay(stored_relay) = stored else {
-            panic!("stored model should be a relay");
-        };
         assert_eq!(stored_relay.buffer, nonzero!(5usize));
 
         let graph = registry
@@ -13585,11 +13514,7 @@ mod tests {
         ));
         assert!(
             registry
-                .get(
-                    &domain,
-                    ModelKind::Relay,
-                    named::<ModelName>("notifications")
-                )
+                .get::<CreateRelay>(&domain, named::<ModelName>("notifications"),)
                 .expect("read should succeed")
                 .is_none()
         );
@@ -16059,10 +15984,9 @@ mod tests {
         ));
         assert!(
             registry
-                .get(
+                .get::<CreateIngestor>(
                     &domain,
-                    ModelKind::Ingestor,
-                    IngestorName::parse("kafka_ingestor").expect("valid ingestor name")
+                    IngestorName::parse("kafka_ingestor").expect("valid ingestor name"),
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -18652,17 +18576,16 @@ mod tests {
         );
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &domain,
-                    ModelKind::Schema,
-                    SchemaName::parse("event_schema").expect("valid schema name")
+                    SchemaName::parse("event_schema").expect("valid schema name"),
                 )
                 .expect("read should succeed")
                 .is_none()
         );
         assert!(
             registry
-                .get(
+                .get_of_kind(
                     &domain,
                     ModelKind::Client,
                     RelayName::parse("broker_out").expect("valid relay name")
@@ -18672,10 +18595,9 @@ mod tests {
         );
         assert!(
             registry
-                .get(
+                .get::<CreateEmitter>(
                     &domain,
-                    ModelKind::Emitter,
-                    EmitterName::parse("emit").expect("valid emitter name")
+                    EmitterName::parse("emit").expect("valid emitter name"),
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -18728,34 +18650,20 @@ mod tests {
             )
             .expect("planning should succeed");
 
-        let Model::Schema(before) = registry
-            .get(
-                &domain,
-                ModelKind::Schema,
-                named::<ModelName>("event_schema"),
-            )
+        let before = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(before.fields.len(), 1, "planning must not persist");
 
         registry
             .commit_planned(planned)
             .expect("commit should succeed");
 
-        let Model::Schema(after) = registry
-            .get(
-                &domain,
-                ModelKind::Schema,
-                named::<ModelName>("event_schema"),
-            )
+        let after = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(after.fields.len(), 2);
 
         let _ = fs::remove_dir_all(path);
@@ -18801,21 +18709,14 @@ mod tests {
         ));
         assert!(
             registry
-                .get(&domain, ModelKind::Schema, named::<ModelName>("new_schema"))
+                .get::<CreateSchema>(&domain, named::<ModelName>("new_schema"))
                 .expect("read should succeed")
                 .is_none()
         );
-        let Model::Schema(schema) = registry
-            .get(
-                &domain,
-                ModelKind::Schema,
-                named::<ModelName>("event_schema"),
-            )
+        let schema = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(schema.fields.len(), 1);
 
         let _ = fs::remove_dir_all(path);
@@ -18854,17 +18755,10 @@ mod tests {
             RegistryError::IncompatibleSchema { .. }
         ));
 
-        let Model::Schema(schema) = registry
-            .get(
-                &domain,
-                ModelKind::Schema,
-                named::<ModelName>("event_schema"),
-            )
+        let schema = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(schema.fields[0].ty, ParseAsType::String);
 
         let _ = fs::remove_dir_all(path);
@@ -19475,7 +19369,7 @@ mod tests {
 
         assert!(
             registry
-                .get(
+                .get_of_kind(
                     &domain,
                     ModelKind::Client,
                     RelayName::parse("broker_in").expect("valid relay name")
@@ -19518,10 +19412,9 @@ mod tests {
         ));
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &domain,
-                    ModelKind::Schema,
-                    SchemaName::parse("event_schema").expect("valid schema name")
+                    SchemaName::parse("event_schema").expect("valid schema name"),
                 )
                 .expect("read should succeed")
                 .is_some()
@@ -19552,10 +19445,9 @@ mod tests {
 
         assert!(
             registry
-                .get(
+                .get::<CreateEmitter>(
                     &domain,
-                    ModelKind::Emitter,
-                    EmitterName::parse("emit").expect("valid emitter name")
+                    EmitterName::parse("emit").expect("valid emitter name"),
                 )
                 .expect("read should succeed")
                 .is_none()

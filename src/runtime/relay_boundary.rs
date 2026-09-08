@@ -700,7 +700,7 @@ impl RelayRetention {
             .nodes
             .values()
             .find(|node| {
-                node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
+                node.kind() == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
             })
             .map(|node| node.config.as_ref())
         else {
@@ -1444,7 +1444,7 @@ impl Runtime {
                 .nodes
                 .values()
                 .find(|node| {
-                    node.kind == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
+                    node.kind() == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
                 })
                 .and_then(ScheduledNode::execution_node)
                 .is_some()
@@ -2131,30 +2131,22 @@ mod tests {
                 Some(DomainSchedule::new(
                     domain.clone(),
                     vec![
-                        scheduled_model(
-                            ModelKind::Schema,
-                            ModelName::from(&schema.clone()),
-                            nervix_models::Model::Schema(CreateSchema {
-                                name: schema.clone(),
-                                fields: vec![nervix_models::SchemaField {
-                                    name: named("user_id"),
-                                    ty: ParseAsType::I64,
-                                    optional: false,
-                                    sensitive: false,
-                                }],
-                            }),
-                        ),
-                        scheduled_model(
-                            ModelKind::Relay,
-                            ModelName::from(&relay),
-                            nervix_models::Model::Relay(CreateRelay {
-                                name: relay.clone(),
-                                schema,
-                                buffer: STUPID_CHANNEL_CAPACITY_REMOVE_ME,
-                                branching: RelayBranching::unbranched(),
-                                materialized_state: None,
-                            }),
-                        ),
+                        scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                            name: schema.clone(),
+                            fields: vec![nervix_models::SchemaField {
+                                name: named("user_id"),
+                                ty: ParseAsType::I64,
+                                optional: false,
+                                sensitive: false,
+                            }],
+                        })),
+                        scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                            name: relay.clone(),
+                            schema,
+                            buffer: STUPID_CHANNEL_CAPACITY_REMOVE_ME,
+                            branching: RelayBranching::unbranched(),
+                            materialized_state: None,
+                        })),
                     ],
                     Vec::new(),
                 )),
