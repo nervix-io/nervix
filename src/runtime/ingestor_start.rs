@@ -1,10 +1,9 @@
 use super::*;
 
-pub(super) struct ScheduledIngestorStartSpec {
-    pub(super) domain: DomainName,
-    pub(super) source_model: Model,
-    pub(super) ingestor: CreateIngestor,
-    pub(super) kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+pub(super) enum ScheduledIngestorStart {
+    Plan(Box<IngestorStartPlan>),
+    Complete,
+    Error(RuntimeError),
 }
 
 impl Runtime {
@@ -20,59 +19,45 @@ impl Runtime {
         configured.to_string()
     }
 
-    pub(in crate::runtime) async fn start_scheduled_ingestor(
+    pub(in crate::runtime) async fn start_ingestor(
         &self,
-        domain: &DomainName,
-        source_model: Model,
-        ingestor: CreateIngestor,
-        kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+        plan: IngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        ingestors::IngestorStarter::start_scheduled(
-            self,
-            domain,
-            source_model,
-            ingestor,
-            kafka_offset_state,
-        )
-        .await
+        ingestors::IngestorStarter::start(self, plan).await
     }
 
     pub(super) async fn start_missing_domain_ingestors(
         &self,
         domain: &DomainName,
     ) -> Result<(), RuntimeError> {
-        while let Some(spec) = self.next_scheduled_ingestor_start_spec(Some(domain)) {
+        loop {
             tokio::task::consume_budget().await;
-            self.start_scheduled_ingestor(
-                &spec.domain,
-                spec.source_model,
-                spec.ingestor,
-                spec.kafka_offset_state,
-            )
-            .await?;
+            match self.next_scheduled_ingestor_start_plan(Some(domain)) {
+                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(*plan).await?,
+                ScheduledIngestorStart::Complete => break,
+                ScheduledIngestorStart::Error(error) => return Err(error),
+            }
         }
         Ok(())
     }
 
     pub async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
         let _lock = self.inner.schedule_apply_lock.lock().await;
-        while let Some(spec) = self.next_scheduled_ingestor_start_spec(None) {
+        loop {
             tokio::task::consume_budget().await;
-            self.start_scheduled_ingestor(
-                &spec.domain,
-                spec.source_model,
-                spec.ingestor,
-                spec.kafka_offset_state,
-            )
-            .await?;
+            match self.next_scheduled_ingestor_start_plan(None) {
+                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(*plan).await?,
+                ScheduledIngestorStart::Complete => break,
+                ScheduledIngestorStart::Error(error) => return Err(error),
+            }
         }
         Ok(())
     }
 
-    pub(super) fn next_scheduled_ingestor_start_spec(
+    pub(super) fn next_scheduled_ingestor_start_plan(
         &self,
         requested_domain: Option<&DomainName>,
-    ) -> Option<ScheduledIngestorStartSpec> {
+    ) -> ScheduledIngestorStart {
         let local_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
         let mut domains = self
             .inner
@@ -130,21 +115,23 @@ impl Runtime {
                     continue;
                 };
 
-                return Some(ScheduledIngestorStartSpec {
-                    domain: domain.clone(),
-                    source_model,
-                    ingestor: ingestor.clone(),
-                    kafka_offset_state: self.scheduled_kafka_offset_state(
-                        &domain,
-                        node,
-                        ingestor,
-                        local_node_id.as_ref(),
-                    ),
-                });
+                let plan = match IngestorStartPlan::decide(&domain, node, &source_model) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        return ScheduledIngestorStart::Error(RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "cannot plan ingestor '{}': {error}",
+                                ingestor.name.as_str()
+                            ),
+                        });
+                    }
+                };
+                return ScheduledIngestorStart::Plan(Box::new(plan));
             }
         }
 
-        None
+        ScheduledIngestorStart::Complete
     }
 
     pub(super) fn source_model_for_scheduled_ingestor(
@@ -160,37 +147,6 @@ impl Runtime {
             .nodes
             .get(&NodeRef::new(source_kind, source_ref))
             .map(|node| (*node.config).clone())
-    }
-
-    pub(super) fn scheduled_kafka_offset_state(
-        &self,
-        domain: &DomainName,
-        node: &ScheduledNode,
-        ingestor: &CreateIngestor,
-        local_node_id: Option<&ClusterNodeName>,
-    ) -> Option<Arc<ReplicatedKafkaOffsetState>> {
-        let IngestSource::Kafka {
-            offset_mode: KafkaOffsetMode::Domain,
-            ..
-        } = &ingestor.source
-        else {
-            return None;
-        };
-        let local_node_id = local_node_id?;
-        if !node.is_primary_on(local_node_id) {
-            return None;
-        }
-        let placement = self.state_placement(
-            domain,
-            RuntimeStateKind::KafkaOffset,
-            node.kind,
-            &node.identifier,
-            None,
-        );
-        self.inner
-            .replicated_kafka_offset_states
-            .get(&placement)
-            .map(|state| state.value().clone())
     }
 
     pub(in crate::runtime) async fn stop_ingestor(
@@ -283,15 +239,15 @@ impl Runtime {
     pub(in crate::runtime) async fn ingestor_dependencies(
         &self,
         domain: &DomainName,
-        ingestor: &CreateIngestor,
+        ingestor: &IngestorSpec,
     ) -> Result<IngestorDependencies, RuntimeError> {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: ingestor
-                    .output_routes
-                    .relays()
-                    .next()
+                    .routes
+                    .first()
+                    .map(|route| &route.relay)
                     .map(|relay| relay.as_str().to_string())
                     .unwrap_or_else(|| "<missing>".to_string()),
             });
@@ -313,7 +269,7 @@ impl Runtime {
                 schema: codec.schema().arrow_schema(),
                 sensitivity: codec.schema().vm_sensitivity(),
             },
-            ingest_source_supports_headers(&ingestor.source),
+            ingestor.allow_header_reads,
             MessageErrorOperation::FilterWhere,
             RuntimeVmCompileContext {
                 available_materialized_streams: &execution.materialized_stream_specs,
@@ -325,9 +281,9 @@ impl Runtime {
             },
         )?;
         let mut output_routes = RelayProcessorOutputsNode {
-            routes: Vec::with_capacity(ingestor.output_routes.routes.len()),
+            routes: Vec::with_capacity(ingestor.routes.len()),
         };
-        for output in ingestor.output_routes.outputs() {
+        for output in &ingestor.routes {
             if !execution.relay_services.contains_key(&output.relay) {
                 return Err(RuntimeError::RelayNotInstantiated {
                     domain: domain.as_str().to_string(),
@@ -345,7 +301,8 @@ impl Runtime {
             let compiled_program = compile_ingestor_filter_map_program(
                 domain,
                 &ingestor.name,
-                &ingestor.source,
+                ingestor.metadata_kind,
+                ingestor.allow_header_reads,
                 &output.construction,
                 RuntimeVmSchemaPair {
                     input: codec.schema().arrow_schema(),
