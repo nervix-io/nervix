@@ -114,6 +114,17 @@ const TEST_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TEST_AUTH_USERNAME: &str = "default";
 pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
+/// Every port any scenario in this process has claimed. Scenarios run concurrently in one test
+/// binary, and `next_ports` drops its probe listener as soon as it has read the port number, so the
+/// operating system does not stop a second scenario from binding the same port. This set is the
+/// only thing that does. Startup still retries on a fresh allocation, because the pool is shared
+/// with sibling worktrees running the same suite, and their binds are invisible here.
+///
+/// A port leaves the set only once nothing can still dial it. Returning one while a peer holds it
+/// in gossip lets an unrelated scenario's node answer that peer, and because every scenario names
+/// its nodes `node-1`, `node-2` and `node-3`, the impostor passes the peer-identity check and is
+/// caught only at signature verification. Never releasing is not the alternative: eleven ports per
+/// node across the suite exceeds the ephemeral range, so teardown has to give them back.
 static RESERVED_TEST_PORTS: LazyLock<Mutex<BTreeSet<u16>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
@@ -2222,6 +2233,10 @@ impl NodeSpec {
         Ok(())
     }
 
+    /// Return this node's ports to the pool. Every caller reaches here with the node down: two
+    /// teardown paths, and the startup retry for a node that never bound them. That is what makes
+    /// the release safe, not the stop itself, so a caller that releases while a peer may still dial
+    /// the address belongs elsewhere.
     fn release_ports(&mut self) {
         let mut reserved = RESERVED_TEST_PORTS.lock();
         for port in [
