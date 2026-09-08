@@ -82,20 +82,13 @@ pub(super) struct ObservedDomainTick {
     pub(super) wall_clock: Timestamp,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct RuntimeDomainClockState {
-    pub(super) logical_started_at: Timestamp,
-    pub(super) wall_started_at: Timestamp,
-    pub(super) time_rate: String,
-}
-
 #[derive(Debug)]
 pub(super) struct RuntimeDomainState {
     pub(super) config: DomainConfig,
     pub(super) status: nervix_models::DomainStatus,
     pub(super) start_version: u64,
     pub(super) last_start: nervix_models::DomainStartPoint,
-    pub(super) clock: Option<RuntimeDomainClockState>,
+    pub(super) clock: Option<DomainClockState>,
     pub(super) ticks: parking_lot::Mutex<VecDeque<ObservedDomainTick>>,
 }
 
@@ -828,7 +821,7 @@ mod tests {
                 tick_id: 1,
                 logical_timestamp: Timestamp::from_unix_nanos(0),
                 wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                duration_ms: 1_000,
+                period: "1s".parse().expect("fixture period is valid"),
             },
         );
 
@@ -873,7 +866,7 @@ mod tests {
                 tick_id: 1,
                 logical_timestamp: Timestamp::from_unix_nanos(0),
                 wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                duration_ms: 1_000,
+                period: "1s".parse().expect("fixture period is valid"),
             },
         );
 

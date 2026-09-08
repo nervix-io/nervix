@@ -45,8 +45,9 @@ use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array,
     take::take as take_arrow_array,
 };
-use chrono::{TimeDelta, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use dashmap::DashMap;
+use error_stack::Report;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -63,22 +64,23 @@ use nervix_models::{
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
     CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
     CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState,
-    DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
-    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
-    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    CreateUdf, DomainClockError, DomainClockState, DomainConfig, DomainName, DomainNodeRef,
+    DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName,
+    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
+    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
+    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, OutputBranch, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
+    PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus,
+    RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -327,7 +329,7 @@ use domain_clock::{
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
     DOMAIN_TICK_HISTORY_LIMIT, DomainExecution, DomainResourceKey, ObservedDomainTick,
-    RuntimeDomainClockState, RuntimeDomainState,
+    RuntimeDomainState,
 };
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
 use domain_wire_schemas::DomainWireSchemas;

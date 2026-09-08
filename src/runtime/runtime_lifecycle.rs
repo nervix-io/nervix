@@ -194,6 +194,10 @@ impl Runtime {
         self.inner.events.subscribe()
     }
 
+    pub(crate) fn report_error(&self, message: impl Into<String>) {
+        self.inner.events.report_error(message);
+    }
+
     pub(in crate::runtime) async fn stop_domain_execution(
         &self,
         domain: &DomainName,

@@ -174,37 +174,26 @@ impl PrometheusIngestor {
                     continue;
                 }
                 let mut query_time = current_timestamp();
-                let paced_state =
-                    task_runtime
-                        .inner
-                        .domains
-                        .get(&task_domain)
-                        .map(|domain_state| {
-                            (
-                                domain_state.config.pace,
-                                domain_state.clock.clone(),
-                                domain_state.ticks.lock().back().cloned(),
-                            )
-                        });
-                let sleep_duration =
-                    if let Some((DomainPace::Paced, clock, latest_tick)) = paced_state {
-                        let Some(clock) = clock else {
-                            next_logical_query = None;
-                            tokio::select! {
-                                changed = shutdown_rx.changed() => {
-                                    if changed.is_err() || *shutdown_rx.borrow() {
-                                        break;
-                                    }
+                let paced_state = task_runtime
+                    .inner
+                    .domains
+                    .get(&task_domain)
+                    .map(|domain_state| (domain_state.config.pace, domain_state.clock.clone()));
+                let sleep_duration = if let Some((DomainPace::Paced, clock)) = paced_state {
+                    let Some(clock) = clock else {
+                        next_logical_query = None;
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
                                 }
-                                _ = sleep(Duration::from_millis(50)) => {}
                             }
-                            continue;
-                        };
-                        let current_logical = match current_domain_logical_time(
-                            &clock,
-                            latest_tick.as_ref(),
-                            current_timestamp(),
-                        ) {
+                            _ = sleep(Duration::from_millis(50)) => {}
+                        }
+                        continue;
+                    };
+                    let current_logical =
+                        match current_domain_logical_time(&clock, current_timestamp()) {
                             Ok(value) => value,
                             Err(error) => {
                                 task_events.report_error(format!(
@@ -225,39 +214,49 @@ impl PrometheusIngestor {
                                 continue;
                             }
                         };
-                        let next_logical = next_logical_query.unwrap_or(current_logical);
-                        query_time = current_logical;
-                        if current_logical >= next_logical {
-                            next_logical_query = current_logical
-                                .into_datetime()
-                                .checked_add_signed(TimeDelta::nanoseconds(
-                                    i64::try_from(logical_interval_nanos).unwrap_or(i64::MAX),
-                                ))
-                                .map(Timestamp::from);
-                            Duration::ZERO
-                        } else {
-                            match wall_duration_until_logical_target(
-                                &clock,
-                                current_logical,
-                                next_logical,
-                            ) {
-                                Ok(duration) => duration,
-                                Err(error) => {
-                                    task_events.report_error(format!(
-                                        "failed to resolve prometheus cadence for ingestor '{}' \
-                                         in domain '{}': {}",
-                                        task_ingestor.as_str(),
-                                        task_domain.as_str(),
-                                        error
-                                    ));
-                                    Duration::from_millis(100)
-                                }
+                    let next_logical = next_logical_query.unwrap_or(current_logical);
+                    query_time = current_logical;
+                    if current_logical >= next_logical {
+                        let next = match current_logical
+                            .checked_add(Duration::from_nanos(logical_interval_nanos))
+                        {
+                            Ok(next) => next,
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "prometheus cadence for ingestor '{}' in domain '{}' leaves \
+                                     the signed Unix-nanosecond range: {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                ));
+                                break;
+                            }
+                        };
+                        next_logical_query = Some(next);
+                        Duration::ZERO
+                    } else {
+                        match wall_duration_until_logical_target(
+                            &clock,
+                            current_logical,
+                            next_logical,
+                        ) {
+                            Ok(duration) => duration,
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "failed to resolve prometheus cadence for ingestor '{}' in \
+                                     domain '{}': {}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                    error
+                                ));
+                                Duration::from_millis(100)
                             }
                         }
-                    } else {
-                        next_logical_query = None;
-                        logical_interval
-                    };
+                    }
+                } else {
+                    next_logical_query = None;
+                    logical_interval
+                };
 
                 tokio::select! {
                     changed = shutdown_rx.changed() => {

@@ -87,6 +87,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 
 ## Preserve NSPL semantics
 
+- For paced domains, use a positive `PERIOD` no larger than `18446744073709551615ns`; `SKEW` may
+  be zero but must fit the same nanosecond duration range. `START AT <timestamp>` is limited to the
+  inclusive signed Unix-nanosecond range `1677-09-21T00:12:43.145224192Z` through
+  `2262-04-11T23:47:16.854775807Z`. `TIME RATE` must be a positive finite `f64`; scientific notation
+  is valid. Tick notifications report progress and never redefine the committed start mapping.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
