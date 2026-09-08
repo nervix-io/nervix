@@ -408,7 +408,7 @@ impl Runtime {
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         relays.retain(|relay| {
             let producers = schedule.nodes.values().filter(|node| {
-                if let Some(processor) = processor_specs.processor(node.kind, &node.identifier) {
+                if let Some(processor) = processor_specs.processor(node.kind(), &node.identifier) {
                     return processor.spec.output_relays().contains(relay);
                 }
                 match node.config.as_ref() {
@@ -1169,35 +1169,27 @@ mod tests {
             materialized_state: Vec::new(),
         };
         let input_relay = |name: &str| {
-            scheduled_model(
-                ModelKind::Relay,
-                named(name),
-                nervix_models::Model::Relay(CreateRelay {
-                    name: named(name),
-                    schema: named("event"),
-                    buffer: nonzero!(2usize),
-                    branching: RelayBranching::unbranched(),
-                    materialized_state: None,
-                }),
-            )
+            scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                name: named(name),
+                schema: named("event"),
+                buffer: nonzero!(2usize),
+                branching: RelayBranching::unbranched(),
+                materialized_state: None,
+            }))
         };
         let mut schedule = DomainSchedule::new(
             domain("testing"),
             vec![
                 input_relay("source_a"),
                 input_relay("source_b"),
-                scheduled_model(
-                    ModelKind::Emitter,
-                    ModelName::from(&emitter.name.clone()),
-                    nervix_models::Model::Emitter(emitter.clone()),
-                ),
+                scheduled_model(nervix_models::Model::Emitter(emitter.clone())),
             ],
             Vec::new(),
         );
         let emitter_node = schedule
             .nodes
             .values_mut()
-            .find(|node| node.kind == ModelKind::Emitter)
+            .find(|node| node.kind() == ModelKind::Emitter)
             .expect("test schedule must contain its emitter");
         emitter_node.primary_node = Some(ClusterNodeName::parse("node-2").expect("valid name"));
         emitter_node.assigned_nodes = vec![ClusterNodeName::parse("node-2").expect("valid name")];
@@ -1231,20 +1223,16 @@ mod tests {
     #[test]
     fn ownership_handoff_keeps_internal_moved_group_relays_open() {
         let junction = |name: &str, input: &str, output: &str| {
-            scheduled_model(
-                ModelKind::Junction,
-                named(name),
-                nervix_models::Model::Junction(CreateJunction {
-                    name: named(name),
-                    from: ProcessorInputs::single(named(input)),
-                    output_routes: (ProcessorOutputs::single(named(output)))
-                        .with_flush_policy(FlushPolicy::Immediate),
-                    branched_by: BranchSelection::unbranched(),
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                }),
-            )
+            scheduled_model(nervix_models::Model::Junction(CreateJunction {
+                name: named(name),
+                from: ProcessorInputs::single(named(input)),
+                output_routes: (ProcessorOutputs::single(named(output)))
+                    .with_flush_policy(FlushPolicy::Immediate),
+                branched_by: BranchSelection::unbranched(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }))
         };
         let schedule = DomainSchedule::new(
             domain("testing"),

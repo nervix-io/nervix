@@ -850,8 +850,37 @@ fn deduplicate_identifiers(identifiers: &mut Vec<ModelName>) {
     });
 }
 
+/// A model shape that its [`ModelKind`] names, and that names its kind back.
+///
+/// A store keyed by kind reads a model whose kind the caller has already named, so the caller
+/// receives that shape and never re-checks what it asked for. The projection below is where the
+/// union is narrowed, and only a store that owns the kind-to-shape invariant calls it.
+///
+/// Two families of model stay outside this pairing and are read as the [`Model`] union they
+/// genuinely are. [`ModelKind::Client`] configures one model per external system, so naming that
+/// kind does not name a shape. The JSON and CBOR wire schemas are the same shape under two kinds,
+/// so that shape does not name a kind.
+pub trait UniquelyKindedModel: Sized {
+    /// The kind whose stored models all have this shape.
+    const KIND: ModelKind;
+
+    /// This shape, when `model` holds it.
+    fn from_model(model: Model) -> Option<Self>;
+
+    /// The borrowing form of [`Self::from_model`].
+    fn from_model_ref(model: &Model) -> Option<&Self>;
+
+    /// The mutable form of [`Self::from_model_ref`], for altering a stored model in place.
+    fn from_model_mut(model: &mut Model) -> Option<&mut Self>;
+}
+
+/// Declares the [`Model`] union.
+///
+/// Each line ends in whether its kind and its shape name each other one-to-one. `paired` earns the
+/// [`UniquelyKindedModel`] projection. `shared` says the pairing is broken in one direction or the
+/// other, so naming the kind leaves the union as the only honest answer.
 macro_rules! declare_models {
-    ($($Variant:ident($Model:ty) => $Kind:ident, $client_label:expr;)+) => {
+    ($($Variant:ident($Model:ty) => $Kind:ident, $client_label:expr, $family:ident;)+) => {
         #[derive(
             Debug,
             Clone,
@@ -886,56 +915,88 @@ macro_rules! declare_models {
                 }
             }
         }
+
+        $(declare_models!(@family $family $Variant($Model) => $Kind);)+
     };
+    (@family paired $Variant:ident($Model:ty) => $Kind:ident) => {
+        impl UniquelyKindedModel for $Model {
+            const KIND: ModelKind = ModelKind::$Kind;
+
+            fn from_model(model: Model) -> Option<Self> {
+                if let Model::$Variant(model) = model {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+
+            fn from_model_ref(model: &Model) -> Option<&Self> {
+                if let Model::$Variant(model) = model {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+
+            fn from_model_mut(model: &mut Model) -> Option<&mut Self> {
+                if let Model::$Variant(model) = model {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+        }
+    };
+    (@family shared $Variant:ident($Model:ty) => $Kind:ident) => {};
 }
 
 declare_models! {
-    Schema(CreateSchema) => Schema, None;
-    WireJsonSchema(CreateJsonWireSchema) => WireJsonSchema, None;
-    WireCborSchema(CreateCborWireSchema) => WireCborSchema, None;
-    WireAvroSchema(CreateAvroWireSchema) => WireAvroSchema, None;
-    Codec(CreateCodec) => Codec, None;
-    ClientKafka(CreateClientKafka) => Client, Some("KAFKA");
-    ClientPulsar(CreateClientPulsar) => Client, Some("PULSAR");
-    ClientHttp(CreateClientHttp) => Client, Some("HTTP");
-    ClientSentry(CreateClientSentry) => Client, Some("SENTRY");
-    ClientOtel(CreateClientOtel) => Client, Some("OTEL");
-    ClientPrometheus(CreateClientPrometheus) => Client, Some("PROMETHEUS");
-    ClientMqtt(CreateClientMqtt) => Client, Some("MQTT");
-    ClientNats(CreateClientNats) => Client, Some("NATS");
-    ClientRabbitMq(CreateClientRabbitMq) => Client, Some("RABBITMQ");
-    ClientRedis(CreateClientRedis) => Client, Some("REDIS");
-    ClientZeroMq(CreateClientZeroMq) => Client, Some("ZEROMQ");
-    ClientSqs(CreateClientSqs) => Client, Some("SQS");
-    ClientWebsockets(CreateClientWebsockets) => Client, Some("WEBSOCKETS");
-    ClientSyslog(CreateClientSyslog) => Client, Some("SYSLOG");
-    ClientClickHouse(CreateClientClickHouse) => Client, Some("CLICKHOUSE");
-    ClientPostgres(CreateClientPostgres) => Client, Some("POSTGRES");
-    ClientMySql(CreateClientMySql) => Client, Some("MYSQL");
-    ClientMongoDb(CreateClientMongoDb) => Client, Some("MONGODB");
-    ClientS3(CreateClientS3) => Client, Some("S3");
-    ClientGcs(CreateClientGcs) => Client, Some("GCS");
-    ClientAzureBlob(CreateClientAzureBlob) => Client, Some("AZURE_BLOB");
-    ClientIcebergRest(CreateClientIcebergRest) => Client, Some("ICEBERG_REST");
-    Vhost(CreateVhost) => Vhost, None;
-    Branch(CreateBranch) => Branch, None;
-    Endpoint(CreateEndpoint) => Endpoint, None;
-    SignalingProtocol(CreateSignalingProtocol) => SignalingProtocol, None;
-    Generator(CreateGenerator) => Generator, None;
-    Inferencer(CreateInferencer) => Inferencer, None;
-    WasmProcessor(CreateWasmProcessor) => WasmProcessor, None;
-    Ingestor(CreateIngestor) => Ingestor, None;
-    Reingestor(CreateReingestor) => Reingestor, None;
-    Relay(CreateRelay) => Relay, None;
-    Lookup(CreateLookup) => Lookup, None;
-    Junction(CreateJunction) => Junction, None;
-    Deduplicator(CreateDeduplicator) => Deduplicator, None;
-    Correlator(CreateCorrelator) => Correlator, None;
-    Reorderer(CreateReorderer) => Reorderer, None;
-    WindowProcessor(CreateWindowProcessor) => WindowProcessor, None;
-    Emitter(CreateEmitter) => Emitter, None;
-    Placement(CreatePlacement) => Placement, None;
-    Udf(CreateUdf) => Udf, None;
+    Schema(CreateSchema) => Schema, None, paired;
+    WireJsonSchema(CreateJsonWireSchema) => WireJsonSchema, None, shared;
+    WireCborSchema(CreateCborWireSchema) => WireCborSchema, None, shared;
+    WireAvroSchema(CreateAvroWireSchema) => WireAvroSchema, None, paired;
+    Codec(CreateCodec) => Codec, None, paired;
+    ClientKafka(CreateClientKafka) => Client, Some("KAFKA"), shared;
+    ClientPulsar(CreateClientPulsar) => Client, Some("PULSAR"), shared;
+    ClientHttp(CreateClientHttp) => Client, Some("HTTP"), shared;
+    ClientSentry(CreateClientSentry) => Client, Some("SENTRY"), shared;
+    ClientOtel(CreateClientOtel) => Client, Some("OTEL"), shared;
+    ClientPrometheus(CreateClientPrometheus) => Client, Some("PROMETHEUS"), shared;
+    ClientMqtt(CreateClientMqtt) => Client, Some("MQTT"), shared;
+    ClientNats(CreateClientNats) => Client, Some("NATS"), shared;
+    ClientRabbitMq(CreateClientRabbitMq) => Client, Some("RABBITMQ"), shared;
+    ClientRedis(CreateClientRedis) => Client, Some("REDIS"), shared;
+    ClientZeroMq(CreateClientZeroMq) => Client, Some("ZEROMQ"), shared;
+    ClientSqs(CreateClientSqs) => Client, Some("SQS"), shared;
+    ClientWebsockets(CreateClientWebsockets) => Client, Some("WEBSOCKETS"), shared;
+    ClientSyslog(CreateClientSyslog) => Client, Some("SYSLOG"), shared;
+    ClientClickHouse(CreateClientClickHouse) => Client, Some("CLICKHOUSE"), shared;
+    ClientPostgres(CreateClientPostgres) => Client, Some("POSTGRES"), shared;
+    ClientMySql(CreateClientMySql) => Client, Some("MYSQL"), shared;
+    ClientMongoDb(CreateClientMongoDb) => Client, Some("MONGODB"), shared;
+    ClientS3(CreateClientS3) => Client, Some("S3"), shared;
+    ClientGcs(CreateClientGcs) => Client, Some("GCS"), shared;
+    ClientAzureBlob(CreateClientAzureBlob) => Client, Some("AZURE_BLOB"), shared;
+    ClientIcebergRest(CreateClientIcebergRest) => Client, Some("ICEBERG_REST"), shared;
+    Vhost(CreateVhost) => Vhost, None, paired;
+    Branch(CreateBranch) => Branch, None, paired;
+    Endpoint(CreateEndpoint) => Endpoint, None, paired;
+    SignalingProtocol(CreateSignalingProtocol) => SignalingProtocol, None, paired;
+    Generator(CreateGenerator) => Generator, None, paired;
+    Inferencer(CreateInferencer) => Inferencer, None, paired;
+    WasmProcessor(CreateWasmProcessor) => WasmProcessor, None, paired;
+    Ingestor(CreateIngestor) => Ingestor, None, paired;
+    Reingestor(CreateReingestor) => Reingestor, None, paired;
+    Relay(CreateRelay) => Relay, None, paired;
+    Lookup(CreateLookup) => Lookup, None, paired;
+    Junction(CreateJunction) => Junction, None, paired;
+    Deduplicator(CreateDeduplicator) => Deduplicator, None, paired;
+    Correlator(CreateCorrelator) => Correlator, None, paired;
+    Reorderer(CreateReorderer) => Reorderer, None, paired;
+    WindowProcessor(CreateWindowProcessor) => WindowProcessor, None, paired;
+    Emitter(CreateEmitter) => Emitter, None, paired;
+    Placement(CreatePlacement) => Placement, None, paired;
+    Udf(CreateUdf) => Udf, None, paired;
 }
 
 impl Model {
@@ -3774,6 +3835,40 @@ impl DomainSchedule {
             placement_groups,
         }
     }
+
+    /// The `M` named `identifier` this schedule places, when it places one.
+    ///
+    /// Every entry is keyed by the kind of the configuration it carries, so an entry found under
+    /// `M`'s kind carries an `M` and a reader has only the missing node to answer for.
+    pub fn configured<M: UniquelyKindedModel>(
+        &self,
+        identifier: impl Into<ModelName>,
+    ) -> Option<&M> {
+        self.scheduled(identifier).map(|scheduled| scheduled.config)
+    }
+
+    /// The `M` named `identifier` together with the entry that places it.
+    ///
+    /// Readers that need both the configuration and where it runs take them from one lookup, so
+    /// the two can never come from different entries.
+    pub fn scheduled<M: UniquelyKindedModel>(
+        &self,
+        identifier: impl Into<ModelName>,
+    ) -> Option<ScheduledModel<'_, M>> {
+        let node = self.nodes.get(&NodeRef::new(M::KIND, identifier.into()))?;
+        Some(ScheduledModel {
+            config: M::from_model_ref(&node.config)
+                .assured("a schedule keys every entry by the kind of the configuration it carries"),
+            node,
+        })
+    }
+}
+
+/// One scheduled node with its configuration already narrowed to the shape its kind names.
+#[derive(Debug, Clone, Copy)]
+pub struct ScheduledModel<'a, M> {
+    pub config: &'a M,
+    pub node: &'a ScheduledNode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3809,10 +3904,15 @@ impl KafkaPartitionSchedule {
     }
 }
 
+/// One runtime node of a domain schedule: the configuration it runs and where it is placed.
+///
+/// The kind and the identifier are read from the configuration when the entry is built, so an
+/// entry can never describe itself as a node its configuration is not. That is why every reader
+/// resolving an entry by kind receives the shape that kind names, with nothing left to reject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScheduledNode {
     pub identifier: ModelName,
-    pub kind: ModelKind,
     pub config: Box<Model>,
     pub effective_branching: Option<Vec<FieldName>>,
     pub effective_branching_schema: Option<SchemaName>,
@@ -3827,10 +3927,67 @@ pub struct ScheduledNode {
 }
 
 impl ScheduledNode {
+    /// An unplaced entry for `config`, before a scheduler decides which cluster nodes run it.
+    pub fn new(config: Model) -> Self {
+        Self {
+            identifier: config.name(),
+            config: Box::new(config),
+            effective_branching: None,
+            effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
+            kafka_partition_schedule: None,
+            primary_node: None,
+            assigned_nodes: Vec::new(),
+        }
+    }
+
+    /// The branch fields and branch schema the registry resolved for this node.
+    #[must_use]
+    pub fn with_effective_branching(
+        mut self,
+        fields: Option<Vec<FieldName>>,
+        schema: Option<SchemaName>,
+    ) -> Self {
+        self.effective_branching = fields;
+        self.effective_branching_schema = schema;
+        self
+    }
+
+    /// The fingerprint of the schema this node produces, as the registry computed it.
+    #[must_use]
+    pub fn with_schema_fingerprint(mut self, fingerprint: [u8; 32]) -> Self {
+        self.schema_fingerprint = fingerprint;
+        self
+    }
+
+    /// The Kafka partitions the leader observed for this node, and how they are shared out.
+    #[must_use]
+    pub fn with_kafka_partitions(mut self, partitions: KafkaPartitionSchedule) -> Self {
+        self.kafka_partition_schedule = Some(partitions);
+        self
+    }
+
+    /// The cluster nodes this entry is placed on, with `primary` owning its state.
+    #[must_use]
+    pub fn placed_on(
+        mut self,
+        primary: Option<ClusterNodeName>,
+        assigned: Vec<ClusterNodeName>,
+    ) -> Self {
+        self.primary_node = primary;
+        self.assigned_nodes = assigned;
+        self
+    }
+
+    /// The kind of runtime node this entry configures.
+    pub fn kind(&self) -> ModelKind {
+        self.config.kind()
+    }
+
     /// The runtime node this scheduled entry configures. Kind and identifier together name a node
     /// in a domain, and this is the key its schedule is stored under.
     pub fn identity(&self) -> NodeRef {
-        NodeRef::new(self.kind, self.identifier.clone())
+        NodeRef::new(self.kind(), self.identifier.clone())
     }
 
     fn executes_on_every_cluster_node(&self) -> bool {
@@ -4645,77 +4802,63 @@ mod tests {
 
     #[test]
     fn scheduled_node_assignment_checks_exact_node_id() {
-        let node = ScheduledNode {
-            identifier: named("orders_ingestor"),
-            kind: ModelKind::Schema,
-            config: Box::new(Model::Schema(CreateSchema {
-                name: named("orders"),
-                fields: vec![SchemaField {
-                    name: named("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                }],
-            })),
-            effective_branching: Some(vec![named("tenant")]),
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![named::<ClusterNodeName>("node-a")],
-        };
+        let node = ScheduledNode::new(Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }))
+        .with_effective_branching(Some(vec![named("tenant")]), None)
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![named::<ClusterNodeName>("node-a")],
+        );
 
         assert!(node.is_assigned_to(&named::<ClusterNodeName>("node-a")));
         assert!(!node.is_assigned_to(&named::<ClusterNodeName>("node-b")));
         assert!(
-            !ScheduledNode {
-                assigned_nodes: Vec::new(),
-                ..node
-            }
-            .is_assigned_to(&named::<ClusterNodeName>("node-a"))
+            !node
+                .clone()
+                .placed_on(Some(named::<ClusterNodeName>("node-a")), Vec::new())
+                .is_assigned_to(&named::<ClusterNodeName>("node-a"))
         );
     }
 
     #[test]
     fn scheduled_node_single_assignment_only_when_exactly_one_node_is_present() {
-        let node = ScheduledNode {
-            identifier: named("orders_ingestor"),
-            kind: ModelKind::Schema,
-            config: Box::new(Model::Schema(CreateSchema {
-                name: named("orders"),
-                fields: vec![SchemaField {
-                    name: named("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                }],
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![named::<ClusterNodeName>("node-a")],
-        };
+        let node = ScheduledNode::new(Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![named::<ClusterNodeName>("node-a")],
+        );
 
         assert_eq!(node.assigned_single_node(), Some(&named("node-a")));
         assert_eq!(
-            ScheduledNode {
-                assigned_nodes: vec![
-                    named::<ClusterNodeName>("node-a"),
-                    named::<ClusterNodeName>("node-b")
-                ],
-                ..node.clone()
-            }
-            .assigned_single_node(),
+            node.clone()
+                .placed_on(
+                    Some(named::<ClusterNodeName>("node-a")),
+                    vec![
+                        named::<ClusterNodeName>("node-a"),
+                        named::<ClusterNodeName>("node-b")
+                    ]
+                )
+                .assigned_single_node(),
             None
         );
         assert_eq!(
-            ScheduledNode {
-                assigned_nodes: Vec::new(),
-                ..node
-            }
-            .assigned_single_node(),
+            node.placed_on(Some(named::<ClusterNodeName>("node-a")), Vec::new())
+                .assigned_single_node(),
             None
         );
     }
@@ -4727,29 +4870,23 @@ mod tests {
 
     #[test]
     fn scheduled_node_exposes_primary_and_replicas() {
-        let node = ScheduledNode {
-            identifier: named("orders_ingestor"),
-            kind: ModelKind::Schema,
-            config: Box::new(Model::Schema(CreateSchema {
-                name: named("orders"),
-                fields: vec![SchemaField {
-                    name: named("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                }],
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![
+        let node = ScheduledNode::new(Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
                 named::<ClusterNodeName>("node-a"),
                 named::<ClusterNodeName>("node-b"),
                 named::<ClusterNodeName>("node-c"),
             ],
-        };
+        );
 
         assert_eq!(node.primary_node(), Some(&named("node-a")));
         assert_eq!(
@@ -4762,103 +4899,85 @@ mod tests {
 
     #[test]
     fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() {
-        let replicated_junction = ScheduledNode {
-            identifier: named("orders_merge"),
-            kind: ModelKind::Junction,
-            config: Box::new(Model::Junction(CreateJunction {
-                name: named("orders_merge"),
-                from: ProcessorInputs::new(
-                    vec![named("orders_in_a"), named("orders_in_b")],
-                    Vec::new(),
-                ),
-                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    named("orders_out"),
-                    FlushPolicy::Each {
-                        interval: "100ms".to_string(),
-                        max_batch_size: "1MiB".to_string(),
-                    },
-                )]),
-                branched_by: BranchSelection::unbranched(),
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![
+        let replicated_junction = ScheduledNode::new(Model::Junction(CreateJunction {
+            name: named("orders_merge"),
+            from: ProcessorInputs::new(
+                vec![named("orders_in_a"), named("orders_in_b")],
+                Vec::new(),
+            ),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
+            )]),
+            branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
                 named::<ClusterNodeName>("node-a"),
                 named::<ClusterNodeName>("node-b"),
             ],
-        };
-        let endpoint_ingestor = ScheduledNode {
-            identifier: named("orders_http"),
-            kind: ModelKind::Ingestor,
-            config: Box::new(Model::Ingestor(CreateIngestor {
-                name: named("orders_http"),
-                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    named("orders_out"),
-                    FlushPolicy::Each {
-                        interval: "100ms".to_string(),
-                        max_batch_size: "1MiB".to_string(),
-                    },
-                )]),
-                decode_using_codec: named("codec"),
-                timestamp_source: None,
-                source: IngestSource::Endpoint {
-                    endpoint: named("public_http"),
-                    mode: EndpointIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::EndpointBuffer {
-                        max_size: "1MiB".to_string(),
-                    },
+        );
+        let endpoint_ingestor = ScheduledNode::new(Model::Ingestor(CreateIngestor {
+            name: named("orders_http"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
                 },
-                general_error_policy: GeneralErrorPolicy::Log,
+            )]),
+            decode_using_codec: named("codec"),
+            timestamp_source: None,
+            source: IngestSource::Endpoint {
+                endpoint: named("public_http"),
+                mode: EndpointIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
 
-                filter_where: None,
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![
+            filter_where: None,
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
                 named::<ClusterNodeName>("node-a"),
                 named::<ClusterNodeName>("node-b"),
             ],
-        };
-        let syslog_ingestor = ScheduledNode {
-            identifier: named("orders_syslog"),
-            kind: ModelKind::Ingestor,
-            config: Box::new(Model::Ingestor(CreateIngestor {
-                name: named("orders_syslog"),
-                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    named("orders_out"),
-                    FlushPolicy::Each {
-                        interval: "100ms".to_string(),
-                        max_batch_size: "1MiB".to_string(),
-                    },
-                )]),
-                decode_using_codec: named("codec"),
-                timestamp_source: None,
-                source: IngestSource::Syslog {
-                    client: named("syslog_listener"),
-                    quiesce: IngestQuiesceMode::Suspend,
+        );
+        let syslog_ingestor = ScheduledNode::new(Model::Ingestor(CreateIngestor {
+            name: named("orders_syslog"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
                 },
-                general_error_policy: GeneralErrorPolicy::Log,
-                filter_where: None,
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(named::<ClusterNodeName>("node-a")),
-            assigned_nodes: vec![
+            )]),
+            decode_using_codec: named("codec"),
+            timestamp_source: None,
+            source: IngestSource::Syslog {
+                client: named("syslog_listener"),
+                quiesce: IngestQuiesceMode::Suspend,
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
                 named::<ClusterNodeName>("node-a"),
                 named::<ClusterNodeName>("node-b"),
             ],
-        };
+        );
 
         assert_eq!(replicated_junction.execution_node(), Some(&named("node-a")));
         assert!(replicated_junction.executes_on(&named::<ClusterNodeName>("node-a")));

@@ -266,7 +266,7 @@ impl Runtime {
         schedule
             .nodes
             .values()
-            .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
+            .find(|node| node.kind() == entity.kind && node.identifier == entity.identifier)
     }
 
     /// Rebuilds the placement-derived runtime of every reassigned node: the replicated states this
@@ -548,9 +548,9 @@ impl Runtime {
         graph_handle.store(Some(desired_graph));
         let desired_model_index = schedule
             .nodes
-            .iter()
-            .map(|(node_ref, node)| (node_ref.clone(), (*node.config).clone()))
-            .collect::<HashMap<_, _>>();
+            .values()
+            .map(|node| (*node.config).clone())
+            .collect::<ModelIndex>();
 
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
         // desired fingerprints before constructing state so the post-swap stale-state purge does
@@ -562,22 +562,15 @@ impl Runtime {
         for entity in entities {
             tokio::task::consume_budget().await;
             if entity.kind == ModelKind::Relay {
-                let desired_node = schedule
-                    .nodes
-                    .get(&NodeRef::new(ModelKind::Relay, entity.identifier.clone()))
+                let ScheduledModel {
+                    config: desired_relay,
+                    node: desired_node,
+                } = schedule
+                    .scheduled::<CreateRelay>(entity.identifier.clone())
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!("missing desired relay '{}'", entity.identifier.as_str()),
                     })?;
-                let Model::Relay(desired_relay) = desired_node.config.as_ref() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "desired relay '{}' has the wrong model kind",
-                            entity.identifier.as_str()
-                        ),
-                    });
-                };
                 let desired_materialized = desired_relay.materialized_state.is_some();
                 let (
                     was_materialized,
@@ -735,12 +728,11 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Ingestor {
-                let desired_node = schedule
-                    .nodes
-                    .get(&NodeRef::new(
-                        ModelKind::Ingestor,
-                        entity.identifier.clone(),
-                    ))
+                let ScheduledModel {
+                    config: desired_ingestor,
+                    node: desired_node,
+                } = schedule
+                    .scheduled::<CreateIngestor>(entity.identifier.clone())
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
@@ -748,15 +740,6 @@ impl Runtime {
                             entity.identifier.as_str()
                         ),
                     })?;
-                let Model::Ingestor(desired_ingestor) = desired_node.config.as_ref() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "desired ingestor '{}' has the wrong model kind",
-                            entity.identifier.as_str()
-                        ),
-                    });
-                };
 
                 let key = entity.in_domain(domain);
                 if self.inner.ingestors.contains_key(&key) {
@@ -813,22 +796,15 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Emitter {
-                let desired_node = schedule
-                    .nodes
-                    .get(&NodeRef::new(ModelKind::Emitter, entity.identifier.clone()))
+                let ScheduledModel {
+                    config: desired_emitter,
+                    node: desired_node,
+                } = schedule
+                    .scheduled::<CreateEmitter>(entity.identifier.clone())
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!("missing desired emitter '{}'", entity.identifier.as_str()),
                     })?;
-                let Model::Emitter(desired_emitter) = desired_node.config.as_ref() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "desired emitter '{}' has the wrong model kind",
-                            entity.identifier.as_str()
-                        ),
-                    });
-                };
                 let desired_emitter = desired_emitter.clone();
                 let (old_emitter, old_task) = {
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
@@ -1697,7 +1673,7 @@ impl Runtime {
                     self.state_placement(
                         domain,
                         RuntimeStateKind::KafkaOffset,
-                        node.kind,
+                        node.kind(),
                         &node.identifier,
                         None,
                     ),
@@ -1747,7 +1723,8 @@ impl Runtime {
         let aggregate_primary_node = execution_node
             .clone()
             .or_else(|| executes_locally.then(|| local_node_id.clone()));
-        let aggregate_replica_nodes = if execution_node.is_some() && node.kind != ModelKind::Relay {
+        let aggregate_replica_nodes = if execution_node.is_some() && node.kind() != ModelKind::Relay
+        {
             node.replica_nodes()
                 .into_iter()
                 .cloned()
@@ -1755,7 +1732,7 @@ impl Runtime {
         } else {
             Vec::new()
         };
-        if node.kind != ModelKind::Relay
+        if node.kind() != ModelKind::Relay
             && (executes_locally || (assigned_locally && aggregate_primary_node.is_some()))
         {
             let required_replica_acks = aggregate_replica_nodes.len();
@@ -1764,7 +1741,7 @@ impl Runtime {
                     self.state_placement(
                         domain,
                         RuntimeStateKind::BranchAggregated,
-                        node.kind,
+                        node.kind(),
                         &node.identifier,
                         None,
                     ),
@@ -1786,10 +1763,10 @@ impl Runtime {
                 placement.tasks.push(task);
             }
         }
-        if node.kind != ModelKind::Relay || executes_locally {
+        if node.kind() != ModelKind::Relay || executes_locally {
             self.inner.metrics.register_global_node(
                 domain,
-                node.kind,
+                node.kind(),
                 &node.identifier,
                 execution_node.as_ref().or(Some(local_node_id)),
             );
@@ -1889,36 +1866,22 @@ mod tests {
         let schedule = ClusterSchedule::from_iter([DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    identifier: ModelName::from(&schema.clone()),
-                    kind: ModelKind::Schema,
-                    config: Box::new(nervix_models::Model::Schema(CreateSchema {
-                        name: schema.clone(),
-                        fields: vec![SchemaField {
-                            name: named("value"),
-                            ty: ParseAsType::I64,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    })),
-                    effective_branching: None,
-                    effective_branching_schema: None,
-                    schema_fingerprint: [0; 32],
-                    kafka_partition_schedule: None,
-                    primary_node: None,
-                    assigned_nodes: Vec::new(),
-                },
-                scheduled_model(
-                    ModelKind::Relay,
-                    ModelName::from(&relay.clone()),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: relay.clone(),
-                        schema,
-                        buffer: nonzero!(2usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
+                ScheduledNode::new(nervix_models::Model::Schema(CreateSchema {
+                    name: schema.clone(),
+                    fields: vec![SchemaField {
+                        name: named("value"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: relay.clone(),
+                    schema,
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
             ],
             Vec::new(),
         )]);
@@ -1964,30 +1927,22 @@ mod tests {
         let schedule = ClusterSchedule::from_iter([DomainSchedule::new(
             domain.clone(),
             vec![
-                scheduled_model(
-                    ModelKind::Schema,
-                    ModelName::from(&schema.clone()),
-                    nervix_models::Model::Schema(CreateSchema {
-                        name: schema.clone(),
-                        fields: vec![SchemaField {
-                            name: named("user_id"),
-                            ty: ParseAsType::I64,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                ),
-                scheduled_model(
-                    ModelKind::Relay,
-                    ModelName::from(&relay),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: relay.clone(),
-                        schema,
-                        buffer: nonzero!(2usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
+                scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    name: schema.clone(),
+                    fields: vec![SchemaField {
+                        name: named("user_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: relay.clone(),
+                    schema,
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
             ],
             Vec::new(),
         )]);
@@ -2049,19 +2004,15 @@ mod tests {
                 clock: None,
             },
         )]);
-        let schema_node = scheduled_model(
-            ModelKind::Schema,
-            ModelName::from(&schema.clone()),
-            nervix_models::Model::Schema(CreateSchema {
-                name: schema.clone(),
-                fields: vec![SchemaField {
-                    name: named("user_id"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                }],
-            }),
-        );
+        let schema_node = scheduled_model(nervix_models::Model::Schema(CreateSchema {
+            name: schema.clone(),
+            fields: vec![SchemaField {
+                name: named("user_id"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
         let stale_schedule = ClusterSchedule::from_iter([DomainSchedule::new(
             domain.clone(),
             vec![schema_node.clone()],
@@ -2071,17 +2022,13 @@ mod tests {
             domain.clone(),
             vec![
                 schema_node,
-                scheduled_model(
-                    ModelKind::Relay,
-                    ModelName::from(&relay),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: relay.clone(),
-                        schema,
-                        buffer: nonzero!(2usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: relay.clone(),
+                    schema,
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
             ],
             Vec::new(),
         )]);
@@ -2123,78 +2070,62 @@ mod tests {
         let domain = domain("default");
         let order_schema = named::<SchemaName>("order_event");
         let order_relay = |name: &str| {
-            scheduled_model(
-                ModelKind::Relay,
-                named(name),
-                nervix_models::Model::Relay(CreateRelay {
-                    name: named(name),
-                    schema: order_schema.clone(),
-                    buffer: nonzero!(2usize),
-                    branching: RelayBranching::unbranched(),
-                    materialized_state: None,
-                }),
-            )
+            scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                name: named(name),
+                schema: order_schema.clone(),
+                buffer: nonzero!(2usize),
+                branching: RelayBranching::unbranched(),
+                materialized_state: None,
+            }))
         };
         let schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                scheduled_model(
-                    ModelKind::Schema,
-                    ModelName::from(&order_schema.clone()),
-                    nervix_models::Model::Schema(CreateSchema {
-                        name: order_schema.clone(),
-                        fields: vec![SchemaField {
-                            name: named("order_id"),
-                            ty: ParseAsType::I64,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                ),
+                scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    name: order_schema.clone(),
+                    fields: vec![SchemaField {
+                        name: named("order_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
                 order_relay("orders"),
                 order_relay("projected_orders"),
                 order_relay("left_orders"),
                 order_relay("right_orders"),
                 order_relay("joined_orders"),
-                scheduled_model(
-                    ModelKind::Deduplicator,
-                    named("dedup_orders"),
-                    nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_orders"),
-                        from: ProcessorInputs::single(named("orders")),
-                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: BranchSelection::unbranched(),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                ),
-                scheduled_model(
-                    ModelKind::Junction,
-                    named("join_orders"),
-                    nervix_models::Model::Junction(CreateJunction {
-                        name: named("join_orders"),
-                        from: ProcessorInputs::new(
-                            vec![named("left_orders"), named("right_orders")],
-                            Vec::new(),
-                        ),
-                        output_routes: (ProcessorOutputs::single(named("joined_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: BranchSelection::unbranched(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                ),
+                scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: named("dedup_orders"),
+                    from: ProcessorInputs::single(named("orders")),
+                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
+                    branched_by: BranchSelection::unbranched(),
+                    deduplicate_on: vec![expression("input.order_id")],
+                    max_time: "10m".to_string(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                })),
+                scheduled_model(nervix_models::Model::Junction(CreateJunction {
+                    name: named("join_orders"),
+                    from: ProcessorInputs::new(
+                        vec![named("left_orders"), named("right_orders")],
+                        Vec::new(),
+                    ),
+                    output_routes: (ProcessorOutputs::single(named("joined_orders")))
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
+                    branched_by: BranchSelection::unbranched(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                })),
             ],
             Vec::new(),
         );
@@ -2230,62 +2161,46 @@ mod tests {
         let schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                scheduled_model(
-                    ModelKind::Schema,
-                    ModelName::from(&event_schema.clone()),
-                    nervix_models::Model::Schema(CreateSchema {
-                        name: event_schema.clone(),
-                        fields: vec![SchemaField {
-                            name: named("event_id"),
-                            ty: ParseAsType::I64,
-                            optional: false,
-                            sensitive: false,
-                        }],
+                scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    name: event_schema.clone(),
+                    fields: vec![SchemaField {
+                        name: named("event_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: named("events"),
+                    schema: event_schema.clone(),
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: named("unique_events"),
+                    schema: event_schema,
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
+                scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: processor.clone(),
+                    from: ProcessorInputs::single(named("events")),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(named(
+                        "unique_events",
+                    )))
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
                     }),
-                ),
-                scheduled_model(
-                    ModelKind::Relay,
-                    named("events"),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: named("events"),
-                        schema: event_schema.clone(),
-                        buffer: nonzero!(2usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
-                scheduled_model(
-                    ModelKind::Relay,
-                    named("unique_events"),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: named("unique_events"),
-                        schema: event_schema,
-                        buffer: nonzero!(2usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
-                scheduled_model(
-                    ModelKind::Deduplicator,
-                    ModelName::from(&processor),
-                    nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: processor.clone(),
-                        from: ProcessorInputs::single(named("events")),
-                        output_routes: with_inherit_all(ProcessorOutputs::single(named(
-                            "unique_events",
-                        )))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        }),
-                        branched_by: BranchSelection::unbranched(),
-                        deduplicate_on: vec![expression("input.event_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                ),
+                    branched_by: BranchSelection::unbranched(),
+                    deduplicate_on: vec![expression("input.event_id")],
+                    max_time: "10m".to_string(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                })),
             ],
             Vec::new(),
         );
@@ -2313,7 +2228,7 @@ mod tests {
         let nervix_models::Model::Deduplicator(config) = desired
             .nodes
             .values_mut()
-            .find(|node| node.kind == ModelKind::Deduplicator)
+            .find(|node| node.kind() == ModelKind::Deduplicator)
             .expect("schedule must contain the processor")
             .config
             .as_mut()
@@ -2349,62 +2264,46 @@ mod tests {
         let schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                scheduled_model(
-                    ModelKind::Schema,
-                    ModelName::from(&event_schema.clone()),
-                    nervix_models::Model::Schema(CreateSchema {
-                        name: event_schema.clone(),
-                        fields: vec![SchemaField {
-                            name: named("event_id"),
-                            ty: ParseAsType::I64,
-                            optional: false,
-                            sensitive: false,
-                        }],
+                scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    name: event_schema.clone(),
+                    fields: vec![SchemaField {
+                        name: named("event_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: named("events"),
+                    schema: event_schema.clone(),
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: named("unique_events"),
+                    schema: event_schema,
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
+                scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: processor.clone(),
+                    from: ProcessorInputs::single(named("events")),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(named(
+                        "unique_events",
+                    )))
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
                     }),
-                ),
-                scheduled_model(
-                    ModelKind::Relay,
-                    named("events"),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: named("events"),
-                        schema: event_schema.clone(),
-                        buffer: nonzero!(2usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
-                scheduled_model(
-                    ModelKind::Relay,
-                    named("unique_events"),
-                    nervix_models::Model::Relay(CreateRelay {
-                        name: named("unique_events"),
-                        schema: event_schema,
-                        buffer: nonzero!(2usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                ),
-                scheduled_model(
-                    ModelKind::Deduplicator,
-                    ModelName::from(&processor),
-                    nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: processor.clone(),
-                        from: ProcessorInputs::single(named("events")),
-                        output_routes: with_inherit_all(ProcessorOutputs::single(named(
-                            "unique_events",
-                        )))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        }),
-                        branched_by: BranchSelection::unbranched(),
-                        deduplicate_on: vec![expression("input.event_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                ),
+                    branched_by: BranchSelection::unbranched(),
+                    deduplicate_on: vec![expression("input.event_id")],
+                    max_time: "10m".to_string(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                })),
             ],
             Vec::new(),
         );
@@ -2423,7 +2322,7 @@ mod tests {
         let processor_node = desired
             .nodes
             .values_mut()
-            .find(|node| node.kind == ModelKind::Deduplicator)
+            .find(|node| node.kind() == ModelKind::Deduplicator)
             .expect("schedule must contain the processor");
         processor_node.schema_fingerprint = [7; 32];
         let nervix_models::Model::Deduplicator(config) = processor_node.config.as_mut() else {

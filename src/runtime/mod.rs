@@ -73,14 +73,15 @@ use nervix_models::{
     IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
     KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
     MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality,
-    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch,
-    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
-    RouteConstruction, ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, OutputBranch, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
+    PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus,
+    RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
 use nervix_nspl::{
     vm_program::{

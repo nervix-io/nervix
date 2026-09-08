@@ -6595,6 +6595,7 @@ dependencies = [
 name = "nervix-models"
 version = "0.1.0-dev"
 dependencies = [
+ "ahash",
  "blake3",
  "chrono",
  "error-stack",

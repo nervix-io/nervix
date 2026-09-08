@@ -151,6 +151,68 @@ impl PulsarEmitter {
         };
 
         outcome.delivered.reserve(records.len());
+        match self.mode {
+            BrokerPublishingMode::NoAck => {
+                Self::publish_unconfirmed(producer, records, &mut outcome).await;
+            }
+            BrokerPublishingMode::Ack(confirmation) => {
+                Self::publish_confirmed(producer, records, confirmation, &mut outcome).await;
+            }
+        }
+        outcome
+    }
+
+    /// `MODE NO_ACK`: a record is delivered once the producer accepts it, and the send receipt it
+    /// would have produced is dropped rather than awaited.
+    async fn publish_unconfirmed(
+        producer: &mut ::pulsar::Producer<TokioExecutor>,
+        records: Vec<EncodedBrokerRecord>,
+        outcome: &mut PerRecordPublishOutcome,
+    ) {
+        for record in records {
+            tokio::task::consume_budget().await;
+            let position = record.position();
+            let acks = record.acks.clone();
+            match await_emitter_confirmation(
+                &acks,
+                producer.send_non_blocking(PulsarProducerMessage {
+                    payload: record.payload,
+                    properties: record.headers.into_iter().collect(),
+                    partition_key: record.key,
+                    ..Default::default()
+                }),
+            )
+            .await
+            {
+                Ok(confirmation) => {
+                    drop(confirmation);
+                    outcome.deliver(position);
+                }
+                Err(source) if Self::is_record_rejection(&source) => {
+                    outcome.reject(position, format!("pulsar rejected record: {source}"));
+                }
+                Err(source) => {
+                    outcome.fail(emitter_publish_error(format!(
+                        "failed to enqueue pulsar message: {source}"
+                    )));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `MODE ACK`: at most `max_in_flight` send receipts are outstanding at once, and every one is
+    /// awaited before the batch finishes. The window carries the confirmation settings, so the
+    /// drain below never has to ask a mode that has no confirmations what its timeout is.
+    async fn publish_confirmed(
+        producer: &mut ::pulsar::Producer<TokioExecutor>,
+        records: Vec<EncodedBrokerRecord>,
+        AckConfirmation {
+            max_in_flight,
+            timeout,
+        }: AckConfirmation,
+        outcome: &mut PerRecordPublishOutcome,
+    ) {
         let mut pending: VecDeque<PendingPulsarConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
@@ -181,46 +243,29 @@ impl PulsarEmitter {
                     outcome.fail(emitter_publish_error(format!(
                         "failed to enqueue pulsar message: {source}"
                     )));
-                    return outcome;
+                    return;
                 }
             };
-            match self.mode {
-                BrokerPublishingMode::NoAck => {
-                    drop(confirmation);
-                    outcome.deliver(position);
-                }
-                BrokerPublishingMode::Ack(AckConfirmation {
-                    max_in_flight,
-                    timeout,
-                }) => {
-                    pending.push_back(PendingPulsarConfirmation {
-                        position,
-                        acks: record.acks,
-                        deadline: Instant::now() + timeout,
-                        confirmation,
-                    });
-                    if pending.len() >= max_in_flight.get()
-                        && let Err(error) =
-                            Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
-                    {
-                        outcome.fail(error);
-                        return outcome;
-                    }
-                }
+            pending.push_back(PendingPulsarConfirmation {
+                position,
+                acks: record.acks,
+                deadline: Instant::now() + timeout,
+                confirmation,
+            });
+            if pending.len() >= max_in_flight.get()
+                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await
+            {
+                outcome.fail(error);
+                return;
             }
         }
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
-            let timeout = match self.mode {
-                BrokerPublishingMode::Ack(confirmation) => confirmation.timeout,
-                BrokerPublishingMode::NoAck => unreachable!("NO_ACK has no confirmations"),
-            };
-            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
+            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await {
                 outcome.fail(error);
-                return outcome;
+                return;
             }
         }
-        outcome
     }
 
     async fn confirm_oldest(

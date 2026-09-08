@@ -1205,7 +1205,11 @@ impl Runtime {
                 node.schema_fingerprint
             };
             self.inner.state_schema_fingerprints.insert(
-                DomainNodeRef::node_in(schedule.domain.clone(), node.kind, node.identifier.clone()),
+                DomainNodeRef::node_in(
+                    schedule.domain.clone(),
+                    node.kind(),
+                    node.identifier.clone(),
+                ),
                 schema_fingerprint,
             );
         }
@@ -1511,8 +1515,8 @@ mod tests {
     use ahash::HashMap;
     use fjall::Database;
     use nervix_models::{
-        ClusterNodeName, CreateSchema, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType,
-        ScheduledNode, SchemaName, Timestamp,
+        ClusterNodeName, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType, ScheduledNode,
+        Timestamp,
     };
     use nonzero_ext::nonzero;
     use tempfile::tempdir;
@@ -2144,20 +2148,26 @@ mod tests {
         let schedule = |fingerprint| {
             DomainSchedule::new(
                 domain.clone(),
-                vec![ScheduledNode {
-                    identifier: identifier.clone(),
-                    kind: ModelKind::Deduplicator,
-                    config: Box::new(nervix_models::Model::Schema(CreateSchema {
-                        name: SchemaName::from(&identifier.clone()),
-                        fields: Vec::new(),
-                    })),
-                    effective_branching: None,
-                    effective_branching_schema: None,
-                    schema_fingerprint: fingerprint,
-                    kafka_partition_schedule: None,
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                }],
+                vec![
+                    ScheduledNode::new(nervix_models::Model::Deduplicator(
+                        nervix_models::CreateDeduplicator {
+                            name: nervix_models::DeduplicatorName::from(&identifier.clone()),
+                            from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
+                            output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
+                            branched_by: nervix_models::BranchSelection::unbranched(),
+                            deduplicate_on: Vec::new(),
+                            max_time: "1m".to_string(),
+                            mode: nervix_models::AckMode::Attached,
+                            filter_where: None,
+                            materialized_state: Vec::new(),
+                        },
+                    ))
+                    .with_schema_fingerprint(fingerprint)
+                    .placed_on(
+                        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                        vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ),
+                ],
                 Vec::new(),
             )
         };

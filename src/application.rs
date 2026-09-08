@@ -114,23 +114,26 @@ use nervix_interconnect::{
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AlterDomain, BranchSelection, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
-    CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
-    CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
-    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
-    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainClockState, DomainConfig,
-    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
-    FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
-    IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName,
-    LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef,
-    ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PostgresConflictAction,
+    AlterDomain, BranchSelection, ClusterNodeName, CreateBranch, CreateCorrelator,
+    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer,
+    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateResource, CreateSchema, CreateStatement, CreateUdf, CreateUser,
+    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, DescribeCorrelator,
+    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
+    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainClockState, DomainConfig, DomainName, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, FieldName, IcebergCatalog,
+    InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
+    IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName, LookupQuery, Model,
+    ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef, ParseAsType,
+    PlacementGroupSchedule, PlacementName, PlacementPolicy, PostgresConflictAction,
     ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId, ResourceName,
-    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
+    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledModel, ScheduledNode,
     ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp, UploadResource,
-    UserName, VhostTlsResource, expression_to_nspl, ingest_quiesce_to_nspl,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp,
+    UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
+    ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -440,6 +443,13 @@ struct EntityGateEngagement<'a> {
     purpose: EntityGatePurpose,
     deadline: tokio::time::Instant,
     reason: &'a str,
+}
+
+/// A model as `DESCRIBE` reads it: the configuration it was created with, and the schedule entry
+/// that places it while its domain is running.
+struct DescribedModel<M> {
+    config: M,
+    scheduled: Option<ScheduledNode>,
 }
 
 struct OnnxModelMetadata {
@@ -4735,10 +4745,7 @@ impl SessionServiceImpl {
 
             for vhost_id in vhost_ids {
                 tokio::task::consume_budget().await;
-                let Ok(Some(Model::Vhost(vhost))) =
-                    self.inner
-                        .registry
-                        .get(domain_id, ModelKind::Vhost, &vhost_id)
+                let Ok(Some(vhost)) = self.inner.registry.get::<CreateVhost>(domain_id, &vhost_id)
                 else {
                     continue;
                 };
@@ -5835,9 +5842,9 @@ impl SessionServiceImpl {
         let form = match self
             .inner
             .registry
-            .get(domain, ModelKind::Placement, &describe.name)
+            .get::<CreatePlacement>(domain, &describe.name)
         {
-            Ok(Some(model)) => model.to_canonical_nspl().ok(),
+            Ok(Some(placement)) => placement.to_canonical_nspl().ok(),
             Ok(None) => None,
             Err(error) => return command_error(error.to_string()),
         };
@@ -5943,15 +5950,11 @@ impl SessionServiceImpl {
         match self
             .inner
             .registry
-            .get(domain, ModelKind::Endpoint, &describe.name)
+            .get::<CreateEndpoint>(domain, &describe.name)
         {
-            Ok(Some(Model::Endpoint(endpoint))) => command_ok(format_endpoint_describe_output(
+            Ok(Some(endpoint)) => command_ok(format_endpoint_describe_output(
                 &ModelName::from(&describe.name),
                 &endpoint,
-            )),
-            Ok(Some(_)) => command_error(format!(
-                "model '{}' is not an endpoint",
-                describe.name.as_str()
             )),
             Ok(None) => command_error(format!("endpoint '{}' not found", describe.name.as_str())),
             Err(error) => command_error(error.to_string()),
@@ -7287,24 +7290,20 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeDeduplicator,
     ) -> CommandResult {
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::Deduplicator, &describe.name)
-            .await;
-        let model = match self
-            .inner
-            .registry
-            .get(domain, ModelKind::Deduplicator, &describe.name)
+        let DescribedModel {
+            config: deduplicator,
+            scheduled: scheduled_node,
+        } = match self
+            .described_model::<CreateDeduplicator>(domain, &describe.name)
+            .await
         {
-            Ok(Some(model)) => model,
+            Ok(Some(described)) => described,
             Ok(None) => {
-                let Some(scheduled_node) = scheduled_node.as_ref() else {
-                    return command_error(format!(
-                        "deduplicator '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                (*scheduled_node.config).clone()
+                return command_error(format!(
+                    "deduplicator '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
             }
             Err(error) => {
                 return command_error(format!(
@@ -7313,13 +7312,6 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-        };
-        let Model::Deduplicator(deduplicator) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a deduplicator",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
         };
 
         let metrics = match self
@@ -7349,24 +7341,20 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeJunction,
     ) -> CommandResult {
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::Junction, &describe.name)
-            .await;
-        let model = match self
-            .inner
-            .registry
-            .get(domain, ModelKind::Junction, &describe.name)
+        let DescribedModel {
+            config: junction,
+            scheduled: scheduled_node,
+        } = match self
+            .described_model::<CreateJunction>(domain, &describe.name)
+            .await
         {
-            Ok(Some(model)) => model,
+            Ok(Some(described)) => described,
             Ok(None) => {
-                let Some(scheduled_node) = scheduled_node.as_ref() else {
-                    return command_error(format!(
-                        "junction '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                (*scheduled_node.config).clone()
+                return command_error(format!(
+                    "junction '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
             }
             Err(error) => {
                 return command_error(format!(
@@ -7375,13 +7363,6 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-        };
-        let Model::Junction(junction) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a junction",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
         };
 
         let metrics = match self
@@ -7407,24 +7388,20 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeReingestor,
     ) -> CommandResult {
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::Reingestor, &describe.name)
-            .await;
-        let model = match self
-            .inner
-            .registry
-            .get(domain, ModelKind::Reingestor, &describe.name)
+        let DescribedModel {
+            config: reingestor,
+            scheduled: scheduled_node,
+        } = match self
+            .described_model::<CreateReingestor>(domain, &describe.name)
+            .await
         {
-            Ok(Some(model)) => model,
+            Ok(Some(described)) => described,
             Ok(None) => {
-                let Some(scheduled_node) = scheduled_node.as_ref() else {
-                    return command_error(format!(
-                        "reingestor '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                (*scheduled_node.config).clone()
+                return command_error(format!(
+                    "reingestor '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
             }
             Err(error) => {
                 return command_error(format!(
@@ -7433,13 +7410,6 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-        };
-        let Model::Reingestor(reingestor) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a reingestor",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
         };
 
         let metrics = match self
@@ -7465,24 +7435,20 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeCorrelator,
     ) -> CommandResult {
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::Correlator, &describe.name)
-            .await;
-        let model = match self
-            .inner
-            .registry
-            .get(domain, ModelKind::Correlator, &describe.name)
+        let DescribedModel {
+            config: correlator,
+            scheduled: scheduled_node,
+        } = match self
+            .described_model::<CreateCorrelator>(domain, &describe.name)
+            .await
         {
-            Ok(Some(model)) => model,
+            Ok(Some(described)) => described,
             Ok(None) => {
-                let Some(scheduled_node) = scheduled_node.as_ref() else {
-                    return command_error(format!(
-                        "correlator '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                (*scheduled_node.config).clone()
+                return command_error(format!(
+                    "correlator '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
             }
             Err(error) => {
                 return command_error(format!(
@@ -7491,13 +7457,6 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-        };
-        let Model::Correlator(correlator) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a correlator",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
         };
 
         let metrics = match self
@@ -7523,24 +7482,20 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeReorderer,
     ) -> CommandResult {
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::Reorderer, &describe.name)
-            .await;
-        let model = match self
-            .inner
-            .registry
-            .get(domain, ModelKind::Reorderer, &describe.name)
+        let DescribedModel {
+            config: reorderer,
+            scheduled: scheduled_node,
+        } = match self
+            .described_model::<CreateReorderer>(domain, &describe.name)
+            .await
         {
-            Ok(Some(model)) => model,
+            Ok(Some(described)) => described,
             Ok(None) => {
-                let Some(scheduled_node) = scheduled_node.as_ref() else {
-                    return command_error(format!(
-                        "reorderer '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                (*scheduled_node.config).clone()
+                return command_error(format!(
+                    "reorderer '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
             }
             Err(error) => {
                 return command_error(format!(
@@ -7549,13 +7504,6 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-        };
-        let Model::Reorderer(reorderer) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a reorderer",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
         };
 
         let metrics = match self
@@ -7581,24 +7529,20 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeEmitter,
     ) -> CommandResult {
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::Emitter, &describe.name)
-            .await;
-        let model = match self
-            .inner
-            .registry
-            .get(domain, ModelKind::Emitter, &describe.name)
+        let DescribedModel {
+            config: emitter,
+            scheduled: scheduled_node,
+        } = match self
+            .described_model::<CreateEmitter>(domain, &describe.name)
+            .await
         {
-            Ok(Some(model)) => model,
+            Ok(Some(described)) => described,
             Ok(None) => {
-                let Some(scheduled_node) = scheduled_node.as_ref() else {
-                    return command_error(format!(
-                        "emitter '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                (*scheduled_node.config).clone()
+                return command_error(format!(
+                    "emitter '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
             }
             Err(error) => {
                 return command_error(format!(
@@ -7607,13 +7551,6 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-        };
-        let Model::Emitter(emitter) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not an emitter",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
         };
         let status = self
             .dataflow_node_status_envelope_for_graph(
@@ -7651,34 +7588,26 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeWindowProcessor,
     ) -> CommandResult {
-        let model =
-            match self
-                .inner
-                .registry
-                .get(domain, ModelKind::WindowProcessor, &describe.name)
-            {
-                Ok(Some(model)) => model,
-                Ok(None) => {
-                    return command_error(format!(
-                        "window processor '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                }
-                Err(error) => {
-                    return command_error(format!(
-                        "failed to read window processor '{}' in domain '{}': {error:?}",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                }
-            };
-        let Model::WindowProcessor(processor) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a window processor",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
+        let processor = match self
+            .inner
+            .registry
+            .get::<CreateWindowProcessor>(domain, &describe.name)
+        {
+            Ok(Some(processor)) => processor,
+            Ok(None) => {
+                return command_error(format!(
+                    "window processor '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
+            }
+            Err(error) => {
+                return command_error(format!(
+                    "failed to read window processor '{}' in domain '{}': {error:?}",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
+            }
         };
         let aggregate = match processor
             .output_routes
@@ -7735,12 +7664,12 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeWasmProcessor,
     ) -> CommandResult {
-        let model = match self
+        let processor = match self
             .inner
             .registry
-            .get(domain, ModelKind::WasmProcessor, &describe.name)
+            .get::<CreateWasmProcessor>(domain, &describe.name)
         {
-            Ok(Some(model)) => model,
+            Ok(Some(processor)) => processor,
             Ok(None) => {
                 return command_error(format!(
                     "wasm processor '{}' does not exist in domain '{}'",
@@ -7755,13 +7684,6 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-        };
-        let Model::WasmProcessor(processor) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a wasm processor",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
         };
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::WasmProcessor, &describe.name)
@@ -7788,6 +7710,37 @@ impl SessionServiceImpl {
             ),
             runtime_details.metrics,
         ))
+    }
+
+    /// The `M` named `identifier` in `domain`, with the schedule entry that places it.
+    ///
+    /// `DESCRIBE` answers on any node, and a node that has not stored the domain's models still
+    /// holds the schedule it was given, so the schedule is the second source for the same
+    /// configuration. Both sources are keyed by `M`'s kind and hand back an `M`, so a description
+    /// either has the model or does not.
+    async fn described_model<M: UniquelyKindedModel>(
+        &self,
+        domain: &DomainName,
+        identifier: impl Into<ModelName>,
+    ) -> Result<Option<DescribedModel<M>>, Report<RegistryError>> {
+        let identifier = identifier.into();
+        let scheduled = self
+            .scheduled_model_node(domain, M::KIND, identifier.clone())
+            .await;
+        if let Some(config) = self.inner.registry.get::<M>(domain, identifier)? {
+            return Ok(Some(DescribedModel { config, scheduled }));
+        }
+        let Some(scheduled) = scheduled else {
+            return Ok(None);
+        };
+        let config = M::from_model((*scheduled.config).clone()).assured(
+            "a schedule keys every entry by the kind of the configuration it carries, and this \
+             entry was resolved under this model's kind",
+        );
+        Ok(Some(DescribedModel {
+            config,
+            scheduled: Some(scheduled),
+        }))
     }
 
     async fn scheduled_model_node(
@@ -8755,9 +8708,8 @@ impl SessionServiceImpl {
                         && self
                             .inner
                             .registry
-                            .get(domain_id, create.body.kind(), create.body.name())
+                            .contains(domain_id, create.body.kind(), create.body.name())
                             .map_err(|error| error.to_string())?
-                            .is_some()
                     {
                         continue;
                     }
@@ -9848,7 +9800,11 @@ impl SessionServiceImpl {
                     let model = create.body;
                     let model_id = model.name();
                     let model_kind = model.kind();
-                    if let Ok(Some(_)) = self.inner.registry.get(&domain, model_kind, &model_id)
+                    if self
+                        .inner
+                        .registry
+                        .contains(&domain, model_kind, &model_id)
+                        .unwrap_or(false)
                         && if_not_exists
                     {
                         results[index] = Some(command_ok_already_existed(format!(
@@ -10848,7 +10804,11 @@ impl SessionServiceImpl {
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
                 let name_span = find_identifier_span(query, &show.name).unwrap_or(0..0);
-                let model = match self.inner.registry.get(domain, show.kind, &show.name) {
+                let model = match self
+                    .inner
+                    .registry
+                    .get_of_kind(domain, show.kind, &show.name)
+                {
                     Ok(Some(model)) => model,
                     Ok(None) => {
                         return CommandResult {
@@ -11890,13 +11850,8 @@ impl SessionServiceImpl {
     }
 
     fn describe_udf(&self, domain: &DomainName, describe: DescribeUdf) -> CommandResult {
-        let model = match self
-            .inner
-            .registry
-            .get(domain, ModelKind::Udf, &describe.name)
-        {
-            Ok(Some(Model::Udf(udf))) => udf,
-            Ok(Some(_)) => unreachable!("UDF registry keys only contain UDF models"),
+        let model = match self.inner.registry.get::<CreateUdf>(domain, &describe.name) {
+            Ok(Some(udf)) => udf,
             Ok(None) => {
                 return command_error(format!(
                     "UDF '{}' does not exist in domain '{}'",
@@ -13044,9 +12999,9 @@ impl SessionServiceImpl {
         node_indices.sort_by(|left, right| {
             let left = &schedule.nodes[*left];
             let right = &schedule.nodes[*right];
-            left.kind
+            left.kind()
                 .as_ref()
-                .cmp(right.kind.as_ref())
+                .cmp(right.kind().as_ref())
                 .then_with(|| left.identifier.cmp(&right.identifier))
         });
         for node_index in node_indices {
@@ -13057,7 +13012,7 @@ impl SessionServiceImpl {
             if node.execution_node() != Some(node_id) {
                 continue;
             }
-            let label = format!("{} {}", node.kind.as_ref(), node.identifier.as_str());
+            let label = format!("{} {}", node.kind().as_ref(), node.identifier.as_str());
             if excluded.contains(&label) {
                 continue;
             }
@@ -13241,7 +13196,7 @@ impl SessionServiceImpl {
             return None;
         }
 
-        let label = format!("{} {}", node.kind.as_ref(), node.identifier.as_str());
+        let label = format!("{} {}", node.kind().as_ref(), node.identifier.as_str());
         let old_primary = node.primary_node.clone();
         let preserved_primary = old_primary
             .as_ref()
@@ -13839,27 +13794,19 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
-        let Some(relay_node) = domain_schedule
-            .nodes
-            .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
+        let Some(ScheduledModel {
+            config: ack_model,
+            node: relay_node,
+        }) = domain_schedule.scheduled::<CreateRelay>(relay)
         else {
             return Ok(None);
         };
-        let Model::Relay(ack_model) = relay_node.config.as_ref() else {
-            return Err("scheduled relay node has invalid model kind".to_string());
-        };
-        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
-            ModelKind::Schema,
-            ModelName::from(&ack_model.schema),
-        )) else {
+        let Some(schema) = domain_schedule.configured::<CreateSchema>(&ack_model.schema) else {
             return Err(format!(
                 "stream '{}' references missing scheduled schema '{}'",
                 relay.as_str(),
                 ack_model.schema.as_str()
             ));
-        };
-        let Model::Schema(schema) = schema_node.config.as_ref() else {
-            return Err("scheduled schema node has invalid model kind".to_string());
         };
         Ok(Some(SubscriptionTarget {
             relay: ack_model.clone(),
@@ -13873,19 +13820,14 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Option<nervix_models::CreateSchema>, String> {
-        match self.inner.registry.get(domain, ModelKind::Relay, relay) {
-            Ok(Some(Model::Relay(ack_model))) => {
+        match self.inner.registry.get::<CreateRelay>(domain, relay) {
+            Ok(Some(ack_model)) => {
                 match self
                     .inner
                     .registry
-                    .get(domain, ModelKind::Schema, &ack_model.schema)
+                    .get::<CreateSchema>(domain, &ack_model.schema)
                 {
-                    Ok(Some(Model::Schema(schema))) => Ok(Some(schema)),
-                    Ok(Some(_)) => Err(format!(
-                        "stream '{}' references non-schema model '{}'",
-                        relay.as_str(),
-                        ack_model.schema.as_str()
-                    )),
+                    Ok(Some(schema)) => Ok(Some(schema)),
                     Ok(None) => Err(format!(
                         "stream '{}' references missing schema '{}'",
                         relay.as_str(),
@@ -13898,7 +13840,6 @@ impl SessionServiceImpl {
                     )),
                 }
             }
-            Ok(Some(_)) => unreachable!("validated relay model kind must match"),
             Ok(None) => self
                 .subscription_target_from_schedule(domain, relay)
                 .await
@@ -13915,24 +13856,13 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
-        match self.inner.registry.get(domain, ModelKind::Relay, relay) {
-            Ok(Some(Model::Relay(relay_model))) => {
+        match self.inner.registry.get::<CreateRelay>(domain, relay) {
+            Ok(Some(relay_model)) => {
                 let Some(branch_ref) = relay_model.branching.branch() else {
                     return Ok(None);
                 };
-                let branch = match self
-                    .inner
-                    .registry
-                    .get(domain, ModelKind::Branch, branch_ref)
-                {
-                    Ok(Some(Model::Branch(branch))) => branch,
-                    Ok(Some(_)) => {
-                        return Err(format!(
-                            "stream '{}' references non-branch model '{}'",
-                            relay.as_str(),
-                            branch_ref.as_str()
-                        ));
-                    }
+                let branch = match self.inner.registry.get::<CreateBranch>(domain, branch_ref) {
+                    Ok(Some(branch)) => branch,
                     Ok(None) => {
                         return Err(format!(
                             "stream '{}' references missing branch '{}'",
@@ -13951,16 +13881,11 @@ impl SessionServiceImpl {
                 match self
                     .inner
                     .registry
-                    .get(domain, ModelKind::Schema, &branch.schema)
+                    .get::<CreateSchema>(domain, &branch.schema)
                 {
-                    Ok(Some(Model::Schema(schema))) => {
+                    Ok(Some(schema)) => {
                         Ok(Some(runtime_schema::compile_schema(&schema).arrow_schema()))
                     }
-                    Ok(Some(_)) => Err(format!(
-                        "stream '{}' references non-schema branch schema '{}'",
-                        relay.as_str(),
-                        branch.schema.as_str()
-                    )),
                     Ok(None) => Err(format!(
                         "stream '{}' references missing branch schema '{}'",
                         relay.as_str(),
@@ -13973,7 +13898,6 @@ impl SessionServiceImpl {
                     )),
                 }
             }
-            Ok(Some(_)) => unreachable!("validated relay model kind must match"),
             Ok(None) => {
                 self.subscription_branch_schema_from_schedule(domain, relay)
                     .await
@@ -13994,41 +13918,27 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
-        let Some(relay_node) = domain_schedule
-            .nodes
-            .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
+        let Some(ScheduledModel {
+            config: relay_model,
+            node: relay_node,
+        }) = domain_schedule.scheduled::<CreateRelay>(relay)
         else {
             return Ok(None);
         };
-        let Model::Relay(relay_model) = relay_node.config.as_ref() else {
-            return Err("scheduled relay node has invalid model kind".to_string());
-        };
         if let Some(branch_ref) = relay_model.branching.branch() {
-            let Some(branch_node) = domain_schedule.nodes.get(&NodeRef::new(
-                ModelKind::Branch,
-                ModelName::from(branch_ref),
-            )) else {
+            let Some(branch) = domain_schedule.configured::<CreateBranch>(branch_ref) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled branch '{}'",
                     relay.as_str(),
                     branch_ref.as_str()
                 ));
             };
-            let Model::Branch(branch) = branch_node.config.as_ref() else {
-                return Err("scheduled branch node has invalid model kind".to_string());
-            };
-            let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
-                ModelKind::Schema,
-                ModelName::from(&branch.schema),
-            )) else {
+            let Some(schema) = domain_schedule.configured::<CreateSchema>(&branch.schema) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled branch schema '{}'",
                     relay.as_str(),
                     branch.schema.as_str()
                 ));
-            };
-            let Model::Schema(schema) = schema_node.config.as_ref() else {
-                return Err("scheduled branch schema node has invalid model kind".to_string());
             };
             return Ok(Some(runtime_schema::compile_schema(schema).arrow_schema()));
         }
@@ -14040,18 +13950,12 @@ impl SessionServiceImpl {
         if branching.is_empty() {
             return Ok(None);
         }
-        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
-            ModelKind::Schema,
-            ModelName::from(&relay_model.schema),
-        )) else {
+        let Some(schema) = domain_schedule.configured::<CreateSchema>(&relay_model.schema) else {
             return Err(format!(
                 "stream '{}' references missing scheduled schema '{}'",
                 relay.as_str(),
                 relay_model.schema.as_str()
             ));
-        };
-        let Model::Schema(schema) = schema_node.config.as_ref() else {
-            return Err("scheduled relay schema node has invalid model kind".to_string());
         };
         let mut fields = Vec::with_capacity(branching.len());
         for branch_field in branching {
@@ -14099,7 +14003,7 @@ impl SessionServiceImpl {
         for relay_node in domain_schedule
             .nodes
             .values()
-            .filter(|node| node.kind == ModelKind::Relay)
+            .filter(|node| node.kind() == ModelKind::Relay)
         {
             let Model::Relay(ack_model) = relay_node.config.as_ref() else {
                 continue;
@@ -14272,11 +14176,10 @@ impl SessionServiceImpl {
         match self
             .inner
             .registry
-            .get(domain, ModelKind::Relay, &subscription.relay)
+            .contains(domain, ModelKind::Relay, &subscription.relay)
         {
-            Ok(Some(Model::Relay(_))) => {}
-            Ok(Some(_)) => unreachable!("validated relay model kind must match"),
-            Ok(None) => match self
+            Ok(true) => {}
+            Ok(false) => match self
                 .subscription_target_from_schedule(domain, &subscription.relay)
                 .await
             {
@@ -15942,7 +15845,7 @@ fn planned_ownership_moves(
         }
         moves.push(PlannedOwnershipMove {
             entity: NodeRef {
-                kind: planned_node.kind,
+                kind: planned_node.kind(),
                 identifier: planned_node.identifier.clone(),
             },
             former_owner: former_owner.clone(),
@@ -16942,7 +16845,7 @@ fn create_registry_error_response(
             }
         }
         RegistryError::NotFound { .. }
-        | RegistryError::InvalidModelKind { .. }
+        | RegistryError::StoredModelKindMismatch { .. }
         | RegistryError::DeleteInUse { .. }
         | RegistryError::InvalidModel { .. } => {
             let span = find_identifier_span(query, model_id).unwrap_or(0..0);
@@ -16959,23 +16862,6 @@ fn create_registry_error_response(
             }
         }
         RegistryError::MissingReference { reference, .. } => {
-            let span = match ModelName::try_from(reference.as_str()) {
-                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
-                Err(_) => 0..0,
-            };
-            CommandResult {
-                success: false,
-                message: format!("{err}"),
-                diagnostics: vec![Diagnostic {
-                    message: format!("{err}"),
-                    span_start: u32::try_from(span.start).unwrap_or(0),
-                    span_end: u32::try_from(span.end).unwrap_or(0),
-                }],
-                kind: i32::from(CommandResultKind::Error),
-                ..Default::default()
-            }
-        }
-        RegistryError::InvalidReferenceKind { reference, .. } => {
             let span = match ModelName::try_from(reference.as_str()) {
                 Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
                 Err(_) => 0..0,
@@ -17488,7 +17374,7 @@ fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> V
             lines.push(format!(
                 "- domain={} kind={} name={} owner={} replicas={}",
                 domain.domain.as_str(),
-                node.kind.as_str(),
+                node.kind().as_str(),
                 node.identifier.as_str(),
                 node.execution_node().map_or("-", ClusterNodeName::as_str),
                 format_schedule_status_replicas(node)
@@ -19758,7 +19644,7 @@ mod tests {
         AckMode, CreateDomain, CreateResource, CreateSchema, CreateStatement, DomainConfig,
         DomainPace, DomainSchedule, DomainState, DomainStatus, KafkaPartitionSchedule, Model,
         ModelKind, NodeRef, PlacementGroupSchedule, ResourceVersion, ResourceVersionCounter,
-        ResourceVersionStatus, ScheduledNode, SchemaField, SubscriptionLiteral,
+        ResourceVersionStatus, ScheduledNode, SubscriptionLiteral,
     };
     use nonzero_ext::nonzero;
     use sorted_vec::SortedVec;
@@ -20110,25 +19996,101 @@ mod tests {
         transport
     }
 
-    fn schema_with_fields(fields: Vec<SchemaField>) -> CreateSchema {
-        CreateSchema {
-            name: named("events"),
-            fields,
+    /// The model a schedule entry of `kind` carries in these tests.
+    ///
+    /// A schedule entry reports the kind of the configuration it holds, so a test that wants an
+    /// entry of a kind has to configure a node of that kind.
+    fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
+        match kind {
+            ModelKind::Ingestor => Model::Ingestor(CreateIngestor {
+                name: named(identifier_raw),
+                output_routes: ProcessorOutputs::new(Vec::new()),
+                decode_using_codec: named("events_codec"),
+                timestamp_source: None,
+                source: IngestSource::Kafka {
+                    client: named("kafka_main"),
+                    topic: named("notifications"),
+                    offset_mode: KafkaOffsetMode::Domain,
+                    instances: nonzero!(1u64),
+                    mode: nervix_models::KafkaIngestMode::AckSequential {
+                        timeout: "5s".to_string(),
+                        retry_policy: nervix_models::RetryPolicy {
+                            backoff: "1s".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                },
+                general_error_policy: nervix_models::GeneralErrorPolicy::Log,
+                filter_where: None,
+            }),
+            ModelKind::Emitter => Model::Emitter(CreateEmitter {
+                name: named(identifier_raw),
+                from: ProcessorInputs::new(Vec::new(), Vec::new()),
+                encode_using_codec: None,
+                sink: Box::new(EmitSink::Syslog {
+                    client: named("syslog_forwarder"),
+                }),
+                flush_policy: nervix_models::FlushPolicy::Immediate,
+                error_policies: nervix_models::ErrorPolicies::handled_by_log(),
+                publishing_mode: nervix_models::EmitterPublishingMode::NoAck {
+                    retry_policy: nervix_models::RetryPolicy {
+                        backoff: "1s".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                mode: AckMode::Attached,
+                construction: nervix_models::RouteConstruction::default(),
+                materialized_state: Vec::new(),
+            }),
+            ModelKind::Junction => Model::Junction(CreateJunction {
+                name: named(identifier_raw),
+                from: ProcessorInputs::new(Vec::new(), Vec::new()),
+                output_routes: ProcessorOutputs::new(Vec::new()),
+                branched_by: BranchSelection::unbranched(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+            ModelKind::Deduplicator => Model::Deduplicator(CreateDeduplicator {
+                name: named(identifier_raw),
+                from: ProcessorInputs::new(Vec::new(), Vec::new()),
+                output_routes: ProcessorOutputs::new(Vec::new()),
+                deduplicate_on: Vec::new(),
+                max_time: "1m".to_string(),
+                branched_by: BranchSelection::unbranched(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+            ModelKind::Client => Model::ClientSyslog(nervix_models::CreateClientSyslog {
+                name: named(identifier_raw),
+                mount: None,
+                config: Vec::new(),
+            }),
+            ModelKind::Schema => Model::Schema(CreateSchema {
+                name: named(identifier_raw),
+                fields: Vec::new(),
+            }),
+            other => panic!("no schedule fixture configures a {} node", other.as_str()),
         }
     }
 
+    fn node_named(raw: &str) -> ClusterNodeName {
+        ClusterNodeName::parse(raw).expect("valid name")
+    }
+
     fn scheduled_node(identifier_raw: &str, kind: ModelKind) -> ScheduledNode {
-        ScheduledNode {
-            identifier: named(identifier_raw),
-            kind,
-            config: Box::new(Model::Schema(schema_with_fields(Vec::new()))),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-            assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-        }
+        ScheduledNode::new(model_of_kind(identifier_raw, kind)).placed_on(
+            Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            vec![ClusterNodeName::parse("node-1").expect("valid name")],
+        )
+    }
+
+    fn scheduled_node_on(identifier_raw: &str, kind: ModelKind, node: &str) -> ScheduledNode {
+        let node = ClusterNodeName::parse(node).expect("valid name");
+        ScheduledNode::new(model_of_kind(identifier_raw, kind))
+            .placed_on(Some(node.clone()), vec![node])
     }
 
     fn placement_member(identifier_raw: &str, kind: ModelKind) -> NodeRef {
@@ -20437,32 +20399,16 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("emit_notifications", ModelKind::Emitter)
-                },
+                scheduled_node_on("ingest_notifications", ModelKind::Ingestor, "node-2"),
+                scheduled_node_on("emit_notifications", ModelKind::Emitter, "node-2"),
             ],
             Vec::new(),
         );
         let desired = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-3").expect("valid name")],
-                    ..scheduled_node("emit_notifications", ModelKind::Emitter)
-                },
+                scheduled_node_on("ingest_notifications", ModelKind::Ingestor, "node-1"),
+                scheduled_node_on("emit_notifications", ModelKind::Emitter, "node-3"),
             ],
             Vec::new(),
         );
@@ -20506,32 +20452,16 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("zeta", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("alpha", ModelKind::Junction)
-                },
+                scheduled_node_on("zeta", ModelKind::Junction, "node-2"),
+                scheduled_node_on("alpha", ModelKind::Junction, "node-2"),
             ],
             Vec::new(),
         );
         let desired = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("zeta", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("alpha", ModelKind::Junction)
-                },
+                scheduled_node_on("zeta", ModelKind::Junction, "node-1"),
+                scheduled_node_on("alpha", ModelKind::Junction, "node-1"),
             ],
             Vec::new(),
         );
@@ -20573,16 +20503,8 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("zeta", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("alpha", ModelKind::Junction)
-                },
+                scheduled_node_on("zeta", ModelKind::Junction, "node-2"),
+                scheduled_node_on("alpha", ModelKind::Junction, "node-2"),
             ],
             vec![
                 placement_group(
@@ -20598,16 +20520,8 @@ mod tests {
         let desired = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("zeta", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("alpha", ModelKind::Junction)
-                },
+                scheduled_node_on("zeta", ModelKind::Junction, "node-1"),
+                scheduled_node_on("alpha", ModelKind::Junction, "node-1"),
             ],
             vec![
                 placement_group(
@@ -20655,27 +20569,26 @@ mod tests {
         let domain = DomainName::parse("payments").expect("valid domain");
         let mut schedule = DomainSchedule::new(
             domain.clone(),
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                    ClusterNodeName::parse("node-4").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-2")),
+                    vec![
+                        node_named("node-2"),
+                        node_named("node-3"),
+                        node_named("node-4"),
+                    ],
+                ),
+            ],
             Vec::new(),
         );
         let desired = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-1").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-1")),
+                    vec![node_named("node-1"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
 
@@ -20726,22 +20639,14 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![
-                        ClusterNodeName::parse("node-2").expect("valid name"),
-                        ClusterNodeName::parse("node-3").expect("valid name"),
-                    ],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![
-                        ClusterNodeName::parse("node-2").expect("valid name"),
-                        ClusterNodeName::parse("node-3").expect("valid name"),
-                    ],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node("corridor_source", ModelKind::Junction).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+                scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
             ],
             vec![placement_group(
                 members.clone(),
@@ -20751,22 +20656,14 @@ mod tests {
         let desired = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![
-                        ClusterNodeName::parse("node-1").expect("valid name"),
-                        ClusterNodeName::parse("node-3").expect("valid name"),
-                    ],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![
-                        ClusterNodeName::parse("node-1").expect("valid name"),
-                        ClusterNodeName::parse("node-3").expect("valid name"),
-                    ],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node("corridor_source", ModelKind::Junction).placed_on(
+                    Some(node_named("node-1")),
+                    vec![node_named("node-1"), node_named("node-3")],
+                ),
+                scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+                    Some(node_named("node-1")),
+                    vec![node_named("node-1"), node_named("node-3")],
+                ),
             ],
             vec![placement_group(
                 members,
@@ -20822,23 +20719,21 @@ mod tests {
         let domain = DomainName::parse("payments").expect("valid domain");
         let mut schedule = DomainSchedule::new(
             domain.clone(),
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
         let desired = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![scheduled_node_on(
+                "dedup_notifications",
+                ModelKind::Deduplicator,
+                "node-1",
+            )],
             Vec::new(),
         );
 
@@ -20879,26 +20774,22 @@ mod tests {
         let domain = DomainName::parse("payments").expect("valid domain");
         let current = DomainSchedule::new(
             domain.clone(),
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
         let mut planned = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-1").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-1")),
+                    vec![node_named("node-1"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
 
@@ -20926,27 +20817,26 @@ mod tests {
         let domain = DomainName::parse("payments").expect("valid domain");
         let mut next = DomainSchedule::new(
             domain.clone(),
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-1").expect("valid name"),
-                    ClusterNodeName::parse("node-4").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-1")),
+                    vec![node_named("node-1"), node_named("node-4")],
+                ),
+            ],
             Vec::new(),
         );
         let existing = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                    ClusterNodeName::parse("node-4").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-2")),
+                    vec![
+                        node_named("node-2"),
+                        node_named("node-3"),
+                        node_named("node-4"),
+                    ],
+                ),
+            ],
             Vec::new(),
         );
 
@@ -20974,23 +20864,21 @@ mod tests {
         let domain = DomainName::parse("payments").expect("valid domain");
         let mut next = DomainSchedule::new(
             domain.clone(),
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![scheduled_node_on(
+                "dedup_notifications",
+                ModelKind::Deduplicator,
+                "node-1",
+            )],
             Vec::new(),
         );
         let existing = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
 
@@ -21016,23 +20904,20 @@ mod tests {
         let preserved_schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![0, 1], 7);
         let mut next = DomainSchedule::new(
             domain.clone(),
-            vec![ScheduledNode {
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
-            }],
+            vec![
+                scheduled_node("ingest_notifications", ModelKind::Ingestor).placed_on(
+                    Some(node_named("node-1")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
         let existing = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                effective_branching_schema: None,
-                kafka_partition_schedule: Some(preserved_schedule.clone()),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
-            }],
+            vec![
+                scheduled_node_on("ingest_notifications", ModelKind::Ingestor, "node-1")
+                    .with_kafka_partitions(preserved_schedule.clone()),
+            ],
             Vec::new(),
         );
 
@@ -21070,24 +20955,11 @@ mod tests {
         let existing = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
-                        nonzero!(2u64),
-                        vec![0, 1],
-                        3,
-                    )),
-                    ..scheduled_node("other_ingestor", ModelKind::Ingestor)
-                },
-                ScheduledNode {
-                    effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
-                        nonzero!(1u64),
-                        vec![0],
-                        2,
-                    )),
-                    ..scheduled_node("ingest_notifications", ModelKind::Client)
-                },
+                scheduled_node("other_ingestor", ModelKind::Ingestor).with_kafka_partitions(
+                    KafkaPartitionSchedule::new(nonzero!(2u64), vec![0, 1], 3),
+                ),
+                scheduled_node("ingest_notifications", ModelKind::Client)
+                    .with_kafka_partitions(KafkaPartitionSchedule::new(nonzero!(1u64), vec![0], 2)),
             ],
             Vec::new(),
         );
@@ -21108,16 +20980,8 @@ mod tests {
         let mut next = DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
+                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
             ],
             vec![placement_group(
                 members.clone(),
@@ -21127,16 +20991,8 @@ mod tests {
         let existing = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-3").expect("valid name")],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
+                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-3"),
             ],
             vec![placement_group(
                 members,
@@ -21172,16 +21028,8 @@ mod tests {
         let mut next = DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
+                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
             ],
             vec![placement_group(
                 members.clone(),
@@ -21191,16 +21039,8 @@ mod tests {
         let existing = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
+                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
             ],
             vec![placement_group(
                 members,
@@ -21235,16 +21075,8 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain.clone(),
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
+                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
             ],
             vec![placement_group(
                 members.clone(),
@@ -21254,16 +21086,8 @@ mod tests {
         let desired = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
+                scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
             ],
             vec![placement_group(
                 members,
@@ -21310,22 +21134,14 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain,
             vec![
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![
-                        ClusterNodeName::parse("node-2").expect("valid name"),
-                        ClusterNodeName::parse("node-3").expect("valid name"),
-                    ],
-                    ..scheduled_node("corridor_source", ModelKind::Junction)
-                },
-                ScheduledNode {
-                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                    assigned_nodes: vec![
-                        ClusterNodeName::parse("node-2").expect("valid name"),
-                        ClusterNodeName::parse("node-1").expect("valid name"),
-                    ],
-                    ..scheduled_node("corridor_sink", ModelKind::Junction)
-                },
+                scheduled_node("corridor_source", ModelKind::Junction).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+                scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-1")],
+                ),
             ],
             vec![placement_group(
                 members,
@@ -21364,14 +21180,12 @@ mod tests {
         let domain = DomainName::parse("payments").expect("valid domain");
         let mut schedule = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
 
@@ -21397,26 +21211,22 @@ mod tests {
         let domain = DomainName::parse("payments").expect("valid domain");
         let mut schedule = DomainSchedule::new(
             domain.clone(),
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-2").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-2")),
+                    vec![node_named("node-2"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
         let desired = DomainSchedule::new(
             domain,
-            vec![ScheduledNode {
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![
-                    ClusterNodeName::parse("node-1").expect("valid name"),
-                    ClusterNodeName::parse("node-3").expect("valid name"),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
+            vec![
+                scheduled_node("dedup_notifications", ModelKind::Deduplicator).placed_on(
+                    Some(node_named("node-1")),
+                    vec![node_named("node-1"), node_named("node-3")],
+                ),
+            ],
             Vec::new(),
         );
 
@@ -22164,16 +21974,12 @@ mod tests {
         assert!(duplicate.message.contains("already exists"));
 
         let schema = registry
-            .get(
+            .get::<CreateSchema>(
                 &DomainName::parse("default").expect("valid domain"),
-                ModelKind::Schema,
                 named::<ModelName>("notification"),
             )
             .expect("registry get should succeed")
             .expect("schema should exist");
-        let Model::Schema(schema) = schema else {
-            panic!("stored model must be a schema");
-        };
         assert_eq!(schema.fields.len(), 1);
         assert_eq!(schema.fields[0].name.as_str(), "user_id");
 
@@ -22208,9 +22014,8 @@ mod tests {
         assert_eq!(command_transaction_state(&result), None);
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &DomainName::parse("prod").expect("valid domain"),
-                    ModelKind::Schema,
                     named::<ModelName>("notification"),
                 )
                 .expect("registry get should succeed")
@@ -22259,9 +22064,8 @@ mod tests {
         assert_eq!(commit.message, "quiesce level: DYNAMIC");
 
         let schema = registry
-            .get(
+            .get::<CreateSchema>(
                 &DomainName::parse("prod").expect("valid domain"),
-                ModelKind::Schema,
                 named::<ModelName>("notification"),
             )
             .expect("registry get should succeed");
@@ -22270,9 +22074,8 @@ mod tests {
             "batch should create schema in prod domain"
         );
         let relay = registry
-            .get(
+            .get::<CreateRelay>(
                 &DomainName::parse("prod").expect("valid domain"),
-                ModelKind::Relay,
                 named::<ModelName>("notifications"),
             )
             .expect("registry get should succeed");
@@ -22329,9 +22132,8 @@ mod tests {
         );
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &DomainName::parse("default").expect("valid domain"),
-                    ModelKind::Schema,
                     named::<ModelName>("queued_event"),
                 )
                 .expect("registry get should succeed")
@@ -22361,9 +22163,8 @@ mod tests {
         );
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &DomainName::parse("default").expect("valid domain"),
-                    ModelKind::Schema,
                     named::<ModelName>("queued_event"),
                 )
                 .expect("registry get should succeed")
@@ -22455,9 +22256,8 @@ mod tests {
         assert!(result.message.contains("already exists"));
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &DomainName::parse("prod").expect("valid domain"),
-                    ModelKind::Schema,
                     named::<ModelName>("duplicated"),
                 )
                 .expect("registry get should succeed")
@@ -22737,19 +22537,11 @@ mod tests {
 
         let domain = DomainName::parse("prod").expect("valid domain");
         let relay = registry
-            .get(
-                &domain,
-                ModelKind::Relay,
-                named::<ModelName>("notifications"),
-            )
+            .get::<CreateRelay>(&domain, named::<ModelName>("notifications"))
             .expect("registry get should succeed");
         assert!(relay.is_none(), "failed model batch must not persist relay");
         let schema = registry
-            .get(
-                &domain,
-                ModelKind::Schema,
-                named::<ModelName>("notification"),
-            )
+            .get::<CreateSchema>(&domain, named::<ModelName>("notification"))
             .expect("registry get should succeed");
         assert!(
             schema.is_none(),
@@ -22788,9 +22580,8 @@ mod tests {
         };
         assert!(result.success, "expected command success: {result:?}");
         let schema = registry
-            .get(
+            .get::<CreateSchema>(
                 &DomainName::parse("default").expect("valid domain"),
-                ModelKind::Schema,
                 named::<ModelName>("web_console_event"),
             )
             .expect("registry get should succeed");
@@ -23436,28 +23227,20 @@ mod tests {
         }
 
         let deduplicator = registry
-            .get(
+            .get::<CreateDeduplicator>(
                 &DomainName::parse("default").expect("valid domain"),
-                ModelKind::Deduplicator,
                 ModelName::parse("passthrough").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("deduplicator should exist");
         let emitter = registry
-            .get(
+            .get::<CreateEmitter>(
                 &DomainName::parse("default").expect("valid domain"),
-                ModelKind::Emitter,
                 ModelName::parse("kafka_forward").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("emitter should exist");
 
-        let Model::Deduplicator(deduplicator) = deduplicator else {
-            panic!("stored model must be a deduplicator");
-        };
-        let Model::Emitter(emitter) = emitter else {
-            panic!("stored model must be an emitter");
-        };
         assert_eq!(deduplicator.mode, AckMode::Detached);
         assert_eq!(emitter.mode, AckMode::Detached);
 
@@ -23604,16 +23387,12 @@ mod tests {
         }
 
         let junction = registry
-            .get(
+            .get::<CreateJunction>(
                 &DomainName::parse("default").expect("valid domain"),
-                ModelKind::Junction,
                 ModelName::parse("join_streams").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("junction should exist");
-        let Model::Junction(junction) = junction else {
-            panic!("stored model must be a junction");
-        };
         assert_eq!(junction.from.relays().len(), 2);
         assert_eq!(
             junction
@@ -23764,16 +23543,12 @@ mod tests {
         }
 
         let deduplicator = registry
-            .get(
+            .get::<CreateDeduplicator>(
                 &DomainName::parse("default").expect("valid domain"),
-                ModelKind::Deduplicator,
                 ModelName::parse("dedup_txns").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("deduplicator should exist");
-        let Model::Deduplicator(deduplicator) = deduplicator else {
-            panic!("stored model must be a deduplicator");
-        };
         assert_eq!(
             deduplicator
                 .from
