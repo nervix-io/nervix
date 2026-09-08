@@ -76,7 +76,7 @@ impl Runtime {
                 #[cfg(feature = "testing")]
                 transaction_binding_drops: hooks.transaction_binding_drops,
                 #[cfg(feature = "testing")]
-                transaction_commit_pauses: hooks.transaction_commit_pauses,
+                command_pauses: hooks.command_pauses,
                 #[cfg(feature = "testing")]
                 entity_gate_pauses: hooks.entity_gate_pauses,
                 #[cfg(feature = "testing")]
@@ -174,8 +174,19 @@ impl Runtime {
         completed_statements: usize,
     ) {
         self.inner
-            .transaction_commit_pauses
-            .pause_if_armed(node_id, completed_statements)
+            .command_pauses
+            .pause_if_armed(test_hooks::CommandPausePoint::TransactionCommit {
+                node_id: node_id.clone(),
+                completed_statements,
+            })
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .command_pauses
+            .pause_if_armed(test_hooks::CommandPausePoint::Admission(node_id.clone()))
             .await;
     }
 

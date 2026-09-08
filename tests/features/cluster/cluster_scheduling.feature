@@ -118,12 +118,57 @@ Feature: Cluster scheduling
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed through the client on a follower node
       """
+      CREATE SCHEMA forwarded_event ( id I64 );
+      CREATE RELAY forwarded_events SCHEMA forwarded_event UNBRANCHED;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
       current_leader:
       """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE RELAY forwarded_events;
+      """
+    Then the last command output contains
+      """
+      schema: forwarded_event
+      """
+
+  Scenario Outline: Leadership loss after command admission returns a leader redirect
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given command admission on node "{{admitted_leader}}" pauses before proposal
+    When this NSPL command request begins executing in the background on the leader node
+      """
+      <mutation>
+      """
+    Then the command admission pause on node "{{admitted_leader}}" is reached
+    When leadership is transferred from node "{{admitted_leader}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports leader "{{successor}}"
+    And node "{{admitted_leader}}" eventually reports leader "{{successor}}"
+    When the command admission pause on node "{{admitted_leader}}" is released
+    Then the background command request is rejected with a redirect to node "{{successor}}"
+    When these NSPL commands are executed through the client on a follower node
+      """
+      <mutation>
+      <inspection>
+      """
+    Then the last command output contains
+      """
+      <expected>
+      """
+
+    Examples:
+      | mutation                                                | inspection                                | expected                       |
+      | CREATE SCHEMA admitted_event ( id I64 );                | SHOW CREATE SCHEMA admitted_event;        | CREATE SCHEMA admitted_event ( |
+      | CREATE UNPACED DOMAIN {{domain}}_admitted;              | USE {{domain}}_admitted; DESCRIBE DOMAIN; | domain: {{domain}}_admitted    |
+      | BEGIN; CREATE SCHEMA admitted_batch ( id I64 ); COMMIT; | SHOW CREATE SCHEMA admitted_batch;        | CREATE SCHEMA admitted_batch ( |
 
   Scenario: Scheduled deduplicators receive relay traffic across nodes
     Given Kafka is running
