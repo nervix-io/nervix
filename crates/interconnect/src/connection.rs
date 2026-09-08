@@ -26,8 +26,8 @@ use triomphe::Arc;
 
 use super::{
     ConnectionHandle, ConnectionKey, Envelope, PING_INTERVAL, PING_TIMEOUT, ReceivedEnvelope,
-    TransportError, TransportInner, TransportMode, WireEnvelope, configure_socket,
-    read_and_verify_introduction, read_wire_envelope, write_wire_envelope,
+    TransportError, TransportInner, TransportMode, configure_socket,
+    wire::{WireEnvelope, read_and_verify_introduction, read_wire_envelope, write_wire_envelope},
 };
 
 pub(super) fn spawn_outbound_connection(

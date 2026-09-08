@@ -12,7 +12,7 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadBuf},
     net::{TcpListener, TcpStream},
     sync::{Notify, mpsc},
     time::{sleep, timeout},
@@ -20,9 +20,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::connection::{
-    ReconnectBackoff, drive_connection, establish_outbound_connection, exchange_introductions,
-    register_connected_peer, unregister_connected_peer,
+use crate::{
+    connection::{
+        ReconnectBackoff, drive_connection, establish_outbound_connection, exchange_introductions,
+        register_connected_peer, unregister_connected_peer,
+    },
+    wire::{WireEnvelope, encode_wire_envelope, read_wire_envelope, write_wire_envelope},
 };
 
 #[derive(Default)]
