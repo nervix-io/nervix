@@ -285,13 +285,15 @@ impl Runtime {
         if reassignments.is_empty() {
             return Ok(());
         }
-        let Some(execution) = self.inner.executions.get(domain) else {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: "domain execution is unavailable for schedule reassignment".to_string(),
-            });
+        let shutdown = match self.inner.executions.get(domain) {
+            Some(execution) => execution.shutdown.clone(),
+            None => {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: "domain execution is unavailable for schedule reassignment".to_string(),
+                });
+            }
         };
-        let shutdown = execution.shutdown.clone();
         let mut relay_states_moved = false;
         for entity in reassignments {
             tokio::task::consume_budget().await;
