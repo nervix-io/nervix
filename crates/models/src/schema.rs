@@ -14,7 +14,9 @@ pub enum WireSchemaDefinition {
     Avro(CreateWireSchema<AvroType>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateSchema {
     pub name: SchemaName,
     pub fields: Vec<SchemaField>,
@@ -36,7 +38,9 @@ pub enum AlterSchemaOperation {
     SetFieldSensitive { field: FieldName, sensitive: bool },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SchemaField {
     pub name: FieldName,
     pub ty: ParseAsType,
@@ -46,7 +50,9 @@ pub struct SchemaField {
     pub sensitive: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateWireSchema<T> {
     pub name: WireSchemaName,
     #[serde(default)]
@@ -70,7 +76,9 @@ pub enum AlterWireSchemaOperation<T> {
     SetFieldOptional { field: FieldName, optional: bool },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct WireSchemaField<T> {
     pub name: FieldName,
     pub ty: T,
@@ -300,7 +308,20 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+    Default,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WireSchemaStrictness {
     #[default]
@@ -317,7 +338,19 @@ impl WireSchemaStrictness {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "lowercase")]
 pub enum JsonType {
     String,
@@ -342,7 +375,19 @@ pub enum JsonType {
 
 pub type CborType = JsonType;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "lowercase")]
 pub enum AvroType {
     Null,

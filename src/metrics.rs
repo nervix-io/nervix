@@ -38,6 +38,7 @@ use prometheus::{
     proto::MetricFamily,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 use triomphe::Arc;
 
@@ -1193,19 +1194,11 @@ struct MetricSeries {
     prometheus: PrometheusMetrics,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumIter)]
+#[strum(serialize_all = "lowercase")]
 pub(crate) enum BranchEvictionReason {
     Lru,
     Ttl,
-}
-
-impl AsRef<str> for BranchEvictionReason {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::Lru => "lru",
-            Self::Ttl => "ttl",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1946,7 +1939,7 @@ impl RuntimeMetrics {
             branch.as_str(),
             physical_node,
         ]);
-        for reason in [BranchEvictionReason::Lru, BranchEvictionReason::Ttl] {
+        for reason in BranchEvictionReason::iter() {
             self.series
                 .prometheus
                 .branch_evictions_total

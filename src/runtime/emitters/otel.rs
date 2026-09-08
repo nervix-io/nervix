@@ -1096,53 +1096,40 @@ impl OtelTransport {
     }
 }
 
-enum OtelHttpResponseKind {
-    Logs,
-    Traces,
-    Metrics,
+macro_rules! declare_otel_http_response_kinds {
+    ($($Kind:ident => $Response:ident, $PartialSuccess:ident, $rejected:ident;)+) => {
+        enum OtelHttpResponseKind {
+            $($Kind,)+
+        }
+
+        impl OtelHttpResponseKind {
+            fn decode(
+                &self,
+                body: &[u8],
+            ) -> Result<Option<OtelPartialSuccess>, otel_prost::DecodeError> {
+                match self {
+                    $(Self::$Kind => Ok($Response::decode(body)?
+                        .partial_success
+                        .map(Into::into)),)+
+                }
+            }
+        }
+
+        $(impl From<$PartialSuccess> for OtelPartialSuccess {
+            fn from(value: $PartialSuccess) -> Self {
+                Self {
+                    rejected: value.$rejected,
+                    error_message: value.error_message,
+                }
+            }
+        })+
+    };
 }
 
-impl OtelHttpResponseKind {
-    fn decode(&self, body: &[u8]) -> Result<Option<OtelPartialSuccess>, otel_prost::DecodeError> {
-        match self {
-            Self::Logs => Ok(ExportLogsServiceResponse::decode(body)?
-                .partial_success
-                .map(Into::into)),
-            Self::Traces => Ok(ExportTraceServiceResponse::decode(body)?
-                .partial_success
-                .map(Into::into)),
-            Self::Metrics => Ok(ExportMetricsServiceResponse::decode(body)?
-                .partial_success
-                .map(Into::into)),
-        }
-    }
-}
-
-impl From<ExportLogsPartialSuccess> for OtelPartialSuccess {
-    fn from(value: ExportLogsPartialSuccess) -> Self {
-        Self {
-            rejected: value.rejected_log_records,
-            error_message: value.error_message,
-        }
-    }
-}
-
-impl From<ExportTracePartialSuccess> for OtelPartialSuccess {
-    fn from(value: ExportTracePartialSuccess) -> Self {
-        Self {
-            rejected: value.rejected_spans,
-            error_message: value.error_message,
-        }
-    }
-}
-
-impl From<ExportMetricsPartialSuccess> for OtelPartialSuccess {
-    fn from(value: ExportMetricsPartialSuccess) -> Self {
-        Self {
-            rejected: value.rejected_data_points,
-            error_message: value.error_message,
-        }
-    }
+declare_otel_http_response_kinds! {
+    Logs => ExportLogsServiceResponse, ExportLogsPartialSuccess, rejected_log_records;
+    Traces => ExportTraceServiceResponse, ExportTracePartialSuccess, rejected_spans;
+    Metrics => ExportMetricsServiceResponse, ExportMetricsPartialSuccess, rejected_data_points;
 }
 
 struct OtelMappedBatch<'a> {

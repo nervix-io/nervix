@@ -31,12 +31,8 @@ pub enum QuiesceLevel {
 }
 
 impl QuiesceLevel {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Dynamic => "DYNAMIC",
-            Self::EntityPause => "ENTITY_PAUSE",
-            Self::DomainPause => "DOMAIN_PAUSE",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     pub const fn requires_domain_pause(self) -> bool {
@@ -64,83 +60,6 @@ pub enum DynamicModelUpdate {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelChangeAspect {
-    RelayCapacity,
-    RelaySchema,
-    RelayBranching,
-    RelayMaterializedState,
-    ProcessorFilter,
-    ProcessorInputWhere,
-    ProcessorRouteConstruction,
-    ProcessorRouteFlushPolicy,
-    ProcessorCollectPolicy,
-    ProcessorMessageErrorPolicy,
-    ProcessorErrorRouteTargets,
-    ProcessorInputs,
-    ProcessorRoutes,
-    ProcessorMode,
-    ProcessorBranching,
-    ProcessorMaterializedState,
-    DeduplicatorKeyspace,
-    DeduplicatorMaxTime,
-    ReordererOrdering,
-    ReordererMaxTime,
-    EmitterInput,
-    EmitterInputWhere,
-    EmitterSink,
-    EmitterClient,
-    EmitterCodec,
-    EmitterCollectPolicy,
-    EmitterMode,
-    EmitterPublishingMode,
-    EmitterFlushPolicy,
-    EmitterConstruction,
-    EmitterErrorPolicies,
-    EmitterMaterializedState,
-    IngestorSource,
-    IngestorCodec,
-    IngestorTimestamp,
-    IngestorFilter,
-    IngestorRoutes,
-    IngestorGeneralError,
-    ReingestorInputs,
-    ReingestorRoutes,
-    ReingestorMode,
-    ReingestorFilter,
-    ReingestorMaterializedState,
-    GeneratorMaterializedState,
-    GeneratorCadence,
-    GeneratorBranching,
-    GeneratorRoutes,
-    CorrelatorCorrelation,
-    CorrelatorMatchPolicy,
-    CorrelatorMaxTime,
-    CorrelatorTimeoutPolicy,
-    WindowBounds,
-    InferencerBinding,
-    InferencerTensors,
-    WasmBinding,
-    WasmLimits,
-    WasmGlobalError,
-    SchemaDefinition,
-    WireSchemaDefinition,
-    CodecDefinition,
-    ClientConfig,
-    VhostHostnames,
-    VhostTls,
-    EndpointDefinition,
-    SignalingProtocolDefinition,
-    LookupDefinition,
-    BranchSchema,
-    BranchLifecycle,
-    UdfDefinition,
-    PlacementDefinition,
-    EntityReplaced,
-    EntityCreated,
-    EntityDropped,
-}
-
 /// Node-owned runtime state that a model change makes meaningless even though the schemas around
 /// it are unchanged, so fingerprint-keyed staleness cannot detect it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,110 +72,111 @@ pub enum StatePurge {
     WasmGuestState,
 }
 
-impl ModelChangeAspect {
-    /// True when this change only redefines a control-plane scheduling input. Placement
-    /// definitions decide where runtime nodes execute; the runtime learns the outcome from the
-    /// published schedule's assignments and has nothing else to apply.
-    pub const fn is_control_plane_only(self) -> bool {
-        matches!(self, Self::PlacementDefinition)
-    }
-
-    /// The runtime state this change invalidates, if any. Schema-driven staleness is already
-    /// handled by keying persisted state on the schema fingerprint; this covers the changes that
-    /// keep the schema identical but redefine what the retained state means.
-    pub const fn state_purge(self) -> Option<StatePurge> {
-        match self {
-            Self::DeduplicatorKeyspace => Some(StatePurge::DeduplicatorKeyspace),
-            Self::ReordererOrdering => Some(StatePurge::ReordererBuffer),
-            Self::WindowBounds => Some(StatePurge::WindowAccumulator),
-            Self::CorrelatorCorrelation | Self::CorrelatorMatchPolicy => {
-                Some(StatePurge::CorrelationBuffer)
-            }
-            Self::InferencerBinding | Self::InferencerTensors => {
-                Some(StatePurge::InferencerWarmState)
-            }
-            Self::WasmBinding => Some(StatePurge::WasmGuestState),
-            _ => None,
+macro_rules! declare_model_change_aspects {
+    ($($Aspect:ident => $Level:ident, $state_purge:expr, $control_plane_only:literal;)+) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ModelChangeAspect {
+            $($Aspect,)+
         }
-    }
 
-    pub const fn quiesce_level(self) -> QuiesceLevel {
-        match self {
-            Self::RelayCapacity
-            | Self::ProcessorFilter
-            | Self::ProcessorInputWhere
-            | Self::ProcessorRouteConstruction
-            | Self::ProcessorRouteFlushPolicy
-            | Self::ProcessorCollectPolicy
-            | Self::ProcessorMessageErrorPolicy
-            | Self::DeduplicatorMaxTime
-            | Self::ReordererMaxTime
-            | Self::EmitterFlushPolicy
-            | Self::PlacementDefinition
-            | Self::EntityReplaced
-            | Self::EntityCreated
-            | Self::EntityDropped => QuiesceLevel::Dynamic,
-            Self::RelayMaterializedState
-            | Self::ProcessorErrorRouteTargets
-            | Self::ProcessorInputs
-            | Self::ProcessorRoutes
-            | Self::ProcessorMode
-            | Self::ProcessorBranching
-            | Self::ProcessorMaterializedState
-            | Self::DeduplicatorKeyspace
-            | Self::ReordererOrdering
-            | Self::EmitterSink
-            | Self::EmitterClient
-            | Self::EmitterCodec
-            | Self::EmitterInputWhere
-            | Self::EmitterCollectPolicy
-            | Self::EmitterMode
-            | Self::EmitterPublishingMode
-            | Self::EmitterConstruction
-            | Self::EmitterErrorPolicies
-            | Self::EmitterMaterializedState
-            | Self::IngestorSource
-            | Self::IngestorCodec
-            | Self::IngestorTimestamp
-            | Self::IngestorFilter
-            | Self::IngestorRoutes
-            | Self::IngestorGeneralError
-            | Self::ReingestorInputs
-            | Self::ReingestorRoutes
-            | Self::ReingestorMode
-            | Self::ReingestorFilter
-            | Self::ReingestorMaterializedState
-            | Self::GeneratorMaterializedState
-            | Self::GeneratorCadence
-            | Self::GeneratorBranching
-            | Self::GeneratorRoutes
-            | Self::CorrelatorCorrelation
-            | Self::CorrelatorMatchPolicy
-            | Self::CorrelatorMaxTime
-            | Self::CorrelatorTimeoutPolicy
-            | Self::WindowBounds
-            | Self::InferencerBinding
-            | Self::InferencerTensors
-            | Self::WasmBinding
-            | Self::WasmLimits
-            | Self::WasmGlobalError => QuiesceLevel::EntityPause,
-            Self::RelaySchema
-            | Self::RelayBranching
-            | Self::EmitterInput
-            | Self::SchemaDefinition
-            | Self::WireSchemaDefinition
-            | Self::CodecDefinition
-            | Self::ClientConfig
-            | Self::VhostHostnames
-            | Self::VhostTls
-            | Self::EndpointDefinition
-            | Self::SignalingProtocolDefinition
-            | Self::LookupDefinition
-            | Self::BranchSchema
-            | Self::BranchLifecycle
-            | Self::UdfDefinition => QuiesceLevel::DomainPause,
+        impl ModelChangeAspect {
+            /// True when this change only redefines a control-plane scheduling input.
+            pub const fn is_control_plane_only(self) -> bool {
+                match self {
+                    $(Self::$Aspect => $control_plane_only,)+
+                }
+            }
+
+            /// The runtime state this change invalidates, if any.
+            pub const fn state_purge(self) -> Option<StatePurge> {
+                match self {
+                    $(Self::$Aspect => $state_purge,)+
+                }
+            }
+
+            pub const fn quiesce_level(self) -> QuiesceLevel {
+                match self {
+                    $(Self::$Aspect => QuiesceLevel::$Level,)+
+                }
+            }
         }
-    }
+    };
+}
+
+declare_model_change_aspects! {
+    RelayCapacity => Dynamic, None, false;
+    RelaySchema => DomainPause, None, false;
+    RelayBranching => DomainPause, None, false;
+    RelayMaterializedState => EntityPause, None, false;
+    ProcessorFilter => Dynamic, None, false;
+    ProcessorInputWhere => Dynamic, None, false;
+    ProcessorRouteConstruction => Dynamic, None, false;
+    ProcessorRouteFlushPolicy => Dynamic, None, false;
+    ProcessorCollectPolicy => Dynamic, None, false;
+    ProcessorMessageErrorPolicy => Dynamic, None, false;
+    ProcessorErrorRouteTargets => EntityPause, None, false;
+    ProcessorInputs => EntityPause, None, false;
+    ProcessorRoutes => EntityPause, None, false;
+    ProcessorMode => EntityPause, None, false;
+    ProcessorBranching => EntityPause, None, false;
+    ProcessorMaterializedState => EntityPause, None, false;
+    DeduplicatorKeyspace => EntityPause, Some(StatePurge::DeduplicatorKeyspace), false;
+    DeduplicatorMaxTime => Dynamic, None, false;
+    ReordererOrdering => EntityPause, Some(StatePurge::ReordererBuffer), false;
+    ReordererMaxTime => Dynamic, None, false;
+    EmitterInput => DomainPause, None, false;
+    EmitterInputWhere => EntityPause, None, false;
+    EmitterSink => EntityPause, None, false;
+    EmitterClient => EntityPause, None, false;
+    EmitterCodec => EntityPause, None, false;
+    EmitterCollectPolicy => EntityPause, None, false;
+    EmitterMode => EntityPause, None, false;
+    EmitterPublishingMode => EntityPause, None, false;
+    EmitterFlushPolicy => Dynamic, None, false;
+    EmitterConstruction => EntityPause, None, false;
+    EmitterErrorPolicies => EntityPause, None, false;
+    EmitterMaterializedState => EntityPause, None, false;
+    IngestorSource => EntityPause, None, false;
+    IngestorCodec => EntityPause, None, false;
+    IngestorTimestamp => EntityPause, None, false;
+    IngestorFilter => EntityPause, None, false;
+    IngestorRoutes => EntityPause, None, false;
+    IngestorGeneralError => EntityPause, None, false;
+    ReingestorInputs => EntityPause, None, false;
+    ReingestorRoutes => EntityPause, None, false;
+    ReingestorMode => EntityPause, None, false;
+    ReingestorFilter => EntityPause, None, false;
+    ReingestorMaterializedState => EntityPause, None, false;
+    GeneratorMaterializedState => EntityPause, None, false;
+    GeneratorCadence => EntityPause, None, false;
+    GeneratorBranching => EntityPause, None, false;
+    GeneratorRoutes => EntityPause, None, false;
+    CorrelatorCorrelation => EntityPause, Some(StatePurge::CorrelationBuffer), false;
+    CorrelatorMatchPolicy => EntityPause, Some(StatePurge::CorrelationBuffer), false;
+    CorrelatorMaxTime => EntityPause, None, false;
+    CorrelatorTimeoutPolicy => EntityPause, None, false;
+    WindowBounds => EntityPause, Some(StatePurge::WindowAccumulator), false;
+    InferencerBinding => EntityPause, Some(StatePurge::InferencerWarmState), false;
+    InferencerTensors => EntityPause, Some(StatePurge::InferencerWarmState), false;
+    WasmBinding => EntityPause, Some(StatePurge::WasmGuestState), false;
+    WasmLimits => EntityPause, None, false;
+    WasmGlobalError => EntityPause, None, false;
+    SchemaDefinition => DomainPause, None, false;
+    WireSchemaDefinition => DomainPause, None, false;
+    CodecDefinition => DomainPause, None, false;
+    ClientConfig => DomainPause, None, false;
+    VhostHostnames => DomainPause, None, false;
+    VhostTls => DomainPause, None, false;
+    EndpointDefinition => DomainPause, None, false;
+    SignalingProtocolDefinition => DomainPause, None, false;
+    LookupDefinition => DomainPause, None, false;
+    BranchSchema => DomainPause, None, false;
+    BranchLifecycle => DomainPause, None, false;
+    UdfDefinition => DomainPause, None, false;
+    PlacementDefinition => Dynamic, None, true;
+    EntityReplaced => Dynamic, None, false;
+    EntityCreated => Dynamic, None, false;
+    EntityDropped => Dynamic, None, false;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -337,6 +257,16 @@ impl Model {
     pub fn change_aspects_against(&self, candidate: &Self) -> ModelChangeAspects {
         if self == candidate {
             return ModelChangeAspects::default();
+        }
+
+        if self.kind() == ModelKind::Client {
+            let is_same_client_type = candidate.kind() == ModelKind::Client
+                && std::mem::discriminant(self) == std::mem::discriminant(candidate);
+            return if is_same_client_type && self.name() == candidate.name() {
+                definition_change_aspect(ModelChangeAspect::ClientConfig)
+            } else {
+                ModelChangeAspects::replaced()
+            };
         }
 
         match (self, candidate) {
@@ -443,80 +373,7 @@ impl Model {
                     ModelChangeAspects::replaced()
                 }
             }
-            (Self::ClientKafka(_), Self::ClientKafka(_))
-            | (Self::ClientPulsar(_), Self::ClientPulsar(_))
-            | (Self::ClientHttp(_), Self::ClientHttp(_))
-            | (Self::ClientSentry(_), Self::ClientSentry(_))
-            | (Self::ClientOtel(_), Self::ClientOtel(_))
-            | (Self::ClientPrometheus(_), Self::ClientPrometheus(_))
-            | (Self::ClientMqtt(_), Self::ClientMqtt(_))
-            | (Self::ClientNats(_), Self::ClientNats(_))
-            | (Self::ClientRabbitMq(_), Self::ClientRabbitMq(_))
-            | (Self::ClientRedis(_), Self::ClientRedis(_))
-            | (Self::ClientZeroMq(_), Self::ClientZeroMq(_))
-            | (Self::ClientSqs(_), Self::ClientSqs(_))
-            | (Self::ClientWebsockets(_), Self::ClientWebsockets(_))
-            | (Self::ClientSyslog(_), Self::ClientSyslog(_))
-            | (Self::ClientClickHouse(_), Self::ClientClickHouse(_))
-            | (Self::ClientPostgres(_), Self::ClientPostgres(_))
-            | (Self::ClientMySql(_), Self::ClientMySql(_))
-            | (Self::ClientMongoDb(_), Self::ClientMongoDb(_))
-            | (Self::ClientS3(_), Self::ClientS3(_))
-            | (Self::ClientGcs(_), Self::ClientGcs(_))
-            | (Self::ClientAzureBlob(_), Self::ClientAzureBlob(_))
-            | (Self::ClientIcebergRest(_), Self::ClientIcebergRest(_)) => {
-                if self.name() == candidate.name() {
-                    definition_change_aspect(ModelChangeAspect::ClientConfig)
-                } else {
-                    ModelChangeAspects::replaced()
-                }
-            }
-            (Self::Codec(_), _)
-            | (Self::ClientKafka(_), _)
-            | (Self::ClientPulsar(_), _)
-            | (Self::ClientHttp(_), _)
-            | (Self::ClientSentry(_), _)
-            | (Self::ClientOtel(_), _)
-            | (Self::ClientPrometheus(_), _)
-            | (Self::ClientMqtt(_), _)
-            | (Self::ClientNats(_), _)
-            | (Self::ClientRabbitMq(_), _)
-            | (Self::ClientRedis(_), _)
-            | (Self::ClientZeroMq(_), _)
-            | (Self::ClientSqs(_), _)
-            | (Self::ClientWebsockets(_), _)
-            | (Self::ClientSyslog(_), _)
-            | (Self::ClientClickHouse(_), _)
-            | (Self::ClientPostgres(_), _)
-            | (Self::ClientMySql(_), _)
-            | (Self::ClientMongoDb(_), _)
-            | (Self::ClientS3(_), _)
-            | (Self::ClientGcs(_), _)
-            | (Self::ClientAzureBlob(_), _)
-            | (Self::ClientIcebergRest(_), _)
-            | (Self::Vhost(_), _)
-            | (Self::Branch(_), _)
-            | (Self::Endpoint(_), _)
-            | (Self::SignalingProtocol(_), _)
-            | (Self::Generator(_), _)
-            | (Self::Inferencer(_), _)
-            | (Self::WasmProcessor(_), _)
-            | (Self::Ingestor(_), _)
-            | (Self::Reingestor(_), _)
-            | (Self::Lookup(_), _)
-            | (Self::Deduplicator(_), _)
-            | (Self::Correlator(_), _)
-            | (Self::Reorderer(_), _)
-            | (Self::WindowProcessor(_), _)
-            | (Self::Emitter(_), _)
-            | (Self::Udf(_), _)
-            | (Self::Placement(_), _)
-            | (Self::Relay(_), _)
-            | (Self::Junction(_), _)
-            | (Self::Schema(_), _)
-            | (Self::WireJsonSchema(_), _)
-            | (Self::WireCborSchema(_), _)
-            | (Self::WireAvroSchema(_), _) => ModelChangeAspects::replaced(),
+            _ => ModelChangeAspects::replaced(),
         }
     }
 }

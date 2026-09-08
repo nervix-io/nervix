@@ -1,19 +1,20 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClientName, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    ClientConfigEntry, ClientName, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
+    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, KafkaConfigEntry, ResourceName,
+    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, Model, ResourceName,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, client_name, if_not_exists_clause, into_parse_error, kw, lex_input,
-        resource_ref, signaling_protocol_clause, string_lit, suggest_from, tok, word_raw,
+        LexedInput, ParseError, boxed_choice, client_name, if_not_exists_clause, into_parse_error,
+        kw, lex_input, resource_ref, signaling_protocol_clause, string_lit, suggest_from, tok,
+        word_raw,
     },
     schema::ParseFromSourceError,
 };
@@ -38,11 +39,11 @@ fn config_value<'src>()
 }
 
 fn config_entry<'src>()
--> impl Parser<'src, &'src [Token], KafkaConfigEntry, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], ClientConfigEntry, extra::Err<ParseError<'src>>> + Clone {
     config_key()
         .then_ignore(tok(Token::Eq))
         .then(config_value())
-        .map(|(key, value)| KafkaConfigEntry { key, value })
+        .map(|(key, value)| ClientConfigEntry { key, value })
 }
 
 fn client_mount<'src>()
@@ -54,7 +55,7 @@ fn client_mount<'src>()
 
 fn create_client_parser<'src, T>(
     client_type: Identifier,
-    build: impl Fn(ClientName, Option<ResourceName>, Vec<KafkaConfigEntry>) -> T + Clone + 'src,
+    build: impl Fn(ClientName, Option<ResourceName>, Vec<ClientConfigEntry>) -> T + Clone + 'src,
 ) -> impl Parser<'src, &'src [Token], CreateStatement<T>, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -71,233 +72,97 @@ fn create_client_parser<'src, T>(
         })
 }
 
-pub fn create_client_kafka_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientKafka>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Kafka, |name, mount, config| CreateClientKafka {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_pulsar_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientPulsar>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Pulsar, |name, mount, config| {
-        CreateClientPulsar {
-            name,
-            mount,
-            config,
+macro_rules! declare_client_parsers {
+    (
+        before_websockets {
+            $($before_parser:ident: $BeforeKeyword:ident => $BeforeClient:ident($BeforeVariant:ident),)+
         }
-    })
-}
-
-pub fn create_client_http_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientHttp>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Http, |name, mount, config| CreateClientHttp {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_sentry_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientSentry>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Sentry, |name, mount, config| {
-        CreateClientSentry {
-            name,
-            mount,
-            config,
+        after_websockets {
+            $($after_parser:ident: $AfterKeyword:ident => $AfterClient:ident($AfterVariant:ident),)+
         }
-    })
-}
+    ) => {
+        $(
+            pub fn $before_parser<'src>() -> impl Parser<
+                'src,
+                &'src [Token],
+                CreateStatement<$BeforeClient>,
+                extra::Err<ParseError<'src>>,
+            > + Clone {
+                create_client_parser(Identifier::$BeforeKeyword, |name, mount, config| $BeforeClient {
+                    name,
+                    mount,
+                    config,
+                })
+            }
+        )+
+        $(
+            pub fn $after_parser<'src>() -> impl Parser<
+                'src,
+                &'src [Token],
+                CreateStatement<$AfterClient>,
+                extra::Err<ParseError<'src>>,
+            > + Clone {
+                create_client_parser(Identifier::$AfterKeyword, |name, mount, config| $AfterClient {
+                    name,
+                    mount,
+                    config,
+                })
+            }
+        )+
 
-pub fn create_client_otel_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientOtel>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Otel, |name, mount, config| CreateClientOtel {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_clickhouse_parser<'src>() -> impl Parser<
-    'src,
-    &'src [Token],
-    CreateStatement<CreateClientClickHouse>,
-    extra::Err<ParseError<'src>>,
-> + Clone {
-    create_client_parser(Identifier::Clickhouse, |name, mount, config| {
-        CreateClientClickHouse {
-            name,
-            mount,
-            config,
+        pub fn create_client_model_parser<'src>() -> impl Parser<
+            'src,
+            &'src [Token],
+            CreateStatement<Box<Model>>,
+            extra::Err<ParseError<'src>>,
+        > + Clone {
+            boxed_choice!(
+                $(
+                    $before_parser().map(|create| {
+                        create.map_body(Model::$BeforeVariant).map_body(Box::new)
+                    }),
+                )+
+                create_client_websockets_parser().map(|create| {
+                    create
+                        .map_body(Model::ClientWebsockets)
+                        .map_body(Box::new)
+                }),
+                $(
+                    $after_parser().map(|create| {
+                        create.map_body(Model::$AfterVariant).map_body(Box::new)
+                    }),
+                )+
+            )
         }
-    })
+    };
 }
 
-pub fn create_client_postgres_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientPostgres>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Postgres, |name, mount, config| {
-        CreateClientPostgres {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
-pub fn create_client_mysql_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientMySql>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Mysql, |name, mount, config| CreateClientMySql {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_mongodb_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientMongoDb>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Mongodb, |name, mount, config| {
-        CreateClientMongoDb {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
-pub fn create_client_rabbitmq_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientRabbitMq>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Rabbitmq, |name, mount, config| {
-        CreateClientRabbitMq {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
-pub fn create_client_redis_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientRedis>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Redis, |name, mount, config| CreateClientRedis {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_mqtt_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientMqtt>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Mqtt, |name, mount, config| CreateClientMqtt {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_nats_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientNats>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Nats, |name, mount, config| CreateClientNats {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_prometheus_parser<'src>() -> impl Parser<
-    'src,
-    &'src [Token],
-    CreateStatement<CreateClientPrometheus>,
-    extra::Err<ParseError<'src>>,
-> + Clone {
-    create_client_parser(Identifier::Prometheus, |name, mount, config| {
-        CreateClientPrometheus {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
-pub fn create_client_zeromq_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientZeroMq>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Zeromq, |name, mount, config| {
-        CreateClientZeroMq {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
-pub fn create_client_sqs_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientSqs>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Sqs, |name, mount, config| CreateClientSqs {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_s3_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientS3>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::S3, |name, mount, config| CreateClientS3 {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_gcs_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientGcs>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Gcs, |name, mount, config| CreateClientGcs {
-        name,
-        mount,
-        config,
-    })
-}
-
-pub fn create_client_azure_blob_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientAzureBlob>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::AzureBlob, |name, mount, config| {
-        CreateClientAzureBlob {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
-pub fn create_client_iceberg_rest_parser<'src>() -> impl Parser<
-    'src,
-    &'src [Token],
-    CreateStatement<CreateClientIcebergRest>,
-    extra::Err<ParseError<'src>>,
-> + Clone {
-    create_client_parser(Identifier::IcebergRest, |name, mount, config| {
-        CreateClientIcebergRest {
-            name,
-            mount,
-            config,
-        }
-    })
+declare_client_parsers! {
+    before_websockets {
+        create_client_kafka_parser: Kafka => CreateClientKafka(ClientKafka),
+        create_client_pulsar_parser: Pulsar => CreateClientPulsar(ClientPulsar),
+        create_client_http_parser: Http => CreateClientHttp(ClientHttp),
+        create_client_sentry_parser: Sentry => CreateClientSentry(ClientSentry),
+        create_client_otel_parser: Otel => CreateClientOtel(ClientOtel),
+        create_client_prometheus_parser: Prometheus => CreateClientPrometheus(ClientPrometheus),
+        create_client_rabbitmq_parser: Rabbitmq => CreateClientRabbitMq(ClientRabbitMq),
+        create_client_redis_parser: Redis => CreateClientRedis(ClientRedis),
+        create_client_mqtt_parser: Mqtt => CreateClientMqtt(ClientMqtt),
+        create_client_nats_parser: Nats => CreateClientNats(ClientNats),
+        create_client_zeromq_parser: Zeromq => CreateClientZeroMq(ClientZeroMq),
+        create_client_sqs_parser: Sqs => CreateClientSqs(ClientSqs),
+        create_client_s3_parser: S3 => CreateClientS3(ClientS3),
+        create_client_gcs_parser: Gcs => CreateClientGcs(ClientGcs),
+        create_client_azure_blob_parser: AzureBlob => CreateClientAzureBlob(ClientAzureBlob),
+        create_client_iceberg_rest_parser: IcebergRest => CreateClientIcebergRest(ClientIcebergRest),
+    }
+    after_websockets {
+        create_client_syslog_parser: Syslog => CreateClientSyslog(ClientSyslog),
+        create_client_clickhouse_parser: Clickhouse => CreateClientClickHouse(ClientClickHouse),
+        create_client_postgres_parser: Postgres => CreateClientPostgres(ClientPostgres),
+        create_client_mysql_parser: Mysql => CreateClientMySql(ClientMySql),
+        create_client_mongodb_parser: Mongodb => CreateClientMongoDb(ClientMongoDb),
+    }
 }
 
 pub fn create_client_websockets_parser<'src>() -> impl Parser<
@@ -332,20 +197,8 @@ pub fn create_client_websockets_parser<'src>() -> impl Parser<
         )
 }
 
-pub fn create_client_syslog_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientSyslog>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Syslog, |name, mount, config| {
-        CreateClientSyslog {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
 fn transport_config<'src>()
--> impl Parser<'src, &'src [Token], Vec<KafkaConfigEntry>, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], Vec<ClientConfigEntry>, extra::Err<ParseError<'src>>> + Clone {
     config_entry()
         .separated_by(tok(Token::Comma))
         .allow_trailing()

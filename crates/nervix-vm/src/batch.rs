@@ -9,271 +9,136 @@ use arrow_schema::{DataType, Schema, TimeUnit};
 
 use crate::{RowErrors, RuntimeError};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypedArray {
-    UInt8(UInt8Array),
-    Int8(Int8Array),
-    UInt16(UInt16Array),
-    Int16(Int16Array),
-    UInt32(UInt32Array),
-    Int32(Int32Array),
-    UInt64(UInt64Array),
-    Int64(Int64Array),
-    Float32(Float32Array),
-    Float64(Float64Array),
-    Boolean(BooleanArray),
-    Utf8(StringArray),
-    Datetime(TimestampNanosecondArray),
-    Generic(ArrayRef),
-    Uninitialized { data_type: DataType, len: usize },
+macro_rules! declare_typed_arrays {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum TypedArray {
+            $($Variant($Array),)+
+            Datetime(TimestampNanosecondArray),
+            Generic(ArrayRef),
+            Uninitialized { data_type: DataType, len: usize },
+        }
+
+        impl TypedArray {
+            pub fn len(&self) -> usize {
+                match self {
+                    $(Self::$Variant(array) => array.len(),)+
+                    Self::Datetime(array) => array.len(),
+                    Self::Generic(array) => array.len(),
+                    Self::Uninitialized { len, .. } => *len,
+                }
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.len() == 0
+            }
+
+            pub fn data_type(&self) -> DataType {
+                match self {
+                    $(Self::$Variant(_) => $data_type,)+
+                    Self::Datetime(_) => {
+                        DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
+                    }
+                    Self::Generic(array) => array.data_type().clone(),
+                    Self::Uninitialized { data_type, .. } => data_type.clone(),
+                }
+            }
+
+            $(pub fn $accessor(&self) -> Option<&$Array> {
+                match self {
+                    Self::$Variant(array) => Some(array),
+                    _ => None,
+                }
+            })+
+
+            pub fn as_datetime(&self) -> Option<&TimestampNanosecondArray> {
+                match self {
+                    Self::Datetime(array) => Some(array),
+                    _ => None,
+                }
+            }
+
+            pub fn to_array_ref(&self) -> ArrayRef {
+                match self {
+                    $(Self::$Variant(array) => Arc::new(array.clone()),)+
+                    Self::Datetime(array) => Arc::new(array.clone()),
+                    Self::Generic(array) => array.clone(),
+                    Self::Uninitialized { data_type, len } => new_null_array(data_type, *len),
+                }
+            }
+
+            pub(crate) fn as_array(&self) -> &dyn Array {
+                match self {
+                    $(Self::$Variant(array) => array,)+
+                    Self::Datetime(array) => array,
+                    Self::Generic(array) => array.as_ref(),
+                    Self::Uninitialized { .. } => {
+                        unreachable!(
+                            "uninitialized arrays must be materialized before Arrow kernel access"
+                        )
+                    }
+                }
+            }
+
+            pub(crate) fn into_array_ref(self) -> ArrayRef {
+                match self {
+                    $(Self::$Variant(array) => Arc::new(array),)+
+                    Self::Datetime(array) => Arc::new(array),
+                    Self::Generic(array) => array,
+                    Self::Uninitialized { data_type, len } => new_null_array(&data_type, len),
+                }
+            }
+
+            pub fn try_from_array_ref(array: ArrayRef) -> Result<Self, RuntimeError> {
+                let converted = match array.data_type() {
+                    $($data_type => array
+                        .as_any()
+                        .downcast_ref::<$Array>()
+                        .map(|array| Self::$Variant(array.clone())),)+
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some(_)) => array
+                        .as_any()
+                        .downcast_ref::<TimestampNanosecondArray>()
+                        .map(|array| Self::Datetime(array.clone())),
+                    DataType::List(_) | DataType::FixedSizeList(_, _) => {
+                        Some(Self::Generic(array.clone()))
+                    }
+                    _ => None,
+                };
+                converted.ok_or_else(|| RuntimeError::UnsupportedColumnType {
+                    data_type: array.data_type().clone(),
+                })
+            }
+
+            pub fn uninitialized(data_type: DataType, len: usize) -> Self {
+                Self::Uninitialized { data_type, len }
+            }
+
+            pub const fn is_uninitialized(&self) -> bool {
+                matches!(self, Self::Uninitialized { .. })
+            }
+
+            pub fn null_count(&self) -> usize {
+                match self {
+                    $(Self::$Variant(array) => array.null_count(),)+
+                    Self::Datetime(array) => array.null_count(),
+                    Self::Generic(array) => array.null_count(),
+                    Self::Uninitialized { len, .. } => *len,
+                }
+            }
+
+            pub(crate) fn is_null(&self, row: usize) -> bool {
+                match self {
+                    $(Self::$Variant(array) => array.is_null(row),)+
+                    Self::Datetime(array) => array.is_null(row),
+                    Self::Generic(array) => array.is_null(row),
+                    Self::Uninitialized { .. } => true,
+                }
+            }
+        }
+    };
 }
 
-impl TypedArray {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::UInt8(array) => array.len(),
-            Self::Int8(array) => array.len(),
-            Self::UInt16(array) => array.len(),
-            Self::Int16(array) => array.len(),
-            Self::UInt32(array) => array.len(),
-            Self::Int32(array) => array.len(),
-            Self::UInt64(array) => array.len(),
-            Self::Int64(array) => array.len(),
-            Self::Float32(array) => array.len(),
-            Self::Float64(array) => array.len(),
-            Self::Boolean(array) => array.len(),
-            Self::Utf8(array) => array.len(),
-            Self::Datetime(array) => array.len(),
-            Self::Generic(array) => array.len(),
-            Self::Uninitialized { len, .. } => *len,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn data_type(&self) -> DataType {
-        match self {
-            Self::UInt8(_) => DataType::UInt8,
-            Self::Int8(_) => DataType::Int8,
-            Self::UInt16(_) => DataType::UInt16,
-            Self::Int16(_) => DataType::Int16,
-            Self::UInt32(_) => DataType::UInt32,
-            Self::Int32(_) => DataType::Int32,
-            Self::UInt64(_) => DataType::UInt64,
-            Self::Int64(_) => DataType::Int64,
-            Self::Float32(_) => DataType::Float32,
-            Self::Float64(_) => DataType::Float64,
-            Self::Boolean(_) => DataType::Boolean,
-            Self::Utf8(_) => DataType::Utf8,
-            Self::Datetime(_) => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
-            Self::Generic(array) => array.data_type().clone(),
-            Self::Uninitialized { data_type, .. } => data_type.clone(),
-        }
-    }
-
-    pub fn as_uint8(&self) -> Option<&UInt8Array> {
-        match self {
-            Self::UInt8(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_int8(&self) -> Option<&Int8Array> {
-        match self {
-            Self::Int8(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_uint16(&self) -> Option<&UInt16Array> {
-        match self {
-            Self::UInt16(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_int16(&self) -> Option<&Int16Array> {
-        match self {
-            Self::Int16(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_uint32(&self) -> Option<&UInt32Array> {
-        match self {
-            Self::UInt32(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_int32(&self) -> Option<&Int32Array> {
-        match self {
-            Self::Int32(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_uint64(&self) -> Option<&UInt64Array> {
-        match self {
-            Self::UInt64(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_int64(&self) -> Option<&Int64Array> {
-        match self {
-            Self::Int64(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_float32(&self) -> Option<&Float32Array> {
-        match self {
-            Self::Float32(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_float64(&self) -> Option<&Float64Array> {
-        match self {
-            Self::Float64(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_boolean(&self) -> Option<&BooleanArray> {
-        match self {
-            Self::Boolean(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_utf8(&self) -> Option<&StringArray> {
-        match self {
-            Self::Utf8(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn as_datetime(&self) -> Option<&TimestampNanosecondArray> {
-        match self {
-            Self::Datetime(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    pub fn to_array_ref(&self) -> ArrayRef {
-        match self {
-            Self::UInt8(array) => Arc::new(array.clone()),
-            Self::Int8(array) => Arc::new(array.clone()),
-            Self::UInt16(array) => Arc::new(array.clone()),
-            Self::Int16(array) => Arc::new(array.clone()),
-            Self::UInt32(array) => Arc::new(array.clone()),
-            Self::Int32(array) => Arc::new(array.clone()),
-            Self::UInt64(array) => Arc::new(array.clone()),
-            Self::Int64(array) => Arc::new(array.clone()),
-            Self::Float32(array) => Arc::new(array.clone()),
-            Self::Float64(array) => Arc::new(array.clone()),
-            Self::Boolean(array) => Arc::new(array.clone()),
-            Self::Utf8(array) => Arc::new(array.clone()),
-            Self::Datetime(array) => Arc::new(array.clone()),
-            Self::Generic(array) => array.clone(),
-            Self::Uninitialized { data_type, len } => new_null_array(data_type, *len),
-        }
-    }
-
-    pub fn try_from_array_ref(array: ArrayRef) -> Result<Self, RuntimeError> {
-        let converted = match array.data_type() {
-            DataType::UInt8 => array
-                .as_any()
-                .downcast_ref::<UInt8Array>()
-                .map(|array| Self::UInt8(array.clone())),
-            DataType::Int8 => array
-                .as_any()
-                .downcast_ref::<Int8Array>()
-                .map(|array| Self::Int8(array.clone())),
-            DataType::UInt16 => array
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .map(|array| Self::UInt16(array.clone())),
-            DataType::Int16 => array
-                .as_any()
-                .downcast_ref::<Int16Array>()
-                .map(|array| Self::Int16(array.clone())),
-            DataType::UInt32 => array
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .map(|array| Self::UInt32(array.clone())),
-            DataType::Int32 => array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .map(|array| Self::Int32(array.clone())),
-            DataType::UInt64 => array
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .map(|array| Self::UInt64(array.clone())),
-            DataType::Int64 => array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .map(|array| Self::Int64(array.clone())),
-            DataType::Float32 => array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .map(|array| Self::Float32(array.clone())),
-            DataType::Float64 => array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .map(|array| Self::Float64(array.clone())),
-            DataType::Boolean => array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .map(|array| Self::Boolean(array.clone())),
-            DataType::Utf8 => array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .map(|array| Self::Utf8(array.clone())),
-            DataType::Timestamp(TimeUnit::Nanosecond, Some(_)) => array
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .map(|array| Self::Datetime(array.clone())),
-            DataType::List(_) | DataType::FixedSizeList(_, _) => Some(Self::Generic(array.clone())),
-            _ => None,
-        };
-        converted.ok_or_else(|| RuntimeError::UnsupportedColumnType {
-            data_type: array.data_type().clone(),
-        })
-    }
-
-    pub fn uninitialized(data_type: DataType, len: usize) -> Self {
-        Self::Uninitialized { data_type, len }
-    }
-
-    pub const fn is_uninitialized(&self) -> bool {
-        matches!(self, Self::Uninitialized { .. })
-    }
-
-    pub fn null_count(&self) -> usize {
-        match self {
-            Self::UInt8(array) => array.null_count(),
-            Self::Int8(array) => array.null_count(),
-            Self::UInt16(array) => array.null_count(),
-            Self::Int16(array) => array.null_count(),
-            Self::UInt32(array) => array.null_count(),
-            Self::Int32(array) => array.null_count(),
-            Self::UInt64(array) => array.null_count(),
-            Self::Int64(array) => array.null_count(),
-            Self::Float32(array) => array.null_count(),
-            Self::Float64(array) => array.null_count(),
-            Self::Boolean(array) => array.null_count(),
-            Self::Utf8(array) => array.null_count(),
-            Self::Datetime(array) => array.null_count(),
-            Self::Generic(array) => array.null_count(),
-            Self::Uninitialized { len, .. } => *len,
-        }
-    }
-}
+with_typed_registers!(declare_typed_arrays);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedBatch {
