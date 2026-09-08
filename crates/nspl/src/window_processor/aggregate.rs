@@ -387,10 +387,10 @@ pub fn parse_aggregate_program(
 pub fn parse_aggregate_tokens(
     tokens: &[SpannedToken],
 ) -> Result<SpannedNode<WindowAggregateProgram>, Vec<ParseError<'_>>> {
-    let end_span = tokens
-        .last()
-        .map(|token| token.span.end..token.span.end)
-        .unwrap_or(0..0);
+    let end_span = match tokens.last() {
+        Some(token) => token.span.end..token.span.end,
+        None => 0..0,
+    };
     let relay = Stream::from_iter(
         tokens
             .iter()
@@ -573,15 +573,17 @@ fn linear_histogram_config<'src>(
     args: &[SpannedExpr],
     span: Span,
 ) -> Result<WindowLinearHistogramConfig, Rich<'src, Token>> {
-    let buckets = usize::try_from(int_arg(&args[2], span, "bucket count")?)
-        .ok()
-        .and_then(NonZeroUsize::new)
-        .ok_or_else(|| {
-            Rich::custom(
-                span,
-                "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
-            )
-        })?;
+    let bucket_count = int_arg(&args[2], span, "bucket count")?;
+    let buckets = match usize::try_from(bucket_count) {
+        Ok(bucket_count) => NonZeroUsize::new(bucket_count),
+        Err(_) => None,
+    };
+    let Some(buckets) = buckets else {
+        return Err(Rich::custom(
+            span,
+            "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
+        ));
+    };
     let min = numeric_arg(&args[3], span, "minimum")?;
     let max = numeric_arg(&args[4], span, "maximum")?;
     if min >= max {

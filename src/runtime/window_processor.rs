@@ -704,24 +704,36 @@ impl WindowAggregateAccumulator {
                     "a window counter cannot exceed the allocation limit of its retained entries",
                 )))
             }
-            (WindowAggregateFunction::First, Self::Sequence { values }) => values
-                .iter()
-                .min_by_key(|entry| (entry.timestamp, entry.sequence))
-                .map(|entry| entry.value.clone())
-                .ok_or_else(|| "FIRST requires a non-empty window".to_string()),
-            (WindowAggregateFunction::Last, Self::Sequence { values }) => values
-                .iter()
-                .max_by_key(|entry| (entry.timestamp, entry.sequence))
-                .map(|entry| entry.value.clone())
-                .ok_or_else(|| "LAST requires a non-empty window".to_string()),
-            (WindowAggregateFunction::Max, Self::SortedMap { counts }) => counts
-                .last_key_value()
-                .map(|(value, _)| value.0.clone())
-                .ok_or_else(|| "MAX requires a non-empty window".to_string()),
-            (WindowAggregateFunction::Min, Self::SortedMap { counts }) => counts
-                .first_key_value()
-                .map(|(value, _)| value.0.clone())
-                .ok_or_else(|| "MIN requires a non-empty window".to_string()),
+            (WindowAggregateFunction::First, Self::Sequence { values }) => {
+                match values
+                    .iter()
+                    .min_by_key(|entry| (entry.timestamp, entry.sequence))
+                {
+                    Some(entry) => Ok(entry.value.clone()),
+                    None => Err("FIRST requires a non-empty window".to_string()),
+                }
+            }
+            (WindowAggregateFunction::Last, Self::Sequence { values }) => {
+                match values
+                    .iter()
+                    .max_by_key(|entry| (entry.timestamp, entry.sequence))
+                {
+                    Some(entry) => Ok(entry.value.clone()),
+                    None => Err("LAST requires a non-empty window".to_string()),
+                }
+            }
+            (WindowAggregateFunction::Max, Self::SortedMap { counts }) => {
+                match counts.last_key_value() {
+                    Some((value, _)) => Ok(value.0.clone()),
+                    None => Err("MAX requires a non-empty window".to_string()),
+                }
+            }
+            (WindowAggregateFunction::Min, Self::SortedMap { counts }) => {
+                match counts.first_key_value() {
+                    Some((value, _)) => Ok(value.0.clone()),
+                    None => Err("MIN requires a non-empty window".to_string()),
+                }
+            }
             (
                 WindowAggregateFunction::PercentileLinearHistogram,
                 Self::LinearHistogram {

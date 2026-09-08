@@ -670,21 +670,20 @@ impl Runtime {
         error_relay: &RelayName,
         assignments: &[Assignment],
     ) -> Result<Option<RuntimeFlushPolicy>, String> {
-        let scheduled = ModelKind::from_str(node_kind.as_str())
-            .ok()
-            .and_then(|kind| {
-                execution
-                    .schedule
-                    .nodes
-                    .get(&NodeRef::new(kind, node.clone()))
-            })
-            .ok_or_else(|| {
-                format!(
-                    "runtime model for {} '{}' is unavailable",
-                    node_kind.as_str(),
-                    node.as_str()
-                )
-            })?;
+        let scheduled = match ModelKind::from_str(node_kind.as_str()) {
+            Ok(kind) => execution
+                .schedule
+                .nodes
+                .get(&NodeRef::new(kind, node.clone())),
+            Err(_) => None,
+        };
+        let scheduled = scheduled.ok_or_else(|| {
+            format!(
+                "runtime model for {} '{}' is unavailable",
+                node_kind.as_str(),
+                node.as_str()
+            )
+        })?;
         let outputs = match scheduled.config.as_ref() {
             Model::Ingestor(model) => &model.output_routes,
             Model::Reingestor(model) => &model.output_routes,
@@ -738,21 +737,20 @@ impl Runtime {
         error_relay: &RelayName,
         assignments: &[Assignment],
     ) -> Result<MessageErrorCompileSchemas, String> {
-        let scheduled = ModelKind::from_str(node_kind.as_str())
-            .ok()
-            .and_then(|kind| {
-                execution
-                    .schedule
-                    .nodes
-                    .get(&NodeRef::new(kind, node.clone()))
-            })
-            .ok_or_else(|| {
-                format!(
-                    "runtime model for {} '{}' is unavailable",
-                    node_kind.as_str(),
-                    node.as_str()
-                )
-            })?;
+        let scheduled = match ModelKind::from_str(node_kind.as_str()) {
+            Ok(kind) => execution
+                .schedule
+                .nodes
+                .get(&NodeRef::new(kind, node.clone())),
+            Err(_) => None,
+        };
+        let scheduled = scheduled.ok_or_else(|| {
+            format!(
+                "runtime model for {} '{}' is unavailable",
+                node_kind.as_str(),
+                node.as_str()
+            )
+        })?;
         let relay_schema = |relay: &RelayName| {
             execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
                 format!(
@@ -777,17 +775,13 @@ impl Runtime {
         let mut current_branch_relay = None;
         match scheduled.config.as_ref() {
             Model::Ingestor(model) => {
-                schemas.input = execution
-                    .codecs
-                    .get(&model.decode_using_codec)
-                    .map(|codec| codec.schema())
-                    .ok_or_else(|| {
-                        format!(
-                            "runtime codec '{}' is unavailable",
-                            model.decode_using_codec.as_str()
-                        )
-                    })?
-                    .into();
+                let Some(codec) = execution.codecs.get(&model.decode_using_codec) else {
+                    return Err(format!(
+                        "runtime codec '{}' is unavailable",
+                        model.decode_using_codec.as_str()
+                    ));
+                };
+                schemas.input = codec.schema().into();
                 schemas.allow_header_reads = ingest_source_supports_headers(&model.source);
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
@@ -871,14 +865,9 @@ impl Runtime {
                 schemas.partial_output = model
                     .encode_using_codec
                     .as_ref()
-                    .map(|codec| {
-                        execution
-                            .codecs
-                            .get(codec)
-                            .map(|compiled| compiled.schema())
-                            .ok_or_else(|| {
-                                format!("runtime codec '{}' is unavailable", codec.as_str())
-                            })
+                    .map(|codec| match execution.codecs.get(codec) {
+                        Some(compiled) => Ok(compiled.schema()),
+                        None => Err(format!("runtime codec '{}' is unavailable", codec.as_str())),
                     })
                     .transpose()?;
             }
@@ -911,9 +900,10 @@ impl Runtime {
     ) -> Result<RuntimeRow, String> {
         let carrier = message.record.one_row_batch();
         let keys = vec![message.key.clone()];
-        let namespace_batches = partial_output
-            .map(|batch| vec![("partial_output", batch)])
-            .unwrap_or_default();
+        let namespace_batches = match partial_output {
+            Some(batch) => vec![("partial_output", batch)],
+            None => Vec::new(),
+        };
         let mut side_inputs = materialized_state.clone();
         side_inputs.insert(
             "error.reference".to_string(),

@@ -1932,10 +1932,10 @@ fn format_parse_error(err: &ParseError<'_>) -> String {
                 expected.join(" | ")
             };
 
-            let found_text = found
-                .as_deref()
-                .map(format_found_token)
-                .unwrap_or_else(|| "end of input".to_string());
+            let found_text = match found.as_deref() {
+                Some(found) => format_found_token(found),
+                None => "end of input".to_string(),
+            };
 
             format!("expected {expected_text}, found {found_text}")
         }
@@ -2052,10 +2052,12 @@ fn vm_program_token_to_source(token: &Token) -> String {
 pub fn vm_program_error_message(error: crate::vm_program::ParseFromSourceError) -> String {
     match error {
         crate::vm_program::ParseFromSourceError::Lex { diagnostics, .. }
-        | crate::vm_program::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics
-            .first()
-            .map(|diagnostic| diagnostic.message.clone())
-            .unwrap_or_else(|| "invalid FILTER-MAP program".to_string()),
+        | crate::vm_program::ParseFromSourceError::Parse { diagnostics, .. } => {
+            match diagnostics.first() {
+                Some(diagnostic) => diagnostic.message.clone(),
+                None => "invalid FILTER-MAP program".to_string(),
+            }
+        }
     }
 }
 

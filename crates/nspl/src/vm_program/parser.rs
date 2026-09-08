@@ -94,9 +94,10 @@ where
         Token::Identifier(name) = e => (name, e.span()),
     }
     .try_map(|(name, span), _| {
-        parse_data_type(&name)
-            .map(|data_type| spanned(data_type, span))
-            .ok_or_else(|| Rich::custom(span, format!("unsupported type '{name}'")))
+        let Some(data_type) = parse_data_type(&name) else {
+            return Err(Rich::custom(span, format!("unsupported type '{name}'")));
+        };
+        Ok(spanned(data_type, span))
     })
     .labelled("type_name")
 }
@@ -453,10 +454,10 @@ where
 pub fn parse_tokens(
     tokens: &[SpannedToken],
 ) -> Result<chumsky::span::Spanned<Program, Span>, Vec<ParseError<'_>>> {
-    let end_span = tokens
-        .last()
-        .map(|token| token.span.end..token.span.end)
-        .unwrap_or(0..0);
+    let end_span = match tokens.last() {
+        Some(token) => token.span.end..token.span.end,
+        None => 0..0,
+    };
     let relay = Stream::from_iter(
         tokens
             .iter()

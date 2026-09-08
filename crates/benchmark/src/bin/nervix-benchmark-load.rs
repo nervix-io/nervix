@@ -1168,7 +1168,10 @@ impl BenchmarkRunner {
                 .groups()
                 .iter()
                 .find(|group| group.name() == self.args.consumer_group);
-            let observed = group.map_or(0, |group| group.members().len());
+            let observed = match group {
+                Some(group) => group.members().len(),
+                None => 0,
+            };
             let is_stable = group.is_some_and(|group| group.state() == "Stable")
                 && observed >= self.args.minimum_consumers;
             if is_stable {
@@ -1180,12 +1183,15 @@ impl BenchmarkRunner {
                 stable_since = None;
             }
             if Instant::now() >= deadline {
+                let state = match group {
+                    Some(group) => group.state(),
+                    None => "missing",
+                };
                 bail!(
                     "timed out waiting for Kafka consumer group '{}' to stabilize at no fewer \
-                     than {} members; observed {observed} in state {}",
+                     than {} members; observed {observed} in state {state}",
                     self.args.consumer_group,
                     self.args.minimum_consumers,
-                    group.map_or("missing", |group| group.state())
                 );
             }
             thread::sleep(OFFSET_POLL_INTERVAL);

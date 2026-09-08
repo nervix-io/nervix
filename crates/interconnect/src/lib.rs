@@ -848,12 +848,10 @@ impl Transport {
     }
 
     pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
-        self.inner
-            .connected_peers
-            .get(node_id)
-            .map(|count| *count)
-            .unwrap_or_default()
-            > 0
+        match self.inner.connected_peers.get(node_id) {
+            Some(count) => *count > 0,
+            None => false,
+        }
     }
 
     pub async fn shutdown(&self) {

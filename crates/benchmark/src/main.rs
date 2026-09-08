@@ -108,10 +108,10 @@ struct WorkloadOptions {
 
 impl WorkloadOptions {
     fn resolve_artifacts_root(&self, repository_root: &Path) -> PathBuf {
-        self.artifacts_root
-            .as_deref()
-            .map(|path| absolute_or_repository_path(repository_root, path))
-            .unwrap_or_else(|| repository_root.join(DEFAULT_ARTIFACTS_ROOT))
+        match self.artifacts_root.as_deref() {
+            Some(path) => absolute_or_repository_path(repository_root, path),
+            None => repository_root.join(DEFAULT_ARTIFACTS_ROOT),
+        }
     }
 }
 
@@ -1252,15 +1252,20 @@ async fn run_load_driver(
     fs::write(&go_file, b"go\n")?;
 
     const COMPLETION_GRACE_SECONDS: u64 = 30;
+    const SECONDS_FIT: &str =
+        "a benchmark run is configured in seconds, far below the u64 second range";
 
+    let waited = resolved
+        .wait_timeout
+        .as_secs()
+        .checked_mul(4)
+        .assured(SECONDS_FIT);
+    let run = waited
+        .checked_add(resolved.duration_seconds)
+        .assured(SECONDS_FIT);
     let completion_timeout = Duration::from_secs(
-        resolved
-            .wait_timeout
-            .as_secs()
-            .checked_mul(4)
-            .and_then(|wait| wait.checked_add(resolved.duration_seconds))
-            .and_then(|total| total.checked_add(COMPLETION_GRACE_SECONDS))
-            .assured("a benchmark run is configured in seconds, far below the u64 second range"),
+        run.checked_add(COMPLETION_GRACE_SECONDS)
+            .assured(SECONDS_FIT),
     );
     let completion_deadline = tokio::time::Instant::now() + completion_timeout;
     let status = loop {

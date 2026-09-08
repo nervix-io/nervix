@@ -455,10 +455,10 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 ),
             });
         };
-        let metadata_row_count = self
-            .metadata
-            .as_ref()
-            .map_or(self.row_count, IngestFilterMapMetadata::len);
+        let metadata_row_count = match self.metadata.as_ref() {
+            Some(metadata) => metadata.len(),
+            None => self.row_count,
+        };
         if metadata_row_count != row_count || names.len() != row_count {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(

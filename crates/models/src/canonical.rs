@@ -243,10 +243,10 @@ pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNs
                 FieldScope::PartialOutput => Some("partial_output".to_string()),
                 FieldScope::Error => Some("error".to_string()),
             };
-            Ok(prefix.map_or_else(
-                || reference.field.as_str().to_string(),
-                |prefix| format!("{prefix}.{}", reference.field.as_str()),
-            ))
+            Ok(match prefix {
+                Some(prefix) => format!("{prefix}.{}", reference.field.as_str()),
+                None => reference.field.as_str().to_string(),
+            })
         }
         Expression::Unary {
             operator,
@@ -703,14 +703,16 @@ impl Statement {
             Self::DescribeIngestor(describe) => {
                 Ok(format!("DESCRIBE INGESTOR {};", describe.ingestor.as_str()))
             }
-            Self::DescribeResource(describe) => Ok(format!(
-                "DESCRIBE RESOURCE {}{};",
-                describe.identifier.as_str(),
-                describe
-                    .version
-                    .map(|version| format!(" VERSION {version}"))
-                    .unwrap_or_default()
-            )),
+            Self::DescribeResource(describe) => {
+                let version = match describe.version {
+                    Some(version) => format!(" VERSION {version}"),
+                    None => String::new(),
+                };
+                Ok(format!(
+                    "DESCRIBE RESOURCE {}{version};",
+                    describe.identifier.as_str()
+                ))
+            }
             Self::DescribeLookup(describe) => {
                 Ok(format!("DESCRIBE HASH MAP {};", describe.name.as_str()))
             }
@@ -1176,30 +1178,31 @@ impl CreateClientWebsockets {
 }
 
 fn client_mount_clause(mount: Option<&ResourceName>) -> String {
-    mount
-        .map(|mount| format!(" MOUNT {}", mount.as_str()))
-        .unwrap_or_default()
+    match mount {
+        Some(mount) => format!(" MOUNT {}", mount.as_str()),
+        None => String::new(),
+    }
 }
 
 fn signaling_protocol_clause(signaling_protocol: Option<&SignalingProtocolName>) -> String {
-    signaling_protocol
-        .map(|protocol| format!(" WITH SIGNALING PROTOCOL {}", protocol.as_str()))
-        .unwrap_or_default()
+    match signaling_protocol {
+        Some(protocol) => format!(" WITH SIGNALING PROTOCOL {}", protocol.as_str()),
+        None => String::new(),
+    }
 }
 
 impl CreateVhost {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let tls = self
-            .tls
-            .as_ref()
-            .map(|tls| {
+        let tls = match &self.tls {
+            Some(tls) => {
                 let mut rendered = format!(" WITH TLS {}", tls.resource.as_str());
                 if let Some(version) = tls.version {
                     rendered.push_str(&format!(" VERSION {version}"));
                 }
                 rendered
-            })
-            .unwrap_or_default();
+            }
+            None => String::new(),
+        };
         Ok(format!(
             "CREATE VHOST {} {}{};",
             self.name.as_str(),
@@ -1262,10 +1265,10 @@ impl SignalingWireFormat {
         let Self::Protobuf(config) = self else {
             return Ok(self.as_ref().to_string());
         };
-        let version = config
-            .resource_version
-            .map(|version| format!(" VERSION {version}"))
-            .unwrap_or_default();
+        let version = match config.resource_version {
+            Some(version) => format!(" VERSION {version}"),
+            None => String::new(),
+        };
         let protobuf_config = config
             .config
             .iter()
@@ -1340,10 +1343,10 @@ impl CreateCodec {
                 codec_jaq_transformations_to_nspl(transformations)?,
             ),
             CodecWireFormat::Protobuf(config) => {
-                let version = config
-                    .resource_version
-                    .map(|version| format!(" VERSION {version}"))
-                    .unwrap_or_default();
+                let version = match config.resource_version {
+                    Some(version) => format!(" VERSION {version}"),
+                    None => String::new(),
+                };
                 let protobuf_config = config
                     .config
                     .iter()
@@ -1495,16 +1498,11 @@ impl CreateBranch {
 
 impl CreateIngestor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let timestamp = self
-            .timestamp_source
-            .as_ref()
-            .map(|source| match source {
-                IngestTimestampSource::Now => " TIMESTAMP NOW".to_string(),
-                IngestTimestampSource::At(field) => {
-                    format!(" TIMESTAMP AT {}", field.as_str())
-                }
-            })
-            .unwrap_or_default();
+        let timestamp = match &self.timestamp_source {
+            Some(IngestTimestampSource::Now) => " TIMESTAMP NOW".to_string(),
+            Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
+            None => String::new(),
+        };
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             ingest_source_to_nspl(&self.source)
@@ -1609,11 +1607,10 @@ fn commit_policy_to_nspl(policy: &str, max_size: &str) -> String {
 }
 
 fn collect_policy_to_nspl(policy: &InputCollectPolicy) -> String {
-    let max_batch_size = policy
-        .max_batch_size
-        .as_ref()
-        .map(|size| format!(" MAX BATCH SIZE {size}"))
-        .unwrap_or_default();
+    let max_batch_size = match &policy.max_batch_size {
+        Some(size) => format!(" MAX BATCH SIZE {size}"),
+        None => String::new(),
+    };
     format!("COLLECT FOR {}{max_batch_size}", policy.collect_for)
 }
 
@@ -1838,11 +1835,10 @@ impl CreateWindowProcessor {
 impl CreateEmitter {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let flush_policy = format!(" {}", self.flush_policy.to_canonical_nspl());
-        let commit_policy = self
-            .sink
-            .commit_policy()
-            .map(|(policy, max_size)| format!(" {}", commit_policy_to_nspl(policy, max_size)))
-            .unwrap_or_default();
+        let commit_policy = match self.sink.commit_policy() {
+            Some((policy, max_size)) => format!(" {}", commit_policy_to_nspl(policy, max_size)),
+            None => String::new(),
+        };
         // The codec and the commit cadence are written with the sink they belong to: whether either
         // is legal is a property of the sink, so they nest under it rather than precede it.
         let mut sink_clauses = Vec::new();
@@ -1919,10 +1915,10 @@ impl CreateReingestor {
 
 impl CreateInferencer {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let version = self
-            .resource_version
-            .map(|version| format!(" VERSION {version}"))
-            .unwrap_or_default();
+        let version = match self.resource_version {
+            Some(version) => format!(" VERSION {version}"),
+            None => String::new(),
+        };
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -1960,10 +1956,10 @@ impl CreateInferencer {
 
 impl CreateWasmProcessor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let version = self
-            .resource_version
-            .map(|version| format!(" VERSION {version}"))
-            .unwrap_or_default();
+        let version = match self.resource_version {
+            Some(version) => format!(" VERSION {version}"),
+            None => String::new(),
+        };
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -2076,11 +2072,10 @@ fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> Result<String, Canonica
         .map(|relay| from_relay_to_nspl(relay, &inputs.r#where))
         .collect::<Result<Vec<_>, _>>()
         .map(|items| items.join(", "))?;
-    let collect = inputs
-        .collect_policy
-        .as_ref()
-        .map(|policy| format!(" {}", collect_policy_to_nspl(policy)))
-        .unwrap_or_default();
+    let collect = match &inputs.collect_policy {
+        Some(policy) => format!(" {}", collect_policy_to_nspl(policy)),
+        None => String::new(),
+    };
     Ok(format!("{relays}{collect}"))
 }
 
@@ -2165,24 +2160,20 @@ fn processor_output_clause(output: &crate::ProcessorOutput) -> Result<Clause, Ca
 }
 
 fn processor_output_to_nspl(output: &crate::ProcessorOutput) -> Result<String, CanonicalNsplError> {
-    let flush = output
-        .flush_policy
-        .as_ref()
-        .map(|policy| format!(" {}", policy.to_canonical_nspl()))
-        .unwrap_or_default();
+    let flush = match &output.flush_policy {
+        Some(policy) => format!(" {}", policy.to_canonical_nspl()),
+        None => String::new(),
+    };
     let construction = route_construction_to_nspl(&output.construction)?;
     let construction = if construction.is_empty() {
         String::new()
     } else {
         format!(" {construction}")
     };
-    let branch = output
-        .branch
-        .as_ref()
-        .map(output_branch_to_nspl)
-        .transpose()?
-        .map(|branch| format!(" {branch}"))
-        .unwrap_or_default();
+    let branch = match &output.branch {
+        Some(branch) => format!(" {}", output_branch_to_nspl(branch)?),
+        None => String::new(),
+    };
     Ok(format!(
         "TO {}{}{}{} {}",
         output.relay.as_str(),
@@ -2342,12 +2333,10 @@ fn alter_emitter_operation_to_nspl(
             relay,
             where_clause,
         } => {
-            let where_clause = where_clause
-                .as_ref()
-                .map(expression_to_nspl)
-                .transpose()?
-                .map(|where_clause| format!(" WHERE {where_clause}"))
-                .unwrap_or_default();
+            let where_clause = match where_clause {
+                Some(where_clause) => format!(" WHERE {}", expression_to_nspl(where_clause)?),
+                None => String::new(),
+            };
             Ok(format!("ADD FROM {}{where_clause}", relay.as_str()))
         }
         AlterEmitterOperation::DropFrom { relay } => Ok(format!("DROP FROM {}", relay.as_str())),
@@ -2365,14 +2354,17 @@ fn alter_emitter_operation_to_nspl(
         AlterEmitterOperation::SetSink {
             sink,
             publishing_mode,
-        } => Ok(format!(
-            "SET TO {}{} MODE {}",
-            emit_sink_to_nspl(sink)?,
-            sink.commit_policy()
-                .map(|(policy, max_size)| format!(" {}", commit_policy_to_nspl(policy, max_size)))
-                .unwrap_or_default(),
-            publishing_mode.to_canonical_nspl()
-        )),
+        } => {
+            let commit_policy = match sink.commit_policy() {
+                Some((policy, max_size)) => format!(" {}", commit_policy_to_nspl(policy, max_size)),
+                None => String::new(),
+            };
+            Ok(format!(
+                "SET TO {}{commit_policy} MODE {}",
+                emit_sink_to_nspl(sink)?,
+                publishing_mode.to_canonical_nspl()
+            ))
+        }
         AlterEmitterOperation::SetClient { client } => {
             Ok(format!("SET CLIENT {}", client.as_str()))
         }

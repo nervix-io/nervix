@@ -1045,9 +1045,10 @@ fn expand_user_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     if raw == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
+        return match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home),
+            None => path.to_path_buf(),
+        };
     }
     if let Some(stripped) = raw.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
@@ -1234,11 +1235,10 @@ fn recovered_transaction_outcome(mut outcome: CommandOutcome) -> CommandOutcome 
             .map(|result| result.message.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        outcome.diagnostics = outcome
-            .results
-            .last()
-            .map(|result| result.diagnostics.clone())
-            .unwrap_or_default();
+        outcome.diagnostics = match outcome.results.last() {
+            Some(result) => result.diagnostics.clone(),
+            None => Vec::new(),
+        };
     }
     if outcome.transaction.as_ref().map(|status| status.state) == Some(TransactionState::Committed)
     {

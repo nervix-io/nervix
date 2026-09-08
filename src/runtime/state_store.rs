@@ -395,24 +395,24 @@ fn stored_placement_schema(
     let state = key
         .get(state_offset)
         .copied()
-        .and_then(RuntimeStateKind::from_repr)
-        .ok_or_else(|| {
-            RuntimePersistenceError::DecodeState(
-                "runtime state key has an invalid state kind".to_string(),
-            )
-        })?;
+        .and_then(RuntimeStateKind::from_repr);
+    let Some(state) = state else {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has an invalid state kind".to_string(),
+        )));
+    };
     let kind_start = state_offset
         .checked_add(2)
         .verified("the state-kind byte position is an index into this key");
     let kind_end = key
         .get(kind_start..)
-        .and_then(|rest| rest.iter().position(|byte| *byte == 0))
-        .and_then(|offset| kind_start.checked_add(offset))
-        .ok_or_else(|| {
-            RuntimePersistenceError::DecodeState(
-                "runtime state key has no model-kind separator".to_string(),
-            )
-        })?;
+        .and_then(|rest| rest.iter().position(|byte| *byte == 0));
+    let kind_end = kind_end.and_then(|offset| kind_start.checked_add(offset));
+    let Some(kind_end) = kind_end else {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has no model-kind separator".to_string(),
+        )));
+    };
     let kind = std::str::from_utf8(&key[kind_start..kind_end]).map_err(|_| {
         RuntimePersistenceError::DecodeState(
             "runtime state key has an invalid model kind".to_string(),
@@ -428,13 +428,13 @@ fn stored_placement_schema(
         .verified("the model-kind separator position is an index into this key");
     let identifier_end = key
         .get(identifier_start..)
-        .and_then(|rest| rest.iter().position(|byte| *byte == 0))
-        .and_then(|offset| identifier_start.checked_add(offset))
-        .ok_or_else(|| {
-            RuntimePersistenceError::DecodeState(
-                "runtime state key has no identifier separator".to_string(),
-            )
-        })?;
+        .and_then(|rest| rest.iter().position(|byte| *byte == 0));
+    let identifier_end = identifier_end.and_then(|offset| identifier_start.checked_add(offset));
+    let Some(identifier_end) = identifier_end else {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has no identifier separator".to_string(),
+        )));
+    };
     let identifier = std::str::from_utf8(&key[identifier_start..identifier_end]).map_err(|_| {
         RuntimePersistenceError::DecodeState(
             "runtime state key has an invalid identifier".to_string(),
@@ -450,12 +450,12 @@ fn stored_placement_schema(
         .verified("the identifier separator position is an index into this key");
     let fingerprint = fingerprint_start
         .checked_add(32)
-        .and_then(|fingerprint_end| key.get(fingerprint_start..fingerprint_end))
-        .ok_or_else(|| {
-            RuntimePersistenceError::DecodeState(
-                "runtime state key has a truncated schema fingerprint".to_string(),
-            )
-        })?;
+        .and_then(|fingerprint_end| key.get(fingerprint_start..fingerprint_end));
+    let Some(fingerprint) = fingerprint else {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has a truncated schema fingerprint".to_string(),
+        )));
+    };
     let mut schema_fingerprint = [0; 32];
     schema_fingerprint.copy_from_slice(fingerprint);
     Ok(StoredPlacementSchema {

@@ -138,12 +138,10 @@ impl Runtime {
             host: normalize_http_host(host),
             path: path.to_string(),
         };
-        let bindings = self
-            .inner
-            .endpoint_bindings
-            .get(&route_key)
-            .map(|bindings| bindings.clone())
-            .unwrap_or_default();
+        let bindings = match self.inner.endpoint_bindings.get(&route_key) {
+            Some(bindings) => bindings.clone(),
+            None => Vec::new(),
+        };
         let mut outcome = EndpointDispatchOutcome::default();
         let mut retry_after = Vec::new();
         for binding in &bindings {
@@ -195,12 +193,9 @@ impl Runtime {
             host: normalize_http_host(host),
             path: path.to_string(),
         };
-        let bindings = {
-            self.inner
-                .endpoint_bindings
-                .get(&route_key)
-                .map(|bindings| bindings.clone())
-                .unwrap_or_default()
+        let bindings = match self.inner.endpoint_bindings.get(&route_key) {
+            Some(bindings) => bindings.clone(),
+            None => Vec::new(),
         };
 
         let mut outcome = EndpointDispatchOutcome::default();

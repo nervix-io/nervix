@@ -723,9 +723,7 @@ impl CompiledWindowAggregateProgram {
             VmCompileBinding::writeonly(OUTPUT_NAMESPACE, empty_output),
             VmCompileBinding::readonly("input", input_schema.clone()),
         ];
-        let signatures = udfs
-            .map(|executor| executor.signatures().clone())
-            .unwrap_or_default();
+        let signatures = super::runtime_udf_signatures(udfs);
         let inferred =
             infer_vm_set_expr_types_for_bindings_with_udfs(&program, infer_bindings, signatures)
                 .map_err(|error| {

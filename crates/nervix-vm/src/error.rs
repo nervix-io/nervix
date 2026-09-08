@@ -78,7 +78,10 @@ impl RowErrors {
     }
 
     pub fn row(&self, row: usize) -> &[SideError] {
-        self.rows.get(row).map_or(&[], Vec::as_slice)
+        match self.rows.get(row) {
+            Some(errors) => errors.as_slice(),
+            None => &[],
+        }
     }
 
     pub fn get(&self, row: usize) -> Option<&[SideError]> {

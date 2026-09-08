@@ -24,10 +24,10 @@ impl IngestMessageHeaders for KafkaMessageHeaders<'_> {
             return;
         };
         for header in headers.iter() {
-            let value = header
-                .value
-                .map(String::from_utf8_lossy)
-                .unwrap_or(std::borrow::Cow::Borrowed(""));
+            let value = match header.value {
+                Some(value) => String::from_utf8_lossy(value),
+                None => std::borrow::Cow::Borrowed(""),
+            };
             visit(header.key, value.as_ref());
         }
     }
@@ -424,12 +424,11 @@ impl KafkaIngestor {
                         continue;
                     }
                     if let Some(state) = task_kafka_offset_state.as_ref() {
-                        let current_start_version = task_runtime
-                            .inner
-                            .domains
-                            .get(&task_domain)
-                            .map(|domain_state| domain_state.start_version)
-                            .unwrap_or(0);
+                        let current_start_version =
+                            match task_runtime.inner.domains.get(&task_domain) {
+                                Some(domain_state) => domain_state.start_version,
+                                None => 0,
+                            };
                         if observed_start_version != Some(current_start_version)
                             || assignment_refresh_pending
                         {
@@ -562,10 +561,12 @@ impl KafkaIngestor {
                                     let decode_message = |message: &rdkafka::message::BorrowedMessage<'_>| {
                                         let key = match message.key_view::<str>() {
                                             Some(Ok(key)) => key.to_owned(),
-                                            Some(Err(_)) | None => message
-                                                .key()
-                                                .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-                                                .unwrap_or_default(),
+                                            Some(Err(_)) | None => match message.key() {
+                                                Some(bytes) => {
+                                                    String::from_utf8_lossy(bytes).to_string()
+                                                }
+                                                None => String::new(),
+                                            },
                                         };
                                         trace!(
                                             domain = task_domain.as_str(),

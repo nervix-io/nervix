@@ -1467,13 +1467,21 @@ pub(crate) fn parse_as_type_from_arrow(
         ArrowDataType::List(element) => Ok(ParseAsType::Vec {
             element: Box::new(parse_as_type_from_arrow(element.data_type())?),
         }),
-        ArrowDataType::FixedSizeList(element, len) => Ok(ParseAsType::Array {
-            element: Box::new(parse_as_type_from_arrow(element.data_type())?),
-            len: u32::try_from(*len)
-                .ok()
-                .and_then(NonZeroU32::new)
-                .ok_or_else(|| Report::new(ArrowTypeError::EmptyFixedSizeList { len: *len }))?,
-        }),
+        ArrowDataType::FixedSizeList(element, len) => {
+            let size = match u32::try_from(*len) {
+                Ok(size) => NonZeroU32::new(size),
+                Err(_) => None,
+            };
+            let Some(size) = size else {
+                return Err(Report::new(ArrowTypeError::EmptyFixedSizeList {
+                    len: *len,
+                }));
+            };
+            Ok(ParseAsType::Array {
+                element: Box::new(parse_as_type_from_arrow(element.data_type())?),
+                len: size,
+            })
+        }
         other => Err(Report::new(ArrowTypeError::Unsupported {
             data_type: other.clone(),
         })),
@@ -2601,11 +2609,14 @@ fn decode_json_value(
     }
     builder
         .finish_row()
-        .and_then(|()| builder.finish())
         .map_err(|reason| CodecError::InvalidCodec {
             codec: codec.name.as_str().to_string(),
             reason,
-        })
+        })?;
+    builder.finish().map_err(|reason| CodecError::InvalidCodec {
+        codec: codec.name.as_str().to_string(),
+        reason,
+    })
 }
 
 fn run_jaq_transformation(
@@ -2699,11 +2710,14 @@ fn decode_avro(
     }
     builder
         .finish_row()
-        .and_then(|()| builder.finish())
         .map_err(|reason| CodecError::InvalidCodec {
             codec: codec.name.as_str().to_string(),
             reason,
-        })
+        })?;
+    builder.finish().map_err(|reason| CodecError::InvalidCodec {
+        codec: codec.name.as_str().to_string(),
+        reason,
+    })
 }
 
 fn append_json_value_to_arrow(

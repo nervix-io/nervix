@@ -355,16 +355,14 @@ impl BenchmarkSuiteReport {
     }
 
     fn successful_runs(&self) -> usize {
-        self.comparison
-            .as_ref()
-            .map(|comparison| {
-                comparison
-                    .benchmarks
-                    .iter()
-                    .map(|benchmark| benchmark.runs.len())
-                    .sum()
-            })
-            .unwrap_or(0)
+        match &self.comparison {
+            Some(comparison) => comparison
+                .benchmarks
+                .iter()
+                .map(|benchmark| benchmark.runs.len())
+                .sum(),
+            None => 0,
+        }
     }
 
     fn benchmark_count(&self) -> usize {
@@ -519,14 +517,16 @@ impl BenchmarkRuns {
             render_parameters(&first.manifest.parameters)
         ));
         for run in &self.runs {
+            let mut directory = "unknown";
+            if let Some(name) = run.directory.file_name()
+                && let Some(name) = name.to_str()
+            {
+                directory = name;
+            }
             let mut provenance = format!(
-                "- {}: subject `{}`, run `{}`",
+                "- {}: subject `{}`, run `{directory}`",
                 display_name(&run.manifest.implementation),
                 run.manifest.subject,
-                run.directory
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("unknown"),
             );
             if let Some(identity) = &run.image_identity {
                 provenance.push_str(&format!(
@@ -867,10 +867,10 @@ pub(crate) fn display_name(value: &str) -> String {
             "vector" => "Vector".to_string(),
             _ => {
                 let mut characters = word.chars();
-                characters
-                    .next()
-                    .map(|first| first.to_uppercase().chain(characters).collect())
-                    .unwrap_or_default()
+                match characters.next() {
+                    Some(first) => first.to_uppercase().chain(characters).collect(),
+                    None => String::new(),
+                }
             }
         })
         .collect::<Vec<_>>()
@@ -944,10 +944,10 @@ fn format_metric_decimal(value: f64, precision: usize) -> String {
     let Some((whole, fraction)) = rendered.split_once('.') else {
         return rendered;
     };
-    let whole = whole
-        .parse::<u64>()
-        .map(format_count)
-        .unwrap_or_else(|_| whole.to_string());
+    let whole = match whole.parse::<u64>() {
+        Ok(count) => format_count(count),
+        Err(_) => whole.to_string(),
+    };
     format!("{whole}.{fraction}")
 }
 

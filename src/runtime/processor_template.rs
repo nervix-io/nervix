@@ -646,17 +646,14 @@ impl BranchInstanceTemplate {
                         domain.as_str()
                     )
                 })?;
-                let schema = execution
-                    .materialized_stream_specs
-                    .get(relay)
-                    .map(|spec| spec.schema.clone())
-                    .ok_or_else(|| {
-                        format!(
-                            "materialized relay '{}' is not instantiated in domain '{}'",
-                            relay.as_str(),
-                            domain.as_str()
-                        )
-                    })?;
+                let Some(spec) = execution.materialized_stream_specs.get(relay) else {
+                    return Err(format!(
+                        "materialized relay '{}' is not instantiated in domain '{}'",
+                        relay.as_str(),
+                        domain.as_str()
+                    ));
+                };
+                let schema = spec.schema.clone();
                 let placement = runtime.state_placement(
                     domain,
                     RuntimeStateKind::MaterializedRelay,

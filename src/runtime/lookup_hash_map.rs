@@ -410,9 +410,7 @@ pub(super) fn compile_lookup_hash_map_calls(
             },
             span: (0..0).into(),
         };
-        let signatures = udfs
-            .map(|executor| executor.signatures().clone())
-            .unwrap_or_default();
+        let signatures = runtime_udf_signatures(udfs);
         let key_types = infer_vm_set_expr_types_for_bindings_with_udfs(
             &key_program,
             bindings.iter().cloned(),

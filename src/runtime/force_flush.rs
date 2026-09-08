@@ -340,10 +340,10 @@ impl Runtime {
     }
 
     pub fn domain_outstanding_work(&self, domain: &DomainName) -> usize {
-        self.inner
-            .in_flight_by_domain
-            .get(domain)
-            .map_or(0, |tracker| tracker.outstanding())
+        match self.inner.in_flight_by_domain.get(domain) {
+            Some(tracker) => tracker.outstanding(),
+            None => 0,
+        }
     }
 
     pub(in crate::runtime) fn force_flush_participant(

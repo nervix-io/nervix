@@ -161,25 +161,20 @@ impl BranchRuntime {
         if self.relay_state_epoch == Some(current_epoch) {
             return;
         }
-        let desired_relays = self
-            .runtime
-            .inner
-            .executions
-            .get(&self.domain)
-            .map(|execution| {
-                execution
-                    .materialized_stream_specs
-                    .keys()
-                    .filter(|relay| {
-                        !execution
-                            .materialized_stream_owner_nodes
-                            .get(*relay)
-                            .is_some_and(Option::is_some)
-                    })
-                    .cloned()
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_default();
+        let desired_relays = match self.runtime.inner.executions.get(&self.domain) {
+            Some(execution) => execution
+                .materialized_stream_specs
+                .keys()
+                .filter(|relay| {
+                    !execution
+                        .materialized_stream_owner_nodes
+                        .get(*relay)
+                        .is_some_and(Option::is_some)
+                })
+                .cloned()
+                .collect::<HashSet<_>>(),
+            None => HashSet::default(),
+        };
         self.materialized_states
             .retain(|identifier, _| desired_relays.contains(identifier));
         if desired_relays.contains(relay) && !self.materialized_states.contains_key(relay) {
@@ -1167,14 +1162,15 @@ impl BranchExecutionRuntime {
                     let branch_sleep = next_branch_deadline.map(|deadline| {
                         wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline)
                     });
-                    branch_sleep
-                        .map(|branch_sleep| expiration_sleep.min(branch_sleep))
-                        .unwrap_or(expiration_sleep)
-                        .min(
-                            next_lru_snapshot
-                                .checked_duration_since(Instant::now())
-                                .unwrap_or(Duration::ZERO),
-                        )
+                    let until_next_deadline = match branch_sleep {
+                        Some(branch_sleep) => expiration_sleep.min(branch_sleep),
+                        None => expiration_sleep,
+                    };
+                    until_next_deadline.min(
+                        next_lru_snapshot
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO),
+                    )
                 };
                 tokio::select! {
                     biased;

@@ -1393,12 +1393,12 @@ async fn handle_http_request(
     shutdown: CancellationToken,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Empty<Bytes>>, Infallible> {
-    let host = request
-        .headers()
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
+    let mut host = String::new();
+    if let Some(value) = request.headers().get(HOST)
+        && let Ok(value) = value.to_str()
+    {
+        host = value.to_string();
+    }
     let path = request.uri().path().to_string();
 
     if runtime.has_websocket_endpoint(&host, &path).await {
@@ -4089,7 +4089,7 @@ impl SessionService for SessionServiceImpl {
         let _authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            let leader_grpc_uri = match leader.as_ref() {
+            let leader_node = match leader.as_ref() {
                 Some(leader_id) => self
                     .inner
                     .cluster
@@ -4097,18 +4097,25 @@ impl SessionService for SessionServiceImpl {
                     .await
                     .live_nodes
                     .into_iter()
-                    .find(|node| node.node_id == *leader_id)
-                    .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
-                    .unwrap_or_default(),
-                None => String::new(),
+                    .find(|node| node.node_id == *leader_id),
+                None => None,
             };
+            let mut leader_grpc_uri = String::new();
+            if let Some(node) = leader_node
+                && let Some(uri) = grpc_uri_from_advertise_addr(&node.grpc_advertise_addr)
+            {
+                leader_grpc_uri = uri;
+            }
             return Ok(Response::new(UploadResourceResponse {
                 success: false,
                 message: "resource uploads must be sent to the cluster leader".to_string(),
                 version: 0,
                 diagnostics: Vec::new(),
                 kind: i32::from(CommandResultKind::NotLeader),
-                leader: leader.map_or_else(String::new, |leader| leader.to_string()),
+                leader: match leader {
+                    Some(leader) => leader.to_string(),
+                    None => String::new(),
+                },
                 leader_grpc_uri,
             }));
         }
@@ -4213,7 +4220,7 @@ impl SessionService for SessionServiceImpl {
             })),
             Err(message) => {
                 let leader = self.inner.consensus.current_leader().await;
-                let leader_grpc_uri = match leader.as_ref() {
+                let leader_node = match leader.as_ref() {
                     Some(leader_id) if leader_id != self.inner.consensus.local_node_id() => self
                         .inner
                         .cluster
@@ -4221,11 +4228,15 @@ impl SessionService for SessionServiceImpl {
                         .await
                         .live_nodes
                         .into_iter()
-                        .find(|node| node.node_id == *leader_id)
-                        .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
-                        .unwrap_or_default(),
-                    _ => String::new(),
+                        .find(|node| node.node_id == *leader_id),
+                    _ => None,
                 };
+                let mut leader_grpc_uri = String::new();
+                if let Some(node) = leader_node
+                    && let Some(uri) = grpc_uri_from_advertise_addr(&node.grpc_advertise_addr)
+                {
+                    leader_grpc_uri = uri;
+                }
                 let kind = if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                     i32::from(CommandResultKind::NotLeader)
                 } else {
@@ -4237,7 +4248,10 @@ impl SessionService for SessionServiceImpl {
                     version: 0,
                     diagnostics: Vec::new(),
                     kind,
-                    leader: leader.map_or_else(String::new, |leader| leader.to_string()),
+                    leader: match leader {
+                        Some(leader) => leader.to_string(),
+                        None => String::new(),
+                    },
                     leader_grpc_uri,
                 }))
             }
@@ -5690,10 +5704,11 @@ impl SessionServiceImpl {
             .inner
             .registry
             .placement_plan(domain, domain_state.config.placement);
-        lines.push(format!(
-            "  rule count: {}",
-            placement_plan.as_ref().map_or(0, |plan| plan.rules.len())
-        ));
+        let rule_count = match placement_plan.as_ref() {
+            Some(plan) => plan.rules.len(),
+            None => 0,
+        };
+        lines.push(format!("  rule count: {rule_count}"));
         if let Some(plan) = placement_plan {
             let schedule = self.inner.consensus.current_schedule().await;
             let domain_schedule = schedule.domain(domain);
@@ -5703,11 +5718,11 @@ impl SessionServiceImpl {
                     "    members: {}",
                     format_placement_runtime_nodes(&group.members)
                 ));
-                lines.push(format!(
-                    "    host: {}",
-                    placement_group_host(domain_schedule, &group.members)
-                        .map_or("(unassigned)", ClusterNodeName::as_str)
-                ));
+                let host = match placement_group_host(domain_schedule, &group.members) {
+                    Some(host) => host.as_str(),
+                    None => "(unassigned)",
+                };
+                lines.push(format!("    host: {host}"));
                 for bond in &group.bonds {
                     lines.push(format!(
                         "    bond: {} <-> {} ({})",
@@ -5740,9 +5755,10 @@ impl SessionServiceImpl {
             .iter()
             .map(|rule| {
                 let coverage = placement_rule_coverage_status(rule);
-                let rank = rule
-                    .rank
-                    .map_or_else(|| "unranked".to_string(), |rank| rank.to_string());
+                let rank = match rule.rank {
+                    Some(rank) => rank.to_string(),
+                    None => "unranked".to_string(),
+                };
                 format!(
                     "{} policy={} rank={} coverage={coverage}",
                     rule.name.as_str(),
@@ -5792,11 +5808,11 @@ impl SessionServiceImpl {
             lines.push(format!("form: {form}"));
         }
         lines.push(format!("policy: {}", rule.policy.as_ref()));
-        lines.push(format!(
-            "rank: {}",
-            rule.rank
-                .map_or_else(|| "unranked".to_string(), |rank| rank.to_string())
-        ));
+        let rank = match rule.rank {
+            Some(rank) => rank.to_string(),
+            None => "unranked".to_string(),
+        };
+        lines.push(format!("rank: {rank}"));
         let rule_runtime_nodes = placement_rule_runtime_nodes(rule);
         let from_runtime_nodes = placement_rule_endpoint_nodes(rule, true);
         let to_runtime_nodes = placement_rule_endpoint_nodes(rule, false);
@@ -5864,11 +5880,11 @@ impl SessionServiceImpl {
                 "group members: {}",
                 format_placement_runtime_nodes(&group.members)
             ));
-            lines.push(format!(
-                "group host: {}",
-                placement_group_host(domain_schedule, &group.members)
-                    .map_or("(unassigned)", ClusterNodeName::as_str)
-            ));
+            let host = match placement_group_host(domain_schedule, &group.members) {
+                Some(host) => host.as_str(),
+                None => "(unassigned)",
+            };
+            lines.push(format!("group host: {host}"));
             for bond in &group.bonds {
                 lines.push(format!(
                     "bond: {} <-> {} ({})",
@@ -6611,11 +6627,12 @@ impl SessionServiceImpl {
             .iter()
             .map(|moved| moved.entity.clone())
             .collect::<Vec<_>>();
-        let relays = current
-            .map(|schedule| {
+        let relays = match current {
+            Some(schedule) => {
                 Runtime::ownership_handoff_relays_for_schedule(schedule, &affected_entities)
-            })
-            .unwrap_or_default();
+            }
+            None => Vec::new(),
+        };
         let former_owners = moves
             .iter()
             .map(|moved| moved.former_owner.clone())
@@ -7820,12 +7837,15 @@ impl SessionServiceImpl {
             })?;
         let local_node_id = self.inner.consensus.local_node_id();
         if !node.executes_on(local_node_id) {
+            let owner = match node.execution_node() {
+                Some(owner) => owner.as_str(),
+                None => "-",
+            };
             return Err(format!(
-                "{} '{}' in domain '{}' is owned by '{}' but request reached '{}'",
+                "{} '{}' in domain '{}' is owned by '{owner}' but request reached '{}'",
                 kind.as_str().to_ascii_lowercase(),
                 identifier.as_str(),
                 domain.as_str(),
-                node.execution_node().map_or("-", ClusterNodeName::as_str),
                 local_node_id
             ));
         }
@@ -8620,8 +8640,11 @@ impl SessionServiceImpl {
             .await
         {
             Ok(transaction) => {
-                let mut result =
-                    command_ok(quiesce_level.map(quiesce_level_message).unwrap_or_default());
+                let message = match quiesce_level {
+                    Some(quiesce_level) => quiesce_level_message(quiesce_level),
+                    None => String::new(),
+                };
+                let mut result = command_ok(message);
                 result.transaction = Some(transaction_status(&transaction));
                 result
             }
@@ -8823,7 +8846,10 @@ impl SessionServiceImpl {
             .await
         {
             Ok(transaction) => {
-                let dropped = previous.map_or(0, |transaction| transaction.statements.len());
+                let dropped = match previous {
+                    Some(transaction) => transaction.statements.len(),
+                    None => 0,
+                };
                 self.release_session_transaction_binding(subscriptions);
                 let mut result = command_ok(format!(
                     "transaction reverted: dropped {dropped} command(s); id '{id}'"
@@ -12018,16 +12044,11 @@ impl SessionServiceImpl {
                 let replica = replicas
                     .iter()
                     .find(|replica| replica.key.node_id == node_id);
-                let state = replica.map_or_else(
-                    || {
-                        if live_node_ids.contains(&node_id) {
-                            "pending"
-                        } else {
-                            "untracked"
-                        }
-                    },
-                    |replica| replica.state.as_ref(),
-                );
+                let state = match replica {
+                    Some(replica) => replica.state.as_ref(),
+                    None if live_node_ids.contains(&node_id) => "pending",
+                    None => "untracked",
+                };
                 let checksum = if let Some(replica) = replica {
                     replica.root_checksum.as_deref().unwrap_or("-")
                 } else {
@@ -12040,13 +12061,9 @@ impl SessionServiceImpl {
                 } else {
                     "-".to_string()
                 };
-                let source = if let Some(replica) = replica {
-                    replica
-                        .source_node_id
-                        .as_ref()
-                        .map_or("-", ClusterNodeName::as_str)
-                } else {
-                    "-"
+                let source = match replica.and_then(|replica| replica.source_node_id.as_ref()) {
+                    Some(source) => source.as_str(),
+                    None => "-",
                 };
                 let error = if let Some(replica) = replica {
                     replica.error.as_deref().unwrap_or("-")
@@ -14177,13 +14194,13 @@ impl SessionServiceImpl {
             }
         }
 
-        let relay_branching = self
+        let relay_target = self
             .subscription_target_from_schedule(domain, &subscription.relay)
-            .await
-            .ok()
-            .flatten()
-            .map(|target| target.branching)
-            .unwrap_or_default();
+            .await;
+        let relay_branching = match relay_target {
+            Ok(Some(target)) => target.branching,
+            Ok(None) | Err(_) => Vec::new(),
+        };
         let relay_branch_schema = match self
             .subscription_branch_schema(domain, &subscription.relay)
             .await
@@ -14272,10 +14289,10 @@ impl SessionServiceImpl {
                         };
                     }
                 };
-                let sensitivity = filter_map
-                    .as_ref()
-                    .map(|filter_map| filter_map.output_sensitivity.clone())
-                    .unwrap_or(input_sensitivity);
+                let sensitivity = match filter_map.as_ref() {
+                    Some(filter_map) => filter_map.output_sensitivity.clone(),
+                    None => input_sensitivity,
+                };
                 (filter_map, sensitivity)
             }
             Ok(None) => {
@@ -14612,9 +14629,10 @@ fn format_ingestor_describe_output(
         format!("codec: {}", ingestor.decode_using_codec.as_str()),
         format!(
             "owner: {}",
-            ingestor_node
-                .execution_node()
-                .map_or("-", ClusterNodeName::as_str)
+            match ingestor_node.execution_node() {
+                Some(owner) => owner.as_str(),
+                None => "-",
+            }
         ),
         format!(
             "timestamp: {}",
@@ -14671,13 +14689,11 @@ fn format_ingestor_describe_output(
         "reconnect backoff: {}",
         summary.reconnect_backoff.as_deref().unwrap_or("-")
     ));
-    lines.push(format!(
-        "reconnect wait: {}",
-        summary
-            .reconnect_wait_millis
-            .map(format_millis_duration)
-            .unwrap_or_else(|| "-".to_string())
-    ));
+    let reconnect_wait = match summary.reconnect_wait_millis {
+        Some(millis) => format_millis_duration(millis),
+        None => "-".to_string(),
+    };
+    lines.push(format!("reconnect wait: {reconnect_wait}"));
 
     if let IngestSource::Kafka {
         topic,
@@ -14740,10 +14756,10 @@ fn format_ingestor_describe_output(
 }
 
 fn format_branch_selection(branched_by: &BranchSelection) -> &str {
-    branched_by
-        .branch()
-        .map(|name| name.as_str())
-        .unwrap_or("UNBRANCHED")
+    match branched_by.branch() {
+        Some(name) => name.as_str(),
+        None => "UNBRANCHED",
+    }
 }
 
 fn format_output_branch(branch: Option<&nervix_models::OutputBranch>) -> &str {
@@ -14813,21 +14829,18 @@ fn format_relay_describe_output(
 }
 
 fn format_schedule_placement_lines(scheduled_node: Option<&ScheduledNode>) -> Vec<String> {
-    vec![
-        format!(
-            "owner: {}",
-            scheduled_node
-                .and_then(ScheduledNode::execution_node)
-                .map_or("-", ClusterNodeName::as_str)
-        ),
-        format!(
-            "replicas: {}",
-            scheduled_node
-                .map(format_replica_nodes)
-                .filter(|replicas| !replicas.is_empty())
-                .unwrap_or_else(|| "-".to_string())
-        ),
-    ]
+    let owner = match scheduled_node.and_then(ScheduledNode::execution_node) {
+        Some(owner) => owner.as_str(),
+        None => "-",
+    };
+    let mut replicas = "-".to_string();
+    if let Some(scheduled_node) = scheduled_node {
+        let rendered = format_replica_nodes(scheduled_node);
+        if !rendered.is_empty() {
+            replicas = rendered;
+        }
+    }
+    vec![format!("owner: {owner}"), format!("replicas: {replicas}")]
 }
 
 fn format_replica_nodes(scheduled_node: &ScheduledNode) -> String {
@@ -14845,17 +14858,14 @@ fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
     lines.push(format!("outputs: {output_count}"));
 
     for (index, output) in outputs.routes.iter().enumerate() {
-        let flush = output
-            .flush_policy
-            .as_ref()
-            .map(|policy| match policy {
-                nervix_models::FlushPolicy::Each {
-                    interval,
-                    max_batch_size,
-                } => format!("{interval} max-batch-size={max_batch_size}"),
-                nervix_models::FlushPolicy::Immediate => "IMMEDIATE".to_string(),
-            })
-            .unwrap_or_else(|| "none".to_string());
+        let flush = match &output.flush_policy {
+            Some(nervix_models::FlushPolicy::Each {
+                interval,
+                max_batch_size,
+            }) => format!("{interval} max-batch-size={max_batch_size}"),
+            Some(nervix_models::FlushPolicy::Immediate) => "IMMEDIATE".to_string(),
+            None => "none".to_string(),
+        };
         lines.push(format!(
             "output {index}: into={} construction={} branch={} flush={flush}",
             output.relay.as_str(),
@@ -15130,10 +15140,10 @@ fn format_emitter_describe_output(
             ),
             format!(
                 "reconnect wait: {}",
-                status
-                    .reconnect_wait_millis
-                    .map(|millis| format!("{millis}ms"))
-                    .unwrap_or_else(|| "-".to_string())
+                match status.reconnect_wait_millis {
+                    Some(millis) => format!("{millis}ms"),
+                    None => "-".to_string(),
+                }
             ),
         ]);
     }
@@ -15150,11 +15160,10 @@ fn format_emitter_describe_output(
         ),
         format!(
             "codec: {}",
-            emitter
-                .encode_using_codec
-                .as_ref()
-                .map(|name| name.as_str())
-                .unwrap_or("none")
+            match emitter.encode_using_codec.as_ref() {
+                Some(name) => name.as_str(),
+                None => "none",
+            }
         ),
         format!("sink: {}", format_emit_sink(&emitter.sink)),
         format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
@@ -15213,16 +15222,19 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             queue,
             fifo_group,
         } => {
-            let fifo = fifo_group.as_ref().map_or_else(String::new, |group| {
-                let value = match group {
-                    nervix_models::SqsFifoGroup::FromBranch => "FROM BRANCH".to_string(),
-                    nervix_models::SqsFifoGroup::Expression(expression) => {
-                        nervix_models::expression_to_nspl(expression)
-                            .unwrap_or_else(|_| "<unrenderable expression>".to_string())
-                    }
-                };
-                format!(" fifo_group={value}")
-            });
+            let fifo = match fifo_group.as_ref() {
+                Some(group) => {
+                    let value = match group {
+                        nervix_models::SqsFifoGroup::FromBranch => "FROM BRANCH".to_string(),
+                        nervix_models::SqsFifoGroup::Expression(expression) => {
+                            nervix_models::expression_to_nspl(expression)
+                                .unwrap_or_else(|_| "<unrenderable expression>".to_string())
+                        }
+                    };
+                    format!(" fifo_group={value}")
+                }
+                None => String::new(),
+            };
             format!(
                 "SQS client={} queue={}{}",
                 client.as_str(),
@@ -15406,10 +15418,10 @@ fn format_wasm_processor_describe_output(
         "kind: WASM PROCESSOR".to_string(),
     ];
     lines.extend(format_schedule_placement_lines(scheduled_node));
-    let version = processor
-        .resource_version
-        .map(|version| version.to_string())
-        .unwrap_or_else(|| "latest".to_string());
+    let version = match processor.resource_version {
+        Some(version) => version.to_string(),
+        None => "latest".to_string(),
+    };
     lines.extend([
         format!("from: {}", processor_input_names(&processor.from)),
         format!("mode: {}", processor.mode.as_ref()),
@@ -15933,11 +15945,10 @@ fn current_timestamp() -> Timestamp {
 
 fn subtract_timestamp_duration(timestamp: Timestamp, duration: Duration) -> Timestamp {
     let delta = TimeDelta::from_std(duration).unwrap_or(TimeDelta::MAX);
-    timestamp
-        .into_datetime()
-        .checked_sub_signed(delta)
-        .map(Timestamp::from)
-        .unwrap_or(Timestamp::from_datetime(chrono::DateTime::UNIX_EPOCH))
+    match timestamp.into_datetime().checked_sub_signed(delta) {
+        Some(shifted) => Timestamp::from(shifted),
+        None => Timestamp::from_datetime(chrono::DateTime::UNIX_EPOCH),
+    }
 }
 
 async fn hash_password(password: String) -> Result<String, String> {
@@ -16030,12 +16041,14 @@ fn logical_timestamp_at_wall_time(
         .floor()
         .checked_approx_into()
         .unwrap_or(i64::MAX);
-    clock
+    let progressed = clock
         .logical_start
         .into_datetime()
-        .checked_add_signed(TimeDelta::nanoseconds(progressed_nanos))
-        .map(Timestamp::from)
-        .unwrap_or(clock.logical_start)
+        .checked_add_signed(TimeDelta::nanoseconds(progressed_nanos));
+    match progressed {
+        Some(progressed) => Timestamp::from(progressed),
+        None => clock.logical_start,
+    }
 }
 
 fn command_ok(message: String) -> CommandResult {
@@ -16077,20 +16090,22 @@ fn command_batch_result(
     let transaction = result.transaction.clone();
     append_command_result(&mut previous_results, result);
     let success = previous_results.iter().all(|result| result.success);
+    let diagnostics = match previous_results.last() {
+        Some(result) => result.diagnostics.clone(),
+        None => Vec::new(),
+    };
+    let failure_kind = match previous_results.last() {
+        Some(result) => result.kind,
+        None => i32::from(CommandResultKind::Error),
+    };
     CommandResult {
         success,
         message: command_results_message(&previous_results),
-        diagnostics: previous_results
-            .last()
-            .map(|result| result.diagnostics.clone())
-            .unwrap_or_default(),
+        diagnostics,
         kind: if success {
             i32::from(CommandResultKind::Ok)
         } else {
-            previous_results
-                .last()
-                .map(|result| result.kind)
-                .unwrap_or(i32::from(CommandResultKind::Error))
+            failure_kind
         },
         results: previous_results,
         transaction,
@@ -16284,24 +16299,27 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
             &format!("planned relocations: {planned_relocations}"),
         );
     }
-    let diagnostics = transaction
+    let mut reported = transaction
         .commit_results()
         .iter()
         .rev()
-        .find(|step| !step.result.success)
-        .or_else(|| transaction.commit_results().last())
-        .map(|step| {
-            step.result
-                .diagnostics
-                .iter()
-                .map(|diagnostic| Diagnostic {
-                    message: diagnostic.message.clone(),
-                    span_start: diagnostic.span_start,
-                    span_end: diagnostic.span_end,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .find(|step| !step.result.success);
+    if reported.is_none() {
+        reported = transaction.commit_results().last();
+    }
+    let diagnostics = match reported {
+        Some(step) => step
+            .result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| Diagnostic {
+                message: diagnostic.message.clone(),
+                span_start: diagnostic.span_start,
+                span_end: diagnostic.span_end,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     let mut result = CommandResult {
         success,
         message,
@@ -16685,17 +16703,20 @@ impl SessionServiceImpl {
                 .find(|node| node.node_id == *leader_id),
             None => None,
         };
-        let leader_grpc_uri = leader_node
-            .as_ref()
-            .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
-            .unwrap_or_default();
-        let leader_web_console_uri = leader_node
-            .map(|node| node.web_console_advertise_addr)
-            .unwrap_or_default();
-        let diagnostic = leader
-            .as_ref()
-            .map(|leader| format!("retry this command on leader '{leader}'"))
-            .unwrap_or_else(|| "retry this command on the current leader".to_string());
+        let mut leader_grpc_uri = String::new();
+        if let Some(node) = leader_node.as_ref()
+            && let Some(uri) = grpc_uri_from_advertise_addr(&node.grpc_advertise_addr)
+        {
+            leader_grpc_uri = uri;
+        }
+        let leader_web_console_uri = match leader_node {
+            Some(node) => node.web_console_advertise_addr,
+            None => String::new(),
+        };
+        let diagnostic = match leader.as_ref() {
+            Some(leader) => format!("retry this command on leader '{leader}'"),
+            None => "retry this command on the current leader".to_string(),
+        };
         CommandResult {
             success: false,
             message: "not-a-leader".to_string(),
@@ -16705,7 +16726,10 @@ impl SessionServiceImpl {
                 span_end: u32::try_from(query.len()).unwrap_or(0),
             }],
             kind: i32::from(CommandResultKind::NotLeader),
-            leader: leader.map_or_else(String::new, |leader| leader.to_string()),
+            leader: match leader {
+                Some(leader) => leader.to_string(),
+                None => String::new(),
+            },
             leader_grpc_uri,
             leader_web_console_uri,
             ..Default::default()
@@ -17013,20 +17037,20 @@ fn resolve_resource_id(
         ));
     }
 
-    resources
+    let latest = resources
         .versions
         .iter()
         .filter(|resource| resource.id.domain == *domain && resource.id.identifier == *identifier)
         .map(|resource| resource.id.version)
-        .max()
-        .map(|version| ResourceId::new(domain.clone(), identifier.clone(), version))
-        .ok_or_else(|| {
-            format!(
-                "resource '{}' has no uploaded versions in domain '{}'",
-                identifier.as_str(),
-                domain.as_str()
-            )
-        })
+        .max();
+    let Some(version) = latest else {
+        return Err(format!(
+            "resource '{}' has no uploaded versions in domain '{}'",
+            identifier.as_str(),
+            domain.as_str()
+        ));
+    };
+    Ok(ResourceId::new(domain.clone(), identifier.clone(), version))
 }
 
 async fn load_vhost_tls_materials(
@@ -17157,12 +17181,14 @@ fn requested_resource_versions(input: &str, cursor: usize) -> Option<ResourceNam
 
 fn word_start(input: &str, cursor: usize) -> usize {
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    input[..cursor.min(input.len())]
+    let boundary = input[..cursor.min(input.len())]
         .char_indices()
         .rev()
-        .find(|(_, c)| !is_word(*c))
-        .map(|(idx, c)| idx + c.len_utf8())
-        .unwrap_or(0)
+        .find(|(_, c)| !is_word(*c));
+    match boundary {
+        Some((index, character)) => index + character.len_utf8(),
+        None => 0,
+    }
 }
 
 fn encode_cbor<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, std::io::Error> {
@@ -17319,12 +17345,15 @@ fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> V
         }
 
         for node in domain.nodes.values() {
+            let owner = match node.execution_node() {
+                Some(owner) => owner.as_str(),
+                None => "-",
+            };
             lines.push(format!(
-                "- domain={} kind={} name={} owner={} replicas={}",
+                "- domain={} kind={} name={} owner={owner} replicas={}",
                 domain.domain.as_str(),
                 node.kind.as_str(),
                 node.identifier.as_str(),
-                node.execution_node().map_or("-", ClusterNodeName::as_str),
                 format_schedule_status_replicas(node)
             ));
         }

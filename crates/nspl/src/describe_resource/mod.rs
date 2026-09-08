@@ -21,15 +21,13 @@ pub fn describe_resource_parser<'src>()
                     select! { Token::NumberLiteral(value) => value }.labelled("resource_version"),
                 )
                 .try_map(|version, span| {
-                    version.parse::<u64>().map_or_else(
-                        |_| {
-                            Err(Rich::custom(
-                                span,
-                                "resource_version must be an unsigned integer",
-                            ))
-                        },
-                        Ok,
-                    )
+                    let Ok(version) = version.parse::<u64>() else {
+                        return Err(Rich::custom(
+                            span,
+                            "resource_version must be an unsigned integer",
+                        ));
+                    };
+                    Ok(version)
                 })
                 .or_not(),
         )

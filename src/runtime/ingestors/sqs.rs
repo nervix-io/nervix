@@ -423,15 +423,18 @@ impl SqsIngestor {
     }
 
     async fn queue_url(client: &SqsClient, queue: &str) -> Result<String, String> {
-        client
+        let queue_url = client
             .get_queue_url()
             .queue_name(queue)
             .send()
             .await
             .map_err(|source| source.to_string())?
             .queue_url()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| format!("SQS queue '{queue}' has no URL"))
+            .map(ToOwned::to_owned);
+        match queue_url {
+            Some(queue_url) => Ok(queue_url),
+            None => Err(format!("SQS queue '{queue}' has no URL")),
+        }
     }
 
     fn attribute_value(value: &MessageAttributeValue) -> Cow<'_, str> {

@@ -1166,11 +1166,10 @@ impl Runtime {
 
     pub(in crate::runtime) fn install_state_schema_fingerprints(&self, schedule: &DomainSchedule) {
         self.clear_state_schema_fingerprints(&schedule.domain);
-        let start_version = self
-            .inner
-            .domains
-            .get(&schedule.domain)
-            .map_or(0, |state| state.start_version);
+        let start_version = match self.inner.domains.get(&schedule.domain) {
+            Some(state) => state.start_version,
+            None => 0,
+        };
         for node in schedule.nodes.values() {
             let schema_fingerprint = if matches!(
                 node.config.as_ref(),
@@ -1232,15 +1231,18 @@ impl Runtime {
             if let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset = state {
                 [0; 32]
             } else {
-                self.inner
+                let stored = self
+                    .inner
                     .state_schema_fingerprints
                     .get(&DomainNodeRef::node_in(
                         domain.clone(),
                         kind,
                         identifier.clone(),
-                    ))
-                    .map(|fingerprint| *fingerprint)
-                    .unwrap_or([0; 32])
+                    ));
+                match stored {
+                    Some(fingerprint) => *fingerprint,
+                    None => [0; 32],
+                }
             };
         RuntimeStatePlacement {
             domain: domain.clone(),

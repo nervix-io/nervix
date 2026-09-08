@@ -228,9 +228,10 @@ pub fn parse_client_statement_sources(
     }
 
     if let Some(start) = segment_start {
-        let end = spanned_tokens
-            .last()
-            .map_or(input.len(), |token| token.span.end);
+        let end = match spanned_tokens.last() {
+            Some(token) => token.span.end,
+            None => input.len(),
+        };
         statements.push(ParsedClientStatement {
             span: start..end,
             statement: parse_client_statement(&input[start..])?,

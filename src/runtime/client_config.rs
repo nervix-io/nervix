@@ -86,16 +86,30 @@ pub(crate) struct ClientResourceMounts {
     pub(super) _aliases: BTreeMap<String, PathBuf>,
 }
 
+/// The entries a client connects with: the resolved ones once the control plane has rendered
+/// them, and the entries written on the model until then.
+pub(super) fn client_config_entries<'a>(
+    resolved: Option<&'a ResolvedClientConfig>,
+    declared: &'a [nervix_models::ClientConfigEntry],
+) -> &'a [nervix_models::ClientConfigEntry] {
+    match resolved {
+        Some(resolved) => resolved.entries.as_slice(),
+        None => declared,
+    }
+}
+
 pub(super) fn client_config_value(
     config: &[nervix_models::ClientConfigEntry],
     key: &str,
     missing_message: impl FnOnce() -> String,
 ) -> Result<String, String> {
-    config
+    let entry = config
         .iter()
-        .find(|entry| entry.key.eq_ignore_ascii_case(key))
-        .map(|entry| entry.value.clone())
-        .ok_or_else(missing_message)
+        .find(|entry| entry.key.eq_ignore_ascii_case(key));
+    match entry {
+        Some(entry) => Ok(entry.value.clone()),
+        None => Err(missing_message()),
+    }
 }
 
 pub(super) fn optional_client_config_value<'a>(

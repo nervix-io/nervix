@@ -385,14 +385,16 @@ impl Runtime {
                 ModelKind::Relay,
                 source_relay.clone(),
             ))
-            .map(|fanout| fanout.dispatch_gate())
-            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+            .map(|fanout| fanout.dispatch_gate());
+        let Some(source_gate) = source_gate else {
+            return Err(RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "missing generator source relay gate '{}'",
                     source_relay.as_str()
                 ),
-            })?;
+            });
+        };
         let quiesce_counters =
             self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &generator.name));
         let mut shutdown_rx = shutdown_tx.subscribe();

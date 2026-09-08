@@ -799,7 +799,10 @@ impl Runtime {
                 first_error.get_or_insert(reason);
             }
         }
-        first_error.map_or(Ok(()), Err)
+        match first_error {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
     }
 
     /// Adds decoded records to the current source ingest group.
@@ -873,17 +876,16 @@ impl Runtime {
             .unwrap_or_else(current_timestamp);
 
         if let Some(filter_where) = filter_where {
+            let owner_nodes = match self.inner.executions.get(domain) {
+                Some(execution) => execution.materialized_stream_owner_nodes.clone(),
+                None => HashMap::default(),
+            };
             let side_inputs = self
                 .load_materialized_side_inputs(
                     domain,
                     &None,
                     &filter_where.materialized_interest,
-                    &self
-                        .inner
-                        .executions
-                        .get(domain)
-                        .map(|execution| execution.materialized_stream_owner_nodes.clone())
-                        .unwrap_or_default(),
+                    &owner_nodes,
                 )
                 .await?;
             let keys = vec![None; rows.len()];
@@ -1337,12 +1339,10 @@ impl Runtime {
                 }
             }
             None => {
-                let pace = self
-                    .inner
-                    .domains
-                    .get(domain)
-                    .map(|state| state.config.pace)
-                    .unwrap_or(DomainPace::Unpaced);
+                let pace = match self.inner.domains.get(domain) {
+                    Some(state) => state.config.pace,
+                    None => DomainPace::Unpaced,
+                };
                 if let DomainPace::Paced = pace {
                     Err(format!(
                         "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \

@@ -1164,9 +1164,10 @@ impl MqttIngestor {
         let addr = client_config_value(config, "addr", || {
             "missing MQTT client config key 'addr'".to_string()
         })?;
-        let client_id = optional_client_config_value(config, "client_id")
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| default_client_id.to_string());
+        let client_id = match optional_client_config_value(config, "client_id") {
+            Some(client_id) => client_id.to_owned(),
+            None => default_client_id.to_string(),
+        };
 
         let mqtt_addr = Self::parse_addr(&addr)?;
         let mut options = MqttOptions::new(client_id, (mqtt_addr.host, mqtt_addr.port));
@@ -1225,9 +1226,10 @@ impl MqttIngestor {
     ) -> Result<String, String> {
         let configured = optional_client_config_value(config, "client_id");
         if instances == NonZeroU64::MIN {
-            return Ok(configured
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| default_client_id.to_string()));
+            return Ok(match configured {
+                Some(client_id) => client_id.to_owned(),
+                None => default_client_id.to_string(),
+            });
         }
         let Some(client_id) = configured else {
             return Err(format!(
@@ -1256,15 +1258,15 @@ impl MqttIngestor {
                 url.scheme()
             ));
         };
-        let host = url
-            .host()
-            .map(|host| match host {
-                Host::Domain(domain) => domain.to_string(),
-                Host::Ipv4(addr) => addr.to_string(),
-                Host::Ipv6(addr) => addr.to_string(),
-            })
-            .filter(|host| !host.is_empty())
-            .ok_or_else(|| format!("missing host in MQTT addr '{addr}'"))?;
+        let host = match url.host() {
+            Some(Host::Domain(domain)) => domain.to_string(),
+            Some(Host::Ipv4(address)) => address.to_string(),
+            Some(Host::Ipv6(address)) => address.to_string(),
+            None => String::new(),
+        };
+        if host.is_empty() {
+            return Err(format!("missing host in MQTT addr '{addr}'"));
+        }
         let port = url
             .port()
             .ok_or_else(|| format!("missing port in MQTT addr '{addr}'"))?;

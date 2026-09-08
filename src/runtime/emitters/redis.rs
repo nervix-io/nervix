@@ -15,9 +15,7 @@ impl RedisEmitter {
         client: &CreateClientRedis,
         resolved: Option<&ResolvedClientConfig>,
     ) -> EmitterRuntimeResult<Self> {
-        let config = resolved
-            .map(|config| config.entries.as_slice())
-            .unwrap_or(client.config.as_slice());
+        let config = client_config_entries(resolved, client.config.as_slice());
         let connection = Self::connection_from_config(config).await?;
         Ok(Self {
             connection: Some(connection),

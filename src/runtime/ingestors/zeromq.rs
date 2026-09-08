@@ -335,8 +335,9 @@ impl ZeroMqIngestor {
     }
 
     pub(in crate::runtime) fn bind_from_client(client: &CreateClientZeroMq) -> bool {
-        optional_client_config_value(&client.config, "bind")
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        match optional_client_config_value(&client.config, "bind") {
+            Some(value) => value.eq_ignore_ascii_case("true"),
+            None => false,
+        }
     }
 }

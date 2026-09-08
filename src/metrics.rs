@@ -240,14 +240,15 @@ impl WallEma {
         Self {
             tau_seconds,
             value: snapshot.value,
-            last_at: snapshot
+            last_at: match snapshot
                 .last_at_wall_nanos
                 .and_then(instant_from_wall_unix_nanos)
-                .or_else(|| {
-                    snapshot
-                        .last_elapsed_seconds
-                        .map(|elapsed| instant_from_series_elapsed(series_started_at, elapsed))
-                }),
+            {
+                Some(last_at) => Some(last_at),
+                None => snapshot
+                    .last_elapsed_seconds
+                    .map(|elapsed| instant_from_series_elapsed(series_started_at, elapsed)),
+            },
         }
     }
 
@@ -694,9 +695,10 @@ impl WallRollingHistogram {
     }
 
     fn summary(&self) -> HistogramPercentileSummary {
-        current_wall_unix_nanos()
-            .map(|now| self.inner.summary_at(now))
-            .unwrap_or_else(HistogramPercentileSummary::empty)
+        match current_wall_unix_nanos() {
+            Some(now) => self.inner.summary_at(now),
+            None => HistogramPercentileSummary::empty(),
+        }
     }
 
     fn to_snapshot(&self) -> WallRollingHistogramSnapshot {
@@ -869,11 +871,10 @@ impl AggregatedRollingHistograms {
         self.domain_1m.merge_from(&rolling.domain_1m.inner);
         self.domain_15m.merge_from(&rolling.domain_15m.inner);
         if let Some(last_at_nanos) = optional_domain_timestamp(&series.domain_last_at_nanos) {
-            self.domain_last_at_nanos = Some(
-                self.domain_last_at_nanos
-                    .map(|current| current.max(last_at_nanos))
-                    .unwrap_or(last_at_nanos),
-            );
+            self.domain_last_at_nanos = Some(match self.domain_last_at_nanos {
+                Some(current) => current.max(last_at_nanos),
+                None => last_at_nanos,
+            });
         }
     }
 
@@ -882,12 +883,14 @@ impl AggregatedRollingHistograms {
         HistogramSummary {
             capacity: None,
             rolling_histograms: RollingHistogramSummary {
-                wall_1m: current_wall_unix_nanos()
-                    .map(|now| self.wall_1m.summary_at(now))
-                    .unwrap_or_else(HistogramPercentileSummary::empty),
-                wall_15m: current_wall_unix_nanos()
-                    .map(|now| self.wall_15m.summary_at(now))
-                    .unwrap_or_else(HistogramPercentileSummary::empty),
+                wall_1m: match current_wall_unix_nanos() {
+                    Some(now) => self.wall_1m.summary_at(now),
+                    None => HistogramPercentileSummary::empty(),
+                },
+                wall_15m: match current_wall_unix_nanos() {
+                    Some(now) => self.wall_15m.summary_at(now),
+                    None => HistogramPercentileSummary::empty(),
+                },
                 domain_1m: domain_timestamp.map(|now| self.domain_1m.summary_at(now.unix_nanos())),
                 domain_15m: domain_timestamp
                     .map(|now| self.domain_15m.summary_at(now.unix_nanos())),
@@ -955,10 +958,13 @@ impl Default for CounterSeries {
 
 impl CounterSeries {
     fn from_snapshot(snapshot: &MetricCounterSnapshot) -> Self {
-        let started_at = snapshot
+        let started_at = match snapshot
             .started_at_wall_nanos
             .and_then(instant_from_wall_unix_nanos)
-            .unwrap_or_else(|| started_at_from_elapsed(snapshot.elapsed_seconds));
+        {
+            Some(started_at) => started_at,
+            None => started_at_from_elapsed(snapshot.elapsed_seconds),
+        };
         Self {
             started_at,
             domain_started_at_nanos: AtomicI64::new(
@@ -1068,10 +1074,13 @@ impl HistogramSeries {
     }
 
     fn from_snapshot(snapshot: &MetricHistogramSnapshot) -> Self {
-        let started_at = snapshot
+        let started_at = match snapshot
             .started_at_wall_nanos
             .and_then(instant_from_wall_unix_nanos)
-            .unwrap_or_else(|| started_at_from_elapsed(snapshot.elapsed_seconds));
+        {
+            Some(started_at) => started_at,
+            None => started_at_from_elapsed(snapshot.elapsed_seconds),
+        };
         let buckets = internal_buckets_for_metric(&snapshot.key.metric);
         Self {
             started_at,
@@ -3718,10 +3727,10 @@ fn format_histogram_metric_line(
     key: &MetricKey,
     summary: &HistogramSummary,
 ) -> String {
-    let capacity = summary
-        .capacity
-        .map(|capacity| format!(" capacity={capacity}"))
-        .unwrap_or_default();
+    let capacity = match summary.capacity {
+        Some(capacity) => format!(" capacity={capacity}"),
+        None => String::new(),
+    };
     format!(
         "{prefix}{} {} relay={} physical_node={}{} p50_1m={} p90_1m={} p99_1m={} p50_15m={} \
          p90_15m={} p99_15m={} domain_p50_1m={} domain_p90_1m={} domain_p99_1m={} \
@@ -3803,11 +3812,17 @@ fn empty_as_dash(value: &str) -> &str {
 /// nothing placed still carries the label, and it uses the same `-` absent marker as the other
 /// optional labels.
 fn physical_node_label(physical_node_id: Option<&ClusterNodeName>) -> &str {
-    physical_node_id.map_or("-", ClusterNodeName::as_str)
+    match physical_node_id {
+        Some(physical_node_id) => physical_node_id.as_str(),
+        None => "-",
+    }
 }
 
 fn format_optional(value: Option<f64>) -> String {
-    value.map(format_number).unwrap_or_else(|| "-".to_string())
+    match value {
+        Some(value) => format_number(value),
+        None => "-".to_string(),
+    }
 }
 
 fn add_optional_metric(left: Option<f64>, right: Option<f64>) -> Option<f64> {
@@ -3835,9 +3850,10 @@ fn max_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 }
 
 fn format_histogram_optional(value: Option<f64>) -> String {
-    value
-        .map(format_histogram_number)
-        .unwrap_or_else(|| "-".to_string())
+    match value {
+        Some(value) => format_histogram_number(value),
+        None => "-".to_string(),
+    }
 }
 
 fn format_histogram_number(value: f64) -> String {

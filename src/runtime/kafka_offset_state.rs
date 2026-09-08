@@ -182,10 +182,10 @@ impl ReplicatedKafkaOffsetState {
     ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
         let next_schedule = {
             let schedules = self.schedules.lock();
-            let rebalance_epoch = schedules
-                .get(topic)
-                .map(|existing| existing.rebalance_epoch)
-                .unwrap_or(0);
+            let rebalance_epoch = match schedules.get(topic) {
+                Some(existing) => existing.rebalance_epoch,
+                None => 0,
+            };
             let next = KafkaPartitionSchedule::new(instances, observed_partitions, rebalance_epoch);
             KafkaTopicSchedulingState {
                 instances,
