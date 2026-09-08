@@ -21,10 +21,15 @@ struct WebsocketDispatchContext<'a> {
 impl WebsocketsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientWebsockets,
-        ingestor: CreateIngestor,
+        plan: WebsocketsIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let WebsocketsIngestorStartPlan {
+            ingestor,
+            client,
+            mode: _,
+            signaling_protocol,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -32,17 +37,6 @@ impl WebsocketsIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
             });
-        }
-
-        match &ingestor.source {
-            IngestSource::Websockets { .. } => {}
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected WebSockets ingestor source".to_string(),
-                });
-            }
         }
 
         let resolved_client = runtime
@@ -59,24 +53,23 @@ impl WebsocketsIngestor {
                 reason,
             }
         })?;
-        let signaling_protocol =
-            if let Some(signaling_protocol) = client.signaling_protocol.as_ref() {
-                Some(
-                    runtime
-                        .signaling_protocol(domain, signaling_protocol)
-                        .await
-                        .ok_or_else(|| RuntimeError::StartIngestor {
-                            domain: domain.as_str().to_string(),
-                            ingestor: ingestor.name.as_str().to_string(),
-                            reason: format!(
-                                "missing signaling protocol '{}'",
-                                signaling_protocol.as_str()
-                            ),
-                        })?,
-                )
-            } else {
-                None
-            };
+        let signaling_protocol = if let Some(signaling_protocol) = signaling_protocol.as_ref() {
+            Some(
+                runtime
+                    .signaling_protocol(domain, signaling_protocol)
+                    .await
+                    .ok_or_else(|| RuntimeError::StartIngestor {
+                        domain: domain.as_str().to_string(),
+                        ingestor: ingestor.name.as_str().to_string(),
+                        reason: format!(
+                            "missing signaling protocol '{}'",
+                            signaling_protocol.as_str()
+                        ),
+                    })?,
+            )
+        } else {
+            None
+        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
@@ -411,14 +404,9 @@ impl WebsocketsIngestor {
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::runtime) fn endpoint_from_client(
-        client: &CreateClientWebsockets,
+    pub(in crate::runtime) fn endpoint_from_config(
+        config: &[nervix_models::ClientConfigEntry],
     ) -> Result<String, String> {
-        Self::endpoint_from_config(&client.config)
-    }
-
-    fn endpoint_from_config(config: &[nervix_models::ClientConfigEntry]) -> Result<String, String> {
         client_config_value(config, "endpoint", || {
             "missing WebSockets client config key 'endpoint'".to_string()
         })

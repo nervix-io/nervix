@@ -249,14 +249,18 @@ impl IngestorQuiesceControl {
             .increment_ingestor_quiesce_rejected(&self.metric_labels, count);
     }
 
-    pub(super) fn update_declared_source(&self, source: &IngestSource) {
+    pub(super) fn update_declared_mode(
+        &self,
+        declared: &IngestQuiesceMode,
+        active_supported_by_source: bool,
+    ) {
         let quiesced = self.reasons.read().active().is_some();
         let mut modes = self.modes.write();
         if quiesced {
-            modes.active_supported_by_source = source.supports_quiesce(&modes.active);
-            modes.pending = Some(source.quiesce().clone());
+            modes.active_supported_by_source = active_supported_by_source;
+            modes.pending = Some(declared.clone());
         } else {
-            modes.active = source.quiesce().clone();
+            modes.active = declared.clone();
             modes.pending = None;
             modes.active_supported_by_source = true;
         }
@@ -649,12 +653,13 @@ impl Runtime {
     pub(in crate::runtime) fn prepare_ingestor_quiescence(
         &self,
         domain: &DomainName,
-        ingestor: &CreateIngestor,
+        ingestor: &IngestorSpec,
     ) -> Arc<IngestorQuiesceControl> {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if let Some(control) = self.inner.ingestor_quiescence.get(&key) {
-            control.update_declared_source(&ingestor.source);
+            let active_supported_by_source = ingestor.quiesce.supports(&control.mode());
+            control.update_declared_mode(ingestor.quiesce.mode(), active_supported_by_source);
             return control.clone();
         }
         let metric_labels = self.inner.metrics.register_ingestor_quiesce(
@@ -663,7 +668,7 @@ impl Runtime {
             self.inner.remote_dispatch.local_node_id.read().as_ref(),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
-            ingestor.source.quiesce().clone(),
+            ingestor.quiesce.mode().clone(),
             self.inner.metrics.clone(),
             metric_labels,
         ));
@@ -974,10 +979,7 @@ impl Runtime {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use nervix_models::{
-        IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestorName, ModelKind,
-        ZeroMqIngestMode,
-    };
+    use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestorName, ModelKind};
     use tokio::sync::watch;
     use triomphe::Arc;
 
@@ -1114,11 +1116,7 @@ mod tests {
             },
         );
         control.engage(IngestorQuiesceCause::EntityHold);
-        control.update_declared_source(&IngestSource::ZeroMq {
-            client: named("zeromq"),
-            mode: ZeroMqIngestMode::NoAckSequential,
-            quiesce: IngestQuiesceMode::Suspend,
-        });
+        control.update_declared_mode(&IngestQuiesceMode::Suspend, false);
 
         assert!(control.should_suspend_intake());
         control.release(IngestorQuiesceCause::EntityHold);

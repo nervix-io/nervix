@@ -691,13 +691,8 @@ impl Runtime {
                         }
                     }
                 }
-                Model::Ingestor(ingestor) if node.executes_on(local_node_id) => {
-                    ingestor_specs.push((
-                        ingestor.clone(),
-                        kafka_offset_states
-                            .get(&RelayName::from(&node.identifier))
-                            .cloned(),
-                    ));
+                Model::Ingestor(_) if node.executes_on(local_node_id) => {
+                    ingestor_specs.push(node.clone());
                 }
                 _ => {}
             }
@@ -1053,9 +1048,11 @@ impl Runtime {
             return Ok(());
         }
 
-        for (ingestor, kafka_offset_state) in ingestor_specs {
-            let Some(source_model) =
-                Self::source_model_for_scheduled_ingestor(&schedule, &ingestor)
+        for node in ingestor_specs {
+            let Model::Ingestor(ingestor) = node.config.as_ref() else {
+                continue;
+            };
+            let Some(source_model) = Self::source_model_for_scheduled_ingestor(&schedule, ingestor)
             else {
                 return Err(RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -1063,11 +1060,18 @@ impl Runtime {
                 });
             };
             let ingestor_name = ingestor.name.clone();
+            let plan =
+                IngestorStartPlan::decide(domain, &node, &source_model).map_err(|error| {
+                    RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "cannot plan ingestor '{}': {error}",
+                            ingestor.name.as_str()
+                        ),
+                    }
+                })?;
             self.clear_ingestor_transient_error(domain, &ingestor_name);
-            if let Err(error) = self
-                .start_scheduled_ingestor(domain, source_model, ingestor, kafka_offset_state)
-                .await
-            {
+            if let Err(error) = self.start_ingestor(plan).await {
                 self.record_ingestor_transient_error(domain, &ingestor_name, error.to_string());
                 self.abort_domain_execution_start(domain).await;
                 return Err(error);

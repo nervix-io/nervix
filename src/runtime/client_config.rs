@@ -192,10 +192,12 @@ mod tests {
             ],
         };
         assert_eq!(
-            ingestors::zeromq::ZeroMqIngestor::addr_from_client(&zeromq).expect("addr"),
+            ingestors::zeromq::ZeroMqIngestor::addr_from_config(&zeromq.config).expect("addr"),
             "tcp://127.0.0.1:5555"
         );
-        assert!(ingestors::zeromq::ZeroMqIngestor::bind_from_client(&zeromq));
+        assert!(ingestors::zeromq::ZeroMqIngestor::bind_from_config(
+            &zeromq.config
+        ));
 
         let http = CreateClientHttp {
             name: named("http"),
@@ -206,11 +208,12 @@ mod tests {
             }],
         };
         assert_eq!(
-            ingestors::http::HttpIngestor::endpoint_from_client(&http).expect("endpoint"),
+            ingestors::http::HttpIngestor::endpoint_from_config(&http.config).expect("endpoint"),
             "https://example.com/api"
         );
         assert_eq!(
-            ingestors::http::HttpIngestor::method_from_client(&http).expect("default method"),
+            ingestors::http::HttpIngestor::method_from_config(&http.config)
+                .expect("default method"),
             reqwest::Method::GET
         );
 
@@ -229,18 +232,22 @@ mod tests {
             ],
         };
         assert_eq!(
-            ingestors::http::HttpIngestor::method_from_client(&http_post).expect("post method"),
+            ingestors::http::HttpIngestor::method_from_config(&http_post.config)
+                .expect("post method"),
             reqwest::Method::POST
         );
         assert!(
-            ingestors::http::HttpIngestor::method_from_client(&CreateClientHttp {
-                name: named("http"),
-                mount: None,
-                config: vec![ClientConfigEntry {
-                    key: "method".to_string(),
-                    value: "NOT A METHOD".to_string(),
-                }],
-            })
+            ingestors::http::HttpIngestor::method_from_config(
+                &CreateClientHttp {
+                    name: named("http"),
+                    mount: None,
+                    config: vec![ClientConfigEntry {
+                        key: "method".to_string(),
+                        value: "NOT A METHOD".to_string(),
+                    }],
+                }
+                .config
+            )
             .is_err()
         );
 
@@ -254,7 +261,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            ingestors::websockets::WebsocketsIngestor::endpoint_from_client(&websocket)
+            ingestors::websockets::WebsocketsIngestor::endpoint_from_config(&websocket.config)
                 .expect("endpoint"),
             "wss://example.com/socket"
         );
@@ -268,7 +275,8 @@ mod tests {
             }],
         };
         assert_eq!(
-            ingestors::prometheus::PrometheusIngestor::addr_from_client(&prometheus).expect("addr"),
+            ingestors::prometheus::PrometheusIngestor::addr_from_config(&prometheus.config)
+                .expect("addr"),
             "http://prometheus:9090"
         );
 
@@ -280,46 +288,56 @@ mod tests {
                 value: "tcp://127.0.0.1:5555".to_string(),
             }],
         };
-        assert!(!ingestors::zeromq::ZeroMqIngestor::bind_from_client(
-            &zeromq_default
+        assert!(!ingestors::zeromq::ZeroMqIngestor::bind_from_config(
+            &zeromq_default.config
         ));
 
         assert!(
-            ingestors::zeromq::ZeroMqIngestor::addr_from_client(&CreateClientZeroMq {
-                name: named("zmq"),
-                mount: None,
-                config: vec![],
-            })
+            ingestors::zeromq::ZeroMqIngestor::addr_from_config(
+                &CreateClientZeroMq {
+                    name: named("zmq"),
+                    mount: None,
+                    config: vec![],
+                }
+                .config
+            )
             .expect_err("missing zeromq addr")
             .contains("missing ZeroMQ client config key 'addr'")
         );
         assert!(
-            ingestors::http::HttpIngestor::endpoint_from_client(&CreateClientHttp {
-                name: named("http"),
-                mount: None,
-                config: vec![],
-            })
+            ingestors::http::HttpIngestor::endpoint_from_config(
+                &CreateClientHttp {
+                    name: named("http"),
+                    mount: None,
+                    config: vec![],
+                }
+                .config
+            )
             .expect_err("missing http endpoint")
             .contains("missing HTTP client config key 'endpoint'")
         );
         assert!(
-            ingestors::websockets::WebsocketsIngestor::endpoint_from_client(
+            ingestors::websockets::WebsocketsIngestor::endpoint_from_config(
                 &CreateClientWebsockets {
                     name: named("ws"),
                     mount: None,
                     signaling_protocol: None,
                     config: vec![],
                 }
+                .config,
             )
             .expect_err("missing websocket endpoint")
             .contains("missing WebSockets client config key 'endpoint'")
         );
         assert!(
-            ingestors::prometheus::PrometheusIngestor::addr_from_client(&CreateClientPrometheus {
-                name: named("prom"),
-                mount: None,
-                config: vec![],
-            })
+            ingestors::prometheus::PrometheusIngestor::addr_from_config(
+                &CreateClientPrometheus {
+                    name: named("prom"),
+                    mount: None,
+                    config: vec![],
+                }
+                .config
+            )
             .expect_err("missing prometheus addr")
             .contains("missing Prometheus client config key 'addr'")
         );

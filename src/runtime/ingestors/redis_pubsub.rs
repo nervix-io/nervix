@@ -1,4 +1,3 @@
-use nervix_models::DomainName;
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;
@@ -8,10 +7,15 @@ pub(in crate::runtime) struct RedisPubSubIngestor;
 impl RedisPubSubIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientRedis,
-        ingestor: CreateIngestor,
+        plan: RedisPubSubIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let RedisPubSubIngestorStartPlan {
+            ingestor,
+            client,
+            channel,
+            mode: _,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -36,16 +40,6 @@ impl RedisPubSubIngestor {
             ingestor: ingestor.name.as_str().to_string(),
             reason,
         })?;
-        let channel = match &ingestor.source {
-            IngestSource::RedisPubSub { channel, .. } => channel.clone(),
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected Redis Pub/Sub ingestor source".to_string(),
-                });
-            }
-        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,

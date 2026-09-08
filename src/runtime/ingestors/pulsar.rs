@@ -1,5 +1,3 @@
-use std::num::NonZeroU64;
-
 use nervix_models::{DomainName, IngestorName};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
@@ -28,10 +26,17 @@ impl IngestMessageHeaders for PulsarMessageProperties<'_> {
 impl PulsarIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientPulsar,
-        ingestor: CreateIngestor,
+        plan: PulsarIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let PulsarIngestorStartPlan {
+            ingestor,
+            client,
+            topic,
+            subscription,
+            instances,
+            mode: ack_mode,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -41,41 +46,6 @@ impl PulsarIngestor {
             });
         }
 
-        /// The parts of a Pulsar ingest source this task drives, taken from the model once so the
-        /// rest of startup reads named values rather than re-matching the source.
-        struct PulsarSource {
-            topic: nervix_models::TopicName,
-            subscription: nervix_models::PulsarSubscriptionName,
-            instances: NonZeroU64,
-            ack_mode: PulsarIngestMode,
-        }
-
-        let PulsarSource {
-            topic,
-            subscription,
-            instances,
-            ack_mode,
-        } = match &ingestor.source {
-            IngestSource::Pulsar {
-                topic,
-                subscription,
-                instances,
-                mode,
-                ..
-            } => PulsarSource {
-                topic: topic.clone(),
-                subscription: subscription.clone(),
-                instances: *instances,
-                ack_mode: mode.clone(),
-            },
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected pulsar ingestor source".to_string(),
-                });
-            }
-        };
         let ack_timeout = match &ack_mode {
             PulsarIngestMode::AckParallel { timeout, .. }
             | PulsarIngestMode::AckSequential { timeout, .. } => {

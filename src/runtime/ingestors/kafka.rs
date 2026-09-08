@@ -1,6 +1,5 @@
-use std::{future, num::NonZeroU64};
+use std::future;
 
-use nervix_models::DomainName;
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -36,11 +35,19 @@ impl IngestMessageHeaders for KafkaMessageHeaders<'_> {
 impl KafkaIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientKafka,
-        ingestor: CreateIngestor,
+        plan: KafkaIngestorStartPlan,
         kafka_offset_state: Option<KafkaOffsetStateOriginator>,
     ) -> Result<(), RuntimeError> {
+        let KafkaIngestorStartPlan {
+            ingestor,
+            client,
+            topic,
+            offset_mode,
+            instances,
+            mode: ack_mode,
+            offset_state_placement: _,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -50,41 +57,6 @@ impl KafkaIngestor {
             });
         }
 
-        /// The parts of a Kafka ingest source this task drives, taken from the model once so the
-        /// rest of startup reads named values rather than re-matching the source.
-        struct KafkaSource {
-            topic: nervix_models::TopicName,
-            offset_mode: KafkaOffsetMode,
-            instances: NonZeroU64,
-            ack_mode: KafkaIngestMode,
-        }
-
-        let KafkaSource {
-            topic,
-            offset_mode,
-            instances,
-            ack_mode,
-        } = match &ingestor.source {
-            IngestSource::Kafka {
-                topic,
-                offset_mode,
-                instances,
-                mode,
-                ..
-            } => KafkaSource {
-                topic: topic.clone(),
-                offset_mode: offset_mode.clone(),
-                instances: *instances,
-                ack_mode: mode.clone(),
-            },
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected kafka ingestor source".to_string(),
-                });
-            }
-        };
         let ack_timeout = match &ack_mode {
             KafkaIngestMode::AckParallel { timeout, .. }
             | KafkaIngestMode::AckSequential { timeout, .. } => {

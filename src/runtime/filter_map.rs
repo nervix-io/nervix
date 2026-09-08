@@ -1382,7 +1382,7 @@ mod tests {
     use ahash::HashMap;
     use nervix_models::{
         AckMode, CreateEmitter, CreateSchema, EmitSink, EmitterPublishingMode, ErrorPolicies,
-        FieldPath, IngestSource, MessageErrorCode, MessageErrorOperation, ModelName, ParseAsType,
+        FieldPath, MessageErrorCode, MessageErrorOperation, ModelName, ParseAsType,
         ProcessorInputs, RetryPolicy, SqsFifoGroup, Timestamp,
     };
     use nonzero_ext::nonzero;
@@ -2204,13 +2204,8 @@ mod tests {
         let program = compile_ingestor_filter_map_program(
             &domain("default"),
             named::<ModelName>("logic_ingestor"),
-            &IngestSource::Endpoint {
-                endpoint: named("logic_endpoint"),
-                mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
-                },
-            },
+            IngestMetadataKind::Headers,
+            true,
             &construction(
                 "INHERIT tenant SET u8_next = input.u8 + (1 AS U8), i8_abs = abs(input.i8), \
                  u16_keep = coalesce(input.u16, (0 AS U16)), i16_prev = input.i16 - (1 AS I16), \

@@ -1,4 +1,3 @@
-use nervix_models::DomainName;
 use zeromq::{PullSocket, Socket, SocketRecv};
 
 use super::super::*;
@@ -8,10 +7,14 @@ pub(in crate::runtime) struct ZeroMqIngestor;
 impl ZeroMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientZeroMq,
-        ingestor: CreateIngestor,
+        plan: ZeroMqIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let ZeroMqIngestorStartPlan {
+            ingestor,
+            client,
+            mode: _,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -20,17 +23,6 @@ impl ZeroMqIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
             });
         }
-
-        match &ingestor.source {
-            IngestSource::ZeroMq { .. } => {}
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected ZeroMQ ingestor source".to_string(),
-                });
-            }
-        };
 
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
@@ -74,7 +66,7 @@ impl ZeroMqIngestor {
                 if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
-                let mut socket = match Self::pull_socket_from_client(&client).await {
+                let mut socket = match Self::pull_socket_from_config(&client.config).await {
                     Ok(socket) => socket,
                     Err(error) => {
                         task_runtime.record_ingestor_transient_error(
@@ -308,9 +300,12 @@ impl ZeroMqIngestor {
         Ok(())
     }
 
-    async fn pull_socket_from_client(client: &CreateClientZeroMq) -> Result<PullSocket, String> {
-        let addr = Self::addr_from_client(client)?;
-        let bind = Self::bind_from_client(client);
+    async fn pull_socket_from_config(config: &[ClientConfigEntry]) -> Result<PullSocket, String> {
+        let addr = client_config_value(config, "addr", || {
+            "missing ZeroMQ client config key 'addr'".to_string()
+        })?;
+        let bind = optional_client_config_value(config, "bind")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
         let mut socket = PullSocket::new();
         if bind {
             socket
@@ -326,16 +321,18 @@ impl ZeroMqIngestor {
         Ok(socket)
     }
 
-    pub(in crate::runtime) fn addr_from_client(
-        client: &CreateClientZeroMq,
+    #[cfg(test)]
+    pub(in crate::runtime) fn addr_from_config(
+        config: &[ClientConfigEntry],
     ) -> Result<String, String> {
-        client_config_value(&client.config, "addr", || {
+        client_config_value(config, "addr", || {
             "missing ZeroMQ client config key 'addr'".to_string()
         })
     }
 
-    pub(in crate::runtime) fn bind_from_client(client: &CreateClientZeroMq) -> bool {
-        match optional_client_config_value(&client.config, "bind") {
+    #[cfg(test)]
+    pub(in crate::runtime) fn bind_from_config(config: &[ClientConfigEntry]) -> bool {
+        match optional_client_config_value(config, "bind") {
             Some(value) => value.eq_ignore_ascii_case("true"),
             None => false,
         }

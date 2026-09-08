@@ -48,9 +48,12 @@ PARSER_EDGES = (
     "src/application.rs",
 )
 
-# The data plane executes plans. `planning.rs` is where a Model is still allowed to be read.
+# The data plane executes plans. These decision modules are where a Model is still allowed to be
+# read while producing those plans.
 DATA_PLANE = "src/runtime/"
-DATA_PLANE_PLANNER = "src/runtime/planning.rs"
+DATA_PLANE_PLANNERS = frozenset(
+    {"src/runtime/planning.rs", "src/runtime/ingestor_start_plan.rs"}
+)
 
 
 @dataclass(frozen=True)
@@ -580,7 +583,7 @@ _MODEL_PATH = re.compile(r"\bModel\s*::")
 def count_model_matches_in_data_plane(files: Sequence[RustFile]) -> list[Site]:
     sites: list[Site] = []
     for file in product_files(files):
-        if not file.path.startswith(DATA_PLANE) or file.path == DATA_PLANE_PLANNER:
+        if not file.path.startswith(DATA_PLANE) or file.path in DATA_PLANE_PLANNERS:
             continue
         for match in _MODEL_PATH.finditer(file.product):
             sites.append(file.site(match.start(), file.source_line(match.start())))

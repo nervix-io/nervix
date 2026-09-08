@@ -59,29 +59,30 @@ use nervix_interconnect::{
 use nervix_models::{
     AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
     ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CorrelationTimeoutAction,
-    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-    CreateClientOtel, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
-    CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace,
-    DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName,
-    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
-    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality,
-    OtelMetric, OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch,
-    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus, RetryPolicy,
-    RouteConstruction, ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
+    CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState,
+    DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
+    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
+    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, ModelName,
+    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
+    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
+    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
+    ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
+#[cfg(test)]
+use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
 use nervix_nspl::{
     vm_program::{
         CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
@@ -178,6 +179,7 @@ mod ingest_group;
 mod ingest_metadata;
 mod ingestor_quiesce;
 mod ingestor_start;
+mod ingestor_start_plan;
 mod ingestors;
 mod kafka_offset_state;
 mod lookup_hash_map;
@@ -383,6 +385,7 @@ use ingestor_quiesce::{
     DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, IngestorRuntime,
     RuntimeReconnectStatus,
 };
+use ingestor_start_plan::*;
 use lookup_hash_map::{
     LookupHashMapCall, LookupHashMapCallKey, collect_program_field_refs,
     compile_lookup_hash_map_calls, rewrite_lookup_hash_map_program,
