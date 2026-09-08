@@ -2670,6 +2670,15 @@ impl TestSession {
         }
     }
 
+    pub(crate) async fn run_command_result(
+        &mut self,
+        query: &str,
+    ) -> io::Result<proto::CommandResult> {
+        match self {
+            Self::Raw(session) => session.run_command_result(query).await,
+        }
+    }
+
     pub(crate) async fn try_next_subscription(
         &mut self,
         timeout_duration: Duration,
@@ -2691,6 +2700,17 @@ impl TestSession {
 
 impl RawTestSession {
     async fn run_command(&mut self, query: &str) -> io::Result<String> {
+        let result = self.run_command_result(query).await?;
+        if result.success {
+            return Ok(flatten_command_messages(&result));
+        }
+        Err(io::Error::other(format!(
+            "command failed: {}\ndiagnostics: {:?}",
+            result.message, result.diagnostics
+        )))
+    }
+
+    async fn run_command_result(&mut self, query: &str) -> io::Result<proto::CommandResult> {
         self.request_tx
             .send(SessionRequest {
                 request: Some(proto::session_request::Request::Command(CommandRequest {
@@ -2707,13 +2727,7 @@ impl RawTestSession {
                 Some(proto::SessionResponse {
                     event: Some(Event::Result(result)),
                 }) => {
-                    if result.success {
-                        return Ok(flatten_command_messages(&result));
-                    }
-                    return Err(io::Error::other(format!(
-                        "command failed: {}\ndiagnostics: {:?}",
-                        result.message, result.diagnostics
-                    )));
+                    return Ok(result);
                 }
                 Some(proto::SessionResponse {
                     event: Some(Event::Subscription(event)),

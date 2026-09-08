@@ -154,6 +154,8 @@ struct ScenarioWorld {
     web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
+    background_command_result:
+        Option<AbortOnDropHandle<std::io::Result<nervix_proto::CommandResult>>>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
 }
 
@@ -3001,6 +3003,45 @@ async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
         .drop_transaction_bindings_on(crate::common::cluster::node_name(&leader));
 }
 
+#[given(expr = "command admission on node {string} pauses before proposal")]
+async fn given_command_admission_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .runtime_test_hooks
+        .pause_command_admission_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command admission pause on node {string} is reached")]
+async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let hooks = world.runtime_test_hooks.clone();
+    let task = world
+        .background_command_result
+        .as_mut()
+        .unwrap_or_else(|| panic!("a background command request must be active"));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let node_name = crate::common::cluster::node_name(&node_id);
+        tokio::select! {
+            () = hooks.wait_for_command_admission_pause(&node_name) => {},
+            result = task => panic!(
+                "command on '{node_id}' returned before reaching its admission pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("command admission pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the command admission pause on node {string} is released")]
+async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .runtime_test_hooks
+        .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "transaction commit on node {string} pauses after {int} statement")]
 async fn given_transaction_commit_pause(
     world: &mut ScenarioWorld,
@@ -3803,6 +3844,59 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
         }
         Ok(last_output)
     })));
+}
+
+#[when("this NSPL command request begins executing in the background on the leader node")]
+async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[step] step: &Step) {
+    assert!(
+        world.background_command_result.is_none(),
+        "a background command request is already active"
+    );
+    let query = expand_placeholders(world, docstring(step));
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
+    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        session.run_command_result(&query).await
+    })));
+}
+
+#[then(expr = "the background command request is rejected with a redirect to node {string}")]
+async fn then_background_command_request_redirects(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let task = world
+        .background_command_result
+        .take()
+        .unwrap_or_else(|| panic!("a background command request must be active"));
+    let result = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .unwrap_or_else(|error| panic!("background command request task failed: {error}"))
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert!(
+        !result.success,
+        "leadership loss must reject the command: {result:?}"
+    );
+    assert_eq!(
+        result.kind,
+        i32::from(nervix_proto::CommandResultKind::NotLeader),
+        "leadership loss must produce a typed redirect: {result:?}"
+    );
+    assert_eq!(
+        result.leader, node_id,
+        "redirect must name the current leader"
+    );
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .unwrap_or_else(|error| panic!("the redirect target must be a cluster node: {error}"));
+    assert_eq!(
+        result.leader_grpc_uri, grpc_uri,
+        "redirect must carry the leader endpoint"
+    );
 }
 
 #[when(expr = "client {string} begins executing these NSPL commands in the background")]
