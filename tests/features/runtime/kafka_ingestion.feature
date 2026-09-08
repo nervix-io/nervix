@@ -178,6 +178,71 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
+  Scenario Outline: Kafka NO_ACK keeps the rest of a collected ingest group when one message fails to decode
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "mixed_group_input_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA mixed_event (
+        tenant STRING,
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA mixed_event_wire MODE STRICT (
+        tenant string,
+        user_id integer
+      );
+      CREATE CODEC mixed_event_codec
+        FROM WIRE JSON SCHEMA mixed_event_wire
+        TO SCHEMA mixed_event;
+      CREATE RELAY mixed_events SCHEMA mixed_event UNBRANCHED;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE INGESTOR mixed_event_source
+        FROM KAFKA kafka_main TOPIC mixed_group_input_{{test_id}}
+        OFFSET BY CONSUMER GROUP nervix_cucumber_mixed_group_{{test_id}}
+        MODE NO_ACK PARALLEL
+        ON QUIESCE SUSPEND DECODE USING mixed_event_codec
+        TO mixed_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION mixed_events_subscription TO mixed_events;
+      """
+    And these Kafka messages are rapidly published to topic "mixed_group_input_{{test_id}}"
+      """
+      {"tenant":"acme","user_id":1}
+      {"tenant":"acme","user_id":"two"}
+      {"tenant":"beta","user_id":3}
+      {"tenant":"beta","user_id":4}
+      """
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "20s" the relay subscription receives payloads
+      """
+      "tenant":"acme","user_id":1
+      "tenant":"beta","user_id":3
+      "tenant":"beta","user_id":4
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

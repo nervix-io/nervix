@@ -556,16 +556,20 @@ mod tests {
     fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
         let topic = "metering_events";
         let headers = TestIngestHeaders(&[("route", "primary")]);
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
         let mut group = PendingIngestGroup::new(IngestMetadataKind::Kafka, 8);
 
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(0));
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(0));
 
         for offset in 0..3i64 {
-            let record = test_runtime_row([("value".to_string(), RuntimeValue::I64(offset))]);
+            let builder = group.record_builder(&schema);
+            builder
+                .append(Some(&RuntimeValue::I64(offset)))
+                .and_then(|()| builder.finish_row())
+                .expect("each decoded message must append into the group's record builder");
             group
                 .append(
-                    vec![record.one_row_batch()],
                     &[IngestMetadataRow::Kafka {
                         topic,
                         partition: 1,

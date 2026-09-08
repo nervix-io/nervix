@@ -10151,7 +10151,7 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     match source_kind.as_str() {
         "KAFKA" => world
             .cluster()
-            .publish_kafka_burst(&input, &payload, count)
+            .publish_kafka_payloads(&input, &vec![payload.clone(); count])
             .await
             .expect("failed to publish kafka message burst"),
         "MQTT" => world
@@ -10171,6 +10171,30 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
             .expect("failed to publish redis message burst"),
         unsupported => panic!("unsupported rapid ingestor input source kind '{unsupported}'"),
     }
+}
+
+#[when(expr = "these Kafka messages are rapidly published to topic {string}")]
+async fn when_these_kafka_messages_are_rapidly_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payloads = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        !payloads.is_empty(),
+        "at least one Kafka payload is required"
+    );
+    world
+        .cluster()
+        .publish_kafka_payloads(&topic, &payloads)
+        .await
+        .expect("failed to publish kafka messages");
 }
 
 #[when(expr = "Pulsar message is published to topic {string}")]

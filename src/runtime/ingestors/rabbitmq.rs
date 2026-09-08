@@ -252,15 +252,18 @@ impl RabbitMqIngestor {
                                             "received rabbitmq message"
                                         );
 
-                                        match decode_ingested_payload(task_codec.clone(), payload).await {
-                                            Ok(record) => {
+                                        // One acknowledged message is one group.
+                                        let mut collector = IngestRouteCollector::new(
+                                            IngestMetadataKind::Headers,
+                                            1,
+                                        );
+                                        match collector
+                                            .decode_payload(&task_codec, Cow::Borrowed(payload))
+                                            .await
+                                        {
+                                            Ok(()) => {
                                                 match &task_ack_mode {
                                                     RabbitMqIngestMode::AckSequential { .. } => {
-                                                        // One acknowledged message is one group.
-                                                        let mut collector = IngestRouteCollector::new(
-                                                            IngestMetadataKind::Headers,
-                                                            1,
-                                                        );
                                                         let metadata = [IngestMetadataRow::Headers {
                                                             headers: &headers,
                                                         }];
@@ -278,7 +281,6 @@ impl RabbitMqIngestor {
                                                                     .as_ref(),
                                                                 output_routes: &task_output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
-                                                                records: vec![record],
                                                                 metadata: &metadata,
                                                                 ingested_at: current_timestamp(),
                                                                 acks: vec![if !task_branched_senders.is_empty() {
