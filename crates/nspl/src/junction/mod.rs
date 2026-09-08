@@ -129,7 +129,7 @@ pub fn suggest_alter_junction(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::AlterProcessorOperation;
+    use nervix_models::{AlterProcessorOperation, FlushPolicy};
 
     use super::*;
     use crate::lexer::lex;
@@ -458,9 +458,11 @@ mod tests {
             parsed.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
     }
 
@@ -475,9 +477,8 @@ mod tests {
             parsed.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "IMMEDIATE"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Immediate
         );
     }
 
@@ -494,17 +495,18 @@ mod tests {
             parsed.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("first output flush policy should parse")
-                .flush_each,
-            "IMMEDIATE"
+                .expect("first output flush policy should parse"),
+            &FlushPolicy::Immediate
         );
         assert_eq!(
             parsed.output_routes.routes[1]
                 .flush_policy
                 .as_ref()
-                .expect("second output flush policy should parse")
-                .flush_each,
-            "1s"
+                .expect("second output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
     }
 

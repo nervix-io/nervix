@@ -3,7 +3,7 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The log store, the state machine over the replicated state, snapshotting, leadership
-//!   observation, and the HTTP network between peers.
+//!   observation, granting operation capabilities, and the HTTP network between peers.
 //! - **Depends on.** The vocabulary for the state it replicates, and `fjall` for storage.
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
@@ -33,7 +33,7 @@ use openraft::{
     BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
     Vote,
     entry::{EntryPayload, RaftPayload},
-    error::{RPCError, RaftError, StreamingError},
+    error::{ClientWriteError, RPCError, RaftError, StreamingError},
     network::{RPCOption, RaftNetworkV2},
     storage::{
         IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine,
@@ -280,7 +280,7 @@ openraft::declare_raft_types!(
         Node = BasicNode
 );
 
-pub type NervixRaft = Raft<TypeConfig, StdArc<FjallStore>>;
+type NervixRaft = Raft<TypeConfig, StdArc<FjallStore>>;
 pub type Node = BasicNode;
 pub type LogIdOf = LogId<CommittedLeaderIdOf<TypeConfig>>;
 pub type VoteOf = Vote<LeaderIdOf<TypeConfig>>;
@@ -417,6 +417,8 @@ pub enum ConsensusError {
     Transport,
     #[error("{0}")]
     Write(String),
+    #[error("raft proposal lost leadership")]
+    LeadershipLost { leader_id: Option<ClusterNodeName> },
     #[error("node '{0}' is not a raft member")]
     NodeNotFound(String),
     #[error("cannot remove the local leader node '{0}'")]
@@ -430,6 +432,19 @@ pub enum ConsensusError {
     },
 }
 
+impl From<RaftError<TypeConfig, ClientWriteError<TypeConfig>>> for ConsensusError {
+    fn from(error: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> Self {
+        match error {
+            RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) => {
+                Self::LeadershipLost {
+                    leader_id: forward.leader_id,
+                }
+            }
+            error => Self::Write(format!("raft write failed: {error}")),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ConsensusTransactionError {
     #[error(transparent)]
@@ -440,21 +455,189 @@ pub enum ConsensusTransactionError {
     InvalidResponse,
 }
 
-#[derive(Clone)]
-pub struct ConsensusHandle {
-    raft: NervixRaft,
-    store: StdArc<FjallStore>,
-    local_node: GossipNode,
-    cluster_api_http_client: HttpClient,
-    node_unavailability_timeout: Duration,
-    peer_health: Arc<RwLock<BTreeMap<ClusterNodeName, PeerHealth>>>,
-    events: broadcast::Sender<String>,
-    metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+/// Owns the consensus runtime lifecycle and grants operation-specific capabilities.
+///
+/// Keep this owner at cluster startup and shutdown. Give consumers only the capability
+/// they need; cloning a capability preserves that capability's authority.
+///
+/// ```
+/// use nervix_consensus::{Administrator, Consensus, Observer, Proposer, ProtocolReceiver};
+/// fn grant_capabilities(consensus: &Consensus) {
+///     let observer: Observer = consensus.observer();
+///     let proposer: Proposer = consensus.proposer();
+///     let receiver: ProtocolReceiver = consensus.protocol_receiver();
+///     let administrator: Administrator = consensus.administrator();
+///     let read_only: Observer = proposer.observer();
+///     let local_node = proposer.local_node_id();
+///     let admin_observation: Observer = administrator.observer();
+/// }
+/// ```
+pub struct Consensus {
+    inner: Arc<ConsensusState>,
 }
 
-impl ConsensusHandle {
-    fn map_write_error(error: impl std::fmt::Display) -> ConsensusError {
-        ConsensusError::Write(format!("raft write failed: {error}"))
+/// Reads replicated state, leadership, membership, and their change notifications.
+///
+/// Queries return the state currently applied on this node. Reads may lag the leader;
+/// they provide no linearizable-read barrier.
+///
+/// Observation cannot propose commands:
+/// ```compile_fail
+/// use nervix_consensus::Observer;
+/// use nervix_models::DomainName;
+/// async fn mutate(observer: Observer, domain: DomainName) {
+///     observer.stop_domain(domain).await;
+/// }
+/// ```
+/// Observation cannot process Raft protocol traffic:
+/// ```compile_fail
+/// use nervix_consensus::{Observer, TypeConfig, VoteRequest};
+/// async fn receive(observer: Observer, vote: VoteRequest<TypeConfig>) {
+///     observer.vote(vote).await;
+/// }
+/// ```
+/// Observation cannot acquire administration:
+/// ```compile_fail
+/// use nervix_consensus::Observer;
+/// fn escalate(observer: Observer) {
+///     observer.administrator();
+/// }
+/// ```
+/// Its shared state is private:
+/// ```compile_fail
+/// use nervix_consensus::Observer;
+/// fn access_shared_state(observer: Observer) {
+///     let state = observer.inner;
+/// }
+/// ```
+/// Observation cannot convert into proposal authority:
+/// ```compile_fail
+/// use nervix_consensus::{Observer, Proposer};
+/// fn escalate(observer: Observer) {
+///     let proposer: Proposer = observer.into();
+/// }
+/// ```
+#[derive(Clone)]
+pub struct Observer {
+    inner: Arc<ConsensusState>,
+}
+
+/// Proposes replicated commands and includes read-only observation.
+///
+/// This capability authorizes proposal attempts. Leadership may change after an earlier
+/// check, so Raft acceptance determines whether each proposal succeeds. A proposal rejected
+/// after leadership is lost returns [`ConsensusError::LeadershipLost`] with the leader ID
+/// when Raft knows it.
+///
+/// A proposer cannot change Raft membership:
+/// ```compile_fail
+/// use nervix_consensus::Proposer;
+/// use nervix_models::ClusterNodeName;
+/// async fn administer(proposer: Proposer, node: ClusterNodeName) {
+///     proposer.drop_node(&node).await;
+/// }
+/// ```
+/// A proposer cannot process Raft protocol traffic:
+/// ```compile_fail
+/// use nervix_consensus::{Proposer, TypeConfig, VoteRequest};
+/// async fn receive(proposer: Proposer, vote: VoteRequest<TypeConfig>) {
+///     proposer.vote(vote).await;
+/// }
+/// ```
+#[derive(Clone)]
+pub struct Proposer {
+    observer: Observer,
+}
+
+/// Receives Raft protocol traffic without proposal or administration authority.
+///
+/// Protocol receivers cannot propose commands:
+/// ```compile_fail
+/// use nervix_consensus::ProtocolReceiver;
+/// use nervix_models::DomainName;
+/// async fn propose(receiver: ProtocolReceiver, domain: DomainName) {
+///     receiver.stop_domain(domain).await;
+/// }
+/// ```
+/// Protocol receivers cannot administer membership:
+/// ```compile_fail
+/// use nervix_consensus::ProtocolReceiver;
+/// use nervix_models::ClusterNodeName;
+/// async fn administer(receiver: ProtocolReceiver, node: ClusterNodeName) {
+///     receiver.drop_node(&node).await;
+/// }
+/// ```
+#[derive(Clone)]
+pub struct ProtocolReceiver {
+    inner: Arc<ConsensusState>,
+}
+
+/// Initializes and changes membership, reconciles peers, and transfers leadership.
+///
+/// Administration does not grant replicated-command proposals:
+/// ```compile_fail
+/// use nervix_consensus::Administrator;
+/// use nervix_models::DomainName;
+/// async fn propose(administrator: Administrator, domain: DomainName) {
+///     administrator.stop_domain(domain).await;
+/// }
+/// ```
+/// Administration does not grant protocol receipt:
+/// ```compile_fail
+/// use nervix_consensus::{Administrator, TypeConfig, VoteRequest};
+/// async fn receive(administrator: Administrator, vote: VoteRequest<TypeConfig>) {
+///     administrator.vote(vote).await;
+/// }
+/// ```
+#[derive(Clone)]
+pub struct Administrator {
+    inner: Arc<ConsensusState>,
+}
+
+struct ConsensusState {
+    raft: NervixRaft,
+    // The Raft runtime independently owns the store as both log storage and state machine.
+    store: StdArc<FjallStore>,
+    local_node_id: ClusterNodeName,
+    cluster_api_advertise_url: String,
+    cluster_api_http_client: HttpClient,
+    node_unavailability_timeout: Duration,
+    peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
+    events: broadcast::Sender<String>,
+    metrics_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl std::ops::Deref for Proposer {
+    type Target = Observer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.observer
+    }
+}
+
+impl Consensus {
+    pub fn observer(&self) -> Observer {
+        Observer {
+            inner: self.inner.clone(),
+        }
+    }
+
+    pub fn proposer(&self) -> Proposer {
+        Proposer {
+            observer: self.observer(),
+        }
+    }
+
+    pub fn protocol_receiver(&self) -> ProtocolReceiver {
+        ProtocolReceiver {
+            inner: self.inner.clone(),
+        }
+    }
+
+    pub fn administrator(&self) -> Administrator {
+        Administrator {
+            inner: self.inner.clone(),
+        }
     }
 
     pub async fn open(
@@ -542,134 +725,23 @@ impl ConsensusHandle {
         });
 
         Ok(Self {
-            raft,
-            store,
-            local_node: GossipNode {
-                node_id: settings.node_id,
-                cluster_api_advertise_addr: settings.cluster_api_advertise_url,
-                grpc_advertise_addr: String::new(),
-                web_console_advertise_addr: String::new(),
-                interconnect_advertise_addr: String::new(),
-                interconnect_mode: "http".to_string(),
-                interconnect_public_key: String::new(),
-            },
-            cluster_api_http_client,
-            node_unavailability_timeout: settings.node_unavailability_timeout,
-            peer_health: Arc::new(RwLock::new(BTreeMap::new())),
-            events,
-            metrics_task: Arc::new(Mutex::new(Some(metrics_task))),
+            inner: Arc::new(ConsensusState {
+                raft,
+                store,
+                local_node_id: settings.node_id,
+                cluster_api_advertise_url: settings.cluster_api_advertise_url,
+                cluster_api_http_client,
+                node_unavailability_timeout: settings.node_unavailability_timeout,
+                peer_health: RwLock::new(BTreeMap::new()),
+                events,
+                metrics_task: Mutex::new(Some(metrics_task)),
+            }),
         })
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<String> {
-        self.events.subscribe()
-    }
-
-    pub fn subscribe_schedule(&self) -> watch::Receiver<ClusterSchedule> {
-        self.store.inner.schedule_tx.subscribe()
-    }
-
-    pub fn subscribe_domains(&self) -> watch::Receiver<BTreeMap<DomainName, DomainState>> {
-        self.store.inner.domain_tx.subscribe()
-    }
-
-    pub fn subscribe_resources(&self) -> watch::Receiver<ResourceVersionStatus> {
-        self.store.inner.resource_tx.subscribe()
-    }
-
-    pub fn subscribe_transactions(
-        &self,
-    ) -> watch::Receiver<BTreeMap<String, ReplicatedTransaction>> {
-        self.store.inner.transaction_tx.subscribe()
-    }
-
-    pub async fn current_schedule(&self) -> ClusterSchedule {
-        self.store.inner.state_machine.read().await.schedule.clone()
-    }
-
-    pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
-        self.store.inner.state_machine.read().await.domains.clone()
-    }
-
-    pub async fn current_transactions(&self) -> BTreeMap<String, ReplicatedTransaction> {
-        self.store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .transactions
-            .clone()
-    }
-
-    pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
-        self.store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .transactions
-            .get(id)
-            .cloned()
-    }
-
-    pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
-        let state = self.store.inner.state_machine.read().await;
-        ConsensusRuntimeState {
-            revision: state.runtime_revision,
-            schedule: state.schedule.clone(),
-            domains: state.domains.clone(),
-        }
-    }
-
-    pub async fn current_domain(&self, domain_id: &DomainName) -> Option<DomainState> {
-        self.store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .domains
-            .get(domain_id)
-            .cloned()
-    }
-
-    pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
-        self.store.inner.state_machine.read().await.users.clone()
-    }
-
-    pub async fn current_user(&self, user: &UserName) -> Option<UserCredentials> {
-        self.store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .users
-            .get(user)
-            .cloned()
-    }
-
-    pub async fn current_resources(&self) -> ResourceVersionStatus {
-        self.store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .resources
-            .clone()
-    }
-
-    pub async fn cordoned_node_ids(&self) -> BTreeSet<ClusterNodeName> {
-        self.store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .cordoned_node_ids
-            .clone()
-    }
-
     pub async fn shutdown(&self) {
-        let _ = self.raft.shutdown().await;
-        let handle = self.metrics_task.lock().take();
+        let _ = self.inner.raft.shutdown().await;
+        let handle = self.inner.metrics_task.lock().take();
         if let Some(handle) = handle {
             handle.abort();
             // The abort makes a cancellation the expected outcome and it says nothing new. A panic
@@ -682,188 +754,277 @@ impl ConsensusHandle {
             }
         }
     }
+}
+
+impl Observer {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<String> {
+        self.inner.events.subscribe()
+    }
+
+    pub fn subscribe_schedule(&self) -> watch::Receiver<ClusterSchedule> {
+        self.inner.store.inner.schedule_tx.subscribe()
+    }
+
+    pub fn subscribe_domains(&self) -> watch::Receiver<BTreeMap<DomainName, DomainState>> {
+        self.inner.store.inner.domain_tx.subscribe()
+    }
+
+    pub fn subscribe_resources(&self) -> watch::Receiver<ResourceVersionStatus> {
+        self.inner.store.inner.resource_tx.subscribe()
+    }
+
+    pub fn subscribe_transactions(
+        &self,
+    ) -> watch::Receiver<BTreeMap<String, ReplicatedTransaction>> {
+        self.inner.store.inner.transaction_tx.subscribe()
+    }
+
+    pub async fn current_schedule(&self) -> ClusterSchedule {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .schedule
+            .clone()
+    }
+
+    pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .domains
+            .clone()
+    }
+
+    pub async fn current_transactions(&self) -> BTreeMap<String, ReplicatedTransaction> {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .transactions
+            .clone()
+    }
+
+    pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .transactions
+            .get(id)
+            .cloned()
+    }
+
+    pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
+        let state = self.inner.store.inner.state_machine.read().await;
+        ConsensusRuntimeState {
+            revision: state.runtime_revision,
+            schedule: state.schedule.clone(),
+            domains: state.domains.clone(),
+        }
+    }
+
+    pub async fn current_domain(&self, domain_id: &DomainName) -> Option<DomainState> {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .domains
+            .get(domain_id)
+            .cloned()
+    }
+
+    pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .users
+            .clone()
+    }
+
+    pub async fn current_user(&self, user: &UserName) -> Option<UserCredentials> {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .users
+            .get(user)
+            .cloned()
+    }
+
+    pub async fn current_resources(&self) -> ResourceVersionStatus {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .resources
+            .clone()
+    }
+
+    pub async fn cordoned_node_ids(&self) -> BTreeSet<ClusterNodeName> {
+        self.inner
+            .store
+            .inner
+            .state_machine
+            .read()
+            .await
+            .cordoned_node_ids
+            .clone()
+    }
 
     pub fn local_node_id(&self) -> &ClusterNodeName {
-        &self.local_node.node_id
-    }
-
-    pub fn set_local_grpc_advertise_addr(&mut self, grpc_advertise_addr: String) {
-        self.local_node.grpc_advertise_addr = grpc_advertise_addr;
-    }
-
-    pub fn raft(&self) -> NervixRaft {
-        self.raft.clone()
-    }
-
-    pub async fn maybe_initialize(&self) -> Result<bool, ConsensusError> {
-        if self.store.has_raft_state().await {
-            return Ok(false);
-        }
-
-        let mut nodes = BTreeMap::new();
-        nodes.insert(
-            self.local_node.node_id.clone(),
-            BasicNode::new(self.local_node.cluster_api_advertise_addr.clone()),
-        );
-        self.raft
-            .initialize(nodes)
-            .await
-            .map(|_| ())
-            .map_err(|_| ConsensusError::Startup)?;
-        let message = format!(
-            "raft initialized with single-node membership {}",
-            self.local_node.node_id
-        );
-        info!("{message}");
-        let _ = self.events.send(message);
-        Ok(true)
-    }
-
-    pub async fn reconcile_nodes(&self, gossip: GossipState) -> Result<(), ConsensusError> {
-        let leader = self.raft.current_leader().await;
-        if leader.as_ref() != Some(&self.local_node.node_id) {
-            return Ok(());
-        }
-
-        let metrics = self.raft.metrics().borrow_watched().clone();
-        let current_voters = metrics
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect::<BTreeSet<_>>();
-        let mut desired_voters = current_voters.clone();
-        let mut added_learner = false;
-
-        for node in gossip.admission_candidates() {
-            if node.cluster_api_advertise_addr.is_empty() {
-                continue;
-            }
-
-            let known_node = metrics
-                .membership_config
-                .membership()
-                .get_node(&node.node_id)
-                .cloned();
-            if known_node.is_none()
-                || known_node.as_ref().map(|known| &known.addr)
-                    != Some(&node.cluster_api_advertise_addr)
-            {
-                let add_message = if known_node.is_some() {
-                    format!(
-                        "raft refreshing learner {} address to {}",
-                        node.node_id, node.cluster_api_advertise_addr
-                    )
-                } else {
-                    format!(
-                        "raft adding learner {} at {}",
-                        node.node_id, node.cluster_api_advertise_addr
-                    )
-                };
-                info!("{add_message}");
-                let _ = self.events.send(add_message);
-                self.raft
-                    .add_learner(
-                        node.node_id.clone(),
-                        BasicNode::new(node.cluster_api_advertise_addr.clone()),
-                        true,
-                    )
-                    .await
-                    .map_err(|_| ConsensusError::Transport)?;
-                added_learner = true;
-            }
-
-            desired_voters.insert(node.node_id.clone());
-        }
-
-        let membership_nodes = metrics
-            .membership_config
-            .nodes()
-            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut unavailable = Vec::new();
-        for node_id in current_voters.iter() {
-            if node_id == &self.local_node.node_id {
-                continue;
-            }
-
-            let Some(addr) = membership_nodes.get(node_id) else {
-                continue;
-            };
-
-            let chitchat_unavailable = gossip.dead_node_ids.contains(node_id);
-            let healthcheck_unavailable = self.ping_peer(addr).await.is_err();
-            unavailable.push((
-                node_id.clone(),
-                chitchat_unavailable || healthcheck_unavailable,
-            ));
-        }
-
-        {
-            let mut peer_health = self.peer_health.write().await;
-
-            for (node_id, is_unavailable) in unavailable {
-                let entry = peer_health.entry(node_id.clone()).or_insert(PeerHealth {
-                    unavailable_since: None,
-                    last_reported_unavailable_at: None,
-                });
-
-                if is_unavailable {
-                    let unavailable_since =
-                        entry.unavailable_since.get_or_insert_with(Instant::now);
-                    let should_report = unavailable_since.elapsed()
-                        >= self.node_unavailability_timeout
-                        && entry.last_reported_unavailable_at.is_none_or(|last| {
-                            last.elapsed() >= HEARTBEAT_ERROR_REPORT_MIN_INTERVAL
-                        });
-                    if should_report {
-                        let message = format!(
-                            "raft peer {} remains unavailable for {:?} (threshold {:?})",
-                            node_id,
-                            unavailable_since.elapsed(),
-                            self.node_unavailability_timeout
-                        );
-                        info!("{message}");
-                        let _ = self.events.send(message);
-                        entry.last_reported_unavailable_at = Some(Instant::now());
-                    }
-                } else {
-                    entry.unavailable_since = None;
-                    entry.last_reported_unavailable_at = None;
-                }
-            }
-
-            peer_health.retain(|node_id, _| {
-                current_voters.contains(node_id) || desired_voters.contains(node_id)
-            });
-        }
-
-        if !added_learner && desired_voters == current_voters {
-            return Ok(());
-        }
-
-        self.raft
-            .change_membership(desired_voters.clone(), true)
-            .await
-            .map_err(|_| ConsensusError::Transport)?;
-        let after = self
-            .raft
-            .metrics()
-            .borrow_watched()
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect::<BTreeSet<_>>();
-        if current_voters != after {
-            let message = format!("raft membership updated: {:?}", after);
-            info!("{message}");
-            let _ = self.events.send(message);
-        }
-        Ok(())
+        &self.inner.local_node_id
     }
 
     pub async fn current_leader(&self) -> Option<ClusterNodeName> {
-        self.raft.current_leader().await
+        self.inner.raft.current_leader().await
+    }
+
+    pub async fn status_lines(&self) -> Vec<String> {
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        let mut lines = Vec::new();
+        lines.push(format!("raft.id: {}", self.inner.local_node_id));
+        lines.push(format!(
+            "raft.current_leader: {}",
+            metrics
+                .current_leader
+                .map_or_else(|| "(none)".to_string(), |leader| leader.to_string())
+        ));
+        lines.push(format!("raft.current_term: {}", metrics.current_term));
+        lines.push(format!("raft.state: {:?}", metrics.state));
+        lines.push(format!(
+            "raft.node_unavailability_timeout: {:?}",
+            self.inner.node_unavailability_timeout
+        ));
+        let cordoned = self.cordoned_node_ids().await;
+        lines.push(format!(
+            "raft.cordoned_nodes: {}",
+            if cordoned.is_empty() {
+                "(none)".to_string()
+            } else {
+                cordoned.into_iter().collect::<Vec<_>>().join(",")
+            }
+        ));
+        lines.push(format!(
+            "raft.last_log_index: {}",
+            metrics.last_log_index.unwrap_or_default()
+        ));
+        lines.push(format!(
+            "raft.last_applied: {}",
+            metrics
+                .last_applied
+                .map(|v| v.index.to_string())
+                .unwrap_or_else(|| "(none)".to_string())
+        ));
+        lines.push("raft.membership:".to_string());
+        for (node_id, node) in metrics.membership_config.nodes() {
+            let role = if metrics
+                .membership_config
+                .membership()
+                .voter_ids()
+                .any(|id| id == *node_id)
+            {
+                "voter"
+            } else {
+                "learner"
+            };
+            lines.push(format!("- {node_id} [{role}] {}", node.addr));
+        }
+        lines
+    }
+
+    pub async fn domain_status_lines(&self) -> Vec<String> {
+        let domains = self.current_domains().await;
+        if domains.is_empty() {
+            return vec!["- none".to_string()];
+        }
+
+        let mut lines = Vec::new();
+        for domain in domains.into_values() {
+            let line = if let nervix_models::DomainPace::Paced = domain.config.pace {
+                format!(
+                    "- {} status={:?} pace={} period={} skew={}",
+                    domain.id.as_str(),
+                    domain.status,
+                    domain.config.pace.as_ref(),
+                    domain.config.period,
+                    domain.config.skew
+                )
+            } else {
+                format!(
+                    "- {} status={:?} pace={}",
+                    domain.id.as_str(),
+                    domain.status,
+                    domain.config.pace.as_ref()
+                )
+            };
+            lines.push(line);
+        }
+        lines
+    }
+
+    pub async fn membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        metrics
+            .membership_config
+            .nodes()
+            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
+            .collect()
+    }
+
+    pub async fn membership_voter_ids(&self) -> BTreeSet<ClusterNodeName> {
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        metrics.membership_config.membership().voter_ids().collect()
+    }
+
+    pub async fn live_voter_ids(
+        &self,
+        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
+        let voters = self.membership_voter_ids().await;
+        let mut live_voters = live_node_ids
+            .into_iter()
+            .filter(|node_id| voters.contains(node_id))
+            .collect::<Vec<_>>();
+        live_voters.sort();
+        live_voters.dedup();
+        live_voters
+    }
+
+    pub async fn schedulable_live_voter_ids(
+        &self,
+        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
+        let cordoned = self.cordoned_node_ids().await;
+        self.live_voter_ids(live_node_ids)
+            .await
+            .into_iter()
+            .filter(|node_id| !cordoned.contains(node_id))
+            .collect()
+    }
+}
+
+impl Proposer {
+    pub fn observer(&self) -> Observer {
+        self.observer.clone()
     }
 
     pub async fn replace_domain_schedule(
@@ -871,24 +1032,26 @@ impl ConsensusHandle {
         domain: DomainName,
         schedule: Option<DomainSchedule>,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::ReplaceDomainSchedule {
                 domain,
                 schedule: schedule.map(Box::new),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn put_domain(&self, domain: DomainState) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::PutDomain {
                 domain: Box::new(domain),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn put_domain_and_schedule(
@@ -896,14 +1059,15 @@ impl ConsensusHandle {
         domain: DomainState,
         schedule: Option<DomainSchedule>,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::PutDomainAndSchedule {
                 domain: Box::new(domain),
                 schedule: schedule.map(Box::new),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn start_domain(
@@ -912,7 +1076,8 @@ impl ConsensusHandle {
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::StartDomain {
                 domain_id,
                 start,
@@ -920,41 +1085,45 @@ impl ConsensusHandle {
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn stop_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::StopDomain { domain_id })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn pause_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::PauseDomain { domain_id })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn resume_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::ResumeDomain { domain_id })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn create_user(&self, user: UserCredentials) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::CreateUser {
                 user: Box::new(user),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn allocate_resource_version(
@@ -970,14 +1139,15 @@ impl ConsensusHandle {
                 domain.as_str()
             )));
         }
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::AdvanceResourceVersion {
                 domain: domain.clone(),
                 identifier: identifier.clone(),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)?;
+            .map_err(ConsensusError::from)?;
 
         let resources = self.current_resources().await;
         Ok(resources.latest_version(domain, identifier).unwrap_or(1))
@@ -988,40 +1158,43 @@ impl ConsensusHandle {
         domain: &DomainName,
         identifier: &ResourceName,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::CreateResourceCatalog {
                 domain: domain.clone(),
                 identifier: identifier.clone(),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn put_resource_version(
         &self,
         resource: ResourceVersion,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::PutResourceVersion {
                 resource: Box::new(resource),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn put_resource_replica(
         &self,
         replica: ResourceNodeStatus,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::PutResourceReplica {
                 replica: Box::new(replica),
             })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     pub async fn set_node_cordoned(
@@ -1029,11 +1202,12 @@ impl ConsensusHandle {
         node_id: ClusterNodeName,
         cordoned: bool,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::SetNodeCordoned { node_id, cordoned })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
     }
 
     async fn write_transaction(
@@ -1041,10 +1215,11 @@ impl ConsensusHandle {
         command: ConsensusCommand,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         let response = self
+            .inner
             .raft
             .client_write(command)
             .await
-            .map_err(Self::map_write_error)?;
+            .map_err(ConsensusError::from)?;
         let ConsensusResponse::Transaction(response) = response.data else {
             return Err(ConsensusTransactionError::InvalidResponse);
         };
@@ -1165,15 +1340,198 @@ impl ConsensusHandle {
         &self,
         finished_before: nervix_models::Timestamp,
     ) -> Result<(), ConsensusError> {
-        self.raft
+        self.inner
+            .raft
             .client_write(ConsensusCommand::RemoveFinishedTransactions { finished_before })
             .await
             .map(|_| ())
-            .map_err(Self::map_write_error)
+            .map_err(ConsensusError::from)
+    }
+}
+
+impl Administrator {
+    pub fn observer(&self) -> Observer {
+        Observer {
+            inner: self.inner.clone(),
+        }
+    }
+
+    pub async fn maybe_initialize(&self) -> Result<bool, ConsensusError> {
+        if self.inner.store.has_raft_state().await {
+            return Ok(false);
+        }
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            self.inner.local_node_id.clone(),
+            BasicNode::new(self.inner.cluster_api_advertise_url.clone()),
+        );
+        self.inner
+            .raft
+            .initialize(nodes)
+            .await
+            .map(|_| ())
+            .map_err(|_| ConsensusError::Startup)?;
+        let message = format!(
+            "raft initialized with single-node membership {}",
+            self.inner.local_node_id
+        );
+        info!("{message}");
+        let _ = self.inner.events.send(message);
+        Ok(true)
+    }
+
+    pub async fn reconcile_nodes(&self, gossip: GossipState) -> Result<(), ConsensusError> {
+        let leader = self.inner.raft.current_leader().await;
+        if leader.as_ref() != Some(&self.inner.local_node_id) {
+            return Ok(());
+        }
+
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        let current_voters = metrics
+            .membership_config
+            .membership()
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        let mut desired_voters = current_voters.clone();
+        let mut added_learner = false;
+
+        for node in gossip.admission_candidates() {
+            tokio::task::consume_budget().await;
+            if node.cluster_api_advertise_addr.is_empty() {
+                continue;
+            }
+
+            let known_node = metrics
+                .membership_config
+                .membership()
+                .get_node(&node.node_id)
+                .cloned();
+            if known_node.is_none()
+                || known_node.as_ref().map(|known| &known.addr)
+                    != Some(&node.cluster_api_advertise_addr)
+            {
+                let add_message = if known_node.is_some() {
+                    format!(
+                        "raft refreshing learner {} address to {}",
+                        node.node_id, node.cluster_api_advertise_addr
+                    )
+                } else {
+                    format!(
+                        "raft adding learner {} at {}",
+                        node.node_id, node.cluster_api_advertise_addr
+                    )
+                };
+                info!("{add_message}");
+                let _ = self.inner.events.send(add_message);
+                self.inner
+                    .raft
+                    .add_learner(
+                        node.node_id.clone(),
+                        BasicNode::new(node.cluster_api_advertise_addr.clone()),
+                        true,
+                    )
+                    .await
+                    .map_err(|_| ConsensusError::Transport)?;
+                added_learner = true;
+            }
+
+            desired_voters.insert(node.node_id.clone());
+        }
+
+        let membership_nodes = metrics
+            .membership_config
+            .nodes()
+            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut unavailable = Vec::new();
+        for node_id in current_voters.iter() {
+            tokio::task::consume_budget().await;
+            if node_id == &self.inner.local_node_id {
+                continue;
+            }
+
+            let Some(addr) = membership_nodes.get(node_id) else {
+                continue;
+            };
+
+            let chitchat_unavailable = gossip.dead_node_ids.contains(node_id);
+            let healthcheck_unavailable = self.ping_peer(addr).await.is_err();
+            unavailable.push((
+                node_id.clone(),
+                chitchat_unavailable || healthcheck_unavailable,
+            ));
+        }
+
+        {
+            let mut peer_health = self.inner.peer_health.write().await;
+
+            for (node_id, is_unavailable) in unavailable {
+                let entry = peer_health.entry(node_id.clone()).or_insert(PeerHealth {
+                    unavailable_since: None,
+                    last_reported_unavailable_at: None,
+                });
+
+                if is_unavailable {
+                    let unavailable_since =
+                        entry.unavailable_since.get_or_insert_with(Instant::now);
+                    let should_report = unavailable_since.elapsed()
+                        >= self.inner.node_unavailability_timeout
+                        && entry.last_reported_unavailable_at.is_none_or(|last| {
+                            last.elapsed() >= HEARTBEAT_ERROR_REPORT_MIN_INTERVAL
+                        });
+                    if should_report {
+                        let message = format!(
+                            "raft peer {} remains unavailable for {:?} (threshold {:?})",
+                            node_id,
+                            unavailable_since.elapsed(),
+                            self.inner.node_unavailability_timeout
+                        );
+                        info!("{message}");
+                        let _ = self.inner.events.send(message);
+                        entry.last_reported_unavailable_at = Some(Instant::now());
+                    }
+                } else {
+                    entry.unavailable_since = None;
+                    entry.last_reported_unavailable_at = None;
+                }
+            }
+
+            peer_health.retain(|node_id, _| {
+                current_voters.contains(node_id) || desired_voters.contains(node_id)
+            });
+        }
+
+        if !added_learner && desired_voters == current_voters {
+            return Ok(());
+        }
+
+        self.inner
+            .raft
+            .change_membership(desired_voters.clone(), true)
+            .await
+            .map_err(|_| ConsensusError::Transport)?;
+        let after = self
+            .inner
+            .raft
+            .metrics()
+            .borrow_watched()
+            .membership_config
+            .membership()
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        if current_voters != after {
+            let message = format!("raft membership updated: {:?}", after);
+            info!("{message}");
+            let _ = self.inner.events.send(message);
+        }
+        Ok(())
     }
 
     async fn ping_peer(&self, target_addr: &str) -> Result<(), ConsensusError> {
         let response = self
+            .inner
             .cluster_api_http_client
             .get(format!("{target_addr}/raft/ping"))
             .send()
@@ -1186,135 +1544,12 @@ impl ConsensusHandle {
         }
     }
 
-    pub async fn status_lines(&self) -> Vec<String> {
-        let metrics = self.raft.metrics().borrow_watched().clone();
-        let mut lines = Vec::new();
-        lines.push(format!("raft.id: {}", self.local_node.node_id));
-        lines.push(format!(
-            "raft.current_leader: {}",
-            metrics
-                .current_leader
-                .map_or_else(|| "(none)".to_string(), |leader| leader.to_string())
-        ));
-        lines.push(format!("raft.current_term: {}", metrics.current_term));
-        lines.push(format!("raft.state: {:?}", metrics.state));
-        lines.push(format!(
-            "raft.node_unavailability_timeout: {:?}",
-            self.node_unavailability_timeout
-        ));
-        let cordoned = self.cordoned_node_ids().await;
-        lines.push(format!(
-            "raft.cordoned_nodes: {}",
-            if cordoned.is_empty() {
-                "(none)".to_string()
-            } else {
-                cordoned.into_iter().collect::<Vec<_>>().join(",")
-            }
-        ));
-        lines.push(format!(
-            "raft.last_log_index: {}",
-            metrics.last_log_index.unwrap_or_default()
-        ));
-        lines.push(format!(
-            "raft.last_applied: {}",
-            metrics
-                .last_applied
-                .map(|v| v.index.to_string())
-                .unwrap_or_else(|| "(none)".to_string())
-        ));
-        lines.push("raft.membership:".to_string());
-        for (node_id, node) in metrics.membership_config.nodes() {
-            let role = if metrics
-                .membership_config
-                .membership()
-                .voter_ids()
-                .any(|id| id == *node_id)
-            {
-                "voter"
-            } else {
-                "learner"
-            };
-            lines.push(format!("- {node_id} [{role}] {}", node.addr));
-        }
-        lines
-    }
-
-    pub async fn domain_status_lines(&self) -> Vec<String> {
-        let domains = self.current_domains().await;
-        if domains.is_empty() {
-            return vec!["- none".to_string()];
-        }
-
-        let mut lines = Vec::new();
-        for domain in domains.into_values() {
-            let line = if let nervix_models::DomainPace::Paced = domain.config.pace {
-                format!(
-                    "- {} status={:?} pace={} period={} skew={}",
-                    domain.id.as_str(),
-                    domain.status,
-                    domain.config.pace.as_ref(),
-                    domain.config.period,
-                    domain.config.skew
-                )
-            } else {
-                format!(
-                    "- {} status={:?} pace={}",
-                    domain.id.as_str(),
-                    domain.status,
-                    domain.config.pace.as_ref()
-                )
-            };
-            lines.push(line);
-        }
-        lines
-    }
-
-    pub async fn membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
-        let metrics = self.raft.metrics().borrow_watched().clone();
-        metrics
-            .membership_config
-            .nodes()
-            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
-            .collect()
-    }
-
-    pub async fn membership_voter_ids(&self) -> BTreeSet<ClusterNodeName> {
-        let metrics = self.raft.metrics().borrow_watched().clone();
-        metrics.membership_config.membership().voter_ids().collect()
-    }
-
-    pub async fn live_voter_ids(
-        &self,
-        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
-    ) -> Vec<ClusterNodeName> {
-        let voters = self.membership_voter_ids().await;
-        let mut live_voters = live_node_ids
-            .into_iter()
-            .filter(|node_id| voters.contains(node_id))
-            .collect::<Vec<_>>();
-        live_voters.sort();
-        live_voters.dedup();
-        live_voters
-    }
-
-    pub async fn schedulable_live_voter_ids(
-        &self,
-        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
-    ) -> Vec<ClusterNodeName> {
-        let cordoned = self.cordoned_node_ids().await;
-        self.live_voter_ids(live_node_ids)
-            .await
-            .into_iter()
-            .filter(|node_id| !cordoned.contains(node_id))
-            .collect()
-    }
-
     pub async fn drop_node(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
-        if *node_id == self.local_node.node_id {
+        if *node_id == self.inner.local_node_id {
             return Err(ConsensusError::RemoveLocalLeader(node_id.to_string()));
         }
 
-        let metrics = self.raft.metrics().borrow_watched().clone();
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
         let member_ids = metrics
             .membership_config
             .nodes()
@@ -1334,51 +1569,68 @@ impl ConsensusHandle {
             return Err(ConsensusError::RemoveLastVoter(node_id.to_string()));
         }
 
-        let membership_change_timeout =
-            self.node_unavailability_timeout.max(Duration::from_secs(5)) * 2;
+        let membership_change_timeout = self
+            .inner
+            .node_unavailability_timeout
+            .max(Duration::from_secs(5))
+            * 2;
         timeout(
             membership_change_timeout,
-            self.raft.change_membership(desired_voters.clone(), false),
+            self.inner
+                .raft
+                .change_membership(desired_voters.clone(), false),
         )
         .await
         .map_err(|_| ConsensusError::MembershipChangeTimeout {
             operation: format!("remove node '{node_id}'"),
             timeout: membership_change_timeout,
         })?
-        .map_err(|_| ConsensusError::Transport)?;
+        .map_err(|error| {
+            if let RaftError::APIError(ClientWriteError::ForwardToLeader(_)) = error {
+                ConsensusError::from(error)
+            } else {
+                ConsensusError::Transport
+            }
+        })?;
 
         let message = format!("raft node removed: {node_id}");
         info!("{message}");
-        let _ = self.events.send(message);
+        let _ = self.inner.events.send(message);
         Ok(())
-    }
-
-    pub async fn append_entries(
-        &self,
-        req: AppendEntriesRequest<TypeConfig>,
-    ) -> Result<AppendEntriesResponse<TypeConfig>, RaftError<TypeConfig>> {
-        self.raft.append_entries(req).await
-    }
-
-    pub async fn vote(
-        &self,
-        req: VoteRequest<TypeConfig>,
-    ) -> Result<VoteResponse<TypeConfig>, RaftError<TypeConfig>> {
-        self.raft.vote(req).await
-    }
-
-    pub async fn transfer_leader(
-        &self,
-        req: TransferLeaderRequest<TypeConfig>,
-    ) -> Result<TransferLeaderResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
-        self.raft.handle_transfer_leader(req).await
     }
 
     pub async fn transfer_leadership_to(
         &self,
         target_node_id: ClusterNodeName,
     ) -> Result<(), openraft::error::Fatal<TypeConfig>> {
-        self.raft.trigger().transfer_leader(target_node_id).await
+        self.inner
+            .raft
+            .trigger()
+            .transfer_leader(target_node_id)
+            .await
+    }
+}
+
+impl ProtocolReceiver {
+    pub async fn append_entries(
+        &self,
+        req: AppendEntriesRequest<TypeConfig>,
+    ) -> Result<AppendEntriesResponse<TypeConfig>, RaftError<TypeConfig>> {
+        self.inner.raft.append_entries(req).await
+    }
+
+    pub async fn vote(
+        &self,
+        req: VoteRequest<TypeConfig>,
+    ) -> Result<VoteResponse<TypeConfig>, RaftError<TypeConfig>> {
+        self.inner.raft.vote(req).await
+    }
+
+    pub async fn transfer_leader(
+        &self,
+        req: TransferLeaderRequest<TypeConfig>,
+    ) -> Result<TransferLeaderResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
+        self.inner.raft.handle_transfer_leader(req).await
     }
 
     pub async fn install_full_snapshot(
@@ -1387,7 +1639,8 @@ impl ConsensusHandle {
         meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
         snapshot: Vec<u8>,
     ) -> Result<SnapshotResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
-        self.raft
+        self.inner
+            .raft
             .install_full_snapshot(
                 vote,
                 Snapshot {
@@ -1400,12 +1653,12 @@ impl ConsensusHandle {
 }
 
 #[derive(Clone)]
-pub struct NetworkFactory {
+struct NetworkFactory {
     http_client: HttpClient,
 }
 
 #[derive(Clone)]
-pub struct NetworkClient {
+struct NetworkClient {
     target: String,
     http_client: HttpClient,
 }
@@ -1712,7 +1965,7 @@ impl StoreInner {
 
 /// Owns the write authority over the shared store: appending, truncating, purging, voting,
 /// snapshotting, and recovery all run through this handle.
-pub struct FjallStore {
+struct FjallStore {
     inner: Arc<StoreInner>,
 }
 
@@ -1801,7 +2054,7 @@ impl Clone for FjallStore {
 /// moment [`RaftLogStorage::append`] returns. Those internals are its only field and are
 /// private, and the type offers no accessor, conversion, or `Deref` back to [`FjallStore`]:
 /// holding a reader grants the log and vote reads below and nothing more.
-pub struct FjallLogReader {
+struct FjallLogReader {
     inner: Arc<StoreInner>,
 }
 
@@ -2765,6 +3018,62 @@ mod tests {
 
     fn domain(raw: &str) -> DomainName {
         DomainName::try_from(raw).expect("valid domain")
+    }
+
+    #[test]
+    fn proposal_leadership_loss_retains_known_and_unknown_leaders()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let node = ClusterNodeName::parse("node-2")?;
+        for leader_id in [Some(node), None] {
+            let error =
+                super::RaftError::APIError(openraft::error::ClientWriteError::ForwardToLeader(
+                    openraft::error::ForwardToLeader::<TypeConfig> {
+                        leader_id: leader_id.clone(),
+                        leader_node: None,
+                    },
+                ));
+            let mapped = ConsensusError::from(error);
+            let ConsensusError::LeadershipLost { leader_id: actual } = mapped else {
+                panic!("a proposal rejected by a non-leader must preserve leadership loss");
+            };
+            assert_eq!(actual, leader_id);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proposal_runtime_failure_retains_write_diagnostic() {
+        let error = super::RaftError::Fatal(openraft::error::Fatal::<TypeConfig>::Stopped);
+        let mapped = ConsensusError::from(error);
+        let ConsensusError::Write(message) = mapped else {
+            panic!("a stopped Raft runtime must report a write failure");
+        };
+        assert_eq!(message, "raft write failed: raft stopped");
+    }
+
+    #[test]
+    fn transaction_errors_preserve_consensus_and_mutation_outcomes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let leader = ClusterNodeName::parse("node-2")?;
+        let consensus = super::ConsensusTransactionError::from(ConsensusError::LeadershipLost {
+            leader_id: Some(leader.clone()),
+        });
+        assert!(matches!(
+            consensus,
+            super::ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
+                leader_id: Some(actual),
+            }) if actual == leader
+        ));
+
+        let mutation = TransactionMutationError::Unknown {
+            id: "tx-1".to_string(),
+        };
+        let error = super::ConsensusTransactionError::from(mutation.clone());
+        assert!(matches!(
+            error,
+            super::ConsensusTransactionError::Mutation(actual) if actual == mutation
+        ));
+        Ok(())
     }
 
     #[test]

@@ -51,7 +51,7 @@ const RESERVED_PREFIX: &str = "__nervix_";
 
 #[derive(Debug, Error)]
 pub enum UdfError {
-    #[error("failed to initialize the ROTO_0_11 runtime: {0}")]
+    #[error("failed to initialize the ROTO_0_13 runtime: {0}")]
     RuntimeRegistration(String),
     #[error("UDF '{name}' uses reserved identifier prefix '__nervix_'")]
     ReservedIdentifier { name: String },
@@ -1472,7 +1472,7 @@ mod tests {
     fn add_one_model() -> CreateUdf {
         CreateUdf::new(
             UdfName::parse("add_one").expect("valid udf name"),
-            UdfLanguage::Roto0_11,
+            UdfLanguage::Roto0_13,
             vec![UdfArgument {
                 name: FieldName::parse("value").expect("valid field name"),
                 ty: ParseAsType::I64,
@@ -1503,7 +1503,7 @@ mod tests {
     ) -> CreateUdf {
         CreateUdf::new(
             UdfName::parse(name).expect("valid udf name"),
-            UdfLanguage::Roto0_11,
+            UdfLanguage::Roto0_13,
             arguments
                 .into_iter()
                 .map(|argument| UdfArgument {

@@ -140,6 +140,14 @@ macro_rules! declare_typed_arrays {
 
 with_typed_registers!(declare_typed_arrays);
 
+/// One columnar batch a program runs over: the schema of its fields and one array per field.
+///
+/// Every array already knows its own type, so the schema beside them is a second description of
+/// the same columns. It is carried rather than derived because this is the VM's per-batch path: a
+/// program's schema is one `Arc` that every batch it runs on shares, and rebuilding it from the
+/// columns would allocate a `Schema` and a `Field` per column for every batch, on top of losing
+/// the field names and nullability the arrays do not carry. [`TypedBatch::try_new`] checks the two
+/// descriptions agree once, when the batch is built.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedBatch {
     schema: Arc<Schema>,

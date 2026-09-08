@@ -261,6 +261,7 @@ pub fn suggest_create_inferencer(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::FlushPolicy;
     use nonzero_ext::nonzero;
 
     use super::*;
@@ -312,9 +313,11 @@ mod tests {
             parsed.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
         assert_eq!(parsed.inputs[0].tensor, "features");
         assert_eq!(

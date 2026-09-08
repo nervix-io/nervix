@@ -74,9 +74,10 @@ use nervix_client_core::{
     TlsRequirement as ClientTlsRequirement,
 };
 use nervix_consensus::{
-    AppendEntriesRequest as RaftAppendEntriesRequest, ConsensusHandle, ConsensusRuntimeState,
-    ConsensusSettings, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR,
-    RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, ReplicatedTransaction,
+    Administrator, AppendEntriesRequest as RaftAppendEntriesRequest, Consensus, ConsensusError,
+    ConsensusRuntimeState, ConsensusSettings, ConsensusTransactionError, Observer, Proposer,
+    ProtocolReceiver, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR, RAFT_INSTALL_SNAPSHOT_PATH,
+    RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, ReplicatedTransaction,
     SnapshotRelayHeader as RaftSnapshotRelayHeader, TransactionCommandResult,
     TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits,
     TransactionState, TransactionStatement, TransactionStepEffect, TransactionStepResult,
@@ -601,7 +602,7 @@ use crate::{
         UploadResourceRequest, UploadResourceResponse,
         session_service_server::{SessionService, SessionServiceServer},
     },
-    resource::{ResourceEntryType, ResourceManifestEntry, ResourceStore},
+    resource::{ResourceEntryContent, ResourceManifestEntry, ResourceStore},
     runtime::{
         CompiledProgramWithMaterializedInterest, EntityGateLease, IngestMessageHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
@@ -1725,7 +1726,8 @@ fn parse_resource_archive_request_path(path: &str) -> Option<ResourceId> {
 }
 
 async fn handle_cluster_api_request(
-    consensus: Arc<ConsensusHandle>,
+    consensus: Proposer,
+    protocol: ProtocolReceiver,
     resource_store: Arc<ResourceStore>,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
@@ -1763,7 +1765,7 @@ async fn handle_cluster_api_request(
             )
             .await
             {
-                Ok(req) => match consensus.append_entries(req).await {
+                Ok(req) => match protocol.append_entries(req).await {
                     Ok(response) => match encode_cbor(&response) {
                         Ok(body) => {
                             response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
@@ -1784,7 +1786,7 @@ async fn handle_cluster_api_request(
         (&Method::POST, RAFT_VOTE_PATH) => {
             match read_cbor_request_body::<RaftVoteRequest<TypeConfig>>(&mut request, "vote").await
             {
-                Ok(req) => match consensus.vote(req).await {
+                Ok(req) => match protocol.vote(req).await {
                     Ok(response) => match encode_cbor(&response) {
                         Ok(body) => {
                             response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
@@ -1809,7 +1811,7 @@ async fn handle_cluster_api_request(
             )
             .await
             {
-                Ok(req) => match consensus.transfer_leader(req).await {
+                Ok(req) => match protocol.transfer_leader(req).await {
                     Ok(response) => match encode_cbor(&response) {
                         Ok(body) => {
                             response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
@@ -1884,7 +1886,7 @@ async fn handle_cluster_api_request(
                         },
                     ));
                 };
-                match consensus
+                match protocol
                     .install_full_snapshot(header.vote, header.meta, snapshot)
                     .await
                 {
@@ -1915,7 +1917,7 @@ async fn handle_cluster_api_request(
 }
 
 async fn handle_observability_request(
-    consensus: Arc<ConsensusHandle>,
+    consensus: Observer,
     runtime: crate::runtime::Runtime,
     request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
@@ -1939,7 +1941,7 @@ async fn handle_observability_request(
 }
 
 async fn serve_observability_http(
-    consensus: Arc<ConsensusHandle>,
+    consensus: Observer,
     runtime: crate::runtime::Runtime,
     listener: TcpListener,
     shutdown: CancellationToken,
@@ -1947,6 +1949,7 @@ async fn serve_observability_http(
     let mut connection_tasks = JoinSet::new();
 
     loop {
+        tokio::task::consume_budget().await;
         let accepted = tokio::select! {
             _ = shutdown.cancelled() => {
                 break;
@@ -2735,7 +2738,8 @@ async fn serve_web_console_https(
 }
 
 async fn serve_cluster_api_http(
-    consensus: Arc<ConsensusHandle>,
+    consensus: Proposer,
+    protocol: ProtocolReceiver,
     resource_store: Arc<ResourceStore>,
     listener: TcpListener,
     shutdown: CancellationToken,
@@ -2743,6 +2747,7 @@ async fn serve_cluster_api_http(
     let mut connection_tasks = JoinSet::new();
 
     loop {
+        tokio::task::consume_budget().await;
         let accepted = tokio::select! {
             _ = shutdown.cancelled() => {
                 break;
@@ -2756,6 +2761,7 @@ async fn serve_cluster_api_http(
             .set_nodelay(true)
             .change_context(AppError::ServeClusterApi)?;
         let consensus = consensus.clone();
+        let protocol = protocol.clone();
         let resource_store = resource_store.clone();
         connection_tasks.spawn(async move {
             let io = TokioIo::new(stream);
@@ -2765,6 +2771,7 @@ async fn serve_cluster_api_http(
                     service_fn(move |request| {
                         handle_cluster_api_request(
                             consensus.clone(),
+                            protocol.clone(),
                             resource_store.clone(),
                             request,
                         )
@@ -2782,7 +2789,8 @@ async fn serve_cluster_api_http(
 }
 
 async fn serve_cluster_api_https(
-    consensus: Arc<ConsensusHandle>,
+    consensus: Proposer,
+    protocol: ProtocolReceiver,
     resource_store: Arc<ResourceStore>,
     cluster_api_tls_server_config: StdArc<ServerConfig>,
     listener: TcpListener,
@@ -2791,6 +2799,7 @@ async fn serve_cluster_api_https(
     let mut connection_tasks = JoinSet::new();
 
     loop {
+        tokio::task::consume_budget().await;
         let accepted = tokio::select! {
             _ = shutdown.cancelled() => {
                 break;
@@ -2804,6 +2813,7 @@ async fn serve_cluster_api_https(
             .set_nodelay(true)
             .change_context(AppError::ServeClusterApi)?;
         let consensus = consensus.clone();
+        let protocol = protocol.clone();
         let resource_store = resource_store.clone();
         let acceptor = TlsAcceptor::from(cluster_api_tls_server_config.clone());
         connection_tasks.spawn(async move {
@@ -2816,6 +2826,7 @@ async fn serve_cluster_api_https(
                             service_fn(move |request| {
                                 handle_cluster_api_request(
                                     consensus.clone(),
+                                    protocol.clone(),
                                     resource_store.clone(),
                                     request,
                                 )
@@ -3252,8 +3263,10 @@ struct SessionServiceImpl {
 struct SessionServiceInner {
     /// Started and shut down by the application, which outlives the service handle.
     cluster: Arc<cluster::ClusterHandle>,
-    /// Started and shut down by the application, which outlives the service handle.
-    consensus: Arc<ConsensusHandle>,
+    /// Proposal authority and local observation; leadership is checked for each operation.
+    consensus: Proposer,
+    /// Membership changes requested by authenticated cluster commands.
+    consensus_administrator: Administrator,
     /// Also held by the application and by the registry reconciliation tasks it spawns.
     registry: Arc<Registry>,
     /// Also held by the application startup that opened it and by the cluster API server.
@@ -3295,11 +3308,68 @@ struct TransactionExecutionLease {
     id: String,
 }
 
+#[derive(Debug, Error)]
+enum TransactionCommitError {
+    #[error(transparent)]
+    Proposal(#[from] ConsensusTransactionError),
+    #[error("transaction '{id}' is unknown")]
+    UnknownTransaction { id: String },
+    #[error("transaction '{id}' is still open")]
+    TransactionOpen { id: String },
+    #[error("transaction '{id}' model step completed without recording progress")]
+    MissingProgress { id: String },
+    #[error("transaction '{id}' has invalid recorded commit progress")]
+    InvalidProgress { id: String },
+    #[error("failed to synchronize registry before resuming transaction '{id}'")]
+    SynchronizeRegistry { id: String },
+    #[error("failed to recover transaction '{id}' domain quiescence")]
+    RecoverQuiescence { id: String },
+    #[error("failed to prepare schedule for domain '{domain}': {reason}")]
+    PrepareSchedule { domain: DomainName, reason: String },
+    #[error("transaction '{id}' commit task failed")]
+    TaskJoin { id: String },
+}
+
+impl TransactionCommitError {
+    fn consensus_error(&self) -> Option<&ConsensusError> {
+        match self {
+            Self::Proposal(ConsensusTransactionError::Consensus(error)) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+enum ResourceUploadError {
+    #[error("failed to allocate version for resource '{identifier}'")]
+    AllocateVersion { identifier: ModelName },
+    #[error("failed to install resource '{identifier}'")]
+    InstallArchive { identifier: ModelName },
+    #[error(
+        "failed to publish resource '{}@{}'{cleanup_suffix}",
+        .id.identifier.as_str(),
+        .id.version
+    )]
+    PublishVersion {
+        id: ResourceId,
+        cleanup_suffix: String,
+    },
+    #[error("failed to publish resource replica '{}@{}'", .id.identifier.as_str(), .id.version)]
+    PublishReplica { id: ResourceId },
+    #[error(
+        "failed to replicate resource '{}@{}': {reason}",
+        .id.identifier.as_str(),
+        .id.version
+    )]
+    WaitForReplicas { id: ResourceId, reason: String },
+}
+
 struct TransactionModelStepContext<'a> {
     transaction: &'a ReplicatedTransaction,
     first_statement: usize,
     statement_count: usize,
-    outcome: &'a ParkingMutex<Option<Result<ReplicatedTransaction, String>>>,
+    outcome:
+        &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
 }
 
 impl Drop for TransactionExecutionLease {
@@ -3672,7 +3742,7 @@ struct ApplicationStartup {
     resource_store: Arc<ResourceStore>,
     registry: Arc<Registry>,
     runtime: Runtime,
-    consensus: Option<Arc<ConsensusHandle>>,
+    consensus: Option<Consensus>,
     interconnect: Option<Transport>,
 }
 
@@ -4211,34 +4281,20 @@ impl SessionService for SessionServiceImpl {
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
             })),
-            Err(message) => {
-                let leader = self.inner.consensus.current_leader().await;
-                let leader_grpc_uri = match leader.as_ref() {
-                    Some(leader_id) if leader_id != self.inner.consensus.local_node_id() => self
-                        .inner
-                        .cluster
-                        .gossip_state()
-                        .await
-                        .live_nodes
-                        .into_iter()
-                        .find(|node| node.node_id == *leader_id)
-                        .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
-                        .unwrap_or_default(),
-                    _ => String::new(),
-                };
-                let kind = if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                    i32::from(CommandResultKind::NotLeader)
-                } else {
-                    i32::from(CommandResultKind::Error)
+            Err(error) => {
+                let message = format!("{error:#}");
+                let result = match error.downcast_ref::<ConsensusError>() {
+                    Some(error) => self.consensus_error_response(error, message).await,
+                    None => command_error(message),
                 };
                 Ok(Response::new(UploadResourceResponse {
                     success: false,
-                    message,
+                    message: result.message,
                     version: 0,
-                    diagnostics: Vec::new(),
-                    kind,
-                    leader: leader.map_or_else(String::new, |leader| leader.to_string()),
-                    leader_grpc_uri,
+                    diagnostics: result.diagnostics,
+                    kind: result.kind,
+                    leader: result.leader,
+                    leader_grpc_uri: result.leader_grpc_uri,
                 }))
             }
         }
@@ -6856,9 +6912,10 @@ impl SessionServiceImpl {
             .pause_domain(domain.clone())
             .await
             .map_err(|error| {
-                Report::new(DomainAlterError::PauseDomain {
+                let reason = error.to_string();
+                Report::new(error).change_context(DomainAlterError::PauseDomain {
                     domain: domain.clone(),
-                    reason: error.to_string(),
+                    reason,
                 })
             })?;
 
@@ -6968,10 +7025,13 @@ impl SessionServiceImpl {
     ) -> Report<DomainAlterError> {
         match self.resume_domain_after_alter(domain).await {
             Ok(()) => reason,
-            Err(resume_error) => Report::new(DomainAlterError::Rollback {
-                domain: domain.clone(),
-                reason: format!("{reason}; automatic resume failed: {resume_error}"),
-            }),
+            Err(resume_error) => {
+                let reason = format!("{reason}; automatic resume failed: {resume_error}");
+                resume_error.change_context(DomainAlterError::Rollback {
+                    domain: domain.clone(),
+                    reason,
+                })
+            }
         }
     }
 
@@ -6984,9 +7044,10 @@ impl SessionServiceImpl {
             .resume_domain(domain.clone())
             .await
             .map_err(|error| {
-                Report::new(DomainAlterError::ResumeDomain {
+                let reason = error.to_string();
+                Report::new(error).change_context(DomainAlterError::ResumeDomain {
                     domain: domain.clone(),
-                    reason: error.to_string(),
+                    reason,
                 })
             })?;
         self.apply_current_cluster_state().await.map_err(|error| {
@@ -8273,6 +8334,11 @@ impl SessionServiceImpl {
                     )
                     .await;
             }
+            #[cfg(feature = "testing")]
+            self.inner
+                .runtime
+                .pause_command_admission_if_armed(self.inner.consensus.local_node_id())
+                .await;
             self.drop_transaction_bindings_if_armed();
             if subscriptions.transaction_active()
                 && let Err(error) = self.validate_session_transaction_binding(subscriptions)
@@ -8298,6 +8364,19 @@ impl SessionServiceImpl {
             .await;
         self.command_with_transaction_status(result, subscriptions)
             .await
+    }
+
+    async fn transaction_consensus_error_response(
+        &self,
+        error: ConsensusTransactionError,
+    ) -> CommandResult {
+        let message = error.to_string();
+        match error {
+            ConsensusTransactionError::Consensus(error) => {
+                self.consensus_error_response(&error, message).await
+            }
+            _ => command_error(message),
+        }
     }
 
     async fn command_with_transaction_status(
@@ -8432,7 +8511,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(transaction) => transaction,
-            Err(error) => return command_error(error.to_string()),
+            Err(error) => return self.transaction_consensus_error_response(error).await,
         };
         self.release_session_transaction_binding(subscriptions);
         self.inner
@@ -8455,6 +8534,7 @@ impl SessionServiceImpl {
         let mut transaction = None;
 
         for operation in operations {
+            tokio::task::consume_budget().await;
             let result = match operation {
                 SessionCommandOperation::Begin { domain } => {
                     match self.resolve_transaction_domain(&domain).await {
@@ -8483,7 +8563,9 @@ impl SessionServiceImpl {
                                     result.transaction = Some(transaction_status(&transaction));
                                     result
                                 }
-                                Err(error) => command_error(error.to_string()),
+                                Err(error) => {
+                                    self.transaction_consensus_error_response(error).await
+                                }
                             }
                         }
                     }
@@ -8625,7 +8707,7 @@ impl SessionServiceImpl {
                 result.transaction = Some(transaction_status(&transaction));
                 result
             }
-            Err(error) => command_error(error.to_string()),
+            Err(error) => self.transaction_consensus_error_response(error).await,
         }
     }
 
@@ -8831,7 +8913,7 @@ impl SessionServiceImpl {
                 result.transaction = Some(transaction_status(&transaction));
                 result
             }
-            Err(error) => command_error(error.to_string()),
+            Err(error) => self.transaction_consensus_error_response(error).await,
         }
     }
 
@@ -8853,14 +8935,14 @@ impl SessionServiceImpl {
             .await
         {
             Ok(transaction) => transaction,
-            Err(error) => return command_error(error.to_string()),
+            Err(error) => return self.transaction_consensus_error_response(error).await,
         };
         let finished = if started.statements.is_empty() {
             self.inner
                 .consensus
                 .finish_empty_transaction_commit(id.clone(), current_timestamp())
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
         } else {
             // A replicated commit owns its execution independently of the session. Keep its
             // model-mutation future off the session's poll stack as well.
@@ -8870,7 +8952,8 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(result) => result,
-                Err(error) => Err(format!("transaction '{id}' commit task failed: {error}")),
+                Err(error) => Err(Report::new(error)
+                    .change_context(TransactionCommitError::TaskJoin { id: id.clone() })),
             }
         };
         match finished {
@@ -8881,10 +8964,19 @@ impl SessionServiceImpl {
                 transaction_commit_result(&transaction)
             }
             Err(error) => {
-                let mut result = command_error(format!(
-                    "transaction '{id}' commit remains in progress after an execution error: \
-                     {error}"
-                ));
+                let proposal_error = error
+                    .current_context()
+                    .consensus_error()
+                    .or_else(|| error.downcast_ref::<ConsensusError>());
+                let mut result =
+                    if let Some(ConsensusError::LeadershipLost { leader_id }) = proposal_error {
+                        self.not_leader_response("COMMIT", leader_id.clone()).await
+                    } else {
+                        command_error(format!(
+                            "transaction '{id}' commit remains in progress after an execution \
+                             error: {error}"
+                        ))
+                    };
                 if let Some(transaction) = self.inner.consensus.current_transaction(&id).await {
                     result.transaction = Some(transaction_status(&transaction));
                 }
@@ -8893,7 +8985,10 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn execute_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
+    async fn execute_replicated_commit(
+        &self,
+        id: &str,
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let _commit_execution = self.inner.transaction_commit_execution.lock().await;
         let mut wait = interval(Duration::from_millis(100));
         let lease = loop {
@@ -8922,33 +9017,39 @@ impl SessionServiceImpl {
         result
     }
 
-    async fn run_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
+    async fn run_replicated_commit(
+        &self,
+        id: &str,
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         self.inner
             .registry
             .synchronize_cluster_schedule(&self.inner.consensus.current_schedule().await)
-            .map_err(|error| {
-                format!(
-                    "failed to synchronize registry before resuming transaction '{id}': {error}"
-                )
-            })?;
+            .change_context(TransactionCommitError::SynchronizeRegistry { id: id.to_string() })?;
         loop {
             tokio::task::consume_budget().await;
-            if self.inner.consensus.current_leader().await.as_ref()
-                != Some(self.inner.consensus.local_node_id())
-            {
-                return Err("leadership changed while executing the commit".to_string());
+            let leader_id = self.inner.consensus.current_leader().await;
+            if leader_id.as_ref() != Some(self.inner.consensus.local_node_id()) {
+                return Err(Report::new(TransactionCommitError::Proposal(
+                    ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
+                        leader_id,
+                    }),
+                )));
             }
             let transaction = self
                 .inner
                 .consensus
                 .current_transaction(id)
                 .await
-                .ok_or_else(|| format!("transaction '{id}' is unknown"))?;
+                .ok_or_else(|| {
+                    Report::new(TransactionCommitError::UnknownTransaction { id: id.to_string() })
+                })?;
             let progress = match &transaction.state {
                 TransactionState::Committing(progress) => progress,
                 TransactionState::Finished(_) => return Ok(transaction),
                 TransactionState::Open => {
-                    return Err(format!("transaction '{id}' is still open"));
+                    return Err(Report::new(TransactionCommitError::TransactionOpen {
+                        id: id.to_string(),
+                    }));
                 }
             };
             let first_statement = progress.next_statement;
@@ -8958,7 +9059,7 @@ impl SessionServiceImpl {
                     .consensus
                     .finish_empty_transaction_commit(id.to_string(), current_timestamp())
                     .await
-                    .map_err(|error| error.to_string());
+                    .map_err(|error| Report::new(TransactionCommitError::Proposal(error)));
             };
             self.recover_transaction_quiescence(&transaction, first_statement)
                 .await?;
@@ -8993,6 +9094,13 @@ impl SessionServiceImpl {
                 let advanced = match recorded {
                     Some(Ok(transaction)) => transaction,
                     Some(Err(error)) => return Err(error),
+                    None if result.kind == i32::from(CommandResultKind::NotLeader) => {
+                        return Err(Report::new(TransactionCommitError::Proposal(
+                            ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
+                                leader_id: self.inner.consensus.current_leader().await,
+                            }),
+                        )));
+                    }
                     None if !result.success => {
                         self.record_transaction_step(
                             &transaction,
@@ -9005,9 +9113,9 @@ impl SessionServiceImpl {
                         .await?
                     }
                     None => {
-                        return Err(format!(
-                            "transaction '{id}' model step completed without recording progress"
-                        ));
+                        return Err(Report::new(TransactionCommitError::MissingProgress {
+                            id: id.to_string(),
+                        }));
                     }
                 };
                 self.pause_transaction_commit_if_armed(&advanced).await;
@@ -9047,7 +9155,7 @@ impl SessionServiceImpl {
         &self,
         transaction: &ReplicatedTransaction,
         current_statement: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<TransactionCommitError>> {
         if transaction
             .statements
             .get(current_statement)
@@ -9063,10 +9171,9 @@ impl SessionServiceImpl {
                 .checked_add(result.statement_count)
                 .and_then(|end| transaction.statements.get(result.first_statement..end))
             else {
-                return Err(format!(
-                    "transaction '{}' has invalid recorded commit progress",
-                    transaction.id
-                ));
+                return Err(Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                }));
             };
             if !statements.is_empty()
                 && statements
@@ -9085,18 +9192,21 @@ impl SessionServiceImpl {
             return Ok(());
         };
         if let DomainStatus::Paused = state.status {
-            self.apply_current_cluster_state().await.map_err(|error| {
-                format!(
-                    "failed to adopt transaction-owned pause in domain '{}': {error}",
-                    domain.as_str()
-                )
-            })?;
+            self.apply_current_cluster_state().await.change_context(
+                TransactionCommitError::RecoverQuiescence {
+                    id: transaction.id.clone(),
+                },
+            )?;
             self.wait_for_paused_domain_drain(domain)
                 .await
-                .map_err(|error| error.to_string())?;
+                .change_context(TransactionCommitError::RecoverQuiescence {
+                    id: transaction.id.clone(),
+                })?;
             self.resume_domain_after_alter(domain)
                 .await
-                .map_err(|error| error.to_string())?;
+                .change_context(TransactionCommitError::RecoverQuiescence {
+                    id: transaction.id.clone(),
+                })?;
         }
         Ok(())
     }
@@ -9109,7 +9219,7 @@ impl SessionServiceImpl {
         result: CommandResult,
         quiesce_level: Option<QuiesceLevel>,
         effect: Option<TransactionStepEffect>,
-    ) -> Result<ReplicatedTransaction, String> {
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let next_statement = first_statement
             .checked_add(statement_count)
             .assured("a recorded commit step counts statements of the transaction it belongs to");
@@ -9161,14 +9271,14 @@ impl SessionServiceImpl {
                 completion,
             })
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
     }
 
     async fn execute_transaction_configuration_step(
         &self,
         transaction: &ReplicatedTransaction,
         statement_index: usize,
-    ) -> Result<ReplicatedTransaction, String> {
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let queued = transaction.statements.get(statement_index).verified(
             "the caller checked this index against the same statement list before dispatching the \
              step",
@@ -9250,7 +9360,13 @@ impl SessionServiceImpl {
                         relocations,
                     } = self
                         .prepare_domain_schedule(domain_id, graph, alter.policy)
-                        .await?;
+                        .await
+                        .map_err(|reason| {
+                            Report::new(TransactionCommitError::PrepareSchedule {
+                                domain: domain_id.clone(),
+                                reason,
+                            })
+                        })?;
                     let quiesce_level =
                         if matches!(previous.status, DomainStatus::Running) && relocations > 0 {
                             QuiesceLevel::EntityPause
@@ -9604,7 +9720,7 @@ impl SessionServiceImpl {
                     if let Err(error) = self.execute_replicated_commit(&transaction.id).await {
                         warn!(
                             transaction_id = transaction.id,
-                            error, "failed to resume replicated NSPL commit"
+                            error = %error, "failed to resume replicated NSPL commit"
                         );
                     }
                 }
@@ -9740,6 +9856,12 @@ impl SessionServiceImpl {
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return self.not_leader_response(query, leader).await;
         }
+
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_command_admission_if_armed(self.inner.consensus.local_node_id())
+            .await;
 
         let _alter_guard = match self.inner.runtime.try_begin_domain_alter(&domain) {
             Some(guard) => guard,
@@ -10104,7 +10226,23 @@ impl SessionServiceImpl {
                 && !adopted_domain_pause
                 && let Err(error) = self.pause_and_drain_domain_for_alter(&domain).await
             {
-                return command_error(error.to_string());
+                let response = match error.downcast_ref::<ConsensusError>() {
+                    Some(cause) => {
+                        self.consensus_error_response(cause, error.to_string())
+                            .await
+                    }
+                    None => command_error(error.to_string()),
+                };
+                if response.kind == i32::from(CommandResultKind::NotLeader)
+                    && let Some(step) = transaction_step.as_ref()
+                {
+                    *step.outcome.lock() = Some(Err(error.change_context(
+                        TransactionCommitError::RecoverQuiescence {
+                            id: step.transaction.id.clone(),
+                        },
+                    )));
+                }
+                return response;
             }
             if !is_noop && base_classified_level.requires_entity_pause() {
                 let relays = self
@@ -10287,17 +10425,18 @@ impl SessionServiceImpl {
                                 let _ = self.resume_domain_after_alter(&domain).await;
                             }
                             let error = match rollback_error {
-                                Some(rollback) => format!(
-                                    "{error}; local registry rollback also failed: {rollback}"
-                                ),
+                                Some(rollback) => error.attach(format!(
+                                    "local registry rollback also failed: {rollback}"
+                                )),
                                 None => error,
                             };
-                            *transaction_step.outcome.lock() = Some(Err(error.clone()));
-                            return command_error(format!(
+                            let message = format!(
                                 "failed to atomically publish transaction model step for domain \
                                  '{}': {error}",
                                 domain.as_str()
-                            ));
+                            );
+                            *transaction_step.outcome.lock() = Some(Err(error));
+                            return command_error(message);
                         }
                     }
                 } else {
@@ -10319,11 +10458,16 @@ impl SessionServiceImpl {
                                 .rollback_model_alteration(&domain, rollback_plan, classified_level)
                                 .await
                         {
-                            return command_error(format!(
-                                "failed to publish model alteration schedule for domain '{}': \
-                                 {err}; {rollback_error}",
-                                domain.as_str()
-                            ));
+                            return self
+                                .consensus_error_response(
+                                    &error,
+                                    format!(
+                                        "failed to publish model alteration schedule for domain \
+                                         '{}': {err}; {rollback_error}",
+                                        domain.as_str()
+                                    ),
+                                )
+                                .await;
                         }
                         self.broadcast_error(format!(
                             "schedule publish failed in domain '{}': {}",
@@ -10335,6 +10479,9 @@ impl SessionServiceImpl {
                             error = %err,
                             "failed to publish schedule for model mutation batch"
                         );
+                        if let ConsensusError::LeadershipLost { leader_id } = &error {
+                            return self.not_leader_response(query, leader_id.clone()).await;
+                        }
                         return CommandResult {
                             success: false,
                             message: format!(
@@ -10456,10 +10603,10 @@ impl SessionServiceImpl {
                     *transaction_step.outcome.lock() = Some(Ok(transaction));
                 }
                 Err(error) => {
-                    *transaction_step.outcome.lock() = Some(Err(error.clone()));
-                    return command_error(format!(
-                        "failed to record transaction model step progress: {error}"
-                    ));
+                    let message =
+                        format!("failed to record transaction model step progress: {error}");
+                    *transaction_step.outcome.lock() = Some(Err(error));
+                    return command_error(message);
                 }
             }
         }
@@ -10553,6 +10700,11 @@ impl SessionServiceImpl {
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return self.not_leader_response(query, leader).await;
             }
+            #[cfg(feature = "testing")]
+            self.inner
+                .runtime
+                .pause_command_admission_if_armed(self.inner.consensus.local_node_id())
+                .await;
         }
 
         if requires_existing_domain(&statement) {
@@ -10970,7 +11122,16 @@ impl SessionServiceImpl {
                     StatusCode::OK,
                     format!("uploaded resource version {version}"),
                 ),
-                Err(message) => web_console_upload_text_response(StatusCode::BAD_REQUEST, message),
+                Err(error) => {
+                    let status = if let Some(ConsensusError::LeadershipLost { .. }) =
+                        error.downcast_ref::<ConsensusError>()
+                    {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    };
+                    web_console_upload_text_response(status, format!("{error:#}"))
+                }
             },
             Err((status, message)) => web_console_upload_text_response(status, message),
         }
@@ -11220,10 +11381,13 @@ impl SessionServiceImpl {
                 }
                 command_ok(format!("created domain '{}'", create.id.as_str()))
             }
-            Err(error) => command_error(format!(
-                "failed to create domain '{}': {error}",
-                create.id.as_str()
-            )),
+            Err(error) => {
+                self.consensus_error_response(
+                    &error,
+                    format!("failed to create domain '{}': {error}", create.id.as_str()),
+                )
+                .await
+            }
         }
     }
 
@@ -11340,10 +11504,15 @@ impl SessionServiceImpl {
             if let Some(handoff) = handoff {
                 self.release_cluster_entity_gates(handoff.gate).await;
             }
-            return command_error(format!(
-                "failed to alter placement for domain '{}': {error}",
-                domain.as_str()
-            ));
+            return self
+                .consensus_error_response(
+                    &error,
+                    format!(
+                        "failed to alter placement for domain '{}': {error}",
+                        domain.as_str()
+                    ),
+                )
+                .await;
         }
         let activation_error = self.apply_current_cluster_state().await.err();
         if let Some(error) = activation_error {
@@ -11397,10 +11566,13 @@ impl SessionServiceImpl {
         };
         match self.inner.consensus.create_user(user).await {
             Ok(()) => command_ok(format!("created user '{}'", create.name.as_str())),
-            Err(error) => command_error(format!(
-                "failed to create user '{}': {error}",
-                create.name.as_str()
-            )),
+            Err(error) => {
+                self.consensus_error_response(
+                    &error,
+                    format!("failed to create user '{}': {error}", create.name.as_str()),
+                )
+                .await
+            }
         }
     }
 
@@ -11429,10 +11601,16 @@ impl SessionServiceImpl {
             .await
         {
             Ok(()) => command_ok(format!("created resource '{}'", create.identifier.as_str())),
-            Err(error) => command_error(format!(
-                "failed to create resource '{}': {error}",
-                create.identifier.as_str()
-            )),
+            Err(error) => {
+                self.consensus_error_response(
+                    &error,
+                    format!(
+                        "failed to create resource '{}': {error}",
+                        create.identifier.as_str()
+                    ),
+                )
+                .await
+            }
         }
     }
 
@@ -11451,25 +11629,18 @@ impl SessionServiceImpl {
         identifier: ModelName,
         archive_path: &Path,
         root_checksum: String,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, Report<ResourceUploadError>> {
         let created_at = current_timestamp();
-        let version = match self
+        let version = self
             .inner
             .consensus
             .allocate_resource_version(domain, &ResourceName::from(&identifier))
             .await
-        {
-            Ok(version) => version,
-            Err(error) => {
-                return Err(format!(
-                    "failed to allocate version for resource '{}': {error}",
-                    identifier.as_str()
-                ));
-            }
-        };
+            .change_context(ResourceUploadError::AllocateVersion {
+                identifier: identifier.clone(),
+            })?;
         let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier), version);
-
-        let manifest = match self
+        let manifest = self
             .inner
             .resource_store
             .install_from_archive_path(
@@ -11480,16 +11651,7 @@ impl SessionServiceImpl {
                 created_at,
             )
             .await
-        {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                return Err(format!(
-                    "failed to install resource '{}': {}",
-                    identifier.as_str(),
-                    error,
-                ));
-            }
-        };
+            .change_context(ResourceUploadError::InstallArchive { identifier })?;
 
         if let Err(error) = self
             .inner
@@ -11507,15 +11669,15 @@ impl SessionServiceImpl {
                     format!("; local cleanup also failed: {cleanup_error}")
                 }
             };
-            return Err(format!(
-                "failed to publish resource '{}@{}': {error}{cleanup_suffix}",
-                manifest.resource.id.identifier.as_str(),
-                manifest.resource.id.version,
-            ));
+            return Err(
+                Report::new(error).change_context(ResourceUploadError::PublishVersion {
+                    id: manifest.resource.id,
+                    cleanup_suffix,
+                }),
+            );
         }
 
-        if let Err(error) = self
-            .inner
+        self.inner
             .consensus
             .put_resource_replica(ResourceNodeStatus {
                 key: ResourceReplicaKey::new(
@@ -11531,16 +11693,18 @@ impl SessionServiceImpl {
                 error: None,
             })
             .await
-        {
-            return Err(format!(
-                "failed to publish resource replica '{}@{}': {error}",
-                manifest.resource.id.identifier.as_str(),
-                manifest.resource.id.version
-            ));
-        }
+            .change_context(ResourceUploadError::PublishReplica {
+                id: manifest.resource.id.clone(),
+            })?;
 
         self.wait_for_resource_cluster_ready(&manifest.resource.id)
-            .await?;
+            .await
+            .map_err(|reason| {
+                Report::new(ResourceUploadError::WaitForReplicas {
+                    id: manifest.resource.id.clone(),
+                    reason,
+                })
+            })?;
         self.inner
             .runtime
             .sync_resource_versions(&self.inner.consensus.current_resources().await);
@@ -11646,10 +11810,13 @@ impl SessionServiceImpl {
                 }
                 command_ok(format!("starting domain '{}'", domain_id.as_str()))
             }
-            Err(error) => command_error(format!(
-                "failed to start domain '{}': {error}",
-                domain_id.as_str()
-            )),
+            Err(error) => {
+                self.consensus_error_response(
+                    &error,
+                    format!("failed to start domain '{}': {error}", domain_id.as_str()),
+                )
+                .await
+            }
         }
     }
 
@@ -11688,10 +11855,13 @@ impl SessionServiceImpl {
                 }
                 command_ok(format!("stopped domain '{}'", domain_id.as_str()))
             }
-            Err(error) => command_error(format!(
-                "failed to stop domain '{}': {error}",
-                domain_id.as_str()
-            )),
+            Err(error) => {
+                self.consensus_error_response(
+                    &error,
+                    format!("failed to stop domain '{}': {error}", domain_id.as_str()),
+                )
+                .await
+            }
         }
     }
 
@@ -12093,18 +12263,13 @@ impl SessionServiceImpl {
     }
 
     fn format_resource_manifest_entry(entry: &ResourceManifestEntry) -> String {
-        let entry_type = match entry.entry_type {
-            ResourceEntryType::File => "file",
-            ResourceEntryType::Directory => "directory",
-        };
-        let checksum = if entry.checksum.is_empty() {
-            "-"
-        } else {
-            entry.checksum.as_str()
+        let (entry_type, size, checksum) = match &entry.content {
+            ResourceEntryContent::File { size, checksum } => ("file", *size, checksum.as_str()),
+            ResourceEntryContent::Directory => ("directory", 0, "-"),
         };
         format!(
             "  - type={} path={} size={} checksum={}",
-            entry_type, entry.path, entry.size, checksum
+            entry_type, entry.path, size, checksum
         )
     }
 
@@ -12272,10 +12437,15 @@ impl SessionServiceImpl {
         }
 
         let current_schedule = self.inner.consensus.current_schedule().await;
-        match self.inner.consensus.drop_node(&node_id).await {
+        match self.inner.consensus_administrator.drop_node(&node_id).await {
             Ok(()) => {}
             Err(error) => {
-                return command_error(format!("failed to drop node '{node_id}': {error}"));
+                return self
+                    .consensus_error_response(
+                        &error,
+                        format!("failed to drop node '{node_id}': {error}"),
+                    )
+                    .await;
             }
         }
 
@@ -12383,7 +12553,12 @@ impl SessionServiceImpl {
             .await
         {
             let action = if cordoned { "cordon" } else { "uncordon" };
-            return command_error(format!("failed to {action} node '{node_id}': {error}"));
+            return self
+                .consensus_error_response(
+                    &error,
+                    format!("failed to {action} node '{node_id}': {error}"),
+                )
+                .await;
         }
 
         let action = if cordoned { "cordoned" } else { "uncordoned" };
@@ -12402,9 +12577,12 @@ impl SessionServiceImpl {
             .set_node_cordoned(node_id.clone(), true)
             .await
         {
-            return command_error(format!(
-                "failed to cordon node '{node_id}' before drain: {error}"
-            ));
+            return self
+                .consensus_error_response(
+                    &error,
+                    format!("failed to cordon node '{node_id}' before drain: {error}"),
+                )
+                .await;
         }
 
         let initial_schedule = self.inner.consensus.current_schedule().await;
@@ -12482,6 +12660,17 @@ impl SessionServiceImpl {
                         .replace_domain_schedule(domain.clone(), Some(desired))
                         .await
                     {
+                        if let ConsensusError::LeadershipLost { .. } = &error {
+                            return self
+                                .consensus_error_response(
+                                    &error,
+                                    format!(
+                                        "failed to publish initial drain schedule for domain \
+                                         '{domain}': {error}"
+                                    ),
+                                )
+                                .await;
+                        }
                         failed = true;
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
@@ -12559,6 +12748,17 @@ impl SessionServiceImpl {
                 {
                     if let Some(handoff) = handoff.take() {
                         self.release_cluster_entity_gates(handoff.gate).await;
+                    }
+                    if let ConsensusError::LeadershipLost { .. } = &error {
+                        return self
+                            .consensus_error_response(
+                                &error,
+                                format!(
+                                    "failed to commit drain schedule for domain '{domain}': \
+                                     {error}"
+                                ),
+                            )
+                            .await;
                     }
                     failed = true;
                     failed_units.insert(unit_key);
@@ -14853,11 +15053,12 @@ fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
         let flush = output
             .flush_policy
             .as_ref()
-            .map(|policy| match policy.max_batch_size.as_deref() {
-                Some(max_batch_size) => {
-                    format!("{} max-batch-size={max_batch_size}", policy.flush_each)
-                }
-                None => policy.flush_each.clone(),
+            .map(|policy| match policy {
+                nervix_models::FlushPolicy::Each {
+                    interval,
+                    max_batch_size,
+                } => format!("{interval} max-batch-size={max_batch_size}"),
+                nervix_models::FlushPolicy::Immediate => "IMMEDIATE".to_string(),
             })
             .unwrap_or_else(|| "none".to_string());
         lines.push(format!(
@@ -15161,6 +15362,7 @@ fn format_emitter_describe_output(
                 .unwrap_or("none")
         ),
         format!("sink: {}", format_emit_sink(&emitter.sink)),
+        format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
         format!(
             "publishing mode: {}",
             emitter.publishing_mode.to_canonical_nspl()
@@ -15248,21 +15450,18 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             client,
             table,
             max_batch,
-            flush_each,
             ..
         } => format!(
-            "CLICKHOUSE client={} table={} max_batch={} flush={}",
+            "CLICKHOUSE client={} table={} max_batch={}",
             client.as_str(),
             table.as_str(),
-            max_batch,
-            flush_each
+            max_batch
         ),
         EmitSink::Postgres {
             client,
             table,
             conflict_action,
             max_batch,
-            flush_each,
             ..
         } => {
             let conflict = match conflict_action {
@@ -15285,12 +15484,11 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "POSTGRES client={} table={}{} max_batch={} flush={}",
+                "POSTGRES client={} table={}{} max_batch={}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch,
-                flush_each
+                max_batch
             )
         }
         EmitSink::MySql {
@@ -15298,7 +15496,6 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             table,
             conflict_action,
             max_batch,
-            flush_each,
             ..
         } => {
             let conflict = match conflict_action {
@@ -15307,12 +15504,11 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 MySqlConflictAction::DoUpdate => " conflict=ON CONFLICT DO UPDATE".to_string(),
             };
             format!(
-                "MYSQL client={} table={}{} max_batch={} flush={}",
+                "MYSQL client={} table={}{} max_batch={}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch,
-                flush_each
+                max_batch
             )
         }
         EmitSink::MongoDb {
@@ -15320,7 +15516,6 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             collection,
             conflict_action,
             max_batch,
-            flush_each,
             ..
         } => {
             let conflict = match conflict_action {
@@ -15333,12 +15528,11 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "MONGODB client={} collection={}{} max_batch={} flush={}",
+                "MONGODB client={} collection={}{} max_batch={}",
                 client.as_str(),
                 collection.as_str(),
                 conflict,
-                max_batch,
-                flush_each
+                max_batch
             )
         }
         EmitSink::Iceberg {
@@ -15348,8 +15542,6 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             values: _,
             location,
             catalog,
-            flush_each,
-            max_batch_size,
             commit_each,
             max_commit_size,
         } => {
@@ -15357,15 +15549,13 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 IcebergCatalog::Rest { client } => format!("rest client={}", client.as_str()),
             };
             format!(
-                "ICEBERG backend={} client={} table={} location={} catalog={} flush={} \
-                 max_batch_size={} commit_each={} max_commit_size={}",
+                "ICEBERG backend={} client={} table={} location={} catalog={} commit_each={} \
+                 max_commit_size={}",
                 backend.as_ref(),
                 client.as_str(),
                 table.as_str(),
                 location,
                 catalog,
-                flush_each,
-                max_batch_size.as_deref().unwrap_or("none"),
                 commit_each,
                 max_commit_size
             )
@@ -16090,6 +16280,9 @@ fn command_batch_result(
     }
 
     let transaction = result.transaction.clone();
+    let leader = result.leader.clone();
+    let leader_grpc_uri = result.leader_grpc_uri.clone();
+    let leader_web_console_uri = result.leader_web_console_uri.clone();
     append_command_result(&mut previous_results, result);
     let success = previous_results.iter().all(|result| result.success);
     CommandResult {
@@ -16109,6 +16302,9 @@ fn command_batch_result(
         },
         results: previous_results,
         transaction,
+        leader,
+        leader_grpc_uri,
+        leader_web_console_uri,
         ..Default::default()
     }
 }
@@ -16684,6 +16880,19 @@ impl SessionServiceImpl {
         }
     }
 
+    async fn consensus_error_response(
+        &self,
+        error: &ConsensusError,
+        message: String,
+    ) -> CommandResult {
+        match error {
+            ConsensusError::LeadershipLost { leader_id } => {
+                self.not_leader_response("", leader_id.clone()).await
+            }
+            _ => command_error(message),
+        }
+    }
+
     async fn not_leader_response(
         &self,
         query: &str,
@@ -17253,10 +17462,7 @@ fn should_initiate_interconnect(
     local_node_id < peer_node_id
 }
 
-async fn render_cluster_status(
-    cluster: &cluster::ClusterHandle,
-    consensus: &ConsensusHandle,
-) -> String {
+async fn render_cluster_status(cluster: &cluster::ClusterHandle, consensus: &Observer) -> String {
     let gossip = cluster.gossip_state().await;
     let mut lines = Vec::new();
 
@@ -18041,7 +18247,7 @@ impl Application {
                 return Err(error);
             }
         }
-        let consensus_result = ConsensusHandle::from_database(
+        let consensus_result = Consensus::from_database(
             startup.db.clone(),
             ConsensusSettings {
                 cluster_name: cluster_id.clone(),
@@ -18056,22 +18262,21 @@ impl Application {
         )
         .await
         .change_context(AppError::StartConsensus);
-        let mut consensus = match consensus_result {
+        let consensus = match consensus_result {
             Ok(consensus) => consensus,
             Err(error) => {
                 startup.terminate().await;
                 return Err(error);
             }
         };
-        consensus.set_local_grpc_advertise_addr(grpc_advertise_url.clone());
-        startup.consensus = Some(Arc::new(consensus));
+        startup.consensus = Some(consensus);
         let consensus = startup
             .consensus
             .as_ref()
             .verified("startup assigns this handle before it reaches this point");
         if let Err(error) = startup
             .registry
-            .synchronize_cluster_schedule(&consensus.current_schedule().await)
+            .synchronize_cluster_schedule(&consensus.observer().current_schedule().await)
         {
             let error = Report::new(AppError::SynchronizeRegistry(error.to_string()));
             startup.terminate().await;
@@ -18079,7 +18284,7 @@ impl Application {
         }
         startup.runtime.attach_resources(
             startup.resource_store.clone(),
-            consensus.current_resources().await,
+            consensus.observer().current_resources().await,
         );
 
         let peer_keys = Arc::new(RwLock::new(HashMap::new()));
@@ -18166,7 +18371,8 @@ impl Application {
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
 
         let cluster_for_reconcile = cluster.clone();
-        let consensus_for_reconcile = consensus.clone();
+        let consensus_for_reconcile = consensus.proposer();
+        let administrator_for_reconcile = consensus.administrator();
         let registry_for_reconcile = registry.clone();
         let runtime_for_reconcile = runtime.clone();
         let reconcile_shutdown = shutdown.clone();
@@ -18179,7 +18385,7 @@ impl Application {
             }));
         }
         let mut leadership_transfer_rx = runtime_test_hooks.leadership_transfers.subscribe();
-        let consensus_for_leadership_transfer = consensus.clone();
+        let consensus_for_leadership_transfer = consensus.administrator();
         let leadership_transfer_shutdown = shutdown.clone();
         let leadership_transfer_local_node_id = node_id.clone();
         background_tasks.push(tokio::spawn(async move {
@@ -18229,7 +18435,7 @@ impl Application {
                 }
                 let gossip = cluster_for_reconcile.gossip_state().await;
                 if allow_bootstrap && !initialized {
-                    match consensus_for_reconcile.maybe_initialize().await {
+                    match administrator_for_reconcile.maybe_initialize().await {
                         Ok(did_initialize) => {
                             initialized = did_initialize;
                         }
@@ -18238,7 +18444,7 @@ impl Application {
                         }
                     }
                 }
-                if let Err(err) = consensus_for_reconcile.reconcile_nodes(gossip).await {
+                if let Err(err) = administrator_for_reconcile.reconcile_nodes(gossip).await {
                     warn!(error = %err, "raft membership reconciliation failed");
                 }
                 if consensus_for_reconcile.current_leader().await.as_ref()
@@ -18585,10 +18791,10 @@ impl Application {
         }));
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
-        let mut schedule_rx = consensus.subscribe_schedule();
-        let consensus_for_schedule = consensus.clone();
+        let mut schedule_rx = consensus.observer().subscribe_schedule();
+        let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
-        let schedule_local_node_id = consensus.local_node_id().clone();
+        let schedule_local_node_id = consensus.observer().local_node_id().clone();
         let schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             let initial_state = consensus_for_schedule.current_runtime_state().await;
@@ -18646,7 +18852,7 @@ impl Application {
             }
         }));
         let runtime_for_resources = runtime.clone();
-        let mut resources_rx = consensus.subscribe_resources();
+        let mut resources_rx = consensus.observer().subscribe_resources();
         let resources_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             runtime_for_resources.update_resource_versions(resources_rx.borrow().clone());
@@ -18668,7 +18874,8 @@ impl Application {
         let service = SessionServiceImpl {
             inner: Arc::new(SessionServiceInner {
                 cluster: cluster.clone(),
-                consensus: consensus.clone(),
+                consensus: consensus.proposer(),
+                consensus_administrator: consensus.administrator(),
                 registry,
                 resource_store,
                 cluster_api_clients: cluster_api_clients.clone(),
@@ -19344,7 +19551,7 @@ impl Application {
             }
         }));
         let consensus_events = events.clone();
-        let mut consensus_event_rx = consensus.subscribe_events();
+        let mut consensus_event_rx = consensus.observer().subscribe_events();
         let consensus_events_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             loop {
@@ -19404,12 +19611,14 @@ impl Application {
                 .await
                 .map_err(|e| Report::new(e).change_context(AppError::Serve))
         };
-        let cluster_api_consensus = consensus.clone();
+        let cluster_api_consensus = consensus.proposer();
+        let cluster_api_protocol = consensus.protocol_receiver();
         let cluster_api_shutdown = shutdown.clone();
         let cluster_api_server = async move {
             if cluster_api_mode.is_tls() {
                 serve_cluster_api_https(
                     cluster_api_consensus.clone(),
+                    cluster_api_protocol.clone(),
                     cluster_api_resource_store,
                     cluster_api_tls_server_config
                         .clone()
@@ -19421,6 +19630,7 @@ impl Application {
             } else {
                 serve_cluster_api_http(
                     cluster_api_consensus.clone(),
+                    cluster_api_protocol.clone(),
                     cluster_api_resource_store,
                     cluster_api_listener,
                     cluster_api_shutdown.clone(),
@@ -19442,7 +19652,7 @@ impl Application {
             shutdown.clone(),
         );
         let observability_server = serve_observability_http(
-            consensus.clone(),
+            consensus.observer(),
             runtime.clone(),
             observability_listener,
             shutdown.clone(),
@@ -19879,7 +20089,7 @@ mod tests {
     /// rather than repeating the field list.
     fn test_session_service(
         cluster: Arc<cluster::ClusterHandle>,
-        consensus: Arc<ConsensusHandle>,
+        consensus: &Consensus,
         registry: Arc<Registry>,
         resource_store: Arc<ResourceStore>,
         interconnect: Transport,
@@ -19887,7 +20097,8 @@ mod tests {
         SessionServiceImpl {
             inner: Arc::new(SessionServiceInner {
                 cluster,
-                consensus,
+                consensus: consensus.proposer(),
+                consensus_administrator: consensus.administrator(),
                 registry,
                 resource_store,
                 cluster_api_clients: Arc::new(
@@ -19984,7 +20195,7 @@ mod tests {
         }
     }
 
-    async fn create_test_domain(consensus: &ConsensusHandle, raw: &str) {
+    async fn create_test_domain(consensus: &Proposer, raw: &str) {
         let domain = DomainName::parse(raw).expect("valid domain");
         let state = DomainState {
             id: domain,
@@ -20047,7 +20258,7 @@ mod tests {
         );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let mut consensus = ConsensusHandle::from_database(
+        let consensus = Consensus::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
@@ -20066,22 +20277,21 @@ mod tests {
         )
         .await
         .expect("consensus should open");
-        consensus.set_local_grpc_advertise_addr(grpc_addr.to_string());
         consensus
+            .administrator()
             .maybe_initialize()
             .await
             .expect("single-node consensus should initialize");
         if create_default_domain_flag {
-            create_test_domain(&consensus, "default").await;
+            create_test_domain(&consensus.proposer(), "default").await;
         }
         let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
+            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let consensus = Arc::new(consensus);
         let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
@@ -20109,7 +20319,7 @@ mod tests {
         );
         let service = test_session_service(
             cluster,
-            consensus,
+            &consensus,
             registry.clone(),
             Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
@@ -23161,7 +23371,7 @@ mod tests {
         );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let mut consensus = ConsensusHandle::from_database(
+        let consensus = Consensus::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
@@ -23180,25 +23390,24 @@ mod tests {
         )
         .await
         .expect("consensus should open");
-        consensus.set_local_grpc_advertise_addr(grpc_addr.to_string());
         consensus
+            .administrator()
             .maybe_initialize()
             .await
             .expect("single-node consensus should initialize");
         let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
+            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(
-            consensus.current_leader().await.as_ref(),
+            consensus.observer().current_leader().await.as_ref(),
             Some(&expected_leader),
             "single-node consensus must report itself as leader before command processing",
         );
-        create_test_domain(&consensus, "default").await;
-        let consensus = Arc::new(consensus);
+        create_test_domain(&consensus.proposer(), "default").await;
         let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
@@ -23226,7 +23435,7 @@ mod tests {
         );
         let service = test_session_service(
             cluster,
-            consensus,
+            &consensus,
             registry.clone(),
             Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
@@ -23337,7 +23546,7 @@ mod tests {
         );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let mut consensus = ConsensusHandle::from_database(
+        let consensus = Consensus::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
@@ -23356,20 +23565,19 @@ mod tests {
         )
         .await
         .expect("consensus should open");
-        consensus.set_local_grpc_advertise_addr(grpc_addr.to_string());
         consensus
+            .administrator()
             .maybe_initialize()
             .await
             .expect("single-node consensus should initialize");
-        create_test_domain(&consensus, "default").await;
+        create_test_domain(&consensus.proposer(), "default").await;
         let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
+            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let consensus = Arc::new(consensus);
         let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
@@ -23397,7 +23605,7 @@ mod tests {
         );
         let service = test_session_service(
             cluster,
-            consensus,
+            &consensus,
             registry.clone(),
             Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
@@ -23502,7 +23710,7 @@ mod tests {
         );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let mut consensus = ConsensusHandle::from_database(
+        let consensus = Consensus::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
@@ -23521,20 +23729,19 @@ mod tests {
         )
         .await
         .expect("consensus should open");
-        consensus.set_local_grpc_advertise_addr(grpc_addr.to_string());
         consensus
+            .administrator()
             .maybe_initialize()
             .await
             .expect("single-node consensus should initialize");
-        create_test_domain(&consensus, "default").await;
+        create_test_domain(&consensus.proposer(), "default").await;
         let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
+            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let consensus = Arc::new(consensus);
         let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
@@ -23562,7 +23769,7 @@ mod tests {
         );
         let service = test_session_service(
             cluster,
-            consensus,
+            &consensus,
             registry.clone(),
             Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
@@ -23677,7 +23884,7 @@ mod tests {
         );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let mut consensus = ConsensusHandle::from_database(
+        let consensus = Consensus::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
@@ -23696,8 +23903,8 @@ mod tests {
         )
         .await
         .expect("consensus should open");
-        consensus.set_local_grpc_advertise_addr(grpc_addr.to_string());
         consensus
+            .administrator()
             .maybe_initialize()
             .await
             .expect("single-node consensus should initialize");
@@ -23735,18 +23942,22 @@ mod tests {
             .await
             .expect("resource version should install");
         consensus
+            .proposer()
             .create_resource_catalog(&resource_domain, &named("fraud_model"))
             .await
             .expect("resource catalog should persist");
         consensus
+            .proposer()
             .put_resource_version(manifest_v1.resource.clone())
             .await
             .expect("resource version should persist");
         consensus
+            .proposer()
             .put_resource_version(manifest_v2.resource.clone())
             .await
             .expect("resource version should persist");
         consensus
+            .proposer()
             .put_resource_replica(nervix_models::ResourceNodeStatus {
                 key: nervix_models::ResourceReplicaKey::new(
                     resource_domain.clone(),
@@ -23763,6 +23974,7 @@ mod tests {
             .await
             .expect("resource replica should persist");
         consensus
+            .proposer()
             .put_domain(DomainState {
                 id: DomainName::parse("default").expect("valid domain"),
                 config: DomainConfig {
@@ -23779,12 +23991,11 @@ mod tests {
             .await
             .expect("domain should persist");
         for _ in 0..50 {
-            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
+            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let consensus = Arc::new(consensus);
         let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
@@ -23811,7 +24022,7 @@ mod tests {
             .expect("cluster should start"),
         );
         let service =
-            test_session_service(cluster, consensus, registry, resource_store, interconnect);
+            test_session_service(cluster, &consensus, registry, resource_store, interconnect);
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 

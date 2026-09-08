@@ -50,8 +50,8 @@ pub struct TransactionBindingDropInjector {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct TransactionCommitPauseInjector {
-    pauses: DashMap<TransactionCommitPauseKey, Arc<TransactionCommitPause>, RandomState>,
+pub(crate) struct CommandPauseInjector {
+    pauses: DashMap<CommandPausePoint, Arc<CommandPause>, RandomState>,
 }
 
 #[derive(Debug, Default)]
@@ -60,7 +60,7 @@ pub(crate) struct EntityGatePauseInjector {
 }
 
 #[derive(Debug, Default)]
-struct TransactionCommitPause {
+struct CommandPause {
     reached: AtomicBool,
     released: AtomicBool,
     reached_notify: Notify,
@@ -88,7 +88,7 @@ pub struct RuntimeTestHooks {
     pub otel_client_faults: Arc<OtelClientFaultInjector>,
     pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     pub transaction_binding_drops: Arc<TransactionBindingDropInjector>,
-    pub(crate) transaction_commit_pauses: Arc<TransactionCommitPauseInjector>,
+    pub(crate) command_pauses: Arc<CommandPauseInjector>,
     pub(crate) entity_gate_pauses: Arc<EntityGatePauseInjector>,
     pub(crate) syslog_ingestor_bind_address_overrides: Arc<SyslogIngestorBindAddressOverrides>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
@@ -112,7 +112,7 @@ impl Default for RuntimeTestHooks {
             otel_client_faults: Arc::default(),
             schedule_publication_faults: Arc::default(),
             transaction_binding_drops: Arc::default(),
-            transaction_commit_pauses: Arc::default(),
+            command_pauses: Arc::default(),
             entity_gate_pauses: Arc::default(),
             syslog_ingestor_bind_address_overrides: Arc::default(),
             branch_instance_expiration_scan_interval: None,
@@ -124,6 +124,22 @@ impl Default for RuntimeTestHooks {
 }
 
 impl RuntimeTestHooks {
+    pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
+        self.command_pauses
+            .arm(CommandPausePoint::Admission(node_id));
+    }
+
+    pub async fn wait_for_command_admission_pause(&self, node_id: &ClusterNodeName) {
+        self.command_pauses
+            .wait_for_pause(&CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_admission_pause(&self, node_id: &ClusterNodeName) {
+        self.command_pauses
+            .release(&CommandPausePoint::Admission(node_id.clone()));
+    }
+
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
         self.syslog_ingestor_bind_address_overrides
             .hosts
@@ -150,13 +166,11 @@ impl RuntimeTestHooks {
         node_id: ClusterNodeName,
         completed_statements: usize,
     ) {
-        self.transaction_commit_pauses.pauses.insert(
-            TransactionCommitPauseKey {
+        self.command_pauses
+            .arm(CommandPausePoint::TransactionCommit {
                 node_id,
                 completed_statements,
-            },
-            Arc::new(TransactionCommitPause::default()),
-        );
+            });
     }
 
     pub fn pause_entity_gate(&self, domain: impl Into<String>) {
@@ -201,29 +215,12 @@ impl RuntimeTestHooks {
         node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        let key = TransactionCommitPauseKey {
-            node_id: node_id.clone(),
-            completed_statements,
-        };
-        let pause = self
-            .transaction_commit_pauses
-            .pauses
-            .get(&key)
-            .unwrap_or_else(|| {
-                panic!(
-                    "transaction commit pause for node '{node_id}' after {completed_statements} \
-                     statements is not armed"
-                )
+        self.command_pauses
+            .wait_for_pause(&CommandPausePoint::TransactionCommit {
+                node_id: node_id.clone(),
+                completed_statements,
             })
-            .clone();
-        while !pause.reached.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.reached_notify.notified();
-            if pause.reached.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+            .await;
     }
 
     pub fn release_transaction_commit_pause(
@@ -231,23 +228,11 @@ impl RuntimeTestHooks {
         node_id: &ClusterNodeName,
         completed_statements: usize,
     ) {
-        let key = TransactionCommitPauseKey {
-            node_id: node_id.clone(),
-            completed_statements,
-        };
-        let pause = self
-            .transaction_commit_pauses
-            .pauses
-            .get(&key)
-            .unwrap_or_else(|| {
-                panic!(
-                    "transaction commit pause for node '{node_id}' after {completed_statements} \
-                     statements is not armed"
-                )
-            })
-            .clone();
-        pause.released.store(true, Ordering::Release);
-        pause.release_notify.notify_waiters();
+        self.command_pauses
+            .release(&CommandPausePoint::TransactionCommit {
+                node_id: node_id.clone(),
+                completed_statements,
+            });
     }
 }
 
@@ -274,25 +259,49 @@ impl TransactionBindingDropInjector {
     }
 }
 
-/// Where a transaction commit is armed to pause: the node running the commit and how many of its
-/// statements have completed when it stops.
+/// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TransactionCommitPauseKey {
-    node_id: ClusterNodeName,
-    completed_statements: usize,
+pub(crate) enum CommandPausePoint {
+    Admission(ClusterNodeName),
+    TransactionCommit {
+        node_id: ClusterNodeName,
+        completed_statements: usize,
+    },
 }
 
-impl TransactionCommitPauseInjector {
+impl CommandPauseInjector {
+    fn arm(&self, point: CommandPausePoint) {
+        self.pauses.insert(point, Arc::new(CommandPause::default()));
+    }
+
+    fn release(&self, point: &CommandPausePoint) {
+        let pause = self
+            .pauses
+            .get(point)
+            .unwrap_or_else(|| panic!("command pause at {point:?} is not armed"))
+            .clone();
+        pause.released.store(true, Ordering::Release);
+        pause.release_notify.notify_waiters();
+    }
+
+    async fn wait_for_pause(&self, point: &CommandPausePoint) {
+        let pause = self
+            .pauses
+            .get(point)
+            .unwrap_or_else(|| panic!("command pause at {point:?} is not armed"))
+            .clone();
+        while !pause.reached.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = pause.reached_notify.notified();
+            if pause.reached.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_if_armed(
-        &self,
-        node_id: &ClusterNodeName,
-        completed_statements: usize,
-    ) {
-        let key = TransactionCommitPauseKey {
-            node_id: node_id.clone(),
-            completed_statements,
-        };
+    pub(crate) async fn pause_if_armed(&self, key: CommandPausePoint) {
         let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
             return;
         };
