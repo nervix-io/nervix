@@ -21,6 +21,9 @@ pub(super) struct RemoteDispatchRegistry {
 pub(super) struct RemoteDispatcher {
     pub(super) cluster: Arc<cluster::ClusterHandle>,
     pub(super) interconnect: Transport,
+    /// The same admission the attaching runtime holds, so a body this dispatcher encodes is
+    /// charged against the same budgets the runtime's own work is.
+    pub(super) executor: Executor,
     /// The same registry the attaching runtime holds, so an acknowledgement this dispatcher sent
     /// a correlation id for resolves against the entry the runtime is waiting on.
     pub(super) registry: Arc<RemoteDispatchRegistry>,
@@ -35,6 +38,12 @@ impl std::fmt::Debug for RemoteDispatcher {
 impl RemoteDispatcher {
     pub(super) const DISPATCH_RETRY_INTERVAL: Duration = Duration::from_millis(25);
     pub(super) const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The node's bounded execution and memory admission, which every body this dispatcher
+    /// encodes or decodes is submitted through.
+    pub(super) fn executor(&self) -> &Executor {
+        &self.executor
+    }
 
     pub(super) fn local_node_id(&self) -> Option<ClusterNodeName> {
         self.registry.local_node_id.read().clone()
@@ -133,22 +142,15 @@ impl RemoteDispatcher {
         let Some(local_node_id) = self.local_node_id() else {
             return;
         };
-        let batch_ipc = match batch.batch.to_arrow_ipc_bytes() {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                warn!(
-                    domain = domain.as_str(),
-                    relay = relay.as_str(),
-                    error = %error,
-                    "failed to serialize remote subscription batch"
-                );
-                return;
-            }
-        };
         let interested_nodes = self
             .cluster
             .nodes_with_subscription_interest(domain.as_str(), relay.as_str())
             .await;
+        // One encode for the whole fanout. Every interested node carries this same allocation,
+        // and the first one serializes it inside its own outbound slot: the slot is what orders
+        // the batches a node receives, so an encode performed ahead of it lets a later batch
+        // overtake an earlier one.
+        let mut encoded_body: Option<ChargedBytes> = None;
         for node_id in interested_nodes {
             tokio::task::consume_budget().await;
             if node_id == local_node_id || excluded_nodes.contains(&node_id) {
@@ -156,6 +158,24 @@ impl RemoteDispatcher {
             }
             let outbound_slot = services.outbound_slot(&node_id);
             let _slot = outbound_slot.lock().await;
+            let batch_ipc = match encoded_body.clone() {
+                Some(bytes) => bytes,
+                None => match batch.batch.encode_arrow_ipc(self.executor()).await {
+                    Ok(bytes) => {
+                        encoded_body = Some(bytes.clone());
+                        bytes
+                    }
+                    Err(error) => {
+                        warn!(
+                            domain = domain.as_str(),
+                            relay = relay.as_str(),
+                            error = %error,
+                            "failed to serialize remote subscription batch"
+                        );
+                        return;
+                    }
+                },
+            };
             if let Err(error) = self
                 .dispatch_admitted_relay_payload(
                     &node_id,
@@ -279,6 +299,7 @@ impl Runtime {
         *self.inner.remote_dispatcher.write() = Some(Arc::new(RemoteDispatcher {
             cluster,
             interconnect,
+            executor: self.inner.executor.clone(),
             registry: self.inner.remote_dispatch.clone(),
         }));
     }
@@ -464,11 +485,12 @@ impl Runtime {
             });
         }
         let decoded_batch = schema
-            .arrow_batch_from_ipc_bytes(&remote.batch_ipc)
-            .map_err(|reason| RuntimeError::DecodeRemoteRelay {
+            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
+            .await
+            .map_err(|error| RuntimeError::DecodeRemoteRelay {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             })?;
         if remote.metadata.len() != decoded_batch.batch().num_rows() {
             return Err(RuntimeError::DecodeRemoteRelay {
@@ -580,11 +602,12 @@ impl Runtime {
             });
         };
         let decoded_batch = schema
-            .arrow_batch_from_ipc_bytes(&remote.batch_ipc)
-            .map_err(|reason| RuntimeError::DecodeRemoteRelay {
+            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
+            .await
+            .map_err(|error| RuntimeError::DecodeRemoteRelay {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
-                reason,
+                reason: error.to_string(),
             })?;
         if remote.metadata.len() != decoded_batch.batch().num_rows() {
             return Err(RuntimeError::DecodeRemoteRelay {

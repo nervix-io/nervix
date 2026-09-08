@@ -26,8 +26,11 @@ use triomphe::Arc;
 
 use super::{
     ConnectionHandle, ConnectionKey, Envelope, PING_INTERVAL, PING_TIMEOUT, ReceivedEnvelope,
-    TransportError, TransportInner, TransportMode, WireEnvelope, configure_socket,
-    read_and_verify_introduction, read_wire_envelope, write_wire_envelope,
+    TransportError, TransportInner, TransportMode, configure_socket,
+    wire::{
+        QueuedFrame, WireEnvelope, WireFrame, decode_frame, encode_frame,
+        read_and_verify_introduction, read_frame_bytes, write_wire_envelope,
+    },
 };
 
 pub(super) fn spawn_outbound_connection(
@@ -35,7 +38,7 @@ pub(super) fn spawn_outbound_connection(
     key: ConnectionKey,
     handle: ConnectionHandle,
     cancel: CancellationToken,
-    rx: mpsc::Receiver<Envelope>,
+    rx: mpsc::Receiver<QueuedFrame>,
     permit: OwnedSemaphorePermit,
 ) {
     let tasks = inner.tasks.clone();
@@ -51,7 +54,7 @@ async fn run_outbound_connection(
     key: ConnectionKey,
     handle: ConnectionHandle,
     cancel: CancellationToken,
-    mut rx: mpsc::Receiver<Envelope>,
+    mut rx: mpsc::Receiver<QueuedFrame>,
 ) {
     let mut pending = None;
     let mut backoff = ReconnectBackoff::new(
@@ -177,6 +180,7 @@ pub(super) async fn run_inbound_connection(
     let handle = ConnectionHandle::new(
         peer_addr,
         tx,
+        inner.executor.clone(),
         cancel.clone(),
         inner.admission_closed.clone(),
         inner.options.queue_admission_timeout,
@@ -258,13 +262,15 @@ pub(super) async fn exchange_introductions(
     io_stream: BoxedIo,
 ) -> Result<EstablishedConnection, Report<TransportError>> {
     let (mut reader, mut writer) = tokio::io::split(io_stream);
-    write_wire_envelope(
-        &mut writer,
-        &WireEnvelope::Introduction(inner.identity.signed_introduction()),
+    let introduction = encode_frame(
+        &inner.executor,
+        WireEnvelope::Introduction(inner.identity.signed_introduction()),
     )
     .await?;
+    write_wire_envelope(&mut writer, &introduction).await?;
     let peer_node_id = read_and_verify_introduction(
         &mut reader,
+        &inner.executor,
         inner.options.max_frame_bytes,
         &inner.peer_verifier,
     )
@@ -343,10 +349,13 @@ pub(super) async fn drive_connection(
     reply_handle: ConnectionHandle,
     established: EstablishedConnection,
     cancel: &CancellationToken,
-    rx: &mut mpsc::Receiver<Envelope>,
-    retry_payload: &mut Option<Envelope>,
+    rx: &mut mpsc::Receiver<QueuedFrame>,
+    retry_payload: &mut Option<QueuedFrame>,
 ) -> Result<(), Report<TransportError>> {
-    let mut pending = retry_payload.take().map(WireEnvelope::Payload);
+    let mut pending = retry_payload.take();
+    // The keepalive is the same fixed frame every time, so it is serialized once for the whole
+    // connection instead of on every tick.
+    let keepalive = encode_frame(&inner.executor, WireEnvelope::Ping).await?;
     let result = {
         let read = read_connection(
             inner.clone(),
@@ -355,7 +364,13 @@ pub(super) async fn drive_connection(
             reply_handle,
             established.reader,
         );
-        let write = write_connection(established.writer, rx, &mut pending, &inner.draining);
+        let write = write_connection(
+            established.writer,
+            rx,
+            &mut pending,
+            &inner.draining,
+            keepalive,
+        );
         tokio::pin!(read);
         tokio::pin!(write);
         tokio::select! {
@@ -366,9 +381,9 @@ pub(super) async fn drive_connection(
             result = &mut write => result,
         }
     };
-    if let Some(WireEnvelope::Payload(payload)) = pending {
-        *retry_payload = Some(payload);
-    }
+    // A frame that never reached the socket is retried as it stands. It is already encoded, so a
+    // retry costs no second serialization and no second copy of its body.
+    *retry_payload = pending;
     result
 }
 
@@ -381,12 +396,15 @@ async fn read_connection(
 ) -> Result<(), Report<TransportError>> {
     loop {
         tokio::task::consume_budget().await;
-        let envelope = timeout(
+        // The liveness deadline covers waiting for bytes on the socket, not the admitted work that
+        // turns them into an envelope. Decoding behind a busy class must not be read as a dead peer.
+        let frame = timeout(
             PING_TIMEOUT,
-            read_wire_envelope(&mut reader, inner.options.max_frame_bytes),
+            read_frame_bytes(&mut reader, &inner.executor, inner.options.max_frame_bytes),
         )
         .await
         .map_err(|_| Report::new(TransportError::Closed(peer_addr)))??;
+        let envelope = decode_frame(&inner.executor, frame).await?;
         match envelope {
             WireEnvelope::Introduction(_) => {
                 return Err(Report::new(TransportError::InvalidHandshake(
@@ -426,9 +444,10 @@ async fn read_connection(
 
 async fn write_connection(
     mut writer: BoxedWriter,
-    rx: &mut mpsc::Receiver<Envelope>,
-    pending: &mut Option<WireEnvelope>,
+    rx: &mut mpsc::Receiver<QueuedFrame>,
+    pending: &mut Option<QueuedFrame>,
     draining: &CancellationToken,
+    keepalive_frame: WireFrame,
 ) -> Result<(), Report<TransportError>> {
     let mut keepalive = interval(PING_INTERVAL);
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -438,7 +457,7 @@ async fn write_connection(
         if pending.is_none() {
             if drain_queue {
                 match rx.try_recv() {
-                    Ok(envelope) => *pending = Some(WireEnvelope::Payload(envelope)),
+                    Ok(frame) => *pending = Some(frame),
                     Err(
                         mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
                     ) => {
@@ -452,21 +471,21 @@ async fn write_connection(
                         drain_queue = true;
                         continue;
                     }
-                    maybe_envelope = rx.recv() => {
-                        let Some(envelope) = maybe_envelope else {
+                    maybe_frame = rx.recv() => {
+                        let Some(frame) = maybe_frame else {
                             return Ok(());
                         };
-                        *pending = Some(WireEnvelope::Payload(envelope));
+                        *pending = Some(frame);
                     }
-                    _ = keepalive.tick() => *pending = Some(WireEnvelope::Ping),
+                    _ = keepalive.tick() => *pending = Some(QueuedFrame::keepalive(&keepalive_frame)),
                 }
             }
         }
 
-        let envelope = pending
+        let frame = pending
             .as_ref()
             .assured("the writer fills its pending frame before attempting socket I/O");
-        write_wire_envelope(&mut writer, envelope).await?;
+        write_wire_envelope(&mut writer, frame.frame()).await?;
         *pending = None;
     }
 }

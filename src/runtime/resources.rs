@@ -468,7 +468,8 @@ mod tests {
         std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
 
         let mount_domain = DomainName::parse("tenant").expect("valid domain");
-        let store = ResourceStore::open(store_root.path()).expect("resource store should open");
+        let store = ResourceStore::open(store_root.path(), Executor::default())
+            .expect("resource store should open");
         store
             .install_from_directory(
                 ResourceId::new(mount_domain.clone(), named("dev_tls"), 1),

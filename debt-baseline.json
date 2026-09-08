@@ -1,13 +1,13 @@
 {
   "as_casts": 3,
-  "bare_error_signatures": 862,
+  "bare_error_signatures": 853,
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 13,
   "combinator_control_flow": 0,
   "files_over_3000_lines": 13,
   "model_matches_in_data_plane": 125,
   "parser_imports_outside_edges": 0,
-  "result_string_errors": 520,
+  "result_string_errors": 518,
   "string_node_ids": 0,
   "testing_feature_struct_fields": 9
 }
