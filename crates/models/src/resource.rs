@@ -160,9 +160,9 @@ impl ResourceVersionStatus {
     /// Returns the highest installed version of the named resource in `domain`, which is `None`
     /// when the resource is declared but has no uploaded version yet.
     pub fn latest_version(&self, domain: &DomainName, identifier: &ResourceName) -> Option<u64> {
-        self.next_version(domain, identifier)
-            .and_then(|next| next.checked_sub(1))
-            .filter(|version| *version > 0)
+        let next = self.next_version(domain, identifier)?;
+        let latest = next.checked_sub(1)?;
+        if latest > 0 { Some(latest) } else { None }
     }
 
     pub fn is_declared(&self, domain: &DomainName, identifier: &ResourceName) -> bool {

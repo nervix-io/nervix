@@ -35,10 +35,10 @@ pub fn report(origin: &str, error: &ParseFromSourceError) {
         },
     };
 
-    let offset = failure
-        .diagnostics
-        .first()
-        .map_or(0, |first| first.span.start);
+    let offset = match failure.diagnostics.first() {
+        Some(first) => first.span.start,
+        None => 0,
+    };
     let mut builder =
         Report::build(ReportKind::Error, (origin, offset..offset)).with_message(failure.kind);
 

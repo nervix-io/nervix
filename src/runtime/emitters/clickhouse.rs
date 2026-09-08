@@ -45,17 +45,17 @@ impl ClickHouseWriteError {
     }
 
     fn record_reason(&self) -> String {
-        self.record_error_name().map_or_else(
-            || "ClickHouse rejected record".to_string(),
-            |name| format!("ClickHouse rejected record with {name}"),
-        )
+        match self.record_error_name() {
+            Some(name) => format!("ClickHouse rejected record with {name}"),
+            None => "ClickHouse rejected record".to_string(),
+        }
     }
 
     fn into_report(self) -> Report<EmitterRuntimeError> {
-        let reason = self.record_error_name().map_or_else(
-            || "ClickHouse insert request failed".to_string(),
-            |name| format!("ClickHouse insert request failed with {name}"),
-        );
+        let reason = match self.record_error_name() {
+            Some(name) => format!("ClickHouse insert request failed with {name}"),
+            None => "ClickHouse insert request failed".to_string(),
+        };
         Report::new(EmitterRuntimeError::PublishBatch).attach_printable(reason)
     }
 }
@@ -68,11 +68,10 @@ impl ClickHouseEmitter {
         values: &[ClickHouseValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let (client, request_timeout) = match Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        ) {
+        let (client, request_timeout) = match Self::client_from_config(client_config_entries(
+            resolved,
+            client.config.as_slice(),
+        )) {
             Ok((client, request_timeout)) => (Some(client), request_timeout),
             Err(error) => {
                 context.report_init_error("clickhouse", &emitter_error_message(&error));

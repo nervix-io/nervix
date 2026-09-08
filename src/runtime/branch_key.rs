@@ -86,7 +86,10 @@ impl BranchKey {
 }
 
 pub(super) fn branch_key_display(key: &Option<BranchKey>) -> &str {
-    key.as_ref().map(BranchKey::as_str).unwrap_or("none")
+    match key {
+        Some(key) => key.as_str(),
+        None => "none",
+    }
 }
 
 impl std::fmt::Display for BranchKey {

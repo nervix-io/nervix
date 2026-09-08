@@ -246,12 +246,10 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
-                relay: ingestor
-                    .routes
-                    .first()
-                    .map(|route| &route.relay)
-                    .map(|relay| relay.as_str().to_string())
-                    .unwrap_or_else(|| "<missing>".to_string()),
+                relay: match ingestor.routes.first() {
+                    Some(route) => route.relay.as_str().to_string(),
+                    None => "<missing>".to_string(),
+                },
             });
         };
         let Some(codec) = execution.codecs.get(&ingestor.decode_using_codec).cloned() else {

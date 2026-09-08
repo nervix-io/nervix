@@ -281,7 +281,10 @@ fn validate_batch(schema: &Schema, columns: &[TypedArray]) -> Result<usize, Runt
         });
     }
 
-    let row_count = columns.first().map(TypedArray::len).unwrap_or(0);
+    let row_count = match columns.first() {
+        Some(column) => column.len(),
+        None => 0,
+    };
     for (field, column) in schema.fields().iter().zip(columns) {
         if field.data_type() != &column.data_type() {
             return Err(RuntimeError::InvalidBatch {

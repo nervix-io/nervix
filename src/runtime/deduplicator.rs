@@ -148,11 +148,10 @@ impl ReplicatedDeduplicatorState {
         now: Timestamp,
         max_time: Duration,
     ) {
-        while recent_keys
-            .oldest()
-            .map(|(_, seen_at)| checked_add_duration_to_timestamp(*seen_at, max_time) <= now)
-            .unwrap_or(false)
-        {
+        while let Some((_, seen_at)) = recent_keys.oldest() {
+            if checked_add_duration_to_timestamp(*seen_at, max_time) > now {
+                break;
+            }
             recent_keys.remove_oldest();
         }
     }

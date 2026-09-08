@@ -199,10 +199,8 @@ impl BranchQuiesceGauges {
     }
 
     pub(super) fn observe(&mut self, branch: &BranchRuntime, processor: &ModelName) {
-        let depths = branch
-            .processors
-            .get(processor)
-            .map(|processor| BranchQuiesceDepths {
+        let depths = match branch.processors.get(processor) {
+            Some(processor) => BranchQuiesceDepths {
                 collected_inputs: processor
                     .input_collectors
                     .values()
@@ -216,8 +214,9 @@ impl BranchQuiesceGauges {
                     .iter()
                     .map(|output| output.pending.len())
                     .sum(),
-            })
-            .unwrap_or_default();
+            },
+            None => BranchQuiesceDepths::default(),
+        };
         Self::replace_gauge(
             &self.counters.collected_inputs,
             &mut self.collected_inputs,
@@ -656,18 +655,19 @@ impl Runtime {
         let node_work_items = affected_entities
             .iter()
             .map(|entity| {
-                let quiesce_work = self
+                let quiesce_work = match self
                     .inner
                     .node_quiesce_counters
                     .get(&entity.in_domain(domain))
-                    .map(|counters| counters.outstanding_work_for(purpose))
-                    .unwrap_or(0);
+                {
+                    Some(counters) => counters.outstanding_work_for(purpose),
+                    None => 0,
+                };
                 let emitter_work = if entity.kind == ModelKind::Emitter {
-                    self.inner
-                        .emitter_buffers
-                        .get(&entity.in_domain(domain))
-                        .map(|buffered| buffered.load(Ordering::Acquire))
-                        .unwrap_or(0)
+                    match self.inner.emitter_buffers.get(&entity.in_domain(domain)) {
+                        Some(buffered) => buffered.load(Ordering::Acquire),
+                        None => 0,
+                    }
                 } else {
                     0
                 };
@@ -712,12 +712,10 @@ impl Runtime {
         &self,
         key: &DomainNodeRef,
     ) -> Option<EmitterPublishingDrainStatus> {
-        let pending_messages = self
-            .inner
-            .emitter_buffers
-            .get(key)
-            .map(|buffered| buffered.load(Ordering::Acquire))
-            .unwrap_or(0);
+        let pending_messages = match self.inner.emitter_buffers.get(key) {
+            Some(buffered) => buffered.load(Ordering::Acquire),
+            None => 0,
+        };
         let awaiting_confirmation = self
             .inner
             .emitter_confirmation_waits
@@ -799,11 +797,10 @@ impl Runtime {
                         .is_none_or(|control| !control.is_quiesced())
             })
             .count();
-        let active_generators = self
-            .inner
-            .generator_activity_by_domain
-            .get(domain)
-            .map_or(0, |counter| counter.load(Ordering::Acquire));
+        let active_generators = match self.inner.generator_activity_by_domain.get(domain) {
+            Some(counter) => counter.load(Ordering::Acquire),
+            None => 0,
+        };
         let buffered_emitter_messages = self
             .inner
             .emitter_buffers
@@ -829,12 +826,10 @@ impl Runtime {
         );
         let mut emitter_publishing = Vec::new();
         for key in publishing_keys {
-            let pending_messages = self
-                .inner
-                .emitter_buffers
-                .get(&key)
-                .map(|buffered| buffered.load(Ordering::Acquire))
-                .unwrap_or(0);
+            let pending_messages = match self.inner.emitter_buffers.get(&key) {
+                Some(buffered) => buffered.load(Ordering::Acquire),
+                None => 0,
+            };
             let awaiting_confirmation = self
                 .inner
                 .emitter_confirmation_waits

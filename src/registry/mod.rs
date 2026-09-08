@@ -1082,27 +1082,26 @@ impl Registry {
         let mut writer = self.state.write();
         *writer = Arc::new(RegistryState { domains });
 
-        let graph_snapshot = writer
-            .domains
-            .get(&planned.domain)
-            .map(|state| state.graph.describe())
-            .unwrap_or_default();
+        let graph_snapshot = match writer.domains.get(&planned.domain) {
+            Some(state) => state.graph.describe(),
+            None => String::new(),
+        };
+        let node_count = match writer.domains.get(&planned.domain) {
+            Some(state) => state.graph.node_count(),
+            None => 0,
+        };
+        let edge_count = match writer.domains.get(&planned.domain) {
+            Some(state) => state.graph.edge_count(),
+            None => 0,
+        };
 
         info!(
             domain = planned.domain.as_str(),
             batch_size = planned.batch_size,
             operation = planned.operation_name,
             result = "ok",
-            node_count = writer
-                .domains
-                .get(&planned.domain)
-                .map(|state| state.graph.node_count())
-                .unwrap_or(0),
-            edge_count = writer
-                .domains
-                .get(&planned.domain)
-                .map(|state| state.graph.edge_count())
-                .unwrap_or(0),
+            node_count,
+            edge_count,
             "applied mutation batch\n{}",
             graph_snapshot
         );
@@ -1343,9 +1342,10 @@ impl Registry {
     }
 
     fn active_graph_snapshot(&self, domain: &DomainName) -> String {
-        self.active_graph(domain)
-            .map(|graph| graph.describe())
-            .unwrap_or_default()
+        match self.active_graph(domain) {
+            Some(graph) => graph.describe(),
+            None => String::new(),
+        }
     }
 }
 
@@ -3861,7 +3861,10 @@ fn placement_materialized_relays(model: &Model) -> Vec<&RelayName> {
 }
 
 fn placement_rank_key(rank: Option<NonZeroU64>) -> (u8, u64) {
-    rank.map_or((1, 0), |rank| (0, rank.get()))
+    match rank {
+        Some(rank) => (0, rank.get()),
+        None => (1, 0),
+    }
 }
 
 fn placement_endpoint_pair_plan(endpoint: &PlacementEndpointAnalysis) -> PlacementEndpointPairPlan {
@@ -6818,8 +6821,8 @@ fn validate_message_error_policy(
             reason: format!(
                 "message-error relay '{}' uses branch {}, expected {}",
                 relay,
-                actual_branch.map_or("UNBRANCHED", BranchName::as_str),
-                expected_branch.map_or("UNBRANCHED", BranchName::as_str),
+                format_branch_name(actual_branch),
+                format_branch_name(expected_branch),
             ),
         }));
     }
@@ -8443,21 +8446,20 @@ fn rewrite_lookup_hash_map_expr(
                         ),
                     })
                 })?;
-                let lookup_field = lookup_hash_map_literal_arg(args, 2)
-                    .map_err(|reason| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason,
-                        })
+                let raw_lookup_field = lookup_hash_map_literal_arg(args, 2).map_err(|reason| {
+                    Report::new(RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason,
                     })
-                    .and_then(|raw| {
-                        FieldName::parse(raw).change_context(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: format!("LOOKUP_HASH_MAP field '{raw}' is invalid"),
-                        })
-                    })?;
+                })?;
+                let lookup_field = FieldName::parse(raw_lookup_field).change_context(
+                    RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason: format!("LOOKUP_HASH_MAP field '{raw_lookup_field}' is invalid"),
+                    },
+                )?;
                 let lookup_schema = schema_for_lookup_model(domain, identifier, models, &lookup)?;
                 let Some(schema_field) = lookup_schema
                     .fields
@@ -9988,7 +9990,7 @@ fn ensure_output_branch(
             reason: format!(
                 "TO output '{}' must use its exact declared branch '{}'",
                 output.relay.as_str(),
-                target_branch.map_or("UNBRANCHED", BranchName::as_str)
+                format_branch_name(target_branch)
             ),
         }));
     }
@@ -10942,7 +10944,10 @@ fn assign_stream_branching(
 }
 
 fn format_branch_name(branch: Option<&BranchName>) -> &str {
-    branch.map(|name| name.as_str()).unwrap_or("UNBRANCHED")
+    match branch {
+        Some(name) => name.as_str(),
+        None => "UNBRANCHED",
+    }
 }
 
 fn format_branched_by(branched_by: &[FieldName]) -> String {

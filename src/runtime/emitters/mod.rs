@@ -695,10 +695,14 @@ pub(in crate::runtime) struct CompiledSqlValuesProgram {
 impl CompiledSqlValuesProgram {
     fn structured_side_error(&self, reason: String, span: VmSpan) -> StructuredMessageError {
         let site = self.error_sites.get(&span);
+        let operation = match site {
+            Some(site) => site.operation,
+            None => MessageErrorOperation::Values,
+        };
         structured_message_error(
             MessageErrorCode::Evaluation,
             reason,
-            site.map_or(MessageErrorOperation::Values, |site| site.operation),
+            operation,
             site.and_then(|site| site.operation_index),
             site.map(|site| site.fields.iter().cloned())
                 .into_iter()
@@ -1121,8 +1125,7 @@ fn compile_sql_values_program(
     let inferred_fields = infer_vm_set_expr_types_for_bindings_with_udfs(
         &parsed,
         infer_bindings,
-        udfs.map(|executor| executor.signatures().clone())
-            .unwrap_or_default(),
+        runtime_udf_signatures(udfs),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -1329,11 +1332,9 @@ async fn sql_mapped_batch_values(
             .enumerate()
             .map(|(index, _mapping)| {
                 let field = format!("c{index}");
-                vm_output_value(&output, row, &field).map(|value| {
-                    value
-                        .as_ref()
-                        .map(runtime_value_to_json)
-                        .unwrap_or(serde_json::Value::Null)
+                vm_output_value(&output, row, &field).map(|value| match value.as_ref() {
+                    Some(value) => runtime_value_to_json(value),
+                    None => serde_json::Value::Null,
                 })
             })
             .collect::<Result<Vec<_>, _>>();
@@ -1460,9 +1461,10 @@ fn emitter_publish_error_with_minimum_retry_delay(
 }
 
 fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration {
-    error
-        .downcast_ref::<EmitterMinimumRetryDelay>()
-        .map_or(Duration::ZERO, |attachment| attachment.0)
+    match error.downcast_ref::<EmitterMinimumRetryDelay>() {
+        Some(attachment) => attachment.0,
+        None => Duration::ZERO,
+    }
 }
 
 fn emitter_retry_delay(
@@ -3090,10 +3092,10 @@ impl EmitterTask {
         } else {
             None
         };
-        let output_compiled_schema = codec
-            .as_ref()
-            .map(|codec| codec.schema())
-            .unwrap_or_else(|| input_schema.clone());
+        let output_compiled_schema = match codec.as_ref() {
+            Some(codec) => codec.schema(),
+            None => input_schema.clone(),
+        };
         let udfs = runtime.udf_executor(domain);
         let filter_map = compile_emitter_filter_map_program(
             domain,
@@ -4206,12 +4208,11 @@ impl EmitterBatchContext<'_> {
             Some(CompiledSqsFifoGroup::FromBranch) => batch
                 .keys
                 .iter()
-                .map(|key| {
-                    key.as_ref()
-                        .map(|key| Some(key.as_str().to_string()))
-                        .ok_or_else(|| {
-                            "SQS FIFO GROUP FROM BRANCH received an unbranched record".to_string()
-                        })
+                .map(|key| match key.as_ref() {
+                    Some(key) => Ok(Some(key.as_str().to_string())),
+                    None => {
+                        Err("SQS FIFO GROUP FROM BRANCH received an unbranched record".to_string())
+                    }
                 })
                 .collect(),
             Some(CompiledSqsFifoGroup::Expression(program)) => {

@@ -375,6 +375,144 @@ def count_clamped_arithmetic(files: Sequence[RustFile]) -> list[Site]:
     return sites
 
 
+# The adapters an `Option` or `Result` chain is built from. `and_then`, `or_else`, `ok_or*`,
+# `map_or*` and `unwrap_or*` belong to those two types alone, so requiring one of them to anchor a
+# chain is what keeps an iterator pipeline — which shares `map`, `filter`, and closures — out.
+_ADAPTERS = frozenset(
+    {
+        "and_then",
+        "filter",
+        "map",
+        "map_err",
+        "map_or",
+        "map_or_else",
+        "ok_or",
+        "ok_or_else",
+        "or_else",
+        "unwrap_or",
+        "unwrap_or_default",
+        "unwrap_or_else",
+    }
+)
+_ANCHORS = _ADAPTERS - {"filter", "map", "map_err"}
+
+# `map_or` and `map_or_else` take the two arms of a match as their arguments, so one call is
+# already the branch, however short the arms are.
+_BRANCH_ADAPTERS = frozenset({"map_or", "map_or_else"})
+
+_ADAPTER_CALL = re.compile(r"\.\s*([a-z_][a-z_0-9]*)\s*\(")
+_CHAIN_CONTINUATION = re.compile(r"\s*(\.\s*([a-z_][a-z_0-9]*)\s*\()")
+
+
+@dataclass(frozen=True)
+class _AdapterCall:
+    """One adapter call in a chain, addressed at the parenthesis its argument opens."""
+
+    name: str
+    open_paren: int
+
+
+def count_combinator_control_flow(files: Sequence[RustFile]) -> list[Site]:
+    """Count control flow written as an `Option` or `Result` combinator chain.
+
+    A chain is one site, counted at its first call, when it branches or sequences instead of
+    applying a single transformation: two adapters in a row, a `map_or` or `map_or_else` holding
+    the two arms of a match, or a closure whose body is a block of statements. A lone adapter
+    shaping a value on its way into `?` is neither, and an iterator pipeline never anchors a chain,
+    so neither is counted.
+    """
+
+    sites: list[Site] = []
+    for file in product_files(files):
+        code = file.product
+        continuations: set[int] = set()
+        for match in _ADAPTER_CALL.finditer(code):
+            if match.start() in continuations or match.group(1) not in _ADAPTERS:
+                continue
+            chain = _adapter_chain(code, match, continuations)
+            if _is_control_flow(code, chain):
+                names = ".".join(call.name for call in chain)
+                sites.append(
+                    file.site(match.start(), f"{names}: {file.source_line(match.start())}")
+                )
+    return sites
+
+
+def _adapter_chain(
+    code: str, first: re.Match[str], continuations: set[int]
+) -> list[_AdapterCall]:
+    """Return the run of adapter calls starting at `first`, recording the ones it swallows.
+
+    A recorded offset is where `_ADAPTER_CALL` matches that call, so the scan that walks the file
+    skips it rather than counting the tail of this chain as a chain of its own.
+    """
+
+    chain = [_AdapterCall(first.group(1), first.end() - 1)]
+    while True:
+        following = _CHAIN_CONTINUATION.match(code, _end_of_call(code, chain[-1].open_paren) + 1)
+        if following is None or following.group(2) not in _ADAPTERS:
+            return chain
+        continuations.add(following.start(1))
+        chain.append(_AdapterCall(following.group(2), following.end(1) - 1))
+
+
+def _is_control_flow(code: str, chain: Sequence[_AdapterCall]) -> bool:
+    """Whether the chain decides between two cases or sequences steps rather than transforming."""
+
+    if any(call.name in _BRANCH_ADAPTERS for call in chain):
+        return True
+    if len(chain) > 1 and any(call.name in _ANCHORS for call in chain):
+        return True
+    return any(
+        call.name in _ANCHORS and _closure_body_has_statements(code, call.open_paren)
+        for call in chain
+    )
+
+
+def _closure_body_has_statements(code: str, open_paren: int) -> bool:
+    """Whether the call's first argument is a closure whose block body holds statements."""
+
+    index = _skip_space(code, open_paren + 1)
+    if index < len(code) and code[index] == "|":
+        parameters = code.find("|", index + 1)
+        if parameters < 0:
+            return False
+        index = _skip_space(code, parameters + 1)
+    if index >= len(code) or code[index] != "{":
+        return False
+    body = code[index + 1 : _end_of_block(code, index) - 1]
+    depth = 0
+    for character in body:
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+        elif character == ";" and depth == 0:
+            return True
+    return False
+
+
+def _end_of_call(code: str, open_index: int) -> int:
+    depth = 0
+    index = open_index
+    length = len(code)
+    while index < length:
+        if code[index] == "(":
+            depth += 1
+        elif code[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return length
+
+
+def _skip_space(code: str, index: int) -> int:
+    while index < len(code) and code[index].isspace():
+        index += 1
+    return index
+
+
 _RESULT = re.compile(r"\bResult\s*<")
 
 
@@ -531,6 +669,11 @@ COUNTS: tuple[Count, ...] = (
         "clamped_arithmetic",
         "`saturating_*` and `wrapping_*` calls outside the time API",
         count_clamped_arithmetic,
+    ),
+    Count(
+        "combinator_control_flow",
+        "control flow written as `Option` and `Result` combinator chains",
+        count_combinator_control_flow,
     ),
     Count(
         "result_string_errors",

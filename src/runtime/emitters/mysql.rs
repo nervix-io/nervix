@@ -38,15 +38,13 @@ impl MySqlWriteError {
             Self::Execute(mysql_async::Error::Server(error)) => Some(error),
             _ => None,
         };
-        server_error.map_or_else(
-            || "MySQL rejected record".to_string(),
-            |error| {
-                format!(
-                    "MySQL rejected record with SQLSTATE {} and code {}",
-                    error.state, error.code
-                )
-            },
-        )
+        match server_error {
+            Some(error) => format!(
+                "MySQL rejected record with SQLSTATE {} and code {}",
+                error.state, error.code
+            ),
+            None => "MySQL rejected record".to_string(),
+        }
     }
 
     fn into_report(self) -> Report<EmitterRuntimeError> {
@@ -79,11 +77,10 @@ impl MySqlEmitter {
         values: &[MySqlValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let client = match Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
+        let client = match Self::client_from_config(client_config_entries(
+            resolved,
+            client.config.as_slice(),
+        ))
         .await
         {
             Ok(client) => Some(client),

@@ -209,11 +209,10 @@ impl Runtime {
     ) -> Result<(), RuntimeError> {
         self.stop_domain_ingestors(domain).await;
 
-        let desired_start_version = self
-            .inner
-            .domains
-            .get(domain)
-            .map_or(0, |state| state.start_version);
+        let desired_start_version = match self.inner.domains.get(domain) {
+            Some(state) => state.start_version,
+            None => 0,
+        };
         let reset_for_start = if let Some((_, existing)) = self.inner.executions.remove(domain) {
             let reset_for_start =
                 existing.passive_only || existing.start_version != desired_start_version;
@@ -461,10 +460,10 @@ impl Runtime {
                         relay.buffer,
                     )
                     .await;
-                let registry = expiring_state
-                    .as_ref()
-                    .map(|state| state.registry.clone())
-                    .unwrap_or_else(RelayRegistry::new);
+                let registry = match expiring_state.as_ref() {
+                    Some(state) => state.registry.clone(),
+                    None => RelayRegistry::new(),
+                };
                 relay_builders.insert(
                     relay.name.clone(),
                     RelayBoundaryBuilder {
@@ -1241,14 +1240,14 @@ impl Runtime {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let start_version = match self.inner.domains.get(domain) {
+            Some(state) => state.start_version,
+            None => 0,
+        };
         Ok(DomainExecution {
             schedule: schedule.clone(),
             passive_only: true,
-            start_version: self
-                .inner
-                .domains
-                .get(domain)
-                .map_or(0, |state| state.start_version),
+            start_version,
             shutdown,
             graph,
             relay_registries,

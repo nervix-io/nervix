@@ -174,12 +174,13 @@ impl fmt::Debug for DependencyEndpoints {
 
 impl DependencyEndpoints {
     pub fn get(&self, key: &str) -> io::Result<&str> {
-        self.values.get(key).map(String::as_str).ok_or_else(|| {
-            io::Error::other(format!(
+        let Some(value) = self.values.get(key) else {
+            return Err(io::Error::other(format!(
                 "dependency endpoint '{key}' is unavailable; start that dependency before \
                  requesting its endpoint"
-            ))
-        })
+            )));
+        };
+        Ok(value.as_str())
     }
 
     pub fn tls_ca_pem(&self) -> io::Result<Vec<u8>> {
@@ -297,9 +298,12 @@ impl DependencyEnvironment {
     }
 
     pub fn tls_dir(&self) -> io::Result<&Path> {
-        self.tls.as_ref().map(|tls| tls.dir.path()).ok_or_else(|| {
-            io::Error::other("TLS materials are unavailable; start a TLS dependency first")
-        })
+        let Some(tls) = &self.tls else {
+            return Err(io::Error::other(
+                "TLS materials are unavailable; start a TLS dependency first",
+            ));
+        };
+        Ok(tls.dir.path())
     }
 
     pub fn container_ids(&self) -> Vec<String> {
@@ -1365,16 +1369,20 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await
             .map_err(testcontainers_error("Sentry event query output"))?;
         let output = String::from_utf8(output).map_err(io::Error::other)?;
-        output
+        let event = output
             .lines()
             .rev()
-            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "Sentry event query returned no JSON value: {output}"
-                ))
-            })
-            .map(|event| if event.is_null() { None } else { Some(event) })
+            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+        let Some(event) = event else {
+            return Err(io::Error::other(format!(
+                "Sentry event query returned no JSON value: {output}"
+            )));
+        };
+        if event.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(event))
+        }
     }
 
     pub async fn shutdown(&mut self) -> Vec<String> {
@@ -1874,10 +1882,10 @@ impl Drop for ReusableStartupLock {
 async fn container_is_running_by_name(name: &str) -> io::Result<bool> {
     let docker = Docker::connect_with_defaults().map_err(io::Error::other)?;
     match docker.inspect_container(name, None).await {
-        Ok(container) => Ok(container
-            .state
-            .and_then(|state| state.running)
-            .unwrap_or(false)),
+        Ok(container) => match container.state {
+            Some(state) => Ok(state.running == Some(true)),
+            None => Ok(false),
+        },
         Err(testcontainers::bollard::errors::Error::DockerResponseServerError {
             status_code: 404,
             ..

@@ -472,14 +472,16 @@ fn percentile_arg(expr: &SpannedExpr) -> WindowAggregateResult<f64> {
 fn linear_histogram_config(
     args: &[SpannedExpr],
 ) -> WindowAggregateResult<WindowLinearHistogramConfig> {
-    let buckets = usize::try_from(int_arg(&args[2], "bucket count")?)
-        .ok()
-        .and_then(NonZeroUsize::new)
-        .ok_or_else(|| {
-            invalid_window_aggregate(
-                "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
-            )
-        })?;
+    let bucket_count = int_arg(&args[2], "bucket count")?;
+    let buckets = match usize::try_from(bucket_count) {
+        Ok(bucket_count) => NonZeroUsize::new(bucket_count),
+        Err(_) => None,
+    };
+    let Some(buckets) = buckets else {
+        return Err(invalid_window_aggregate(
+            "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
+        ));
+    };
     let min = numeric_arg(&args[3], "minimum")?;
     let max = numeric_arg(&args[4], "maximum")?;
     if min >= max {

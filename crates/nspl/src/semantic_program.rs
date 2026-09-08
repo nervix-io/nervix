@@ -491,10 +491,10 @@ where
 }
 
 fn parse_tokens(tokens: &[SpannedToken]) -> Result<RouteConstruction, Vec<ParseError<'_>>> {
-    let end_span = tokens
-        .last()
-        .map(|token| token.span.end..token.span.end)
-        .unwrap_or(0..0);
+    let end_span = match tokens.last() {
+        Some(token) => token.span.end..token.span.end,
+        None => 0..0,
+    };
     let input = Stream::from_iter(
         tokens
             .iter()
@@ -541,10 +541,10 @@ pub fn parse_expression(input: &str) -> Result<Expression, ParseFromSourceError>
             })
             .collect(),
     })?;
-    let end_span = tokens
-        .last()
-        .map(|token| token.span.end..token.span.end)
-        .unwrap_or(0..0);
+    let end_span = match tokens.last() {
+        Some(token) => token.span.end..token.span.end,
+        None => 0..0,
+    };
     let input = Stream::from_iter(
         tokens
             .iter()
@@ -580,10 +580,10 @@ pub fn parse_expression_list(input: &str) -> Result<Vec<Expression>, ParseFromSo
             })
             .collect(),
     })?;
-    let end_span = tokens
-        .last()
-        .map(|token| token.span.end..token.span.end)
-        .unwrap_or(0..0);
+    let end_span = match tokens.last() {
+        Some(token) => token.span.end..token.span.end,
+        None => 0..0,
+    };
     let input = Stream::from_iter(
         tokens
             .iter()

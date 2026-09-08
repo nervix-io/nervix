@@ -169,6 +169,47 @@ mod tests {
 
             self.assertEqual(count(root, "bare_unwrap_and_expect"), 2)
 
+    def test_combinator_control_flow_spares_pipelines_and_single_adapters(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "src/lib.rs": """
+fn describe(state: Option<State>, raw: &str) -> Result<Vec<u8>, ParseError> {
+    let width = state.map(|state| state.width).unwrap_or_default();
+    let label = state.map_or("absent", State::label);
+    let parsed = raw.trim().parse::<u64>().map_err(ParseError::Invalid)?;
+    let scaled = state.and_then(|state| {
+        let scaled = state.width * parsed;
+        NonZeroUsize::new(scaled)
+    });
+    let parts = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::as_bytes)
+        .collect::<Vec<_>>();
+    let first = parts.first().ok_or_else(|| ParseError::Empty)?;
+    let bound = scaled.unwrap_or(1);
+    // state.map(State::label).unwrap_or_default() is written here as prose only.
+    let quoted = "state.map(State::label).unwrap_or_default()";
+    Ok(first.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn describes() {
+        assert_eq!(Some(1u8).map(u16::from).unwrap_or_default(), 1);
+    }
+}
+""",
+                },
+            )
+
+            self.assertEqual(count(root, "combinator_control_flow"), 3)
+
     def test_result_string_errors_span_lines_and_ignore_other_errors(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

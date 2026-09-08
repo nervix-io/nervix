@@ -213,19 +213,18 @@ impl Runtime {
         }
 
         let Some(program) = output.compiled_program.as_ref() else {
-            let output_schema = self
-                .inner
-                .executions
-                .get(domain)
-                .and_then(|execution| execution.relay_schemas.get(&output.relay).cloned())
-                .ok_or_else(|| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "reingestor '{}' output relay '{}' is not instantiated",
-                        reingestor.as_str(),
-                        output.relay.as_str()
-                    ),
-                })?;
+            let output_schema = match self.inner.executions.get(domain) {
+                Some(execution) => execution.relay_schemas.get(&output.relay).cloned(),
+                None => None,
+            };
+            let output_schema = output_schema.ok_or_else(|| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: format!(
+                    "reingestor '{}' output relay '{}' is not instantiated",
+                    reingestor.as_str(),
+                    output.relay.as_str()
+                ),
+            })?;
             let projected = batch
                 .batch
                 .project(output_schema.arrow_schema())
