@@ -192,7 +192,7 @@ pub(crate) struct CompiledDomainUdfs {
 }
 
 pub(super) fn referenced_materialized_stream_bindings(
-    parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+    parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     writable_namespaces: &HashSet<String>,
     available_materialized_streams: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     current_branching: &[FieldName],
@@ -331,7 +331,7 @@ pub(super) fn collect_expression_field_paths(
 }
 
 pub(super) fn compiled_message_error_sites(
-    program: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+    program: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     set_operations: &[MessageErrorOperation],
     filter_operation: Option<MessageErrorOperation>,
 ) -> Result<CompiledMessageErrorSites, String> {
@@ -1324,7 +1324,7 @@ pub(crate) fn compile_sqs_fifo_group_program(
 
 pub(super) fn compile_emitter_filter_map_part(
     target: RuntimeCompileTarget<'_>,
-    parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+    parsed: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     schemas: RuntimeVmSchemaPair,
     codec_route: bool,
     error_sites: CompiledMessageErrorSites,

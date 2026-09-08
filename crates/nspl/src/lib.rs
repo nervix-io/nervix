@@ -9,10 +9,6 @@
 //! - **Must not know.** The registry, the runtime, the control plane or any engine. Parsing
 //!   produces a Model and stops.
 //!
-//! This crate breaks its own contract: `vm_program`, the frontend of the expression VM, lives here,
-//! so `nervix-vm` and `nervix-roto` reach into the language layer for their own IR vocabulary. That
-//! frontend belongs to the VM.
-
 pub mod branch;
 pub mod client;
 #[cfg(feature = "client")]
@@ -39,6 +35,7 @@ pub mod domain;
 pub mod drop_stmt;
 pub mod emitter;
 pub mod endpoint;
+mod expression_lexer;
 pub mod generator;
 pub mod inferencer;
 pub mod ingestor;
@@ -69,7 +66,6 @@ pub mod udf;
 pub mod upload_resource;
 pub mod user;
 pub mod vhost;
-pub mod vm_program;
 pub mod wasm_processor;
 pub mod window_processor;
 
