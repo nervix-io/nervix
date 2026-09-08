@@ -19,8 +19,8 @@ pub use openraft::raft::{
     TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::{
-    BasicNode, Config, Entry, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta,
-    StoredMembership, Vote,
+    BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
+    Vote,
     entry::{EntryPayload, RaftPayload},
     error::{RPCError, RaftError, StreamingError},
     network::{RPCOption, RaftNetworkV2},
@@ -28,7 +28,7 @@ use openraft::{
         IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine,
     },
     type_config::{
-        alias::{CommittedLeaderIdOf, LeaderIdOf},
+        alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf},
         async_runtime::watch::WatchReceiver,
     },
 };
@@ -1626,6 +1626,55 @@ struct StoreInner {
     transaction_tx: watch::Sender<BTreeMap<String, ReplicatedTransaction>>,
 }
 
+impl StoreInner {
+    fn log_key(index: u64) -> io::Result<Vec<u8>> {
+        storekey::serialize(&index).map_err(io_error)
+    }
+
+    fn log_entries_in_range<RB: RangeBounds<u64>>(
+        &self,
+        range: RB,
+    ) -> io::Result<Vec<EntryOf<TypeConfig>>> {
+        let mut out = Vec::new();
+        for item in self.logs.iter() {
+            let (key, value) = item.into_inner().map_err(io_error)?;
+            let index: u64 = storekey::deserialize(&key).map_err(io_error)?;
+            if !range.contains(&index) {
+                continue;
+            }
+            out.push(decode::<EntryOf<TypeConfig>>(value.as_ref())?);
+        }
+        out.sort_by_key(|entry| entry.log_id.index);
+        Ok(out)
+    }
+
+    async fn read_last_purged(&self) -> io::Result<Option<LogIdOf>> {
+        read_key(&self.meta, KEY_LAST_PURGED)
+    }
+
+    async fn write_last_purged(&self, value: &Option<LogIdOf>) -> io::Result<()> {
+        write_key(&self.meta, KEY_LAST_PURGED, value)
+    }
+
+    async fn read_committed(&self) -> io::Result<Option<LogIdOf>> {
+        read_key(&self.meta, KEY_COMMITTED)
+    }
+
+    async fn write_committed(&self, value: &Option<LogIdOf>) -> io::Result<()> {
+        write_key(&self.meta, KEY_COMMITTED, value)
+    }
+
+    async fn read_vote(&self) -> io::Result<Option<VoteOf>> {
+        read_key(&self.meta, KEY_VOTE)
+    }
+
+    async fn write_vote(&self, vote: &VoteOf) -> io::Result<()> {
+        write_key(&self.meta, KEY_VOTE, vote)
+    }
+}
+
+/// Owns the write authority over the shared store: appending, truncating, purging, voting,
+/// snapshotting, and recovery all run through this handle.
 pub struct FjallStore {
     inner: Arc<StoreInner>,
 }
@@ -1680,7 +1729,7 @@ impl FjallStore {
     }
 
     async fn has_raft_state(&self) -> bool {
-        self.read_vote().await.ok().flatten().is_some()
+        self.inner.read_vote().await.ok().flatten().is_some()
             || self
                 .inner
                 .logs
@@ -1690,32 +1739,14 @@ impl FjallStore {
                 .is_some()
     }
 
-    fn log_key(index: u64) -> io::Result<Vec<u8>> {
-        storekey::serialize(&index).map_err(io_error)
-    }
-
-    async fn read_last_purged(&self) -> io::Result<Option<LogIdOf>> {
-        read_key(&self.inner.meta, KEY_LAST_PURGED)
-    }
-
-    async fn write_last_purged(&self, value: &Option<LogIdOf>) -> io::Result<()> {
-        write_key(&self.inner.meta, KEY_LAST_PURGED, value)
-    }
-
-    async fn read_committed_value(&self) -> io::Result<Option<LogIdOf>> {
-        read_key(&self.inner.meta, KEY_COMMITTED)
-    }
-
-    async fn write_committed_value(&self, value: &Option<LogIdOf>) -> io::Result<()> {
-        write_key(&self.inner.meta, KEY_COMMITTED, value)
-    }
-
-    async fn read_vote(&self) -> io::Result<Option<VoteOf>> {
-        read_key(&self.inner.meta, KEY_VOTE)
-    }
-
-    async fn write_vote(&self, vote: &VoteOf) -> io::Result<()> {
-        write_key(&self.inner.meta, KEY_VOTE, vote)
+    /// Lends the shared store to a reader without lending it the write authority.
+    ///
+    /// This is the only construction site of [`FjallLogReader`], so
+    /// [`RaftLogStorage::get_log_reader`] is the one way to obtain one.
+    fn log_reader(&self) -> FjallLogReader {
+        FjallLogReader {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -1727,65 +1758,63 @@ impl Clone for FjallStore {
     }
 }
 
-impl RaftLogReader<TypeConfig> for StdArc<FjallStore> {
+/// Read-only view of the Raft log and vote, handed to OpenRaft's replication tasks.
+///
+/// It shares the writer's store internals, so an entry is readable through this handle the
+/// moment [`RaftLogStorage::append`] returns. Those internals are its only field and are
+/// private, and the type offers no accessor, conversion, or `Deref` back to [`FjallStore`]:
+/// holding a reader grants the log and vote reads below and nothing more.
+pub struct FjallLogReader {
+    inner: Arc<StoreInner>,
+}
+
+impl RaftLogReader<TypeConfig> for FjallLogReader {
     async fn try_get_log_entries<
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
     >(
         &mut self,
         range: RB,
-    ) -> Result<Vec<<TypeConfig as openraft::RaftTypeConfig>::Entry>, io::Error> {
-        let mut out = Vec::new();
-        for item in self.inner.logs.iter() {
-            let (key, value) = item.into_inner().map_err(io_error)?;
-            let index: u64 = storekey::deserialize(&key).map_err(io_error)?;
-            if !range.contains(&index) {
-                continue;
-            }
-            out.push(decode::<
-                Entry<CommittedLeaderIdOf<TypeConfig>, ConsensusCommand, NodeId, Node>,
-            >(value.as_ref())?);
-        }
-        out.sort_by_key(|entry| entry.log_id.index);
-        Ok(out)
+    ) -> Result<Vec<EntryOf<TypeConfig>>, io::Error> {
+        self.inner.log_entries_in_range(range)
     }
 
     async fn read_vote(&mut self) -> Result<Option<VoteOf>, io::Error> {
-        FjallStore::read_vote(self).await
+        self.inner.read_vote().await
     }
 }
 
 impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
-    type LogReader = StdArc<FjallStore>;
+    type LogReader = FjallLogReader;
 
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, io::Error> {
-        let mut last_log_id = self.read_last_purged().await?;
+        let last_purged_log_id = self.inner.read_last_purged().await?;
+        let mut last_log_id = last_purged_log_id.clone();
         for item in self.inner.logs.iter() {
             let (_, value) = item.into_inner().map_err(io_error)?;
-            let entry: Entry<CommittedLeaderIdOf<TypeConfig>, ConsensusCommand, NodeId, Node> =
-                decode(value.as_ref())?;
+            let entry: EntryOf<TypeConfig> = decode(value.as_ref())?;
             last_log_id = Some(entry.log_id);
         }
 
         Ok(LogState {
-            last_purged_log_id: self.read_last_purged().await?,
+            last_purged_log_id,
             last_log_id,
         })
     }
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
-        self.clone()
+        self.log_reader()
     }
 
     async fn save_vote(&mut self, vote: &VoteOf) -> Result<(), io::Error> {
-        self.write_vote(vote).await
+        self.inner.write_vote(vote).await
     }
 
     async fn save_committed(&mut self, committed: Option<LogIdOf>) -> Result<(), io::Error> {
-        self.write_committed_value(&committed).await
+        self.inner.write_committed(&committed).await
     }
 
     async fn read_committed(&mut self) -> Result<Option<LogIdOf>, io::Error> {
-        self.read_committed_value().await
+        self.inner.read_committed().await
     }
 
     async fn append<I>(
@@ -1794,12 +1823,11 @@ impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
         callback: IOFlushed<TypeConfig>,
     ) -> Result<(), io::Error>
     where
-        I: IntoIterator<Item = <TypeConfig as openraft::RaftTypeConfig>::Entry>
-            + openraft::OptionalSend,
+        I: IntoIterator<Item = EntryOf<TypeConfig>> + openraft::OptionalSend,
         I::IntoIter: openraft::OptionalSend,
     {
         for entry in entries {
-            let key = FjallStore::log_key(entry.log_id.index)?;
+            let key = StoreInner::log_key(entry.log_id.index)?;
             let bytes = encode(&entry)?;
             self.inner.logs.insert(key, bytes).map_err(io_error)?;
         }
@@ -1835,7 +1863,7 @@ impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
         for key in to_delete {
             self.inner.logs.remove(key).map_err(io_error)?;
         }
-        self.write_last_purged(&Some(log_id)).await
+        self.inner.write_last_purged(&Some(log_id)).await
     }
 }
 
@@ -2647,7 +2675,7 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, sync::Arc as StdArc};
+    use std::{io::Cursor, ops::RangeInclusive, sync::Arc as StdArc};
 
     use fjall::Database;
     use nervix_models::{
@@ -2657,19 +2685,24 @@ mod tests {
     };
     use openraft::{
         SnapshotMeta,
-        storage::{RaftSnapshotBuilder, RaftStateMachine},
+        entry::RaftEntry,
+        storage::{
+            RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftSnapshotBuilder, RaftStateMachine,
+        },
+        type_config::alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf},
+        vote::RaftLeaderIdExt,
     };
     use tempfile::tempdir;
 
     use super::{
-        ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallStore, GossipNode, GossipState,
-        KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, SnapshotRelayHeader, StateMachineData,
-        StoredMembershipOf, TransactionCommandResult, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStepEffect, TransactionStepResult, TypeConfig,
-        UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame, io_error,
-        load_value, read_key, write_key,
+        ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
+        GossipNode, GossipState, KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, SnapshotRelayHeader,
+        StateMachineData, StoredMembershipOf, TransactionCommandResult, TransactionMutationError,
+        TransactionOutcome, TransactionStatement, TransactionStepEffect, TransactionStepResult,
+        TypeConfig, UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame,
+        io_error, load_value, read_key, write_key,
     };
-    use crate::{ConsensusError, ReplicatedTransaction, TransactionQueueLimits, VoteOf};
+    use crate::{ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits, VoteOf};
 
     fn domain(raw: &str) -> Domain {
         Domain::try_from(raw).expect("valid domain")
@@ -2755,6 +2788,29 @@ mod tests {
         Database::builder(dir.keep())
             .open()
             .expect("database should open")
+    }
+
+    fn committed_leader(term: u64) -> CommittedLeaderIdOf<TypeConfig> {
+        <LeaderIdOf<TypeConfig> as RaftLeaderIdExt>::new_committed(term, "node-1".to_string())
+    }
+
+    fn blank_log_entries(term: u64, indexes: RangeInclusive<u64>) -> Vec<EntryOf<TypeConfig>> {
+        let leader = committed_leader(term);
+        indexes
+            .map(|index| {
+                <EntryOf<TypeConfig> as RaftEntry>::new_blank(LogIdOf::new(leader.clone(), index))
+            })
+            .collect()
+    }
+
+    async fn read_log_indexes(reader: &mut FjallLogReader) -> Vec<u64> {
+        reader
+            .try_get_log_entries(..)
+            .await
+            .expect("log should read")
+            .iter()
+            .map(|entry| entry.log_id.index)
+            .collect()
     }
 
     #[test]
@@ -3256,10 +3312,127 @@ mod tests {
         assert!(!store.has_raft_state().await);
 
         store
+            .inner
             .write_vote(&VoteOf::new(7, "node-1".to_string()))
             .await
             .expect("vote should persist");
         assert!(store.has_raft_state().await);
+    }
+
+    /// The handle `get_log_reader` returns reads the log and the vote and carries nothing else.
+    ///
+    /// `AmbiguousIfImpl` has one impl that covers every type and one per mutating storage trait.
+    /// Only the blanket impl can apply to a reader, so the marker below infers to `()`. Were the
+    /// reader ever to gain log storage or state machine authority, two impls would apply and
+    /// inference here would fail.
+    const _: fn() = || {
+        fn reads_the_raft_log<T: RaftLogReader<TypeConfig>>() {}
+        reads_the_raft_log::<FjallLogReader>();
+
+        trait AmbiguousIfImpl<Marker> {
+            fn probe() {}
+        }
+        impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+        impl<T: ?Sized + RaftLogStorage<TypeConfig>> AmbiguousIfImpl<u8> for T {}
+        impl<T: ?Sized + RaftStateMachine<TypeConfig>> AmbiguousIfImpl<u16> for T {}
+
+        let _ = <FjallLogReader as AmbiguousIfImpl<_>>::probe;
+    };
+
+    #[tokio::test]
+    async fn log_reader_returns_the_requested_range_in_index_order() {
+        let mut store =
+            StdArc::new(FjallStore::from_database(temp_database()).expect("store should open"));
+        let vote = VoteOf::new(4, "node-1".to_string());
+        RaftLogStorage::<TypeConfig>::save_vote(&mut store, &vote)
+            .await
+            .expect("vote should save");
+        RaftLogStorageExt::<TypeConfig>::blocking_append(&mut store, blank_log_entries(4, 1..=5))
+            .await
+            .expect("entries should append");
+
+        let mut reader = RaftLogStorage::<TypeConfig>::get_log_reader(&mut store).await;
+
+        assert_eq!(read_log_indexes(&mut reader).await, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            reader
+                .try_get_log_entries(2..=4)
+                .await
+                .expect("bounded range should read")
+                .iter()
+                .map(|entry| entry.log_id.index)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            reader
+                .try_get_log_entries(4..)
+                .await
+                .expect("open range should read")
+                .iter()
+                .map(|entry| entry.log_id.index)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert!(
+            reader
+                .try_get_log_entries(6..9)
+                .await
+                .expect("range beyond the log should read")
+                .is_empty()
+        );
+        assert_eq!(
+            reader.read_vote().await.expect("vote should read"),
+            Some(vote)
+        );
+    }
+
+    #[tokio::test]
+    async fn log_reader_observes_writes_the_storage_owner_makes() {
+        let mut store =
+            StdArc::new(FjallStore::from_database(temp_database()).expect("store should open"));
+        let mut reader = RaftLogStorage::<TypeConfig>::get_log_reader(&mut store).await;
+        assert!(
+            reader
+                .read_vote()
+                .await
+                .expect("vote should read")
+                .is_none()
+        );
+        assert!(read_log_indexes(&mut reader).await.is_empty());
+
+        let vote = VoteOf::new(2, "node-1".to_string());
+        RaftLogStorage::<TypeConfig>::save_vote(&mut store, &vote)
+            .await
+            .expect("vote should save");
+        RaftLogStorageExt::<TypeConfig>::blocking_append(&mut store, blank_log_entries(2, 1..=6))
+            .await
+            .expect("entries should append");
+        assert_eq!(
+            reader.read_vote().await.expect("vote should read"),
+            Some(vote)
+        );
+        assert_eq!(read_log_indexes(&mut reader).await, vec![1, 2, 3, 4, 5, 6]);
+
+        let leader = committed_leader(2);
+        RaftLogStorage::<TypeConfig>::truncate_after(
+            &mut store,
+            Some(LogIdOf::new(leader.clone(), 4)),
+        )
+        .await
+        .expect("log should truncate");
+        assert_eq!(read_log_indexes(&mut reader).await, vec![1, 2, 3, 4]);
+
+        RaftLogStorage::<TypeConfig>::purge(&mut store, LogIdOf::new(leader, 2))
+            .await
+            .expect("log should purge");
+        assert_eq!(read_log_indexes(&mut reader).await, vec![3, 4]);
+
+        let state = RaftLogStorage::<TypeConfig>::get_log_state(&mut store)
+            .await
+            .expect("log state should read");
+        assert_eq!(state.last_purged_log_id.map(|log_id| log_id.index), Some(2));
+        assert_eq!(state.last_log_id.map(|log_id| log_id.index), Some(4));
     }
 
     #[tokio::test]
