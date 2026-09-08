@@ -1,4 +1,4 @@
-use std::future;
+use std::{borrow::Cow, future};
 
 use rdkafka::{
     config::ClientConfig,
@@ -303,15 +303,6 @@ impl KafkaIngestor {
             let mut rebalance_rx = rebalance_tx.as_ref().map(watch::Sender::subscribe);
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
-                /// One decoded message of an ACK PARALLEL poll group.
-                ///
-                /// The group holds its source messages until it dispatches, so the entry
-                /// keeps the borrowed message and appends its metadata straight from it.
-                struct KafkaBatchEntry<'a> {
-                    message: rdkafka::message::BorrowedMessage<'a>,
-                    record: RuntimeRecordBatch,
-                }
-
                 info!(
                     domain = task_domain.as_str(),
                     ingestor = task_ingestor.as_str(),
@@ -527,11 +518,13 @@ impl KafkaIngestor {
                                 Ok(message) => {
                                     task_runtime
                                         .clear_ingestor_transient_error(&task_domain, &task_ingestor);
-                                    // Decoding copies the payload because the codec is
-                                    // async while the source message stays borrowed from
-                                    // the consumer. Every other value a mode needs is read
-                                    // from the borrowed message where it is used.
-                                    let decode_message = |message: &rdkafka::message::BorrowedMessage<'_>| {
+                                    // Decoding appends one row to the group's own record builder,
+                                    // so a poll group is one set of Arrow columns. The payload is
+                                    // copied because the codec may leave the reactor while the
+                                    // source message stays borrowed from the consumer; every other
+                                    // value a mode needs is read from the borrowed message where
+                                    // it is used.
+                                    let trace_message = |message: &rdkafka::message::BorrowedMessage<'_>| {
                                         let key = match message.key_view::<str>() {
                                             Some(Ok(key)) => key.to_owned(),
                                             Some(Err(_)) | None => message
@@ -549,16 +542,19 @@ impl KafkaIngestor {
                                             payload = String::from_utf8_lossy(message.payload().unwrap_or_default()).to_string(),
                                             "received kafka message"
                                         );
-
-                                        let payload = message.payload().unwrap_or_default().to_vec();
-                                        let codec = task_codec.clone();
-                                        async move { decode_ingested_payload(codec, &payload).await }
                                     };
 
                                     match &task_ack_mode {
                                         KafkaIngestMode::NoAckParallel => {
-                                            match decode_message(&message).await {
-                                                Ok(record) => {
+                                            trace_message(&message);
+                                            match ingest_collector
+                                                .decode_payload(
+                                                    &task_codec,
+                                                    Cow::Borrowed(message.payload().unwrap_or_default()),
+                                                )
+                                                .await
+                                            {
+                                                Ok(()) => {
                                                     let headers = KafkaMessageHeaders(message.headers());
                                                     let metadata = [IngestMetadataRow::Kafka {
                                                         topic: message.topic(),
@@ -575,7 +571,6 @@ impl KafkaIngestor {
                                                                 .as_ref(),
                                                             output_routes: &task_output_routes,
                                                             filter_where: task_filter_where.as_ref(),
-                                                            records: vec![record],
                                                             metadata: &metadata,
                                                             ingested_at: current_timestamp(),
                                                             acks: vec![AckSet::empty()],
@@ -655,9 +650,27 @@ impl KafkaIngestor {
                                             }
                                         }
                                         KafkaIngestMode::AckSequential { .. } => {
-                                            let record = match decode_message(&message).await {
-                                                Ok(record) => record,
-                                                Err(error) => {
+                                            trace_message(&message);
+                                            let payload = message.payload().unwrap_or_default().to_vec();
+
+                                            let headers = KafkaMessageHeaders(message.headers());
+                                            let metadata = [IngestMetadataRow::Kafka {
+                                                topic: message.topic(),
+                                                partition: message.partition(),
+                                                offset: message.offset(),
+                                                headers: &headers,
+                                            }];
+
+                                            loop {
+                                            tokio::task::consume_budget().await;
+                                                // One acknowledged message is one group, and a replay
+                                                // decodes into the group it replays into.
+                                                let mut collector =
+                                                    IngestRouteCollector::new(IngestMetadataKind::Kafka, 1);
+                                                if let Err(error) = collector
+                                                    .decode_payload(&task_codec, Cow::Borrowed(&payload))
+                                                    .await
+                                                {
                                                     task_events.report_error(format!(
                                                         "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
@@ -676,26 +689,11 @@ impl KafkaIngestor {
                                                     retry_delay = next_retry_delay(retry_delay, retry_policy);
                                                     continue 'ingest;
                                                 }
-                                            };
-
-                                            let headers = KafkaMessageHeaders(message.headers());
-                                            let metadata = [IngestMetadataRow::Kafka {
-                                                topic: message.topic(),
-                                                partition: message.partition(),
-                                                offset: message.offset(),
-                                                headers: &headers,
-                                            }];
-
-                                            loop {
-                                            tokio::task::consume_budget().await;
                                                 let (acks, completion) = task_runtime
                                                     .tracked_ingestor_ack_root(
                                                         &task_domain,
                                                         &task_ingestor,
                                                     );
-                                                // One acknowledged message is one group.
-                                                let mut collector =
-                                                    IngestRouteCollector::new(IngestMetadataKind::Kafka, 1);
                                                 let dispatch_result = task_runtime
                                                     .dispatch_ingested_records(IngestGroupDispatch {
                                                         collector: &mut collector,
@@ -705,7 +703,6 @@ impl KafkaIngestor {
                                                             .as_ref(),
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        records: vec![record.clone()],
                                                         metadata: &metadata,
                                                         ingested_at: current_timestamp(),
                                                         acks: vec![if !task_branched_senders.is_empty() {
@@ -837,34 +834,44 @@ impl KafkaIngestor {
                                             }
                                         }
                                         KafkaIngestMode::AckParallel { .. } => {
-                                            let mut batch = Vec::with_capacity(ack_parallel_limit.get());
-                                            let first = match decode_message(&message).await {
-                                                Ok(record) => KafkaBatchEntry { message, record },
-                                                Err(error) => {
+                                            // The poll group is one ingest group, so every message
+                                            // it polls decodes into the same record builder.
+                                            let mut collector = IngestRouteCollector::new(
+                                                IngestMetadataKind::Kafka,
+                                                ack_parallel_limit.get(),
+                                            );
+                                            let mut messages = Vec::with_capacity(ack_parallel_limit.get());
+                                            trace_message(&message);
+                                            if let Err(error) = collector
+                                                .decode_payload(
+                                                    &task_codec,
+                                                    Cow::Borrowed(message.payload().unwrap_or_default()),
+                                                )
+                                                .await
+                                            {
+                                                task_events.report_error(format!(
+                                                    "failed to decode message for ingestor '{}' in domain '{}': {}",
+                                                    task_ingestor.as_str(),
+                                                    task_domain.as_str(),
+                                                    error
+                                                ));
+                                                if let Err(seek_error) = Self::seek_offset(&consumer, message.topic(), message.partition(), message.offset()) {
                                                     task_events.report_error(format!(
-                                                        "failed to decode message for ingestor '{}' in domain '{}': {}",
+                                                        "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
-                                                        error
+                                                        seek_error
                                                     ));
-                                                    if let Err(seek_error) = Self::seek_offset(&consumer, message.topic(), message.partition(), message.offset()) {
-                                                        task_events.report_error(format!(
-                                                            "failed to seek kafka offset for ingestor '{}' in domain '{}': {}",
-                                                            task_ingestor.as_str(),
-                                                            task_domain.as_str(),
-                                                            seek_error
-                                                        ));
-                                                    }
-                                                    sleep(retry_delay).await;
-                                                    retry_delay = next_retry_delay(retry_delay, retry_policy);
-                                                    continue 'ingest;
                                                 }
-                                            };
-                                            batch.push(first);
+                                                sleep(retry_delay).await;
+                                                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                                                continue 'ingest;
+                                            }
+                                            messages.push(message);
                                             let batch_deadline =
                                                 Instant::now() + batch_timeout.verified("this branch runs only for the parallel ACK mode, which parses a batch timeout above");
 
-                                            while batch.len() < ack_parallel_limit.get() {
+                                            while messages.len() < ack_parallel_limit.get() {
                                                 tokio::task::consume_budget().await;
                                                 tokio::select! {
                                                     _ = task_quiesce.wait_for_change() => {
@@ -879,11 +886,15 @@ impl KafkaIngestor {
                                                     next = consumer.recv() => {
                                                         match next {
                                                             Ok(next_message) => {
-                                                                match decode_message(&next_message).await {
-                                                                    Ok(record) => batch.push(KafkaBatchEntry {
-                                                                        message: next_message,
-                                                                        record,
-                                                                    }),
+                                                                trace_message(&next_message);
+                                                                match collector
+                                                                    .decode_payload(
+                                                                        &task_codec,
+                                                                        Cow::Borrowed(next_message.payload().unwrap_or_default()),
+                                                                    )
+                                                                    .await
+                                                                {
+                                                                    Ok(()) => messages.push(next_message),
                                                                     Err(error) => {
                                                                         task_events.report_error(format!(
                                                                             "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -927,13 +938,6 @@ impl KafkaIngestor {
                                             // The group holds its poll's messages while it
                                             // dispatches, so offsets and metadata are read
                                             // from them instead of copies taken per message.
-                                            let mut messages = Vec::with_capacity(batch.len());
-                                            let mut decoded = Vec::with_capacity(batch.len());
-                                            for entry in batch {
-                                                messages.push(entry.message);
-                                                decoded.push(entry.record);
-                                            }
-
                                             let mut batch_commit_offsets = HashMap::<(&str, i32), i64>::new();
                                             let mut batch_start_offsets = HashMap::<(&str, i32), i64>::new();
 
@@ -955,20 +959,13 @@ impl KafkaIngestor {
                                                 let mut completions = Vec::with_capacity(messages.len());
                                                 let mut batch_failure = None::<String>;
                                                 let ingested_at = current_timestamp();
-                                                // The poll group is one ingest group, so its
-                                                // builders are sized for the messages it holds.
-                                                let mut collector = IngestRouteCollector::new(
-                                                    IngestMetadataKind::Kafka,
-                                                    messages.len(),
-                                                );
 
                                                 // Every message keeps its own ack root; the group only
                                                 // shares the dispatch call, so an ack still resolves per
                                                 // message.
                                                 let mut roots = Vec::with_capacity(messages.len());
-                                                let mut records = Vec::with_capacity(messages.len());
                                                 let mut dispatch_acks = Vec::with_capacity(messages.len());
-                                                for record in decoded {
+                                                for _ in &messages {
                                                     tokio::task::consume_budget().await;
                                                     let (acks, completion) = task_runtime
                                                         .tracked_ingestor_ack_root(
@@ -984,7 +981,6 @@ impl KafkaIngestor {
                                                     );
                                                     roots.push(acks);
                                                     completions.push(completion);
-                                                    records.push(record);
                                                 }
                                                 let headers = messages
                                                     .iter()
@@ -1009,7 +1005,6 @@ impl KafkaIngestor {
                                                             .as_ref(),
                                                         output_routes: &task_output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        records,
                                                         metadata: &metadata,
                                                         acks: dispatch_acks,
                                                         ingested_at,
