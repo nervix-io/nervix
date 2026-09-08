@@ -30,6 +30,18 @@ has scheduler-selected replicas.
 
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
+Consensus access is restricted by operation. Observers can read locally applied state and watch
+changes. Proposers can also attempt replicated mutations, administrators manage membership and
+leadership transfers, and protocol receivers apply Raft messages independently of those capabilities.
+Consumers receive only the capabilities their responsibilities require. Observation does not imply a
+linearizable read, and proposal authority does not imply that the node is currently leader.
+
+Raft still checks leadership when accepting a proposal. If leadership changes after a command is
+admitted, the server preserves the leadership-loss result so the client can redirect to the new
+leader or wait for an election. Long-running transaction commits validate leadership between steps;
+their replicated progress survives leader loss so the new leader can continue execution. Raft
+protocol listeners remain available on every live node through elections and membership changes.
+
 The runtime then instantiates that schedule:
 
 - ingestors attach to external systems or local endpoints

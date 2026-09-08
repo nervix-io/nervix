@@ -9,7 +9,7 @@ Feature: Roto user-defined functions
     When these NSPL commands are executed on the leader node
       """
       CREATE UDF add_one
-        WITH ROTO_0_11
+        WITH ROTO_0_13
         ARGS (value I64)
         RETURNS I64
         CODE $roto$
@@ -86,7 +86,7 @@ Feature: Roto user-defined functions
     When these NSPL commands are executed on the leader node
       """
       CREATE UDF luhn_valid
-        WITH ROTO_0_11
+        WITH ROTO_0_13
         ARGS (pan STRING)
         RETURNS BOOL
         CODE $roto$
@@ -200,7 +200,7 @@ Feature: Roto user-defined functions
     When these NSPL commands fail with "now() requires VOLATILE"
       """
       CREATE UDF invalid_clock
-        WITH ROTO_0_11
+        WITH ROTO_0_13
         ARGS (value DATETIME)
         RETURNS BOOL
         CODE $roto$
@@ -226,7 +226,7 @@ Feature: Roto user-defined functions
     When these NSPL commands fail with "Roto test block failed"
       """
       CREATE UDF broken_increment
-        WITH ROTO_0_11
+        WITH ROTO_0_13
         ARGS (value I64)
         RETURNS I64
         CODE $roto$
