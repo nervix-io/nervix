@@ -39,13 +39,13 @@ impl ScheduleDelta {
                 .change_aspects_against(&desired_node.config);
             let level = aspects.quiesce_level();
             let emitter_schema_fingerprint_may_change =
-                desired_node.kind == ModelKind::Emitter && level == QuiesceLevel::EntityPause;
+                desired_node.kind() == ModelKind::Emitter && level == QuiesceLevel::EntityPause;
             let model_derived_residue_may_change = matches!(
-                desired_node.kind,
+                desired_node.kind(),
                 ModelKind::Reingestor | ModelKind::Generator
             ) && level == QuiesceLevel::EntityPause;
             let ingestor_schedule_residue_may_change =
-                desired_node.kind == ModelKind::Ingestor && level == QuiesceLevel::EntityPause;
+                desired_node.kind() == ModelKind::Ingestor && level == QuiesceLevel::EntityPause;
             if !Self::same_schedule_residue(
                 existing_node,
                 desired_node,
@@ -95,28 +95,22 @@ impl ScheduleDelta {
     ) -> bool {
         let ScheduledNode {
             identifier: existing_identifier,
-            kind: existing_kind,
-            config: _,
             effective_branching: existing_effective_branching,
             effective_branching_schema: existing_effective_branching_schema,
             schema_fingerprint: existing_schema_fingerprint,
             kafka_partition_schedule: existing_kafka_partition_schedule,
-            primary_node: _,
-            assigned_nodes: _,
+            ..
         } = existing;
         let ScheduledNode {
             identifier: desired_identifier,
-            kind: desired_kind,
-            config: _,
             effective_branching: desired_effective_branching,
             effective_branching_schema: desired_effective_branching_schema,
             schema_fingerprint: desired_schema_fingerprint,
             kafka_partition_schedule: desired_kafka_partition_schedule,
-            primary_node: _,
-            assigned_nodes: _,
+            ..
         } = desired;
 
-        if existing_identifier != desired_identifier || existing_kind != desired_kind {
+        if existing_identifier != desired_identifier || existing.kind() != desired.kind() {
             return false;
         }
         if allow_ingestor_schedule_residue_change {
@@ -141,9 +135,9 @@ mod tests {
         AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction,
         CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
         EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
-        GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, ModelName, NodeRef,
-        OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode,
+        GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch,
+        PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
+        RetryPolicy, RouteConstruction, ScheduledNode,
     };
     use nonzero_ext::nonzero;
 
@@ -172,23 +166,21 @@ mod tests {
     fn schedule(capacity: NonZeroUsize) -> DomainSchedule {
         DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
-            vec![ScheduledNode {
-                identifier: named("events"),
-                kind: ModelKind::Relay,
-                config: Box::new(Model::Relay(CreateRelay {
+            vec![
+                ScheduledNode::new(Model::Relay(CreateRelay {
                     name: named("events"),
                     schema: named("event"),
                     buffer: capacity,
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
-                })),
-                effective_branching: Some(Vec::new()),
-                effective_branching_schema: None,
-                schema_fingerprint: [1; 32],
-                kafka_partition_schedule: None,
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-            }],
+                }))
+                .with_effective_branching(Some(Vec::new()), None)
+                .with_schema_fingerprint([1; 32])
+                .placed_on(
+                    Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                ),
+            ],
             Vec::new(),
         )
     }
@@ -196,10 +188,8 @@ mod tests {
     fn ingestor_schedule(endpoint: &str) -> DomainSchedule {
         DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
-            vec![ScheduledNode {
-                identifier: named("event_source"),
-                kind: ModelKind::Ingestor,
-                config: Box::new(Model::Ingestor(CreateIngestor {
+            vec![
+                ScheduledNode::new(Model::Ingestor(CreateIngestor {
                     name: named("event_source"),
                     output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: named("events"),
@@ -219,14 +209,13 @@ mod tests {
                     },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
-                })),
-                effective_branching: None,
-                effective_branching_schema: None,
-                schema_fingerprint: [1; 32],
-                kafka_partition_schedule: None,
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-            }],
+                }))
+                .with_schema_fingerprint([1; 32])
+                .placed_on(
+                    Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                ),
+            ],
             Vec::new(),
         )
     }
@@ -293,17 +282,15 @@ mod tests {
         };
         let existing = DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
-            vec![ScheduledNode {
-                identifier: named("route_events"),
-                kind: ModelKind::Junction,
-                config: Box::new(Model::Junction(junction.clone())),
-                effective_branching: Some(Vec::new()),
-                effective_branching_schema: None,
-                schema_fingerprint: [1; 32],
-                kafka_partition_schedule: None,
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-            }],
+            vec![
+                ScheduledNode::new(Model::Junction(junction.clone()))
+                    .with_effective_branching(Some(Vec::new()), None)
+                    .with_schema_fingerprint([1; 32])
+                    .placed_on(
+                        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                        vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ),
+            ],
             Vec::new(),
         );
         let mut dynamic_config = junction;
@@ -386,17 +373,15 @@ mod tests {
         };
         let existing = DomainSchedule::new(
             DomainName::parse("testing").expect("valid domain"),
-            vec![ScheduledNode {
-                identifier: ModelName::from(&emitter.name),
-                kind: ModelKind::Emitter,
-                config: Box::new(Model::Emitter(emitter.clone())),
-                effective_branching: Some(Vec::new()),
-                effective_branching_schema: None,
-                schema_fingerprint: [1; 32],
-                kafka_partition_schedule: None,
-                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
-                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
-            }],
+            vec![
+                ScheduledNode::new(Model::Emitter(emitter.clone()))
+                    .with_effective_branching(Some(Vec::new()), None)
+                    .with_schema_fingerprint([1; 32])
+                    .placed_on(
+                        Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                        vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ),
+            ],
             Vec::new(),
         );
 
@@ -477,10 +462,8 @@ mod tests {
 
     #[test]
     fn a_placement_policy_change_only_applies_its_reassignments() {
-        let placement_node = |policy: PlacementPolicy| ScheduledNode {
-            identifier: named("keep_local"),
-            kind: ModelKind::Placement,
-            config: Box::new(Model::Placement(
+        let placement_node = |policy: PlacementPolicy| {
+            ScheduledNode::new(Model::Placement(
                 CreatePlacement::new(
                     named("keep_local"),
                     vec![named("event_source")],
@@ -489,13 +472,8 @@ mod tests {
                     Some(nonzero!(1u64)),
                 )
                 .expect("valid placement"),
-            )),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [1; 32],
-            kafka_partition_schedule: None,
-            primary_node: None,
-            assigned_nodes: Vec::new(),
+            ))
+            .with_schema_fingerprint([1; 32])
         };
         let mut existing = ingestor_schedule("ingress_a");
         push_scheduled(

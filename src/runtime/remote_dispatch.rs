@@ -815,7 +815,7 @@ impl Runtime {
             .nodes
             .values()
             .filter(|node| node.execution_node() == Some(local_node_id))
-            .filter(|node| node.kind == ModelKind::Relay)
+            .filter(|node| node.kind() == ModelKind::Relay)
             .map(|node| RelayName::from(&node.identifier))
             .collect::<HashSet<_>>();
         let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);

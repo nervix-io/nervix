@@ -1,8 +1,9 @@
 use std::num::NonZeroU64;
 
 use nervix_models::{
-    BranchName, CreateBranch, ModelName, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
+    BranchName, CreateBranch, CreateRelay, ModelIndex, ModelName, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
+    ProcessorOutputs as ModelProcessorOutputs,
 };
 
 use super::*;
@@ -113,7 +114,7 @@ pub(in crate::runtime) fn branched_node_specs_from_scheduled_nodes(
     nodes: &ScheduledNodes,
 ) -> BranchedNodeSpecs {
     branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
-        kind: node.kind,
+        kind: node.kind(),
         identifier: node.identifier.clone(),
         model: (*node.config).clone(),
     }))
@@ -783,7 +784,7 @@ fn parse_branch_ttl_setting(
 
 fn resolve_branch_relay_templates(
     branch_relay_ids: HashSet<RelayName>,
-    model_index: &HashMap<NodeRef, Model>,
+    model_index: &ModelIndex,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<
@@ -795,36 +796,18 @@ fn resolve_branch_relay_templates(
 > {
     let materialized_streams = branch_relay_ids
         .iter()
-        .filter_map(|relay| {
-            match model_index.get(&NodeRef {
-                kind: ModelKind::Relay,
-                identifier: ModelName::from(relay),
-            }) {
-                Some(Model::Relay(model)) if model.materialized_state.is_some() => {
-                    Some(relay.clone())
-                }
-                _ => None,
-            }
+        .filter(|relay| {
+            model_index
+                .configured::<CreateRelay>(*relay)
+                .is_some_and(|model| model.materialized_state.is_some())
         })
+        .cloned()
         .collect::<HashSet<_>>();
     let relays = branch_relay_ids
         .into_iter()
         .map(|relay| {
-            match model_index.get(&NodeRef {
-                kind: ModelKind::Relay,
-                identifier: ModelName::from(&relay),
-            }) {
-                Some(Model::Relay(_)) => {}
-                Some(model) => {
-                    return Err(format!(
-                        "expected relay model for '{}', found '{}'",
-                        relay.as_str(),
-                        model.kind().as_str()
-                    ));
-                }
-                None => {
-                    return Err(format!("missing branched relay '{}'", relay.as_str()));
-                }
+            if model_index.configured::<CreateRelay>(&relay).is_none() {
+                return Err(format!("missing branched relay '{}'", relay.as_str()));
             }
             let registry = relay_registries
                 .get(&relay)
@@ -842,7 +825,7 @@ fn resolve_branch_relay_templates(
 
 pub(in crate::runtime) fn materialize_ingestor_route_template(
     spec: &BranchedIngestorSpec,
-    model_index: &HashMap<NodeRef, Model>,
+    model_index: &ModelIndex,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> Result<IngestorRouteTemplate, String> {
@@ -882,7 +865,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
 
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
-    model_index: &HashMap<NodeRef, Model>,
+    model_index: &ModelIndex,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
