@@ -780,7 +780,10 @@ impl Runtime {
 
     #[cfg(feature = "testing")]
     pub async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {
-        self.inner.entity_gate_pauses.pause_if_armed(domain).await;
+        self.inner
+            .runtime_pauses
+            .pause_entity_gate_if_armed(domain)
+            .await;
     }
 
     pub fn domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatus {

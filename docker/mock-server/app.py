@@ -1,11 +1,13 @@
 import asyncio
 import ssl
+import time
 
 from aiohttp import WSMsgType, web
 
 
 served_http = set()
 active_websockets = {}
+clock_source_requests = {}
 
 
 async def handle_http(request: web.Request) -> web.StreamResponse:
@@ -21,6 +23,34 @@ async def handle_http(request: web.Request) -> web.StreamResponse:
         body=b'{"user_id":42}',
         content_type="application/json",
     )
+
+
+async def handle_clock_source(request: web.Request) -> web.StreamResponse:
+    name = request.match_info["name"]
+    requests = clock_source_requests.setdefault(name, [])
+    requests.append(
+        {
+            "received_at_unix_nanos": time.time_ns(),
+            "received_at_monotonic_nanos": time.monotonic_ns(),
+            "query": dict(request.query),
+        }
+    )
+    delay_ms = int(request.query.get("delay_ms", "0"))
+    if delay_ms > 0:
+        await asyncio.sleep(delay_ms / 1000)
+    return web.json_response({"user_id": 42})
+
+
+async def clock_source_observations(request: web.Request) -> web.StreamResponse:
+    name = request.match_info["name"]
+    requests = clock_source_requests.get(name, [])
+    return web.json_response({"count": len(requests), "requests": requests})
+
+
+async def reset_clock_source(request: web.Request) -> web.StreamResponse:
+    name = request.match_info["name"]
+    clock_source_requests.pop(name, None)
+    return web.Response(status=204)
 
 
 async def handle_ws(request: web.Request) -> web.StreamResponse:
@@ -76,6 +106,9 @@ async def publish_ws(request: web.Request) -> web.StreamResponse:
 
 app = web.Application()
 app.router.add_get("/http/{name}", handle_http)
+app.router.add_get("/clock-source/{name}", handle_clock_source)
+app.router.add_get("/clock-source-observations/{name}", clock_source_observations)
+app.router.add_delete("/clock-source-observations/{name}", reset_clock_source)
 app.router.add_get("/ws/{name}", handle_ws)
 app.router.add_post("/ws/{name}", publish_ws)
 

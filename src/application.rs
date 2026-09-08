@@ -17633,6 +17633,12 @@ async fn emit_domain_tick(
     logical_timestamp: Timestamp,
     duration_ms: u64,
 ) {
+    #[cfg(feature = "testing")]
+    let progress_was_paused = service
+        .inner
+        .runtime
+        .pause_domain_clock_progress_if_armed(domain_id)
+        .await;
     let wall_clock = current_timestamp();
     let tick = DomainTick {
         tick_id: clock.next_tick_id,
@@ -17674,6 +17680,13 @@ async fn emit_domain_tick(
                 "failed to deliver domain tick"
             );
         }
+    }
+    #[cfg(feature = "testing")]
+    if progress_was_paused {
+        service
+            .inner
+            .runtime
+            .mark_domain_clock_progress_delivered(domain_id);
     }
 }
 
