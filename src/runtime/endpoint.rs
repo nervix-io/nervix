@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -260,11 +262,14 @@ impl Runtime {
         payload: BufferedIngestPayload,
         protocol: &str,
     ) {
-        match decode_ingested_payload(binding.codec.clone(), payload.payload()).await {
-            Ok(record) => {
-                // One request is one group, so its builders are sized for the single row
-                // this binding decodes.
-                let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+        // One request is one group, so its builders are sized for the single row this binding
+        // decodes.
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+        match collector
+            .decode_payload(&binding.codec, Cow::Borrowed(payload.payload()))
+            .await
+        {
+            Ok(()) => {
                 let metadata = [payload.first_metadata_row()];
                 let dispatch_result = self
                     .dispatch_ingested_records(IngestGroupDispatch {
@@ -274,7 +279,6 @@ impl Runtime {
                         timestamp_source: binding.timestamp_source.as_ref(),
                         output_routes: &binding.output_routes,
                         filter_where: binding.filter_where.as_ref(),
-                        records: vec![record],
                         metadata: &metadata,
                         ingested_at: current_timestamp(),
                         acks: vec![AckSet::empty()],

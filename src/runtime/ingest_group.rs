@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::*;
 
 /// Chosen operational bound for how many decoded source rows accumulate before an
@@ -24,22 +26,24 @@ pub(super) struct IngestGroupContext {
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
 }
 
-/// Decoded messages to add to a source-owned ingest group.
+/// The rows a source has decoded into its ingest group and is now accepting.
 ///
-/// A source may contribute one poll batch or several consecutive single-record polls.
-/// The collector owns the actual group boundary: request-scoped sources flush at the
-/// end of the request, while streaming sources flush at the row or idle-time bound.
+/// The payloads have already been appended to the group's record builder by
+/// [`IngestRouteCollector::decode_payload`]; this call is what accepts them, by giving each one the
+/// metadata row and ACK set that belong to it. A source may contribute one poll batch or several
+/// consecutive single-record polls. The collector owns the actual group boundary: request-scoped
+/// sources flush at the end of the request, while streaming sources flush at the row or idle-time
+/// bound.
 pub(super) struct IngestGroupDispatch<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
     pub(super) output_routes: &'a RelayProcessorOutputsNode,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    pub(super) records: Vec<RuntimeRecordBatch>,
-    /// Row-aligned with `records`, read from the borrowed source messages and appended
-    /// into the group's own metadata builders.
+    /// One entry per decoded row, read from the borrowed source messages and appended into the
+    /// group's own metadata builders.
     pub(super) metadata: &'a [IngestMetadataRow<'a>],
-    /// Row-aligned with `records`. An empty set is replaced by a tracked ack root.
+    /// Row-aligned with `metadata`. An empty set is replaced by a tracked ack root.
     pub(super) acks: Vec<AckSet>,
     pub(super) ingested_at: Timestamp,
     /// Sources differ only in when they flush this group: stream sources use the
@@ -53,7 +57,6 @@ pub(super) struct IngestGroupContribution<'a> {
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
     pub(super) output_routes: &'a RelayProcessorOutputsNode,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    pub(super) records: Vec<RuntimeRecordBatch>,
     pub(super) metadata: &'a [IngestMetadataRow<'a>],
     pub(super) acks: Vec<AckSet>,
     pub(super) ingested_at: Timestamp,
@@ -86,14 +89,20 @@ pub(super) struct IngestGroupRows {
 
 /// One ingest group's rows before the group closes.
 ///
-/// The group owns exactly one set of metadata builders: it opens them with its first row,
-/// appends one row per decoded message, and finishes them once in `into_rows`. Nothing
-/// here is built per message.
+/// The group owns exactly one record builder and exactly one set of metadata builders: it opens
+/// each with its first row, appends one row per decoded message, and finishes both once in
+/// `into_rows`. Nothing here is built per message, so a group of `n` messages is one set of Arrow
+/// columns rather than `n` single-row batches and a concatenation.
+///
+/// Decoding and accepting are two steps, because a payload that fails to decode has to stay
+/// attributable to the message that carried it. `record_builder` hands the codec the group's
+/// builder, which drops the row a failed decode started; `append` then accepts the rows that did
+/// decode, together with the metadata and ACKs that belong to them.
 pub(super) struct PendingIngestGroup {
     pub(super) kind: IngestMetadataKind,
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
-    pub(super) records: Vec<RuntimeRecordBatch>,
+    pub(super) records: Option<RuntimeRecordBatchBuilder>,
     pub(super) metadata: Option<IngestMetadataBuilders>,
     pub(super) acks: Vec<AckSet>,
     pub(super) ingested_at: Vec<Timestamp>,
@@ -104,37 +113,64 @@ impl PendingIngestGroup {
         Self {
             kind,
             row_bound,
-            records: Vec::new(),
+            records: None,
             metadata: None,
             acks: Vec::new(),
             ingested_at: Vec::new(),
         }
     }
 
+    /// The group's record builder, opened for `schema` on the first payload it decodes.
+    pub(super) fn record_builder(
+        &mut self,
+        schema: &CompiledSchema,
+    ) -> &mut RuntimeRecordBatchBuilder {
+        let row_bound = self.row_bound;
+        self.records
+            .get_or_insert_with(|| schema.batch_builder(row_bound))
+    }
+
+    /// Rows the group has decoded but not yet accepted with their metadata and ACKs.
+    pub(super) fn undispatched_rows(&self) -> usize {
+        self.decoded_rows()
+            .checked_sub(self.acks.len())
+            .assured("`append` accepts an ACK set only for a row the group already decoded")
+    }
+
+    fn decoded_rows(&self) -> usize {
+        self.records
+            .as_ref()
+            .map_or(0, RuntimeRecordBatchBuilder::rows)
+    }
+
+    /// Drops the decoded rows the caller could not accept, so the group stays row-aligned.
+    pub(super) fn discard_undispatched_rows(&mut self) {
+        let accepted = self.acks.len();
+        if let Some(records) = self.records.as_mut() {
+            records.abandon_rows_after(accepted);
+        }
+    }
+
     pub(super) fn append(
         &mut self,
-        records: Vec<RuntimeRecordBatch>,
         metadata: &[IngestMetadataRow<'_>],
         acks: Vec<AckSet>,
         ingested_at: Timestamp,
     ) -> Result<(), String> {
-        let row_count = records.len();
-        if metadata.len() != row_count {
-            return Err(format!(
-                "received {} ingest metadata rows for {row_count} records",
-                metadata.len()
-            ));
-        }
+        let row_count = metadata.len();
         if acks.len() != row_count {
             return Err(format!(
-                "received {} ack sets for {row_count} records",
+                "received {} ack sets for {row_count} ingest metadata rows",
                 acks.len()
             ));
         }
-        if records.iter().any(|record| record.batch().num_rows() != 1) {
-            return Err(
-                "decoded a message into a batch that does not contain exactly one row".to_string(),
-            );
+        // Rows are accepted in the order they decoded, and a source may accept them one at a
+        // time, so a contribution may cover a prefix of what the group has decoded but never more.
+        if row_count > self.undispatched_rows() {
+            return Err(format!(
+                "received {row_count} ingest metadata rows for {} decoded records",
+                self.undispatched_rows()
+            ));
         }
 
         let (kind, row_bound) = (self.kind, self.row_bound);
@@ -144,7 +180,6 @@ impl PendingIngestGroup {
         for row in metadata {
             builders.append(row)?;
         }
-        self.records.extend(records);
         self.acks.extend(acks);
         self.ingested_at
             .extend(std::iter::repeat_n(ingested_at, row_count));
@@ -152,20 +187,19 @@ impl PendingIngestGroup {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.acks.is_empty()
     }
 
     pub(super) fn len(&self) -> usize {
-        self.records.len()
+        self.acks.len()
     }
 
     pub(super) fn into_rows(self) -> Result<IngestGroupRows, String> {
-        let row_count = self.records.len();
-        if self.ingested_at.len() != row_count || self.acks.len() != row_count {
+        let row_count = self.acks.len();
+        if self.ingested_at.len() != row_count {
             return Err(format!(
-                "ingest group has {row_count} records, {} ingest timestamps and {} ack sets",
-                self.ingested_at.len(),
-                self.acks.len()
+                "ingest group has {row_count} ack sets and {} ingest timestamps",
+                self.ingested_at.len()
             ));
         }
         let ingest_metadata = self
@@ -178,9 +212,18 @@ impl PendingIngestGroup {
                 ingest_metadata.len()
             ));
         }
-        let batch_refs = self.records.iter().collect::<Vec<_>>();
+        let batch = self
+            .records
+            .ok_or_else(|| "ingest group closed without opening its record builder".to_string())?
+            .finish()?;
+        if batch.batch().num_rows() != row_count {
+            return Err(format!(
+                "ingest group has {row_count} records and {} decoded rows",
+                batch.batch().num_rows()
+            ));
+        }
         Ok(IngestGroupRows {
-            batch: Arc::new(RuntimeRecordBatch::concat(&batch_refs)?),
+            batch: Arc::new(batch),
             record_metadata: self
                 .ingested_at
                 .into_iter()
@@ -260,8 +303,10 @@ pub(super) struct IngestorFilterWhereError<'a> {
 /// Accumulates one source ingest group before program execution, then holds its routed
 /// messages long enough to build one Arrow batch per (relay, branch key).
 ///
-/// The metadata schema is fixed by the source kind when the ingestor starts, so every
-/// group the collector opens builds the same columns.
+/// A source decodes each payload into the open group with `decode_payload` and accepts the rows
+/// that decoded with `collect`, so the group's records, metadata and ACKs stay row-aligned. The
+/// metadata schema is fixed by the source kind when the ingestor starts, so every group the
+/// collector opens builds the same columns.
 pub(super) struct IngestRouteCollector {
     pub(super) kind: IngestMetadataKind,
     /// The number of rows a group is expected to reach, used to size its metadata builders.
@@ -288,6 +333,25 @@ impl IngestRouteCollector {
         }
     }
 
+    /// Decodes one source payload into the group's record builder.
+    ///
+    /// The builder belongs to the group, so consecutive payloads share one set of Arrow columns.
+    /// A payload that fails to decode leaves the group exactly as it was, and the error names that
+    /// payload alone.
+    pub(super) async fn decode_payload(
+        &mut self,
+        codec: &Arc<CompiledCodec>,
+        payload: Cow<'_, [u8]>,
+    ) -> Result<(), CodecError> {
+        let schema = codec.schema();
+        decode_ingested_payload(codec, payload, self.pending.record_builder(&schema)).await
+    }
+
+    /// Drops decoded rows a caller could not accept, so a failed dispatch leaves no stray row.
+    pub(super) fn discard_undispatched_rows(&mut self) {
+        self.pending.discard_undispatched_rows();
+    }
+
     pub(super) fn collect(
         &mut self,
         contribution: IngestGroupContribution<'_>,
@@ -298,17 +362,17 @@ impl IngestRouteCollector {
             timestamp_source,
             output_routes,
             filter_where,
-            records,
             metadata,
             acks,
             ingested_at,
         } = contribution;
-        if records.is_empty() {
+        if metadata.is_empty() && self.pending.undispatched_rows() == 0 {
             return Ok(());
         }
         if let Some(existing) = self.context.as_ref()
             && (existing.domain != *domain || existing.ingestor != *ingestor)
         {
+            self.pending.discard_undispatched_rows();
             return Err(format!(
                 "ingest group for '{}.{}' cannot collect rows for '{}.{}'",
                 existing.domain.as_str(),
@@ -317,7 +381,10 @@ impl IngestRouteCollector {
                 ingestor.as_str()
             ));
         }
-        self.pending.append(records, metadata, acks, ingested_at)?;
+        if let Err(error) = self.pending.append(metadata, acks, ingested_at) {
+            self.pending.discard_undispatched_rows();
+            return Err(error);
+        }
         if self.context.is_none() {
             self.context = Some(IngestGroupContext {
                 domain: domain.clone(),
@@ -334,6 +401,15 @@ impl IngestRouteCollector {
     pub(super) fn take_pending(
         &mut self,
     ) -> Result<Option<(IngestGroupContext, IngestGroupRows)>, String> {
+        // A decoded row the source never accepted would put the records out of step with the
+        // metadata and ACKs, so the group says so rather than closing over the mismatch.
+        let undispatched = self.pending.undispatched_rows();
+        if undispatched != 0 {
+            self.pending.discard_undispatched_rows();
+            return Err(format!(
+                "ingest group closed with {undispatched} decoded records that were never accepted"
+            ));
+        }
         if self.pending.is_empty() {
             return Ok(None);
         }
@@ -611,39 +687,33 @@ pub(super) async fn branched_branch_filter_blocking(
     }
 }
 
+/// Decodes one payload as one row of `builder`.
+///
+/// jaq and protobuf decoding is CPU-bound, so the transformation half runs off the reactor and
+/// hands back the JSON value the append consumes. The append itself always runs here, which keeps
+/// the builder on the task that owns it.
 pub(super) async fn decode_ingested_payload(
-    codec: Arc<CompiledCodec>,
-    payload: &[u8],
-) -> Result<RuntimeRecordBatch, CodecError> {
+    codec: &Arc<CompiledCodec>,
+    payload: Cow<'_, [u8]>,
+    builder: &mut RuntimeRecordBatchBuilder,
+) -> Result<(), CodecError> {
     if !codec.requires_blocking_decode() {
-        return decode_with_codec(&codec, payload);
+        return decode_with_codec(codec, payload, builder);
     }
 
+    // Only the transformation leaves the reactor. The Arrow append that consumes its result stays
+    // here, with the batch builder the decoded row joins.
     let codec_name = codec.name.as_str().to_string();
-    let payload = payload.to_vec();
-    tokio::task::spawn_blocking(move || decode_with_codec(&codec, &payload))
-        .await
-        .map_err(|error| CodecError::InvalidCodec {
-            codec: codec_name,
-            reason: format!("blocking decode task failed: {error}"),
-        })?
-}
-
-pub(super) async fn decode_ingested_payload_owned(
-    codec: Arc<CompiledCodec>,
-    payload: Vec<u8>,
-) -> Result<RuntimeRecordBatch, CodecError> {
-    if !codec.requires_blocking_decode() {
-        return decode_with_codec_owned(&codec, payload);
-    }
-
-    let codec_name = codec.name.as_str().to_string();
-    tokio::task::spawn_blocking(move || decode_with_codec_owned(&codec, payload))
-        .await
-        .map_err(|error| CodecError::InvalidCodec {
-            codec: codec_name,
-            reason: format!("blocking decode task failed: {error}"),
-        })?
+    let blocking_codec = codec.clone();
+    let payload = payload.into_owned();
+    let value =
+        tokio::task::spawn_blocking(move || blocking_codec.transform_on_ingestion(&payload))
+            .await
+            .map_err(|error| CodecError::InvalidCodec {
+                codec: codec_name,
+                reason: format!("blocking decode task failed: {error}"),
+            })??;
+    codec.append_transformed_row(&value, builder)
 }
 
 impl Runtime {
@@ -802,7 +872,7 @@ impl Runtime {
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Adds decoded records to the current source ingest group.
+    /// Accepts the rows a source decoded into the current ingest group.
     ///
     /// Program execution is deliberately deferred until `flush_ingest_collector`, so
     /// sources that receive one record per poll still enter the columnar VM once for the
@@ -817,7 +887,6 @@ impl Runtime {
             timestamp_source,
             output_routes,
             filter_where,
-            records,
             metadata,
             acks,
             ingested_at,
@@ -830,7 +899,6 @@ impl Runtime {
                 timestamp_source,
                 output_routes,
                 filter_where,
-                records,
                 metadata,
                 acks,
                 ingested_at,
@@ -1510,16 +1578,20 @@ impl Runtime {
             collector,
             flush,
         } = dispatch;
-        let mut records = Vec::new();
+        let mut row_count = 0usize;
         for source_payload in payload.payloads() {
             tokio::task::consume_budget().await;
-            records.push(
-                decode_ingested_payload(codec.clone(), source_payload)
-                    .await
-                    .map_err(|error| error.to_string())?,
-            );
+            // A request carries all of its payloads or none of them, so a payload that fails to
+            // decode takes the rows decoded before it back out of the group.
+            if let Err(error) = collector
+                .decode_payload(&codec, Cow::Borrowed(source_payload))
+                .await
+            {
+                collector.discard_undispatched_rows();
+                return Err(error.to_string());
+            }
+            row_count += 1;
         }
-        let row_count = records.len();
         let metadata = payload.metadata_rows();
         self.dispatch_ingested_records(IngestGroupDispatch {
             collector,
@@ -1528,7 +1600,6 @@ impl Runtime {
             timestamp_source,
             output_routes,
             filter_where,
-            records,
             metadata: &metadata,
             ingested_at: current_timestamp(),
             acks: vec![AckSet::empty(); row_count],
@@ -1551,8 +1622,9 @@ mod tests {
     use ahash::{HashMap, HashSet};
     use arc_swap::ArcSwapOption;
     use nervix_models::{
-        AckMode, DomainConfig, DomainPace, DomainState, DomainStatus, ErrorPolicies,
-        IngestTimestampSource, ModelKind, ParseAsType, Timestamp,
+        AckMode, CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, DomainConfig,
+        DomainPace, DomainState, DomainStatus, ErrorPolicies, IngestTimestampSource, JsonType,
+        ModelKind, ParseAsType, ResolvedCodecWireFormat, SchemaField, Timestamp, WireSchemaField,
     };
     use tokio::time::{Duration, timeout};
     use triomphe::Arc;
@@ -1562,9 +1634,202 @@ mod tests {
         runtime::branch_runtime::BranchExecutionRuntime,
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{
-            RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, test_runtime_row,
+            RECORD_BUILDER_SETS_OPENED, RECORD_COLUMN_SETS_BUILT, RuntimeRecordBatch,
+            RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
         },
     };
+
+    /// A JSON codec over a one-field schema, for the ingest-group decode tests below.
+    fn grouped_event_codec() -> Arc<CompiledCodec> {
+        let schema = Arc::new(compile_schema(&CreateSchema {
+            name: named("grouped_event"),
+            fields: vec![SchemaField {
+                name: named("user_id"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }));
+        compile_codec(
+            &CreateCodec {
+                name: named("grouped_event_codec"),
+                wire_format: CodecWireFormat::Json {
+                    wire_schema: named("grouped_event_wire"),
+                },
+                schema: named("grouped_event"),
+                encoding_rules: Vec::new(),
+            },
+            schema,
+            ResolvedCodecWireFormat::Json(&CreateWireSchema {
+                name: named("grouped_event_wire"),
+                strictness: Default::default(),
+                fields: vec![WireSchemaField {
+                    name: named("user_id"),
+                    ty: JsonType::Integer,
+                    optional: false,
+                }],
+            }),
+        )
+        .expect("the grouped event codec should compile")
+    }
+
+    /// Accepts the rows `collector` has decoded, as an ingestor does after a successful decode.
+    fn accept_decoded_rows(
+        collector: &mut IngestRouteCollector,
+        rows: usize,
+    ) -> Result<(), String> {
+        let headers = NoIngestHeaders;
+        let metadata = (0..rows)
+            .map(|_| IngestMetadataRow::Headers { headers: &headers })
+            .collect::<Vec<_>>();
+        collector.collect(IngestGroupContribution {
+            domain: &domain("default"),
+            ingestor: &named("grouped_event_source"),
+            timestamp_source: None,
+            output_routes: &RelayProcessorOutputsNode { routes: Vec::new() },
+            filter_where: None,
+            metadata: &metadata,
+            acks: vec![AckSet::empty(); rows],
+            ingested_at: Timestamp::from_unix_nanos(1),
+        })
+    }
+
+    /// A group of `n` messages must cost one set of Arrow columns, not `n` single-row batches and
+    /// a concatenation.
+    #[tokio::test]
+    async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
+        let codec = grouped_event_codec();
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 8);
+
+        RECORD_BUILDER_SETS_OPENED.with(|count| count.set(0));
+        RECORD_COLUMN_SETS_BUILT.with(|count| count.set(0));
+
+        for user_id in 0..3i64 {
+            collector
+                .decode_payload(
+                    &codec,
+                    Cow::Owned(format!(r#"{{"user_id":{user_id}}}"#).into_bytes()),
+                )
+                .await
+                .expect("each payload should decode into the open group");
+            accept_decoded_rows(&mut collector, 1).expect("each decoded row should be accepted");
+        }
+
+        assert_eq!(
+            RECORD_BUILDER_SETS_OPENED.with(std::cell::Cell::get),
+            1,
+            "a group must open exactly one record builder, not one per message"
+        );
+        assert_eq!(
+            RECORD_COLUMN_SETS_BUILT.with(std::cell::Cell::get),
+            0,
+            "an open group must not build record columns before it closes"
+        );
+
+        let (_, rows) = collector
+            .take_pending()
+            .expect("the group must close")
+            .expect("the group holds rows");
+
+        assert_eq!(
+            RECORD_COLUMN_SETS_BUILT.with(std::cell::Cell::get),
+            1,
+            "closing a group must build exactly one record column set"
+        );
+        assert_eq!(rows.len(), 3);
+        for user_id in 0..3usize {
+            assert_eq!(
+                rows.batch
+                    .value(user_id, "user_id")
+                    .expect("the decoded column must be readable"),
+                Some(RuntimeValue::I64(
+                    user_id.try_into().expect("a small test index fits i64")
+                ))
+            );
+        }
+    }
+
+    /// An acknowledged poll group decodes its whole batch up front and then accepts the rows one
+    /// at a time, so a contribution covers a prefix of what the group has decoded.
+    #[tokio::test]
+    async fn ingest_group_accepts_its_decoded_rows_one_at_a_time() {
+        let codec = grouped_event_codec();
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 3);
+
+        for user_id in 0..3i64 {
+            collector
+                .decode_payload(
+                    &codec,
+                    Cow::Owned(format!(r#"{{"user_id":{user_id}}}"#).into_bytes()),
+                )
+                .await
+                .expect("each payload should decode into the open group");
+        }
+        for _ in 0..3 {
+            accept_decoded_rows(&mut collector, 1)
+                .expect("each decoded row should be accepted on its own");
+        }
+
+        let (_, rows) = collector
+            .take_pending()
+            .expect("the group must close")
+            .expect("the group holds rows");
+
+        assert_eq!(rows.len(), 3);
+        for user_id in 0..3usize {
+            assert_eq!(
+                rows.batch
+                    .value(user_id, "user_id")
+                    .expect("the decoded column must be readable"),
+                Some(RuntimeValue::I64(
+                    user_id.try_into().expect("a small test index fits i64")
+                ))
+            );
+        }
+    }
+
+    /// A payload the codec rejects stays attributable to its own message: the group keeps the rows
+    /// around it, and its records, metadata and ACKs stay row-aligned.
+    #[tokio::test]
+    async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode() {
+        let codec = grouped_event_codec();
+        let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 8);
+
+        collector
+            .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":1}"#))
+            .await
+            .expect("the first payload should decode");
+        accept_decoded_rows(&mut collector, 1).expect("the first row should be accepted");
+
+        collector
+            .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":"two"}"#))
+            .await
+            .expect_err("a user id of the wrong type should be rejected");
+
+        collector
+            .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":3}"#))
+            .await
+            .expect("the payload after the rejected one should decode");
+        accept_decoded_rows(&mut collector, 1).expect("the third row should be accepted");
+
+        let (_, rows) = collector
+            .take_pending()
+            .expect("the group must close")
+            .expect("the group holds rows");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.acks.len(), 2);
+        assert_eq!(rows.record_metadata.len(), 2);
+        assert_eq!(
+            rows.batch.value(0, "user_id").expect("readable"),
+            Some(RuntimeValue::I64(1))
+        );
+        assert_eq!(
+            rows.batch.value(1, "user_id").expect("readable"),
+            Some(RuntimeValue::I64(3))
+        );
+    }
+
     #[test]
     fn runtime_uses_configured_timestamp_field_when_present() {
         let runtime = Runtime::new();
