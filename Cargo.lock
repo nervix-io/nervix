@@ -6555,6 +6555,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-execution"
+version = "0.1.0-dev"
+dependencies = [
+ "arch-into",
+ "error-stack",
+ "meticulous",
+ "parking_lot",
+ "thiserror 2.0.20",
+ "tokio",
+ "triomphe",
+ "ubyte",
+]
+
+[[package]]
 name = "nervix-expiry-map"
 version = "0.1.0-dev"
 dependencies = [
@@ -6576,6 +6590,7 @@ dependencies = [
  "fastrand",
  "futures-util",
  "meticulous",
+ "nervix-execution",
  "nervix-models",
  "parking_lot",
  "rand_core 0.6.4",
@@ -6590,6 +6605,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "triomphe",
+ "ubyte",
 ]
 
 [[package]]
@@ -6756,6 +6772,7 @@ dependencies = [
  "nervix-client-core",
  "nervix-consensus",
  "nervix-dataflow-graph",
+ "nervix-execution",
  "nervix-expiry-map",
  "nervix-interconnect",
  "nervix-models",

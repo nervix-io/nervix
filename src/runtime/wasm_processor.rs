@@ -152,21 +152,23 @@ pub(super) async fn flush_branch_wasm_processor(
         return;
     }
 
-    let (envelope, input_ack_map) = match wasm_envelope_from_relay_batch(&forwarded, next_ack_token)
-    {
-        Ok(envelope) => envelope,
-        Err(error) => {
-            branch.runtime.handle_general_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                forwarded.acks.iter(),
-                error,
-            );
-            return;
-        }
-    };
+    let (envelope, input_ack_map) =
+        match wasm_envelope_from_relay_batch(branch.runtime.executor(), &forwarded, next_ack_token)
+            .await
+        {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                branch.runtime.handle_general_error_for_acks(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    forwarded.acks.iter(),
+                    error,
+                );
+                return;
+            }
+        };
     ack_map.extend(input_ack_map);
     let process_result = instance
         .as_mut()
@@ -398,11 +400,17 @@ pub(super) async fn ensure_wasm_processor_instance(
     Ok(())
 }
 
-pub(super) fn wasm_envelope_from_relay_batch(
+pub(super) async fn wasm_envelope_from_relay_batch(
+    executor: &Executor,
     batch: &RelayRecordBatch,
     next_ack_token: &mut u64,
 ) -> Result<(WasmEnvelope, WasmAckMap), String> {
-    let arrow_ipc_batch = batch.batch.to_arrow_ipc_bytes()?;
+    let arrow_ipc_batch = batch
+        .batch
+        .encode_arrow_ipc(executor)
+        .await
+        .map_err(|error| error.to_string())?
+        .to_vec();
     let row_count = batch.batch.batch().num_rows();
     if row_count != batch.acks.len() || row_count != batch.metadata.len() {
         return Err(format!(
@@ -462,10 +470,10 @@ mod tests {
     use super::*;
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
 
-    #[test]
-    fn wasm_input_envelope_retains_one_shared_source_batch_and_source_tokens() {
+    #[tokio::test]
+    async fn wasm_input_envelope_retains_one_shared_source_batch_and_source_tokens() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (envelope, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]);
+        let (envelope, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]).await;
         let WasmEnvelope::Input {
             arrow_ipc_batch,
             acks,
@@ -488,10 +496,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wasm_identity_input_reference_reuses_exact_source_array() {
+    #[tokio::test]
+    async fn wasm_identity_input_reference_reuses_exact_source_array() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]);
+        let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]).await;
         let source = ack_map[&1].input_batch.batch().column(0).clone();
         let outputs = validate_wasm_test_outputs(
             &schema,
@@ -507,10 +515,10 @@ mod tests {
         assert!(StdArc::ptr_eq(&source, outputs[0].batch.batch().column(0)));
     }
 
-    #[test]
-    fn wasm_contiguous_input_reference_shares_source_buffers() {
+    #[tokio::test]
+    async fn wasm_contiguous_input_reference_shares_source_buffers() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]);
+        let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]).await;
         let rows = wasm_input_acks(&input).rows[1..3].to_vec();
         let outputs = validate_wasm_test_outputs(
             &schema,
@@ -543,10 +551,10 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[20, 30]);
     }
 
-    #[test]
-    fn wasm_general_input_selection_filters_reorders_and_duplicates_rows() {
+    #[tokio::test]
+    async fn wasm_general_input_selection_filters_reorders_and_duplicates_rows() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]);
+        let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]).await;
         let input_rows = wasm_input_acks(&input).rows.clone();
         let rows = vec![
             input_rows[3].clone(),
@@ -574,11 +582,11 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[40, 20, 20]);
     }
 
-    #[test]
-    fn wasm_input_references_materialize_rows_from_multiple_retained_batches() {
+    #[tokio::test]
+    async fn wasm_input_references_materialize_rows_from_multiple_retained_batches() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (first_input, mut ack_map) = wasm_input_for_values(&schema, &[10]);
-        let (second_input, mut second_ack_map) = wasm_input_for_values(&schema, &[20]);
+        let (first_input, mut ack_map) = wasm_input_for_values(&schema, &[10]).await;
+        let (second_input, mut second_ack_map) = wasm_input_for_values(&schema, &[20]).await;
         let second_context = second_ack_map.remove(&1).expect("second token must exist");
         ack_map.insert(2, second_context);
         let mut rows = wasm_input_acks(&first_input).rows.clone();
@@ -608,8 +616,8 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[10, 20]);
     }
 
-    #[test]
-    fn wasm_identity_references_support_every_internal_arrow_field_kind() {
+    #[tokio::test]
+    async fn wasm_identity_references_support_every_internal_arrow_field_kind() {
         let schema = test_schema(&[
             ("u8", ParseAsType::U8),
             ("i8", ParseAsType::I8),
@@ -673,7 +681,7 @@ mod tests {
                 ]),
             ),
         ]);
-        let (input, ack_map) = wasm_input_for_records(&schema, vec![record]);
+        let (input, ack_map) = wasm_input_for_records(&schema, vec![record]).await;
         let source_columns = ack_map[&1].input_batch.batch().columns().to_vec();
         let outputs = validate_wasm_test_outputs(
             &schema,

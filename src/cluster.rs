@@ -23,6 +23,7 @@ use chitchat::{
     Chitchat, ChitchatHandle, ChitchatId, NodeState, spawn_chitchat,
     transport::{Socket, Transport, UdpSocket},
 };
+use meticulous::ResultExt as _;
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_models::ClusterNodeName;
 use parking_lot::{Mutex, RwLock};
@@ -217,10 +218,19 @@ pub async fn start_cluster_with_transport(
     transport: &dyn Transport,
 ) -> io::Result<ClusterHandle> {
     let node_id = settings.node_id.clone();
-    let generation_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    // Gossip tells one run of a node from the next by this generation, and a peer ignores any
+    // key-value whose version is below what it already holds for the same generation. A restart
+    // publishes its address from version one again, so two restarts sharing a generation leave
+    // peers on the address the earlier of them published, dialling a port nothing listens on.
+    // Only the interconnect ports move across a restart, so the rest of the identity is equal and
+    // the generation is the sole thing keeping the runs apart: it is taken in nanoseconds.
+    let generation_id = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    )
+    .assured("nanoseconds since the epoch stay within a u64 until the year 2554");
     let gossip_advertise_addr = settings.cluster_advertise_addr.resolve_one().await?;
     let seed_nodes = match settings.bootstrap_host.as_deref() {
         Some(seed) => match seed.parse::<HostPort>() {

@@ -5170,6 +5170,58 @@ async fn when_these_nspl_commands_are_executed_on_node(
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
+/// Fill every bulk worker on a node and hold them, so the scenario can measure management work
+/// against a class that is genuinely full rather than one that merely looks busy.
+#[when(expr = "bulk execution on node {string} is occupied")]
+async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let occupancy = world.runtime_test_hooks.bulk_execution_occupancy.clone();
+    tokio::time::timeout(Duration::from_secs(30), occupancy.occupy(&node_name))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("bulk execution on '{node_id}' never filled its workers: {error}")
+        });
+}
+
+#[when(expr = "bulk execution on node {string} is released")]
+async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .runtime_test_hooks
+        .bulk_execution_occupancy
+        .release(&crate::common::cluster::node_name(&node_id));
+}
+
+/// Run NSPL on a node and require it to finish inside a bound, which is how a scenario states that
+/// one class of work was not admitted behind another.
+#[then(expr = "within {string} these NSPL commands complete on node {string}")]
+async fn then_nspl_commands_complete_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    let limit =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let commands = expand_placeholders(world, docstring(step));
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let started = Instant::now();
+    let session = tokio::time::timeout(
+        limit,
+        execute_nspl_commands_on_node(world, &node_id, &commands),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("NSPL commands on '{node_id}' did not complete within {limit:?}"))
+    .unwrap_or_else(|error| panic!("failed to execute NSPL commands on '{node_id}': {error:?}"));
+    world.last_cluster_operation_elapsed = Some(started.elapsed());
+    world.active_session = Some(session);
+    world.active_session_node = Some(node_id);
+    world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
+}
+
 #[given("the leader node is configured with these NSPL commands")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,
@@ -8420,7 +8472,7 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
     let relay = expand_placeholders(world, &relay);
     let prefix = format!("{metric} {direction} relay={relay} physical_node=");
     let deadline = Instant::now() + duration;
-    let mut last_totals = Vec::new();
+    let mut last_totals = std::collections::BTreeMap::<String, u64>::new();
 
     loop {
         tokio::task::consume_budget().await;
@@ -8431,9 +8483,15 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
             tokio::task::consume_budget().await;
             match run_nspl_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
                 Ok(output) => {
-                    last_totals.extend(metric_totals_in_indented_section(
-                        &output, &section, &prefix,
-                    ));
+                    for (physical_node, total) in
+                        metric_totals_in_indented_section(&output, &section, &prefix)
+                    {
+                        // Two nodes reporting the same physical node's counter are reporting one
+                        // counter, so the highest value each has seen stands for it rather than
+                        // both being added together.
+                        let seen = last_totals.entry(physical_node).or_default();
+                        *seen = (*seen).max(total);
+                    }
                     outputs.push(output);
                 }
                 Err(error) => {
@@ -8446,7 +8504,7 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
         world.last_command_output = Some(outputs.join("\n"));
         if world.last_command_error.is_none()
             && !last_totals.is_empty()
-            && last_totals.iter().sum::<u64>() == expected_total
+            && last_totals.values().sum::<u64>() == expected_total
         {
             return;
         }
@@ -8463,11 +8521,21 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
     }
 }
 
-fn metric_totals_in_indented_section(output: &str, section: &str, prefix: &str) -> Vec<u64> {
+/// The counters in one section, keyed by the physical node each counter belongs to.
+///
+/// A node's `DESCRIBE DOMAIN` can report a counter owned by a different physical node, so the same
+/// counter appears in more than one node's output. The line names its owner, so keying by that
+/// name lets a caller polling every node count each counter once. Returning a bare list instead
+/// invites summing one message's counter once per node that happens to have seen it.
+fn metric_totals_in_indented_section(
+    output: &str,
+    section: &str,
+    prefix: &str,
+) -> std::collections::BTreeMap<String, u64> {
     let header = format!("{section}:");
     let mut lines = output.lines();
     let Some(header_line) = lines.find(|line| line.trim() == header) else {
-        return Vec::new();
+        return std::collections::BTreeMap::new();
     };
     let header_indent = header_line.len() - header_line.trim_start().len();
 
@@ -8478,10 +8546,14 @@ fn metric_totals_in_indented_section(output: &str, section: &str, prefix: &str) 
         .map(str::trim)
         .filter(|line| line.starts_with(prefix))
         .map(|line| {
-            metric_line_value(line, "total")
+            let physical_node = metric_line_value(line, "physical_node")
+                .unwrap_or_else(|| panic!("expected physical_node in metric line '{line}'"))
+                .to_string();
+            let total = metric_line_value(line, "total")
                 .unwrap_or_else(|| panic!("expected total in metric line '{line}'"))
                 .parse::<u64>()
-                .unwrap_or_else(|error| panic!("invalid total in metric line '{line}': {error}"))
+                .unwrap_or_else(|error| panic!("invalid total in metric line '{line}': {error}"));
+            (physical_node, total)
         })
         .collect()
 }
