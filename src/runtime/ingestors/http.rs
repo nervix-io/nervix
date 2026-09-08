@@ -1,4 +1,3 @@
-use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 
 use super::super::*;
@@ -21,10 +20,14 @@ impl IngestMessageHeaders for HttpResponseHeaders<'_> {
 impl HttpIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientHttp,
-        ingestor: CreateIngestor,
+        plan: HttpIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let HttpIngestorStartPlan {
+            ingestor,
+            client,
+            every,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -34,16 +37,6 @@ impl HttpIngestor {
             });
         }
 
-        let every = match &ingestor.source {
-            IngestSource::Http { every, .. } => every.clone(),
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected HTTP ingestor source".to_string(),
-                });
-            }
-        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
 
         let resolved_client = runtime
@@ -302,27 +295,15 @@ impl HttpIngestor {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(in crate::runtime) fn endpoint_from_client(
-        client: &CreateClientHttp,
+    pub(in crate::runtime) fn endpoint_from_config(
+        config: &[nervix_models::ClientConfigEntry],
     ) -> Result<String, String> {
-        Self::endpoint_from_config(&client.config)
-    }
-
-    fn endpoint_from_config(config: &[nervix_models::ClientConfigEntry]) -> Result<String, String> {
         client_config_value(config, "endpoint", || {
             "missing HTTP client config key 'endpoint'".to_string()
         })
     }
 
-    #[cfg(test)]
-    pub(in crate::runtime) fn method_from_client(
-        client: &CreateClientHttp,
-    ) -> Result<reqwest::Method, String> {
-        Self::method_from_config(&client.config)
-    }
-
-    fn method_from_config(
+    pub(in crate::runtime) fn method_from_config(
         config: &[nervix_models::ClientConfigEntry],
     ) -> Result<reqwest::Method, String> {
         let method = optional_client_config_value(config, "method").unwrap_or("GET");

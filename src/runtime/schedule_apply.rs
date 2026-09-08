@@ -779,19 +779,15 @@ impl Runtime {
                                     entity.identifier.as_str()
                                 ),
                             })?;
-                    let kafka_offset_state = self.scheduled_kafka_offset_state(
-                        domain,
-                        desired_node,
-                        desired_ingestor,
-                        local_node_id.as_ref(),
-                    );
-                    self.start_scheduled_ingestor(
-                        domain,
-                        source_model,
-                        desired_ingestor.clone(),
-                        kafka_offset_state,
-                    )
-                    .await?;
+                    let plan = IngestorStartPlan::decide(domain, desired_node, &source_model)
+                        .map_err(|error| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "cannot plan swapped ingestor '{}': {error}",
+                                desired_ingestor.name.as_str()
+                            ),
+                        })?;
+                    self.start_ingestor(plan).await?;
                 }
                 continue;
             }
@@ -1802,14 +1798,13 @@ impl Runtime {
         }
 
         for (source_model, ingestor) in starts {
-            ingestors::IngestorStarter::start_scheduled(
-                self,
-                &domain,
-                source_model,
-                ingestor,
-                None,
-            )
-            .await?;
+            let plan = IngestorStartPlan::decide_unscheduled(&domain, &ingestor, &source_model)
+                .map_err(|error| RuntimeError::StartIngestor {
+                    domain: domain.as_str().to_string(),
+                    ingestor: ingestor.name.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            ingestors::IngestorStarter::start(self, plan).await?;
         }
 
         Ok(())

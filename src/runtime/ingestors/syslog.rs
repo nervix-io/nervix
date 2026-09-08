@@ -102,24 +102,16 @@ enum SyslogFrameError {
 impl SyslogIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientSyslog,
-        ingestor: CreateIngestor,
+        plan: SyslogIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let SyslogIngestorStartPlan { ingestor, client } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-            });
-        }
-        if let IngestSource::Syslog { .. } = &ingestor.source {
-        } else {
-            return Err(RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: "expected Syslog ingestor source".to_string(),
             });
         }
         let resolved = runtime
