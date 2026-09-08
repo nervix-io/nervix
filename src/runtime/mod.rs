@@ -145,8 +145,8 @@ use crate::{
     },
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool, RuntimeRecordBatch,
-        RuntimeRecordMetadata, RuntimeRow, RuntimeValue, RuntimeValueColumn,
-        compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
+        RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeValue,
+        RuntimeValueColumn, compile_codec_with_protobuf, compile_schema, decode_with_codec,
         parse_as_type_from_arrow, runtime_value_arrow_array, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
@@ -342,7 +342,7 @@ use ingest_group::{
     BranchedEntrypointInput, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
     IngestorRouteRuntimes, RawIngestDispatch, branched_branch_filter_blocking,
     branched_branch_plan_blocking, branched_entrypoint_batch_from_inputs_blocking,
-    decode_ingested_payload, decode_ingested_payload_owned,
+    decode_ingested_payload,
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,

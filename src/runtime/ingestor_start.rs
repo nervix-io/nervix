@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::*;
 
 pub(super) struct ScheduledIngestorStartSpec {
@@ -502,8 +504,12 @@ impl Runtime {
             )
         })?;
         let mut lines = tokio::io::BufReader::new(file).lines();
-        let mut entries = HashMap::new();
-        let mut batches = Vec::new();
+        let schema = codec.schema();
+        // The whole file is one batch, so it is decoded into one set of Arrow columns rather than
+        // one batch per line. Blank lines are skipped, so each row remembers the line it came from
+        // for the diagnostics below.
+        let mut builder = schema.batch_builder(0);
+        let mut row_lines = Vec::new();
         let mut line_number = 0usize;
         while let Some(line) = lines.next_line().await.map_err(|error| {
             format!(
@@ -518,7 +524,7 @@ impl Runtime {
             if line.trim().is_empty() {
                 continue;
             }
-            let record = decode_ingested_payload_owned(codec.clone(), line.into_bytes())
+            decode_ingested_payload(&codec, Cow::Owned(line.into_bytes()), &mut builder)
                 .await
                 .map_err(|error| {
                     format!(
@@ -528,7 +534,14 @@ impl Runtime {
                         error
                     )
                 })?;
-            let Some(value) = record.value(0, lookup.key_field.as_str())? else {
+            row_lines.push(line_number);
+        }
+
+        let batch = builder.finish()?;
+        let mut entries = HashMap::new();
+        for (row, line_number) in row_lines.into_iter().enumerate() {
+            tokio::task::consume_budget().await;
+            let Some(value) = batch.value(row, lookup.key_field.as_str())? else {
                 return Err(format!(
                     "lookup '{}' line {} is missing key field '{}'",
                     lookup.name.as_str(),
@@ -536,16 +549,8 @@ impl Runtime {
                     lookup.key_field.as_str()
                 ));
             };
-            entries.insert(value.to_key_fragment(), batches.len());
-            batches.push(record);
+            entries.insert(value.to_key_fragment(), row);
         }
-
-        let schema = codec.schema();
-        let batch = if batches.is_empty() {
-            schema.batch_builder(0).finish()?
-        } else {
-            RuntimeRecordBatch::concat(&batches.iter().collect::<Vec<_>>())?
-        };
 
         Ok(LookupRuntime {
             model: lookup,

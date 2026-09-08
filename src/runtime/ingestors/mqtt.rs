@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use std::{borrow::Cow, num::NonZeroU64};
 
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, Event, Incoming, MqttOptions, Publish, QoS,
@@ -39,9 +39,13 @@ struct MqttClientSettings {
     manual_acks: bool,
 }
 
-struct MqttBatchEntry {
-    publish: Publish,
-    record: RuntimeRecordBatch,
+/// One MQTT poll group: the publishes it collected and the ingest group they decoded into.
+///
+/// The publishes are kept because an acknowledged group acknowledges them one by one, and because
+/// a replay decodes them again into the group it replays into.
+struct MqttPollGroup {
+    publishes: Vec<Publish>,
+    decoded: IngestRouteCollector,
 }
 
 enum MqttNextPublish {
@@ -463,22 +467,27 @@ impl MqttIngestor {
                                 }
                             }
                             MqttIngestMode::AckParallel { max, .. } => {
-                                let mut batch =
-                                    match Self::decode_publish(&task_context, publish).await {
-                                        Some(entry) => vec![entry],
-                                        None => {
-                                            if !backoff.wait(&mut shutdown_rx).await {
-                                                break 'outer;
-                                            }
-                                            break;
-                                        }
-                                    };
+                                // The poll group is one ingest group, so every publish it collects
+                                // decodes into the same record builder.
+                                let mut collector = IngestRouteCollector::new(
+                                    IngestMetadataKind::Headers,
+                                    addressable_count(*max).get(),
+                                );
+                                if !Self::decode_publish(&task_context, &mut collector, &publish)
+                                    .await
+                                {
+                                    if !backoff.wait(&mut shutdown_rx).await {
+                                        break 'outer;
+                                    }
+                                    break;
+                                }
+                                let mut publishes = vec![publish];
                                 let deadline = Instant::now()
                                     + task_batch_timeout.verified(
                                         "this branch runs only for the parallel ACK mode, which \
                                          parses a batch timeout above",
                                     );
-                                while batch.len() < addressable_count(*max).get() {
+                                while publishes.len() < addressable_count(*max).get() {
                                     tokio::task::consume_budget().await;
                                     tokio::select! {
                                         _ = sleep_until(deadline) => break,
@@ -494,8 +503,8 @@ impl MqttIngestor {
                                                     ).await else {
                                                         continue;
                                                     };
-                                                    if let Some(entry) = Self::decode_publish(&task_context, publish).await {
-                                                        batch.push(entry);
+                                                    if Self::decode_publish(&task_context, &mut collector, &publish).await {
+                                                        publishes.push(publish);
                                                     } else {
                                                         if !backoff.wait(&mut shutdown_rx).await {
                                                             break 'outer;
@@ -515,7 +524,10 @@ impl MqttIngestor {
                                     &task_context,
                                     &client_handle,
                                     &mut shutdown_rx,
-                                    batch,
+                                    MqttPollGroup {
+                                        publishes,
+                                        decoded: collector,
+                                    },
                                     task_ack_timeout.verified(
                                         "this branch runs only for an ACK mode, and every ACK \
                                          mode parses a timeout above",
@@ -775,12 +787,10 @@ impl MqttIngestor {
         publish: Publish,
         collector: &mut IngestRouteCollector,
     ) {
-        let Some(entry) = Self::decode_publish(context, publish).await else {
+        if !Self::decode_publish(context, collector, &publish).await {
             return;
-        };
-        if let Err(error) =
-            Self::dispatch_entry(context, entry.record, AckSet::empty(), collector).await
-        {
+        }
+        if let Err(error) = Self::dispatch_entry(context, AckSet::empty(), collector).await {
             context.runtime.events().report_error(format!(
                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                 context.ingestor.as_str(),
@@ -801,19 +811,19 @@ impl MqttIngestor {
         retry_policy: ParsedRetryPolicy,
         backoff: &mut RuntimeReconnectBackoff,
     ) -> bool {
-        let Some(entry) = Self::decode_publish(context, publish).await else {
-            return backoff.wait(shutdown_rx).await;
-        };
         loop {
             tokio::task::consume_budget().await;
+            // One acknowledged message is one group, and a replay decodes into the group it
+            // replays into.
+            let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+            if !Self::decode_publish(context, &mut collector, &publish).await {
+                return backoff.wait(shutdown_rx).await;
+            }
             let (acks, completion) = context
                 .runtime
                 .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
-            // One acknowledged message is one group.
-            let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
             let dispatch_result = Self::dispatch_entry(
                 context,
-                entry.record.clone(),
                 if !context.branched_senders.is_empty() {
                     acks.attached()
                 } else {
@@ -839,7 +849,7 @@ impl MqttIngestor {
                 acks.ack_success();
                 match Runtime::await_ack_completion(shutdown_rx, completion, ack_timeout).await {
                     Some(AckOutcome::Ack) => {
-                        if let Err(error) = client_handle.ack(&entry.publish).await {
+                        if let Err(error) = client_handle.ack(&publish).await {
                             context.runtime.events().report_error(format!(
                                 "failed to acknowledge mqtt message for ingestor '{}' in domain \
                                  '{}': {}",
@@ -888,50 +898,44 @@ impl MqttIngestor {
         context: &MqttTaskContext,
         client_handle: &AsyncClient,
         shutdown_rx: &mut watch::Receiver<bool>,
-        batch: Vec<MqttBatchEntry>,
+        group: MqttPollGroup,
         ack_timeout: Duration,
         retry_policy: ParsedRetryPolicy,
         backoff: &mut RuntimeReconnectBackoff,
     ) -> bool {
-        let mut publishes = Vec::with_capacity(batch.len());
-        let mut initial_records = Vec::with_capacity(batch.len());
-        for entry in batch {
-            publishes.push(entry.publish);
-            initial_records.push(entry.record);
-        }
-        let mut initial_records = Some(initial_records);
+        let MqttPollGroup { publishes, decoded } = group;
+        // The collection loop already decoded this batch once; a replay decodes it again, into
+        // the group it replays into.
+        let mut decoded = Some(decoded);
         'retry: loop {
             tokio::task::consume_budget().await;
-            let records = if let Some(records) = initial_records.take() {
-                records
-            } else {
-                let mut records = Vec::with_capacity(publishes.len());
-                for publish in &publishes {
-                    tokio::task::consume_budget().await;
-                    let Some(record) = Self::decode_publish_record(context, publish).await else {
-                        if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
-                            return false;
+            let mut collector = match decoded.take() {
+                Some(collector) => collector,
+                None => {
+                    let mut collector =
+                        IngestRouteCollector::new(IngestMetadataKind::Headers, publishes.len());
+                    for publish in &publishes {
+                        tokio::task::consume_budget().await;
+                        if !Self::decode_publish(context, &mut collector, publish).await {
+                            if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
+                                return false;
+                            }
+                            continue 'retry;
                         }
-                        continue 'retry;
-                    };
-                    records.push(record);
+                    }
+                    collector
                 }
-                records
             };
-            let mut completions = Vec::with_capacity(records.len());
+            let mut completions = Vec::with_capacity(publishes.len());
             let mut batch_failure = None::<String>;
-            // The poll group is one ingest group.
-            let mut collector =
-                IngestRouteCollector::new(IngestMetadataKind::Headers, records.len());
 
-            for record in records {
+            for _ in &publishes {
                 tokio::task::consume_budget().await;
                 let (acks, completion) = context
                     .runtime
                     .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
                 let dispatch_result = Self::dispatch_entry(
                     context,
-                    record,
                     if !context.branched_senders.is_empty() {
                         acks.attached()
                     } else {
@@ -965,6 +969,9 @@ impl MqttIngestor {
                         "mqtt runtime dispatch failed".to_string(),
                     );
                     batch_failure = Some("mqtt runtime dispatch failed".to_string());
+                    // The rest of the poll group is replayed rather than flushed, so its rows
+                    // leave the group with the message that failed.
+                    collector.discard_undispatched_rows();
                     break;
                 }
             }
@@ -1040,15 +1047,13 @@ impl MqttIngestor {
         }
     }
 
-    async fn decode_publish(context: &MqttTaskContext, publish: Publish) -> Option<MqttBatchEntry> {
-        let record = Self::decode_publish_record(context, &publish).await?;
-        Some(MqttBatchEntry { publish, record })
-    }
-
-    async fn decode_publish_record(
+    /// Decodes one publish as one row of `collector`'s ingest group, reporting a payload the
+    /// codec rejects and answering whether the row joined the group.
+    async fn decode_publish(
         context: &MqttTaskContext,
+        collector: &mut IngestRouteCollector,
         publish: &Publish,
-    ) -> Option<RuntimeRecordBatch> {
+    ) -> bool {
         let key = publish.topic.clone();
         let payload = publish.payload.as_ref();
 
@@ -1061,8 +1066,11 @@ impl MqttIngestor {
             "received mqtt message"
         );
 
-        match decode_ingested_payload(context.codec.clone(), payload).await {
-            Ok(record) => Some(record),
+        match collector
+            .decode_payload(&context.codec, Cow::Borrowed(payload))
+            .await
+        {
+            Ok(()) => true,
             Err(error) => {
                 context.runtime.events().report_error(format!(
                     "failed to decode message for ingestor '{}' in domain '{}': {}",
@@ -1076,14 +1084,13 @@ impl MqttIngestor {
                     error = %error,
                     "failed to decode mqtt message"
                 );
-                None
+                false
             }
         }
     }
 
     async fn dispatch_entry(
         context: &MqttTaskContext,
-        record: RuntimeRecordBatch,
         acks: AckSet,
         collector: &mut IngestRouteCollector,
     ) -> Result<(), String> {
@@ -1096,7 +1103,6 @@ impl MqttIngestor {
                 timestamp_source: context.timestamp_source.as_ref(),
                 output_routes: &context.output_routes,
                 filter_where: context.filter_where.as_ref(),
-                records: vec![record],
                 metadata: &[IngestMetadataRow::Headers {
                     headers: &NoIngestHeaders,
                 }],
