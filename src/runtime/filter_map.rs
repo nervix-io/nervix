@@ -146,8 +146,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
                     side_error.span,
                     MessageErrorOperation::Set,
                 ),
-                partial_output: vm_partial_output_row_to_runtime_batch(&executed.batch, output_row)
-                    .ok(),
+                partial_output: captured_partial_output(&executed.batch, output_row),
                 materialized_state: state_snapshot.clone(),
             };
             continue;
@@ -586,9 +585,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
             let source_record = source_record("FILTER-MAP error")?;
             let partial_output = program
                 .codec_route
-                .then(|| {
-                    vm_partial_output_row_to_runtime_batch(&body_result.batch, output_row).ok()
-                })
+                .then(|| captured_partial_output(&body_result.batch, output_row))
                 .flatten();
             let reason = format!(
                 "emitter '{}' FILTER-MAP side error {}: {} at {}",
@@ -624,10 +621,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                     let source_record = source_record("FILTER-MAP header error")?;
                     let partial_output = program
                         .codec_route
-                        .then(|| {
-                            vm_partial_output_row_to_runtime_batch(&body_result.batch, output_row)
-                                .ok()
-                        })
+                        .then(|| captured_partial_output(&body_result.batch, output_row))
                         .flatten();
                     message_errors.push(planned_structured_message_error(
                         RelayMessage {
@@ -657,9 +651,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
             let source_record = source_record("FILTER-MAP validation error")?;
             let partial_output = program
                 .codec_route
-                .then(|| {
-                    vm_partial_output_row_to_runtime_batch(&body_result.batch, output_row).ok()
-                })
+                .then(|| captured_partial_output(&body_result.batch, output_row))
                 .flatten();
             message_errors.push(planned_structured_message_error(
                 RelayMessage {

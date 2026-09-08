@@ -759,6 +759,10 @@ impl Client {
             let progress_callback = on_progress.clone();
             tokio::spawn(async move {
                 let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+                // A build that fails or panics drops its end of the pipe, so the loop below sees
+                // a short archive and the server rejects the upload. The failure is reported by
+                // `upload_resource` rather than here, which is why neither this result nor the
+                // join below is turned into a second report.
                 let build_task = tokio::spawn(async move {
                     let _ = relay_upload_archive(&request_directory, writer).await;
                 });

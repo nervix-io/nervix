@@ -611,6 +611,7 @@ use crate::{
         execute_filter_map_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
+    task_shutdown::JoinShutdown as _,
 };
 
 const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
@@ -984,14 +985,20 @@ impl SessionSubscriptions {
     async fn remove(&mut self, name: &SubscriptionName) -> Option<(DomainName, RelayName)> {
         let subscription = self.subscriptions.remove(name)?;
         let _ = subscription.stop_tx.send(true);
-        let _ = subscription.task.await;
+        subscription
+            .task
+            .join_after_shutdown("session subscription")
+            .await;
         Some((subscription.domain, subscription.relay))
     }
 
     async fn stop_all(&mut self, service: &SessionServiceImpl) {
         for (_, subscription) in self.subscriptions.drain() {
             let _ = subscription.stop_tx.send(true);
-            let _ = subscription.task.await;
+            subscription
+                .task
+                .join_after_shutdown("session subscription")
+                .await;
             service
                 .unregister_subscription_interest(&subscription.domain, &subscription.relay)
                 .await;
@@ -3167,7 +3174,7 @@ impl BackgroundTask {
     /// touching the state it is about to replace.
     async fn stop(self) {
         self.cancel.cancel();
-        let _ = self.handle.await;
+        self.handle.join_after_shutdown("background task").await;
     }
 }
 
@@ -4030,7 +4037,11 @@ impl SessionService for SessionServiceImpl {
                                     return;
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            // The session stays open and resumes from the newest event. Saying how
+                            // many it skipped is what stops the gap from looking like quiet.
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                warn!(skipped, "session fell behind the server event bus");
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -4049,7 +4060,11 @@ impl SessionService for SessionServiceImpl {
                                     return;
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            // As above: the runtime errors the session missed are gone, so the
+                            // count is the only record that they happened.
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                warn!(skipped, "session fell behind the runtime event bus");
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -4355,10 +4370,18 @@ impl SessionServiceImpl {
             .fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Report a control-plane failure this node recovered from to the sessions attached to it.
+    ///
+    /// Unlike the runtime event bus, this one carries no fan-out task, so its only subscribers are
+    /// live sessions and a node serving none is the ordinary case rather than a startup window.
+    /// The event is therefore expected to find no receiver, and the log is what keeps the recovery
+    /// observable when it does.
     fn broadcast_error(&self, message: impl Into<String>) {
+        let message = message.into();
+        warn!(error = %message, "server error reported to sessions");
         let _ = self.inner.events.send(ServerEvent {
             level: i32::from(ServerEventLevel::Error),
-            message: message.into(),
+            message,
         });
     }
 
@@ -18769,7 +18792,11 @@ impl Application {
                                 }
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        // The peers never learn about the errors this node skipped, so the count
+                        // is logged here to keep the gap attributable to load rather than silence.
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "runtime error fan-out fell behind the event bus");
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -19308,7 +19335,9 @@ impl Application {
                                 message,
                             });
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "cluster event relay fell behind the event bus");
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -19329,7 +19358,9 @@ impl Application {
                                 message,
                             });
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "consensus event relay fell behind the event bus");
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }

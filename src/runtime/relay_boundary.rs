@@ -205,7 +205,7 @@ impl RelayStateTask {
             Ok(Err(error)) => Err(format!("relay state task failed: {error}")),
             Err(_) => {
                 self.task.abort();
-                let _ = self.task.await;
+                self.task.join_after_shutdown("relay state").await;
                 Err(format!(
                     "relay state task did not drain within {}",
                     humantime::format_duration(grace)
@@ -223,7 +223,7 @@ impl RelayOwnerTask {
             Ok(Err(error)) => Err(format!("relay owner task failed: {error}")),
             Err(_) => {
                 self.task.abort();
-                let _ = self.task.await;
+                self.task.join_after_shutdown("relay owner").await;
                 Err(format!(
                     "relay owner task did not drain within {}",
                     humantime::format_duration(grace)

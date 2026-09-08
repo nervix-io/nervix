@@ -570,7 +570,15 @@ impl TimeRollingHistogram {
             .find(|bucket| bucket.start_at_nanos == current_start)
             && let Some(scaled) = scaled_histogram_value(value)
         {
-            let _ = bucket.histogram.record(scaled);
+            // The configured maximum is the top of this metric's bucket ladder, so an
+            // observation above it belongs in the top bucket exactly as one past the last
+            // explicit boundary does. Clamping here is what puts it there; letting `record`
+            // reject it instead would drop the sample and pull every percentile below the truth,
+            // which is the one outcome a latency histogram must not produce.
+            bucket
+                .histogram
+                .record(scaled.min(bucket.histogram.high()))
+                .assured("the value was just clamped to the histogram's own maximum");
         }
     }
 
@@ -583,7 +591,9 @@ impl TimeRollingHistogram {
         for bucket in self.buckets.iter().filter(|bucket| {
             bucket.start_at_nanos >= oldest_start && bucket.start_at_nanos <= current_start
         }) {
-            let _ = merged.add(&bucket.histogram);
+            merged
+                .add(&bucket.histogram)
+                .assured("merged was built from the same self.config as every bucket it holds");
         }
         HistogramPercentileSummary::from_histogram(&merged)
     }
@@ -605,7 +615,10 @@ impl TimeRollingHistogram {
                 .iter_mut()
                 .find(|existing| existing.start_at_nanos == bucket.start_at_nanos)
             {
-                let _ = existing.histogram.add(&bucket.histogram);
+                existing.histogram.add(&bucket.histogram).assured(
+                    "both ladders come from internal_buckets_for_metric, and aggregation only \
+                     merges series whose aggregate key carries the same metric",
+                );
             } else {
                 self.buckets.push_back(bucket.clone());
             }
@@ -1570,6 +1583,11 @@ impl PrometheusMetrics {
         }
     }
 
+    /// Withdraw one label set from the Prometheus registry.
+    ///
+    /// Removal reports an error when the label set was never registered, which happens whenever an
+    /// entity is torn down before it produced its first observation of that metric. There is
+    /// nothing to withdraw and nothing to report, so each removal below discards that outcome.
     fn remove(&self, key: &MetricKey) {
         let labels = prometheus_label_values(key);
         match key.metric {
@@ -3556,7 +3574,12 @@ fn hdr_histogram_from_snapshot(
 ) -> HdrHistogram<u64> {
     let mut histogram = config.new_histogram();
     for value in snapshot {
-        let _ = histogram.record_n(value.value, value.count);
+        // Clamped for the same reason as `TimeRollingHistogram::record`: a snapshot written when
+        // the ladder reached further still describes observations that belong in this histogram's
+        // top bucket, and dropping them would silently lower the restored percentiles.
+        histogram
+            .record_n(value.value.min(config.highest_trackable_value), value.count)
+            .assured("the value was just clamped to the histogram's own maximum");
     }
     histogram
 }
@@ -4197,6 +4220,32 @@ mod tests {
         assert_histogram_percentile_near(summary.p50, 2.0);
         assert_histogram_percentile_near(summary.p90, 2.0);
         assert_histogram_percentile_near(summary.p99, 2.0);
+    }
+
+    #[test]
+    fn an_observation_past_the_bucket_ladder_lands_in_the_top_bucket() {
+        // LATENCY_BUCKETS tops out at 30 seconds. A request slower than that is exactly the
+        // observation a latency percentile exists to expose, so it has to be counted at the
+        // maximum rather than dropped for being out of range.
+        let mut histogram = TimeRollingHistogram::new(
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            LATENCY_BUCKETS,
+        );
+        for _ in 0..90 {
+            histogram.observe_at(0.001, 0);
+        }
+        for _ in 0..10 {
+            histogram.observe_at(3_600.0, 0);
+        }
+
+        let summary = histogram.summary_at(1_000_000_000);
+        assert_histogram_percentile_near(summary.p50, 0.001);
+        assert!(
+            summary.p99.is_some_and(|p99| p99 >= 30.0),
+            "the slowest observation must reach the top bucket, got {:?}",
+            summary.p99
+        );
     }
 
     #[test]

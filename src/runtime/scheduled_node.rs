@@ -44,7 +44,7 @@ pub(super) struct ScheduledNodeTask {
 impl ScheduledNodeTask {
     pub(super) async fn abort_and_join(&mut self) {
         self.task.abort();
-        let _ = (&mut self.task).await;
+        (&mut self.task).join_after_shutdown("scheduled node").await;
     }
 
     pub(super) async fn handoff(self) -> Result<Vec<ProcessorBranchHandoff>, String> {
@@ -90,7 +90,7 @@ impl ScheduledNodeTask {
             Ok(Err(error)) => Err(format!("scheduled node task join failed: {error}")),
             Err(_) => {
                 self.task.abort();
-                let _ = self.task.await;
+                self.task.join_after_shutdown("scheduled node").await;
                 Err("scheduled node task timed out stopping for handoff".to_string())
             }
         }

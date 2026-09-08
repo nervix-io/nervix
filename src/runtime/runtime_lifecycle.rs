@@ -29,7 +29,7 @@ impl Runtime {
         hooks: RuntimeTestHooks,
         temp_dir: PathBuf,
     ) -> Result<Self, RuntimePersistenceError> {
-        let (events, _) = broadcast::channel(256);
+        let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
             .map(RuntimeStateStore::from_database)
@@ -133,7 +133,7 @@ impl Runtime {
     }
 
     /// The node's runtime event bus. Connectors report transient failures here.
-    pub(in crate::runtime) fn events(&self) -> &broadcast::Sender<RuntimeEvent> {
+    pub(in crate::runtime) fn events(&self) -> &RuntimeEvents {
         &self.inner.events
     }
 

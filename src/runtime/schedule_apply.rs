@@ -355,7 +355,7 @@ impl Runtime {
             for task in previous_tasks.unwrap_or_default() {
                 tokio::task::consume_budget().await;
                 task.abort();
-                let _ = task.await;
+                task.join_after_shutdown("placement").await;
             }
 
             let materialized_relay = match desired_node.config.as_ref() {
@@ -667,7 +667,7 @@ impl Runtime {
                 for task in previous_placement_tasks {
                     tokio::task::consume_budget().await;
                     task.abort();
-                    let _ = task.await;
+                    task.join_after_shutdown("placement").await;
                 }
 
                 if desired_materialized {
@@ -1068,7 +1068,7 @@ impl Runtime {
                 for task in old_tasks {
                     tokio::task::consume_budget().await;
                     task.abort();
-                    let _ = task.await;
+                    task.join_after_shutdown("scheduled node").await;
                 }
                 for runtime in old_entrypoints {
                     tokio::task::consume_budget().await;
@@ -1228,7 +1228,7 @@ impl Runtime {
                     .remove(entity);
                 if let Some(task) = old_task {
                     task.abort();
-                    let _ = task.await;
+                    task.join_after_shutdown("generator").await;
                 }
 
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_ref()) {

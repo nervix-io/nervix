@@ -327,12 +327,12 @@ impl RabbitMqIngestor {
                                                         {
                                                             Ok(()) => true,
                                                             Err(error) => {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                task_events.report_error(format!(
                                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                                 false
                                                             }
                                                         };
@@ -345,21 +345,21 @@ impl RabbitMqIngestor {
                                                             ).await {
                                                                 Some(AckOutcome::Ack) => {
                                                                     if let Err(error) = delivery.ack(BasicAckOptions::default()).await {
-                                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                        task_events.report_error(format!(
                                                                             "failed to acknowledge rabbitmq message for ingestor '{}' in domain '{}': {}",
                                                                             task_ingestor.as_str(),
                                                                             task_domain.as_str(),
                                                                             error
-                                                                        )));
+                                                                        ));
                                                                     }
                                                                 }
                                                                 Some(AckOutcome::NoAck(error)) => {
-                                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                    task_events.report_error(format!(
                                                                         "rabbitmq ack chain failed for ingestor '{}' in domain '{}': {}",
                                                                         task_ingestor.as_str(),
                                                                         task_domain.as_str(),
                                                                         error
-                                                                    )));
+                                                                    ));
                                                                 }
                                                                 None => break,
                                                             }
@@ -377,12 +377,12 @@ impl RabbitMqIngestor {
                                                 }
                                             }
                                             Err(error) => {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                task_events.report_error(format!(
                                                     "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                     task_ingestor.as_str(),
                                                     task_domain.as_str(),
                                                     error
-                                                )));
+                                                ));
                                                 warn!(
                                                     domain = task_domain.as_str(),
                                                     ingestor = task_ingestor.as_str(),
@@ -399,12 +399,12 @@ impl RabbitMqIngestor {
                                             &task_ingestor,
                                             format!("rabbitmq receive failed: {error}"),
                                         );
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "failed to receive rabbitmq message for ingestor '{}' in domain '{}': {}",
                                             task_ingestor.as_str(),
                                             task_domain.as_str(),
                                             error
-                                        )));
+                                        ));
                                         warn!(
                                             domain = task_domain.as_str(),
                                             ingestor = task_ingestor.as_str(),
