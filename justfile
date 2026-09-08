@@ -61,6 +61,12 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
+test-runtime-state-capabilities: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --features testing --test runtime_state_capabilities
+
 # Validate the small unsafe boundary used by deduplicator expiration tracking.
 test-expiry-map:
     cargo test --package nervix-expiry-map

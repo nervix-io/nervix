@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::BTreeSet, str::FromStr};
 
 use ahash::HashMap;
 use error_stack::Report;
@@ -27,7 +27,7 @@ pub(crate) struct RuntimeStatePlacement {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StateReplicationRoles {
     pub(crate) primary_node: Option<ClusterNodeName>,
-    pub(crate) replica_nodes: Vec<ClusterNodeName>,
+    pub(crate) replica_nodes: BTreeSet<ClusterNodeName>,
     pub(crate) required_replica_acks: usize,
 }
 
@@ -39,7 +39,7 @@ impl StateReplicationRoles {
     ) -> Self {
         Self {
             primary_node,
-            replica_nodes,
+            replica_nodes: replica_nodes.into_iter().collect(),
             required_replica_acks,
         }
     }
@@ -47,9 +47,156 @@ impl StateReplicationRoles {
     pub(crate) fn owned_by(primary_node: Option<ClusterNodeName>) -> Self {
         Self {
             primary_node,
-            replica_nodes: Vec::new(),
+            replica_nodes: BTreeSet::new(),
             required_replica_acks: 0,
         }
+    }
+
+    fn local_capability(&self, local_node: Option<&ClusterNodeName>) -> StateCapability {
+        if self.primary_node.is_none() && self.replica_nodes.is_empty() {
+            return StateCapability::Originate;
+        }
+        if self.primary_node.as_ref() == local_node {
+            return StateCapability::Originate;
+        }
+        if local_node.is_some_and(|node| self.replica_nodes.contains(node)) {
+            return StateCapability::InstallSnapshot;
+        }
+        StateCapability::Read
+    }
+}
+
+/// The operation one assignment grants over a shared runtime state. A capability token carries
+/// this discriminator as well as its generation, so possessing a generation number alone never
+/// authorizes an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum StateCapability {
+    Read,
+    Originate,
+    InstallSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StateAssignmentToken {
+    generation: u64,
+    capability: StateCapability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StateAssignmentBinding {
+    generation: u64,
+    capability: StateCapability,
+}
+
+impl StateAssignmentBinding {
+    pub(crate) fn token_for(self, capability: StateCapability) -> Option<StateAssignmentToken> {
+        (self.capability == capability).then_some(StateAssignmentToken {
+            generation: self.generation,
+            capability,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct StateAssignment {
+    generation: u64,
+    roles: StateReplicationRoles,
+    local_capability: StateCapability,
+}
+
+/// Serializes assignment rebinding with every authoritative mutation and replica installation.
+/// The state value outlives individual assignments; short-lived capability handles carry the
+/// token returned by `rebind` and must validate it inside this lock at the operation boundary.
+#[derive(Debug)]
+pub(crate) struct StateAssignmentAuthority {
+    assignment: parking_lot::Mutex<StateAssignment>,
+}
+
+impl Default for StateAssignmentAuthority {
+    fn default() -> Self {
+        Self {
+            assignment: parking_lot::Mutex::new(StateAssignment {
+                generation: 0,
+                roles: StateReplicationRoles::default(),
+                local_capability: StateCapability::Read,
+            }),
+        }
+    }
+}
+
+impl StateAssignmentAuthority {
+    pub(crate) fn rebind(
+        &self,
+        roles: StateReplicationRoles,
+        local_node: Option<&ClusterNodeName>,
+    ) -> StateAssignmentBinding {
+        let mut assignment = self.assignment.lock();
+        assignment.generation = assignment
+            .generation
+            .checked_add(1)
+            .assured("one process cannot apply 2^64 assignments to one runtime state");
+        assignment.local_capability = roles.local_capability(local_node);
+        assignment.roles = roles;
+        StateAssignmentBinding {
+            generation: assignment.generation,
+            capability: assignment.local_capability,
+        }
+    }
+
+    pub(crate) fn current_binding(&self) -> StateAssignmentBinding {
+        let assignment = self.assignment.lock();
+        StateAssignmentBinding {
+            generation: assignment.generation,
+            capability: assignment.local_capability,
+        }
+    }
+
+    pub(crate) fn roles(&self) -> StateReplicationRoles {
+        self.assignment.lock().roles.clone()
+    }
+
+    pub(crate) fn serialize<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _assignment = self.assignment.lock();
+        action()
+    }
+
+    pub(crate) fn authorize<T>(
+        &self,
+        token: StateAssignmentToken,
+        required: StateCapability,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, Report<StateAuthorityError>> {
+        let assignment = self.assignment.lock();
+        if token.generation != assignment.generation
+            || token.capability != required
+            || assignment.local_capability != required
+        {
+            return Err(Report::new(StateAuthorityError {
+                operation: required,
+            }));
+        }
+        Ok(action())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Error)]
+#[error("runtime state assignment no longer grants {} authority", operation.as_ref())]
+pub(crate) struct StateAuthorityError {
+    operation: StateCapability,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum RuntimeStateOperationError {
+    #[error(transparent)]
+    Authority(#[from] StateAuthorityError),
+    #[error(transparent)]
+    Persistence(#[from] RuntimePersistenceError),
+}
+
+impl From<Report<StateAuthorityError>> for RuntimeStateOperationError {
+    fn from(error: Report<StateAuthorityError>) -> Self {
+        Self::Authority(*error.current_context())
     }
 }
 

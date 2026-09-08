@@ -705,8 +705,10 @@ Feature: Relocating runtime nodes onto a named cluster node
 
   Scenario: Relocating onto an existing replica promotes it and demotes the former owner
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
+    And Kafka topic "promote_events_{{test_id}}" exists with 1 partitions
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -714,34 +716,77 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed through the client on node "node-1"
       """
-      CREATE SCHEMA promote_event ( id I64 );
-      CREATE RELAY promote_input SCHEMA promote_event UNBRANCHED;
-      CREATE RELAY promote_output SCHEMA promote_event UNBRANCHED;
-      CREATE DEDUPLICATOR promote_dedup FROM promote_input
-        DEDUPLICATE ON input.id MAX TIME 10m UNBRANCHED
-        TO promote_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SCHEMA promote_event ( tenant STRING, id I64, source STRING );
+      CREATE WIRE JSON SCHEMA promote_event_wire MODE STRICT (
+        tenant string,
+        id integer,
+        source string
+      );
+      CREATE CODEC promote_event_codec
+        FROM WIRE JSON SCHEMA promote_event_wire
+        TO SCHEMA promote_event;
+      CREATE SCHEMA promote_tenant ( tenant STRING );
+      CREATE BRANCH promote_by_tenant SCHEMA promote_tenant TTL 5m;
+      CREATE RELAY promote_output SCHEMA promote_event BRANCHED BY promote_by_tenant;
+      CREATE CLIENT promote_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR promote_source
+        FROM KAFKA promote_kafka TOPIC promote_events_{{test_id}}
+          OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 500ms
+        ON QUIESCE SUSPEND DECODE USING promote_event_codec
+        TIMESTAMP NOW
+        TO promote_output INHERIT ALL
+        BRANCHED BY promote_by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
-      DESCRIBE DEDUPLICATOR promote_dedup;
+      SHOW CLUSTER STATUS;
       """
-    Then the last command output owner is saved as placeholder "promote_owner"
-    And the first replica in the last command output is saved as placeholder "promote_replica"
-    When these NSPL commands are executed through the client on node "node-1"
+    Then the last cluster status owner for scheduled "ingestor" "promote_source" is saved as placeholder "promote_owner"
+    And the first replica for scheduled "ingestor" "promote_source" in the last cluster status is saved as placeholder "promote_replica"
+    When these NSPL commands are executed on the leader node
       """
-      RELOCATE DEDUPLICATOR promote_dedup ONTO NODE {{promote_replica}} IGNORE PREFERENCES;
+      CREATE SUBSCRIPTION promote_seen TO promote_output;
+      """
+    When Kafka message is published to topic "promote_events_{{test_id}}"
+      """
+      {"tenant":"acme","id":1,"source":"before-acme"}
+      """
+    And Kafka message is published to topic "promote_events_{{test_id}}"
+      """
+      {"tenant":"beta","id":2,"source":"before-beta"}
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "tenant":"acme" | "id":1 | "source":"before-acme"
+      key={"tenant":"beta"} | "tenant":"beta" | "id":2 | "source":"before-beta"
+      """
+    When these NSPL commands are executed on the active session
+      """
+      RELOCATE INGESTOR promote_source ONTO NODE {{promote_replica}} IGNORE PREFERENCES;
       """
     Then the last command output contains
       """
-      - kind=deduplicator name=promote_dedup group=1 strategy=ignore reason=selected owner={{promote_owner}} moves=yes replicas={{promote_owner}} promoted_replica=yes
+      - kind=ingestor name=promote_source group=1 strategy=ignore reason=selected owner={{promote_owner}} moves=yes replicas={{promote_owner}} promoted_replica=yes
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    Then within "20s" node "node-1" eventually reports scheduled "ingestor" "promote_source" owner equals placeholder "promote_replica"
+    When Kafka message is published to topic "promote_events_{{test_id}}"
       """
-      DESCRIBE DEDUPLICATOR promote_dedup;
+      {"tenant":"beta","id":3,"source":"after-beta"}
       """
-    Then the last command output owner equals placeholder "promote_replica"
-    And the last command output contains
+    And Kafka message is published to topic "promote_events_{{test_id}}"
       """
-      replicas: {{promote_owner}}
+      {"tenant":"acme","id":4,"source":"after-acme"}
       """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"beta"} | "tenant":"beta" | "id":3 | "source":"after-beta"
+      key={"tenant":"acme"} | "tenant":"acme" | "id":4 | "source":"after-acme"
+      """
+    And the relay subscription does not receive a payload within "1s"
 
   Scenario: A relocation and a drain of the same domain are mutually exclusive
     Given entity gate deadline is configured as "60s"
@@ -1038,6 +1083,8 @@ Feature: Relocating runtime nodes onto a named cluster node
     And Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
+    And Kafka topic "relay_state_{{test_id}}" exists with 1 partitions
+    And Kafka topic "relay_reader_{{test_id}}" exists with 1 partitions
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -1045,15 +1092,21 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node
       """
-      CREATE SCHEMA state_event ( id I64, source STRING );
-      CREATE WIRE JSON SCHEMA state_event_wire MODE STRICT ( id integer, source string );
+      CREATE SCHEMA state_event ( tenant STRING, id I64, source STRING );
+      CREATE WIRE JSON SCHEMA state_event_wire MODE STRICT (
+        tenant string,
+        id integer,
+        source string
+      );
       CREATE CODEC state_event_codec
         FROM WIRE JSON SCHEMA state_event_wire
         TO SCHEMA state_event;
-      CREATE RELAY moving_state SCHEMA state_event UNBRANCHED
+      CREATE SCHEMA state_tenant ( tenant STRING );
+      CREATE BRANCH state_by_tenant SCHEMA state_tenant TTL 5m;
+      CREATE RELAY moving_state SCHEMA state_event BRANCHED BY state_by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-      CREATE RELAY reader_input SCHEMA state_event UNBRANCHED;
-      CREATE RELAY reader_output SCHEMA state_event UNBRANCHED;
+      CREATE RELAY reader_input SCHEMA state_event BRANCHED BY state_by_tenant;
+      CREATE RELAY reader_output SCHEMA state_event BRANCHED BY state_by_tenant;
       CREATE CLIENT state_kafka TYPE KAFKA CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
@@ -1061,18 +1114,22 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE INGESTOR state_source
         FROM KAFKA state_kafka TOPIC relay_state_{{test_id}}
           OFFSET BY CONSUMER GROUP nervix_cucumber_relay_state_{{test_id}}
-          MODE NO_ACK PARALLEL
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING state_event_codec
-        TO moving_state INHERIT ALL UNBRANCHED
+        TO moving_state INHERIT ALL BRANCHED BY state_by_tenant
+        SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INGESTOR reader_source
         FROM KAFKA state_kafka TOPIC relay_reader_{{test_id}}
           OFFSET BY CONSUMER GROUP nervix_cucumber_relay_reader_{{test_id}}
-          MODE NO_ACK PARALLEL
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING state_event_codec
-        TO reader_input INHERIT ALL UNBRANCHED
+        TO reader_input INHERIT ALL BRANCHED BY state_by_tenant
+        SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE JUNCTION state_reader FROM reader_input UNBRANCHED
+      CREATE JUNCTION state_reader FROM reader_input BRANCHED BY state_by_tenant
         USING MATERIALIZED STATE moving_state REQUIRED WAIT
         TO reader_output INHERIT ALL
         SET source = relay_state.moving_state.source
@@ -1081,53 +1138,112 @@ Feature: Relocating runtime nodes onto a named cluster node
       SHOW RELAY moving_state MATERIALIZED STATE;
       """
     Then the last command output owner is saved as placeholder "state_owner"
-    And a node other than placeholder "state_owner" is saved as placeholder "state_destination"
+    And the first replica in the last command output is saved as placeholder "state_replica"
     When these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION reader_output_seen TO reader_output;
       """
     And Kafka message is published to topic "relay_state_{{test_id}}"
       """
-      {"id":1,"source":"before"}
+      {"tenant":"acme","id":1,"source":"before-acme"}
+      """
+    And Kafka message is published to topic "relay_state_{{test_id}}"
+      """
+      {"tenant":"beta","id":2,"source":"before-beta"}
+      """
+    Then within "20s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":1,"source":"before-acme","tenant":"acme"}
+      """
+    And within "20s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"beta"} payload={"id":2,"source":"before-beta","tenant":"beta"}
+      """
+    And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":1,"source":"before-acme","tenant":"acme"}
+      """
+    And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"beta"} payload={"id":2,"source":"before-beta","tenant":"beta"}
+      """
+    When Kafka message is published to topic "relay_reader_{{test_id}}"
+      """
+      {"tenant":"acme","id":11,"source":"ignored-acme"}
       """
     And Kafka message is published to topic "relay_reader_{{test_id}}"
       """
-      {"id":1,"source":"ignored"}
+      {"tenant":"beta","id":12,"source":"ignored-beta"}
       """
-    Then within "30s" the relay subscription receives a payload
+    Then within "20s" the relay subscription receives payloads containing all fragments
       """
-      {"id":1,"source":"before"}
+      key={"tenant":"acme"} | "tenant":"acme" | "id":11 | "source":"before-acme"
+      key={"tenant":"beta"} | "tenant":"beta" | "id":12 | "source":"before-beta"
       """
     When these NSPL commands are executed on the active session
       """
-      RELOCATE RELAY moving_state ONTO NODE {{state_destination}} IGNORE PREFERENCES;
+      RELOCATE RELAY moving_state ONTO NODE {{state_replica}} IGNORE PREFERENCES;
       """
     Then the last command output contains
       """
-      - kind=relay name=moving_state group=1 strategy=ignore reason=selected owner={{state_owner}} moves=yes replicas={{state_owner}}
+      - kind=relay name=moving_state group=1 strategy=ignore reason=selected owner={{state_owner}} moves=yes replicas={{state_owner}} promoted_replica=yes
       """
     When these NSPL commands are executed on the active session
       """
       SHOW RELAY moving_state MATERIALIZED STATE;
       """
-    Then the last command output owner equals placeholder "state_destination"
+    Then the last command output owner equals placeholder "state_replica"
+    And the last command output contains
+      """
+      replicas: {{state_owner}}
+      """
+    Then within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":1,"source":"before-acme","tenant":"acme"}
+      """
+    And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"beta"} payload={"id":2,"source":"before-beta","tenant":"beta"}
+      """
     When Kafka message is published to topic "relay_reader_{{test_id}}"
       """
-      {"id":2,"source":"ignored"}
+      {"tenant":"beta","id":13,"source":"ignored-beta"}
+      """
+    And Kafka message is published to topic "relay_reader_{{test_id}}"
+      """
+      {"tenant":"acme","id":14,"source":"ignored-acme"}
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"beta"} | "tenant":"beta" | "id":13 | "source":"before-beta"
+      key={"tenant":"acme"} | "tenant":"acme" | "id":14 | "source":"before-acme"
+      """
+    When Kafka message is published to topic "relay_state_{{test_id}}"
+      """
+      {"tenant":"beta","id":3,"source":"after-beta"}
       """
     And Kafka message is published to topic "relay_state_{{test_id}}"
       """
-      {"id":3,"source":"after"}
+      {"tenant":"acme","id":4,"source":"after-acme"}
       """
-    Then within "30s" the relay subscription receives a payload
+    Then within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      {"id":2,"source":"after"}
+      key={"tenant":"beta"} payload={"id":3,"source":"after-beta","tenant":"beta"}
+      """
+    And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":4,"source":"after-acme","tenant":"acme"}
       """
     When Kafka message is published to topic "relay_reader_{{test_id}}"
       """
-      {"id":4,"source":"ignored"}
+      {"tenant":"acme","id":15,"source":"ignored-acme"}
       """
-    Then within "30s" the relay subscription receives a payload
+    And Kafka message is published to topic "relay_reader_{{test_id}}"
       """
-      {"id":4,"source":"after"}
+      {"tenant":"beta","id":16,"source":"ignored-beta"}
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "tenant":"acme" | "id":15 | "source":"after-acme"
+      key={"tenant":"beta"} | "tenant":"beta" | "id":16 | "source":"after-beta"
       """
