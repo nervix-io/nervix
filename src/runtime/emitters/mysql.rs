@@ -2,6 +2,7 @@ use mysql_async::{
     Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Params as MySqlParams, Pool as MySqlPool,
     SslOpts as MySqlSslOpts, Value as MySqlValue, prelude::Queryable as MySqlQueryable,
 };
+use nervix_models::TableName;
 
 use super::*;
 
@@ -100,7 +101,7 @@ impl MySqlEmitter {
         ) {
             Ok(program) => Some(program),
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(error.to_string()));
+                context.runtime.events().report_error(error.to_string());
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),
@@ -169,7 +170,7 @@ impl MySqlEmitter {
 
     async fn publish_rows(
         client: &MySqlEmitterClient,
-        table: &Identifier,
+        table: &TableName,
         mappings: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
         rows: &[&[serde_json::Value]],
@@ -261,7 +262,7 @@ impl MySqlEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
         batch: &RelayRecordBatch,
@@ -315,7 +316,10 @@ impl MySqlEmitter {
             {
                 Ok(_) => {
                     for row in chunk {
-                        outcome.deliver((batch_index, *row));
+                        outcome.deliver(BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        });
                     }
                 }
                 Err(error) if error.is_record_error() && chunk.len() > 1 => {
@@ -341,10 +345,17 @@ impl MySqlEmitter {
                         )
                         .await
                         {
-                            Ok(_) => outcome.deliver((batch_index, *row)),
-                            Err(error) if error.is_record_error() => {
-                                outcome.reject((batch_index, *row), error.record_reason())
-                            }
+                            Ok(_) => outcome.deliver(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            }),
+                            Err(error) if error.is_record_error() => outcome.reject(
+                                BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                },
+                                error.record_reason(),
+                            ),
                             Err(error) => {
                                 outcome.fail(error.into_report());
                                 return outcome;
@@ -354,7 +365,13 @@ impl MySqlEmitter {
                 }
                 Err(error) if error.is_record_error() => {
                     if let Some(row) = chunk.first() {
-                        outcome.reject((batch_index, *row), error.record_reason());
+                        outcome.reject(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.record_reason(),
+                        );
                     }
                 }
                 Err(error) => {
@@ -379,15 +396,19 @@ impl MySqlEmitter {
         indices
             .iter()
             .map(|row| {
-                rows.get(*row)
-                    .and_then(|values| values.as_ref().ok())
-                    .map(Vec::as_slice)
-                    .ok_or_else(|| {
-                        MySqlWriteError::InvalidValues(format!(
-                            "pending row {row} has no mapped VALUES in batch with {} rows",
-                            rows.len()
-                        ))
-                    })
+                let Some(values) = rows.get(*row) else {
+                    return Err(MySqlWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                let Ok(values) = values else {
+                    return Err(MySqlWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                Ok(values.as_slice())
             })
             .collect()
     }

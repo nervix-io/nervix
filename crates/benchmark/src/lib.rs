@@ -1,3 +1,18 @@
+//! The Nervix benchmark harness.
+//!
+//! Outside the layer order: a harness. It may name any layer, and no product code may name it.
+//!
+//! - **Owns.** The benchmark catalog, the load definitions, running one implementation under a
+//!   shared load, the metrics report each run produces, and the same-hardware A/B comparison
+//!   between two arms.
+//! - **Depends on.** Whatever it measures, plus `nervix-test-environment`.
+//! - **Must not know.** How the systems it measures are built. Every implementation is driven
+//!   through its public interface, which is what keeps a comparison fair.
+//!
+//! This crate breaks its own contract: its binary names `nervix_nspl::client_statement` directly
+//! rather than going through the client core, which is what the ratchet counts as a parser
+//! reference outside the edges.
+
 mod ab;
 mod catalog;
 mod comparison;

@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use redis::{Client as RedisClient, ClientTlsConfig, TlsCertificates as RedisTlsCertificates};
 
 use super::super::*;
@@ -7,12 +8,13 @@ pub(in crate::runtime) struct RedisPubSubIngestor;
 impl RedisPubSubIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientRedis,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -56,7 +58,9 @@ impl RedisPubSubIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled Redis Pub/Sub ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -64,7 +68,7 @@ impl RedisPubSubIngestor {
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
         let task_channel = channel.clone();
-        let task_events = runtime.events.clone();
+        let task_events = runtime.events().clone();
         let task_addr = addr.clone();
         let task_config = resolved_client.entries.clone();
         let task_client_mounts = resolved_client.mounts.clone();
@@ -90,7 +94,7 @@ impl RedisPubSubIngestor {
                 {
                     break;
                 }
-                if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
                 if task_quiesce.should_suspend_intake() {
@@ -190,13 +194,13 @@ impl RedisPubSubIngestor {
                             })
                             .await
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to dispatch buffered redis pubsub payload for ingestor \
                                  '{}' in domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         continue;
                     }
@@ -240,12 +244,12 @@ impl RedisPubSubIngestor {
                                 )
                                 .await
                             {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                         }
                         message = relay.next() => {
@@ -265,7 +269,7 @@ impl RedisPubSubIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                        BufferedIngestMetadata::without_headers(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         task_quiesce.intake(0, payload, false)
@@ -285,12 +289,12 @@ impl RedisPubSubIngestor {
                                             })
                                             .await
                                         {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                         }
                                             if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                 && let Err(error) = task_runtime
@@ -302,14 +306,14 @@ impl RedisPubSubIngestor {
                                                     )
                                                     .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(
+                                                task_events.report_error(
                                                     format!(
                                                         "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
                                                     ),
-                                                ));
+                                                );
                                             }
                                     }
                                 }
@@ -350,7 +354,7 @@ impl RedisPubSubIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,

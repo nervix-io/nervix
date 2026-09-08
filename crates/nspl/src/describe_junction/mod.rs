@@ -1,11 +1,12 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::DescribeJunction;
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, junction_ref, kw, lex_input,
-        suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, junction_ref, kw,
+        lex_input, suggest_from, tok,
     },
 };
 
@@ -27,12 +28,16 @@ pub fn parse_describe_junction_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_describe_junction(input: &str) -> Result<DescribeJunction, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_junction_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

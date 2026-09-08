@@ -1,15 +1,16 @@
 pub mod aggregate;
 
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{AckMode, CreateStatement, CreateWindowProcessor, WindowBound};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection, duration_lit,
-        explicit_processor_outputs, filter_where_clause, from_relay_clauses, if_not_exists_clause,
-        into_parse_error, kw, lex_input, materialized_state_dependencies, suggest_from, tok,
-        window_processor_name,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection,
+        duration_lit, explicit_processor_outputs, filter_where_clause, from_relay_clauses,
+        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
+        suggest_from, tok, window_processor_name,
     },
 };
 
@@ -230,14 +231,18 @@ pub fn parse_create_window_processor_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_window_processor(
     input: &str,
 ) -> Result<CreateStatement<CreateWindowProcessor>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_window_processor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

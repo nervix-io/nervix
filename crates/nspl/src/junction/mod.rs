@@ -1,13 +1,15 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{AckMode, AlterJunction, CreateJunction, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, alter_op_separator, alter_processor_operation,
-        branch_selection, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, junction_name, junction_ref, kw, lex_input,
-        materialized_state_dependencies, suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_op_separator,
+        alter_processor_operation, branch_selection, filter_where_clause,
+        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error,
+        junction_name, junction_ref, kw, lex_input, materialized_state_dependencies, suggest_from,
+        tok,
     },
 };
 
@@ -80,14 +82,18 @@ pub fn parse_create_junction_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_junction(
     input: &str,
 ) -> Result<CreateStatement<CreateJunction>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_junction_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -99,12 +105,16 @@ pub fn parse_alter_junction_tokens(tokens: &[Token]) -> Result<AlterJunction, Ve
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_alter_junction(input: &str) -> Result<AlterJunction, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_junction_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

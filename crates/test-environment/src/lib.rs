@@ -1,3 +1,13 @@
+//! The external services the Nervix test and benchmark suites run against.
+//!
+//! Outside the layer order: a harness. It may name any layer, and no product code may name it.
+//!
+//! - **Owns.** Container lifecycle, the addresses and TLS material a run is given, and the
+//!   parallelism budget it is allowed.
+//! - **Depends on.** Container and process management.
+//! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
+//!   are always provisioned explicitly, never as a side effect of the product starting.
+
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
@@ -11,6 +21,8 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
+use meticulous::OptionExt as _;
 use tempfile::{TempDir, tempdir, tempdir_in};
 use testcontainers::{
     ContainerAsync, ContainerRequest, CopyTargetOptions, GenericBuildableImage, GenericImage,
@@ -82,10 +94,14 @@ impl TestParallelism {
         Self { available_cpus }
     }
 
-    pub const fn max_concurrent_scenarios(self, concurrency_factor: NonZeroUsize) -> usize {
+    pub fn max_concurrent_scenarios(self, concurrency_factor: NonZeroUsize) -> usize {
         self.available_cpus
             .get()
-            .saturating_mul(concurrency_factor.get())
+            .checked_mul(concurrency_factor.get())
+            .assured(
+                "the test command line supplies a small scenario multiplier, not a value near \
+                 usize::MAX",
+            )
     }
 
     pub const fn tokio_worker_threads(self) -> usize {
@@ -942,7 +958,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let workspace_root = workspace_root();
-        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "v1")
+        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "v2")
             .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
             .with_file(
                 workspace_root.join("docker/mock-server/app.py"),
@@ -1388,7 +1404,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             self.endpoints.set_tls(&tls);
             self.tls = Some(tls);
         }
-        Ok(self.tls.as_ref().expect("TLS materials were initialized"))
+        Ok(self
+            .tls
+            .as_ref()
+            .verified("the branch above assigns the materials whenever they are absent"))
     }
 
     async fn start_container<I, Build>(
@@ -1786,7 +1805,8 @@ fn dependency_configuration_hash(role: &str) -> String {
     hasher.update(&[0]);
     hasher.update(DEPENDENCY_CONFIGURATION_SOURCE);
     for file in DEPENDENCY_CONFIGURATION_FILES {
-        hasher.update(&(file.len() as u64).to_le_bytes());
+        let file_len: u64 = file.len().arch_into();
+        hasher.update(&file_len.to_le_bytes());
         hasher.update(file);
     }
     hasher.finalize().to_hex().to_string()
@@ -1794,7 +1814,7 @@ fn dependency_configuration_hash(role: &str) -> String {
 
 fn short_hash(hash: &str) -> &str {
     hash.get(..16)
-        .expect("BLAKE3 hashes contain at least 16 ASCII characters")
+        .assured("a BLAKE3 hex digest is always 64 ASCII characters")
 }
 
 fn reusable_container_name(role: &str, config_hash: &str) -> String {

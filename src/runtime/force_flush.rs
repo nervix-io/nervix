@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use triomphe::Arc;
 
-use super::NodeQuiesceCounters;
+use super::*;
 
 #[derive(Debug)]
 struct ForceFlushParticipantState {
@@ -58,7 +58,10 @@ impl DomainForceFlush {
         counters: Option<Arc<NodeQuiesceCounters>>,
     ) -> DomainForceFlushParticipant {
         let mut state = coordinator.state.lock();
-        state.next_participant = state.next_participant.wrapping_add(1);
+        state.next_participant = state
+            .next_participant
+            .checked_add(1)
+            .assured("a domain cannot register 2^64 force-flush participants");
         let participant = state.next_participant;
         let pending_generation = state.active_generation;
         if pending_generation.is_some()
@@ -106,10 +109,10 @@ impl DomainForceFlush {
         if only_if_idle && let Some(generation) = state.active_generation {
             return generation;
         }
-        state.generation = state.generation.wrapping_add(1);
-        if state.generation == 0 {
-            state.generation = 1;
-        }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .assured("a domain cannot run 2^64 force flushes");
         let generation = state.generation;
         state.active_generation = Some(generation);
         for participant in state.participants.values_mut() {
@@ -295,6 +298,82 @@ impl Drop for DomainForceFlushCompletion {
             self.coordinator
                 .release_claim(self.participant, self.generation);
         }
+    }
+}
+
+impl Runtime {
+    pub(in crate::runtime) fn tracked_ack_root(
+        &self,
+        domain: &DomainName,
+    ) -> (AckSet, AckCompletion) {
+        let tracker = self
+            .inner
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        AckSet::tracked_root(tracker)
+    }
+
+    pub(in crate::runtime) fn tracked_ingestor_ack_root(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> (AckSet, AckCompletion) {
+        let domain_tracker = self
+            .inner
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        let ingestor_tracker = self
+            .inner
+            .in_flight_by_ingestor
+            .entry(DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Ingestor,
+                ingestor.clone(),
+            ))
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        AckSet::tracked_roots(vec![domain_tracker, ingestor_tracker])
+    }
+
+    pub fn domain_outstanding_work(&self, domain: &DomainName) -> usize {
+        self.inner
+            .in_flight_by_domain
+            .get(domain)
+            .map_or(0, |tracker| tracker.outstanding())
+    }
+
+    pub(in crate::runtime) fn force_flush_participant(
+        &self,
+        domain: &DomainName,
+        counters: Arc<NodeQuiesceCounters>,
+    ) -> DomainForceFlushParticipant {
+        let coordinator = self
+            .inner
+            .force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(DomainForceFlush::new)
+            .clone();
+        DomainForceFlush::subscribe(&coordinator, Some(counters))
+    }
+
+    pub fn force_flush_domain(&self, domain: &DomainName) -> u64 {
+        self.inner
+            .force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(DomainForceFlush::new)
+            .request()
+    }
+
+    pub fn force_flush_domain_if_idle(&self, domain: &DomainName) -> u64 {
+        self.inner
+            .force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(DomainForceFlush::new)
+            .request_if_idle()
     }
 }
 
@@ -498,11 +577,12 @@ mod tests {
     }
 
     #[test]
-    fn generation_rollover_skips_the_reserved_zero_generation() {
+    fn generations_start_at_one_and_never_repeat() {
         let coordinator = DomainForceFlush::new();
-        coordinator.state.lock().generation = u64::MAX;
 
         assert_eq!(coordinator.request(), 1);
+        assert_eq!(coordinator.request(), 2);
+        assert_eq!(coordinator.request(), 3);
     }
 
     #[test]

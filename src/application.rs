@@ -1,3 +1,23 @@
+//! The control plane and the edges it is reached through.
+//!
+//! Layer: control plane and edges.
+//!
+//! - **Owns.** The session service, transaction lifecycle, domain lifecycle commands, users and
+//!   authentication, resource upload and replication, subscription management, the domain clock,
+//!   leader-side coordination, and the listeners for HTTP endpoints, the cluster API, metrics and
+//!   the console.
+//! - **Depends on.** The registry for decisions, the runtime for execution, consensus and the
+//!   interconnect for cluster state, the proto wire types, and the language layer: this module is
+//!   the session adapter and the one place in the server that may name the parser.
+//! - **Must not know.** Connector internals, VM IR, Arrow batches or branch-local runtime state. It
+//!   commands the data plane and reads what the data plane reports.
+//!
+//! This module breaks its own contract: it is a single file in which one `SessionServiceImpl` is at
+//! once the gRPC adapter, the transaction manager, the leader-side scheduler, the describe fan-out,
+//! the domain-clock owner, the subscription manager, the resource uploader and four HTTP servers.
+//! Separating the use cases from the adapters is a later move; every piece it is split into
+//! inherits the contract above.
+
 use std::{
     collections::BTreeSet,
     convert::Infallible,
@@ -5,7 +25,7 @@ use std::{
     future::Future,
     io,
     net::SocketAddr,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
     path::{Component, Path, PathBuf},
     sync::{
         Arc as StdArc,
@@ -14,6 +34,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
+use arch_into::ArchInto as _;
 #[cfg(feature = "testing")]
 use argon2::{Algorithm, Params, Version};
 use argon2::{
@@ -46,6 +67,8 @@ use hyper::{
     upgrade,
 };
 use hyper_util::rt::TokioIo;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{
     Client as NervixClient, ConnectOptions as ClientConnectOptions,
     TlsRequirement as ClientTlsRequirement,
@@ -60,7 +83,7 @@ use nervix_consensus::{
     TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
     VoteRequest as RaftVoteRequest,
 };
-use nervix_dataflow_graph::{DataflowGraph, DataflowNodeStatus};
+use nervix_dataflow_graph::{DataflowGraph, DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
     ControlEnvelope, DataflowNodeStatusEnvelope,
     DataflowNodeStatusRequest as RemoteDataflowNodeStatusRequest,
@@ -78,35 +101,36 @@ use nervix_interconnect::{
     DomainDrainStatusResponse as RemoteDomainDrainStatusResponse, DomainTickEnvelope,
     EmitterPublishingDrainStateEnvelope, EmitterPublishingDrainStatusEnvelope,
     EntityDrainStatusEnvelope, EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
-    EntityDrainStatusResponse as RemoteEntityDrainStatusResponse,
+    EntityDrainStatusResponse as RemoteEntityDrainStatusResponse, EntityGatePurpose,
     EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
-    EntityReference as RemoteEntityReference, Envelope, IngestorDescribeEnvelope, LocalIdentity,
-    LookupDescribeEnvelope, LookupRequest as RemoteLookupRequest,
-    LookupResponse as RemoteLookupResponse, PeerVerifier, RelayPayload,
-    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncResponse as RemoteStateSyncResponse,
+    Envelope, IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
+    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse, PeerVerifier,
+    RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
+    StateSyncResponse as RemoteStateSyncResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AlterDomain, BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain,
-    CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup,
-    CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
+    AlterDomain, BranchSelection, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
+    CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
     CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
     DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
     DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainClockState,
-    DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
-    IcebergCatalog, Identifier, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
-    IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
-    MongoDbConflictAction, MySqlConflictAction, ParseAsType, PlacementGroupSchedule,
-    PlacementPolicy, PlacementRuntimeNode, PostgresConflictAction, ProcessorInputs,
-    ProcessorOutputs, QuiesceLevel, ResourceId, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement,
-    StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
-    UploadResource, VhostTlsResource, expression_to_nspl, ingest_quiesce_to_nspl,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainClockState, DomainConfig,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
+    FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName,
+    LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef,
+    ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy, PostgresConflictAction,
+    ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId, ResourceName,
+    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
+    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp, UploadResource,
+    UserName, VhostTlsResource, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -182,6 +206,8 @@ const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
 const OBSERVABILITY_METRICS_PATH: &str = "/metrics";
+mod relocation;
+
 const WEB_CONSOLE_INDEX: &[u8] = include_bytes!("../crates/web-console/dist/index.html");
 const WEB_CONSOLE_CSS: &[u8] = include_bytes!("../crates/web-console/dist/console.css");
 const WEB_CONSOLE_JS: &[u8] = include_bytes!("../crates/web-console/dist/nervix-web-console.js");
@@ -204,8 +230,8 @@ const DEFAULT_TRANSACTION_MAX_OPEN: usize = 1024;
 
 #[derive(Debug, Clone)]
 struct DrainOutstanding {
-    domain: Domain,
-    node: Option<String>,
+    domain: DomainName,
+    node: Option<ClusterNodeName>,
     active_ingestors: u64,
     active_generators: u64,
     outstanding_acks: u64,
@@ -269,7 +295,7 @@ fn emitter_publishing_drain_status_envelope(
                 EmitterPublishingDrainStateEnvelope::RetryingIcebergCommit
             }
         },
-        pending_messages: u64::try_from(status.pending_messages).unwrap_or(u64::MAX),
+        pending_messages: status.pending_messages.arch_into(),
         retry_backoff_millis: status
             .retry_backoff
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
@@ -281,11 +307,15 @@ fn emitter_publishing_drain_status_envelope(
 
 impl std::fmt::Display for DrainOutstanding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let total = self
-            .active_ingestors
-            .saturating_add(self.active_generators)
-            .saturating_add(self.outstanding_acks)
-            .saturating_add(self.buffered_emitter_messages);
+        let total = [
+            self.active_ingestors,
+            self.active_generators,
+            self.outstanding_acks,
+            self.buffered_emitter_messages,
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .assured("every count totals work items this cluster already holds in memory");
         if let Some(node) = &self.node {
             write!(
                 formatter,
@@ -320,43 +350,60 @@ impl std::fmt::Display for DrainOutstanding {
 #[derive(Debug, Error)]
 enum DomainAlterError {
     #[error("domain '{domain}' already has a model alteration in progress")]
-    ConcurrentAlter { domain: Domain },
+    ConcurrentAlter { domain: DomainName },
     #[error("{outstanding}")]
     QuiesceTimeout { outstanding: DrainOutstanding },
     #[error(
-        "timed out draining domain '{domain}' for entity alteration: \
-         relay_buffers={buffered_relay_batches}, \
-         node_work_items={node_work_items}{emitter_publishing}"
+        "timed out draining domain '{domain}' for {operation}: pending_node={pending_node}, \
+         relay_buffers={buffered_relay_batches}, node_work_items={node_work_items}, \
+         outstanding_acks={outstanding_acks}{emitter_publishing}"
     )]
     EntityQuiesceTimeout {
-        domain: Domain,
+        domain: DomainName,
+        operation: &'static str,
+        pending_node: ClusterNodeName,
         buffered_relay_batches: usize,
         node_work_items: usize,
+        outstanding_acks: usize,
         emitter_publishing: String,
     },
+    #[error("failed {operation} gate in domain '{domain}': {reason}")]
+    EntityGate {
+        domain: DomainName,
+        operation: &'static str,
+        reason: String,
+    },
     #[error("failed to pause domain '{domain}' for model alteration: {reason}")]
-    PauseDomain { domain: Domain, reason: String },
+    PauseDomain { domain: DomainName, reason: String },
     #[error("failed to stop ingestion in domain '{domain}' for model alteration: {reason}")]
-    StopIngestion { domain: Domain, reason: String },
+    StopIngestion { domain: DomainName, reason: String },
     #[error("failed to resume domain '{domain}' after model alteration: {reason}")]
-    ResumeDomain { domain: Domain, reason: String },
+    ResumeDomain { domain: DomainName, reason: String },
     #[error("failed to restore ingestion in domain '{domain}' after model alteration: {reason}")]
-    RestoreIngestion { domain: Domain, reason: String },
+    RestoreIngestion { domain: DomainName, reason: String },
     #[error("failed to roll back model alteration in domain '{domain}': {reason}")]
-    Rollback { domain: Domain, reason: String },
+    Rollback { domain: DomainName, reason: String },
 }
 
 struct ClusterEntityGate {
     operation_id: u64,
-    domain: Domain,
-    nodes: Vec<String>,
+    domain: DomainName,
+    /// Nodes whose gate engagement was attempted and not yet released. Membership decides both
+    /// what still needs releasing and what a repeated attempt must not duplicate, so this is a set.
+    nodes: BTreeSet<ClusterNodeName>,
     release_owner: Option<SessionServiceImpl>,
 }
 
 struct PendingClusterEntityGateRelease {
     operation_id: u64,
-    domain: Domain,
-    nodes: Vec<String>,
+    domain: DomainName,
+    nodes: BTreeSet<ClusterNodeName>,
+}
+
+struct PlannedOwnershipHandoff {
+    gate: ClusterEntityGate,
+    moves: Vec<PlannedOwnershipMove>,
+    started_at: tokio::time::Instant,
 }
 
 struct InterconnectRelayPayloadLane {
@@ -389,9 +436,10 @@ impl InterconnectRelayPayloadLane {
 #[derive(Clone, Copy)]
 struct EntityGateEngagement<'a> {
     operation_id: u64,
-    domain: &'a Domain,
-    relays: &'a [Identifier],
-    affected_entities: &'a [crate::registry::RegistryEntity],
+    domain: &'a DomainName,
+    relays: &'a [RelayName],
+    affected_entities: &'a [NodeRef],
+    purpose: EntityGatePurpose,
     deadline: tokio::time::Instant,
     reason: &'a str,
 }
@@ -509,7 +557,7 @@ impl OnnxTensorMetadata {
                 .zip(&schema.dimensions)
                 .any(|(actual, declared)| match declared {
                     InferencerTensorDimension::Fixed(declared) => {
-                        *actual >= 0 && *actual != i64::from(*declared)
+                        *actual >= 0 && *actual != i64::from(declared.get())
                     }
                     InferencerTensorDimension::Dynamic => *actual >= 0,
                     InferencerTensorDimension::Batch => *actual >= 0,
@@ -555,22 +603,23 @@ use crate::{
     },
     resource::{ResourceEntryType, ResourceManifestEntry, ResourceStore},
     runtime::{
-        CompiledProgramWithMaterializedInterest, IngestHeaders,
+        CompiledProgramWithMaterializedInterest, EntityGateLease, IngestMessageHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
-        RelaySubscriptionReceiver, RelaySubscriptionRecvError, Runtime, RuntimeEvent,
-        RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext, SignalingDataSink,
-        WebsocketSignalingSession, compile_session_filter_map_program,
-        execute_filter_map_on_record, scheduled_branched_stream_owner_nodes,
+        RelaySubscriptionReceiver, RelaySubscriptionRecvError, RetainedIngestHeaders, Runtime,
+        RuntimeEvent, RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext,
+        SignalingDataSink, WebsocketSignalingSession, compile_session_filter_map_program,
+        execute_filter_map_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
+    task_shutdown::JoinShutdown as _,
 };
 
 const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct SessionSubscription {
-    domain: Domain,
-    relay: Identifier,
+    domain: DomainName,
+    relay: RelayName,
     active: Arc<AtomicBool>,
     stop_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -583,13 +632,13 @@ struct SubscriptionFilter {
 
 #[derive(Clone)]
 struct SubscriptionMatcher {
-    field: Identifier,
+    field: FieldName,
     expected: runtime_schema::RuntimeValue,
 }
 
 struct SessionSubscriptions {
-    subscriptions: HashMap<Identifier, SessionSubscription>,
-    user: Identifier,
+    subscriptions: HashMap<SubscriptionName, SessionSubscription>,
+    user: UserName,
     session_id: String,
     transaction_id: Option<String>,
 }
@@ -615,8 +664,8 @@ struct SessionSubscriptionTaskConfig {
     sensitivity: nervix_vm::SchemaSensitivity,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<f64>,
-    runtime: Arc<Runtime>,
-    materialized_stream_owner_nodes: HashMap<Identifier, Option<String>>,
+    runtime: Runtime,
+    materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     receiver: RelaySubscriptionReceiver<RelayRecordBatch>,
     tx: mpsc::Sender<Result<SessionResponse, Status>>,
 }
@@ -625,11 +674,11 @@ impl SessionSubscriptions {
     #[cfg(test)]
     fn new() -> Self {
         Self::for_user(
-            Identifier::parse(DEFAULT_USER).expect("default user identifier must be valid"),
+            UserName::parse(DEFAULT_USER).expect("default user identifier must be valid"),
         )
     }
 
-    fn for_user(user: Identifier) -> Self {
+    fn for_user(user: UserName) -> Self {
         Self {
             subscriptions: HashMap::new(),
             user,
@@ -712,9 +761,9 @@ impl SessionSubscriptions {
 
     fn insert(
         &mut self,
-        name: Identifier,
-        domain: Domain,
-        relay: Identifier,
+        name: SubscriptionName,
+        domain: DomainName,
+        relay: RelayName,
         config: SessionSubscriptionTaskConfig,
     ) {
         let SessionSubscriptionTaskConfig {
@@ -748,7 +797,7 @@ impl SessionSubscriptions {
                                         let event = SessionResponse {
                                             event: Some(proto::session_response::Event::Server(
                                                 ServerEvent {
-                                                    level: ServerEventLevel::Error as i32,
+                                                    level: i32::from(ServerEventLevel::Error),
                                                     message: format!(
                                                         "session subscription '{}' failed to expand relay batch: {}",
                                                         event_name, error
@@ -785,7 +834,7 @@ impl SessionSubscriptions {
                                                     let event = SessionResponse {
                                                         event: Some(proto::session_response::Event::Server(
                                                             ServerEvent {
-                                                                level: ServerEventLevel::Error as i32,
+                                                                level: i32::from(ServerEventLevel::Error),
                                                                 message: format!(
                                                                     "session subscription '{}' failed to load materialized side inputs: {}",
                                                                     event_name, error
@@ -813,7 +862,7 @@ impl SessionSubscriptions {
                                                 let event = SessionResponse {
                                                     event: Some(proto::session_response::Event::Server(
                                                         ServerEvent {
-                                                            level: ServerEventLevel::Error as i32,
+                                                            level: i32::from(ServerEventLevel::Error),
                                                             message: format!(
                                                                 "session subscription '{}' FILTER-MAP failed: {}",
                                                                 event_name, error
@@ -866,7 +915,7 @@ impl SessionSubscriptions {
                                 let event = SessionResponse {
                                     event: Some(proto::session_response::Event::Server(
                                         ServerEvent {
-                                            level: ServerEventLevel::Error as i32,
+                                            level: i32::from(ServerEventLevel::Error),
                                             message: format!(
                                                 "session subscription '{}' was dropped because \
                                                  relay '{}' in domain '{}' was rebuilt after a \
@@ -907,7 +956,7 @@ impl SessionSubscriptions {
         );
     }
 
-    fn contains_domain_stream(&self, domain: &Domain, relay: &Identifier) -> bool {
+    fn contains_domain_stream(&self, domain: &DomainName, relay: &RelayName) -> bool {
         self.subscriptions.values().any(|subscription| {
             subscription.active.load(Ordering::Acquire)
                 && subscription.domain == *domain
@@ -915,7 +964,7 @@ impl SessionSubscriptions {
         })
     }
 
-    fn contains_name(&self, name: &Identifier) -> bool {
+    fn contains_name(&self, name: &SubscriptionName) -> bool {
         self.subscriptions
             .get(name)
             .is_some_and(|subscription| subscription.active.load(Ordering::Acquire))
@@ -933,17 +982,23 @@ impl SessionSubscriptions {
             .collect()
     }
 
-    async fn remove(&mut self, name: &Identifier) -> Option<(Domain, Identifier)> {
+    async fn remove(&mut self, name: &SubscriptionName) -> Option<(DomainName, RelayName)> {
         let subscription = self.subscriptions.remove(name)?;
         let _ = subscription.stop_tx.send(true);
-        let _ = subscription.task.await;
+        subscription
+            .task
+            .join_after_shutdown("session subscription")
+            .await;
         Some((subscription.domain, subscription.relay))
     }
 
     async fn stop_all(&mut self, service: &SessionServiceImpl) {
         for (_, subscription) in self.subscriptions.drain() {
             let _ = subscription.stop_tx.send(true);
-            let _ = subscription.task.await;
+            subscription
+                .task
+                .join_after_shutdown("session subscription")
+                .await;
             service
                 .unregister_subscription_interest(&subscription.domain, &subscription.relay)
                 .await;
@@ -966,8 +1021,8 @@ fn format_stream_message(
 }
 
 fn validate_subscription_bindings(
-    relay: &Identifier,
-    branching: &[Identifier],
+    relay: &RelayName,
+    branching: &[FieldName],
     schema: &nervix_models::CreateSchema,
     bindings: &[SubscriptionBinding],
 ) -> Result<SubscriptionFilter, String> {
@@ -989,7 +1044,7 @@ fn validate_subscription_bindings(
             relay.as_str(),
             branching
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -1021,7 +1076,7 @@ fn validate_subscription_bindings(
             relay.as_str(),
             branching
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -1038,7 +1093,7 @@ fn validate_subscription_bindings(
         })?;
         let literal = bound
             .get(field)
-            .expect("validated binding set must include branch field");
+            .verified("the check above requires the bound keys to match the branch fields exactly");
         let expected = parse_subscription_literal(field, ty, literal)?;
         matchers.push(SubscriptionMatcher {
             field: field.clone(),
@@ -1050,7 +1105,7 @@ fn validate_subscription_bindings(
 }
 
 fn branch_key_from_filter(
-    branching: &[Identifier],
+    branching: &[FieldName],
     filter: &SubscriptionFilter,
 ) -> Result<Option<crate::runtime::BranchKey>, String> {
     if branching.is_empty() {
@@ -1117,12 +1172,12 @@ fn subscription_sample_passes(batch_sample_rate: Option<f64>, message: &RelayMes
     let hash = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&hash.as_bytes()[..8]);
-    let draw = u64::from_le_bytes(bytes) as f64 / u64::MAX as f64;
+    let draw = u64::from_le_bytes(bytes).approx_into::<f64>() / u64::MAX.approx_into::<f64>();
     draw < rate
 }
 
 fn parse_subscription_literal(
-    field: &Identifier,
+    field: &FieldName,
     ty: &ParseAsType,
     literal: &SubscriptionLiteral,
 ) -> Result<runtime_schema::RuntimeValue, String> {
@@ -1194,20 +1249,26 @@ fn response_with_status(status: StatusCode) -> HyperResponse<Empty<Bytes>> {
     HyperResponse::builder()
         .status(status)
         .body(empty_body())
-        .expect("empty response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn endpoint_rejection_response(retry_after: Option<Duration>) -> HyperResponse<Empty<Bytes>> {
     let mut response = HyperResponse::builder().status(StatusCode::SERVICE_UNAVAILABLE);
     if let Some(retry_after) = retry_after {
+        // `Retry-After` is whole seconds, so a sub-second remainder rounds the wait up.
         let seconds = retry_after
             .as_secs()
-            .saturating_add(u64::from(retry_after.subsec_nanos() > 0));
+            .checked_add(u64::from(retry_after.subsec_nanos() > 0))
+            .assured("a Duration's whole seconds leave room for the rounding increment");
         response = response.header(RETRY_AFTER, seconds.to_string());
     }
-    response
-        .body(empty_body())
-        .expect("endpoint rejection response must build")
+    response.body(empty_body()).assured(
+        "the status and header values are typed constants or generated ASCII, which the http \
+         builder always accepts",
+    )
 }
 
 fn response_with_bytes(
@@ -1219,7 +1280,10 @@ fn response_with_bytes(
         .status(status)
         .header(hyper::header::CONTENT_TYPE, content_type)
         .body(Full::new(body.into()))
-        .expect("byte response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn text_response(status: StatusCode, body: impl Into<Bytes>) -> HyperResponse<Full<Bytes>> {
@@ -1237,7 +1301,10 @@ fn web_console_upload_text_response(
         .header(ACCESS_CONTROL_ALLOW_METHODS, "POST, OPTIONS")
         .header(ACCESS_CONTROL_ALLOW_HEADERS, "content-type")
         .body(Full::new(body.into()))
-        .expect("web console upload response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
@@ -1245,7 +1312,10 @@ fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
         .status(StatusCode::PERMANENT_REDIRECT)
         .header(LOCATION, location)
         .body(Full::new(Bytes::new()))
-        .expect("redirect response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn try_take_length_delimited_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -1253,7 +1323,7 @@ fn try_take_length_delimited_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
         return None;
     }
 
-    let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+    let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]).arch_into();
     if buffer.len() < 4 + len {
         return None;
     }
@@ -1290,37 +1360,35 @@ fn is_websocket_upgrade_request(request: &HyperRequest<HyperIncoming>) -> bool {
 
 /// Ingests data frames that arrive on a server-side endpoint while its handshake is running.
 struct EndpointSignalingDataSink<'a> {
-    runtime: &'a Arc<Runtime>,
+    runtime: &'a Runtime,
     host: &'a str,
     path: &'a str,
-    headers: &'a IngestHeaders,
+    headers: &'a RetainedIngestHeaders,
 }
 
 impl SignalingDataSink for EndpointSignalingDataSink<'_> {
     async fn accept(&self, payload: Vec<u8>) {
         self.runtime
-            .dispatch_websocket_payload(
-                self.host,
-                self.path,
-                payload.as_slice(),
-                self.headers.clone(),
-            )
+            .dispatch_websocket_payload(self.host, self.path, payload.as_slice(), self.headers)
             .await;
     }
 }
 
-fn ingest_headers_from_hyper(headers: &hyper::HeaderMap) -> IngestHeaders {
-    let mut values = IngestHeaders::new();
-    for (name, value) in headers {
-        if let Ok(value) = value.to_str() {
-            values.push((name.as_str().to_string(), value.to_string()));
+/// The headers of one borrowed request, skipping values that are not UTF-8.
+struct HyperRequestHeaders<'a>(&'a hyper::HeaderMap);
+
+impl IngestMessageHeaders for HyperRequestHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        for (name, value) in self.0 {
+            if let Ok(value) = value.to_str() {
+                visit(name.as_str(), value);
+            }
         }
     }
-    values
 }
 
 async fn handle_http_request(
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     request_tasks: TaskTracker,
     shutdown: CancellationToken,
     mut request: HyperRequest<HyperIncoming>,
@@ -1341,16 +1409,17 @@ async fn handle_http_request(
         if !admission.is_accepted() {
             return Ok(endpoint_rejection_response(admission.retry_after));
         }
-        let headers = ingest_headers_from_hyper(request.headers());
+        // The session outlives the upgrade request, so its handshake headers are copied
+        // once here and appended from that copy for every later frame.
+        let headers = RetainedIngestHeaders::capture(&HyperRequestHeaders(request.headers()));
 
-        let Some(sec_websocket_key) = request
-            .headers()
-            .get(SEC_WEBSOCKET_KEY)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-        else {
+        let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
             return Ok(response_with_status(StatusCode::BAD_REQUEST));
         };
+        let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
+            return Ok(response_with_status(StatusCode::BAD_REQUEST));
+        };
+        let sec_websocket_key = sec_websocket_key.to_owned();
 
         let response = HyperResponse::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -1361,7 +1430,10 @@ async fn handle_http_request(
                 derive_accept_key(sec_websocket_key.as_bytes()),
             )
             .body(empty_body())
-            .expect("websocket upgrade response must build");
+            .assured(
+                "the status and header values are typed constants or generated ASCII, which the \
+                 http builder always accepts",
+            );
 
         let on_upgrade = upgrade::on(&mut request);
         request_tasks.spawn(async move {
@@ -1416,7 +1488,7 @@ async fn handle_http_request(
                                         &host,
                                         &path,
                                         payload.as_bytes(),
-                                        headers.clone(),
+                                        &headers,
                                     )
                                     .await;
                                 if !outcome.is_accepted() {
@@ -1435,7 +1507,7 @@ async fn handle_http_request(
                                         &host,
                                         &path,
                                         payload.as_ref(),
-                                        headers.clone(),
+                                        &headers,
                                     )
                                     .await;
                                 if !outcome.is_accepted() {
@@ -1475,8 +1547,6 @@ async fn handle_http_request(
         if request.method() != Method::POST {
             return Ok(response_with_status(StatusCode::METHOD_NOT_ALLOWED));
         }
-        let headers = ingest_headers_from_hyper(request.headers());
-
         let body = match request.body_mut().collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(error) => {
@@ -1486,7 +1556,12 @@ async fn handle_http_request(
         };
 
         let outcome = runtime
-            .dispatch_http_payload(&host, &path, body.as_ref(), headers)
+            .dispatch_http_payload(
+                &host,
+                &path,
+                body.as_ref(),
+                &HyperRequestHeaders(request.headers()),
+            )
             .await;
         return Ok(if outcome.is_accepted() {
             response_with_status(StatusCode::ACCEPTED)
@@ -1499,7 +1574,7 @@ async fn handle_http_request(
 }
 
 async fn serve_http(
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     request_tasks: TaskTracker,
     listener: TcpListener,
     shutdown: CancellationToken,
@@ -1549,7 +1624,7 @@ async fn serve_http(
 }
 
 async fn serve_https(
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     request_tasks: TaskTracker,
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     listener: TcpListener,
@@ -1640,8 +1715,8 @@ async fn read_cbor_request_body<T: serde::de::DeserializeOwned>(
 fn parse_resource_archive_request_path(path: &str) -> Option<ResourceId> {
     let suffix = path.strip_prefix(RESOURCE_ARCHIVE_PATH_PREFIX)?;
     let mut parts = suffix.split('/');
-    let domain = Domain::parse(parts.next()?).ok()?;
-    let identifier = Identifier::parse(parts.next()?).ok()?;
+    let domain = DomainName::parse(parts.next()?).ok()?;
+    let identifier = ResourceName::parse(parts.next()?).ok()?;
     let version = parts.next()?.parse::<u64>().ok()?;
     if parts.next()? != "archive" || parts.next().is_some() {
         return None;
@@ -1656,7 +1731,8 @@ async fn handle_cluster_api_request(
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     let response = match (request.method(), request.uri().path()) {
         (&Method::GET, path) if parse_resource_archive_request_path(path).is_some() => {
-            let id = parse_resource_archive_request_path(path).expect("path checked above");
+            let id = parse_resource_archive_request_path(path)
+                .verified("the match guard above accepted this same path");
             match resource_store.read_archive_bytes(&id) {
                 Ok(bytes) => response_with_bytes(StatusCode::OK, bytes, "application/x-tar"),
                 Err(_) => text_response(StatusCode::NOT_FOUND, "resource archive not found"),
@@ -1926,17 +2002,19 @@ async fn handle_web_console_request(
             ));
         }
 
-        let Some(sec_websocket_key) = request
-            .headers()
-            .get(SEC_WEBSOCKET_KEY)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-        else {
+        let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
             return Ok(text_response(
                 StatusCode::BAD_REQUEST,
                 "missing websocket key",
             ));
         };
+        let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
+            return Ok(text_response(
+                StatusCode::BAD_REQUEST,
+                "missing websocket key",
+            ));
+        };
+        let sec_websocket_key = sec_websocket_key.to_owned();
 
         let response = HyperResponse::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -1947,13 +2025,16 @@ async fn handle_web_console_request(
                 derive_accept_key(sec_websocket_key.as_bytes()),
             )
             .body(Full::new(Bytes::new()))
-            .expect("web console websocket upgrade response must build");
+            .assured(
+                "the status and header values are typed constants or generated ASCII, which the \
+                 http builder always accepts",
+            );
 
         let on_upgrade = upgrade::on(&mut request);
-        let service_tasks = service.service_tasks.clone();
+        let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
             let upgraded = tokio::select! {
-                _ = service.shutdown.cancelled() => return,
+                _ = service.inner.shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
             match upgraded {
@@ -1965,17 +2046,17 @@ async fn handle_web_console_request(
                     let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
                     let mut leadership_check = interval(WEB_CONSOLE_LEADERSHIP_CHECK_INTERVAL);
                     let mut graph_snapshot = interval(WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL);
-                    let mut domains_rx = service.consensus.subscribe_domains();
+                    let mut domains_rx = service.inner.consensus.subscribe_domains();
                     leadership_check.tick().await;
                     graph_snapshot.tick().await;
                     let mut leader_connected = false;
-                    let mut active_domain = None::<Domain>;
+                    let mut active_domain = None::<DomainName>;
                     let mut clean_close = false;
 
                     loop {
                         tokio::task::consume_budget().await;
                         tokio::select! {
-                            _ = service.shutdown.cancelled() => break,
+                            _ = service.inner.shutdown.cancelled() => break,
                             message = futures_util::StreamExt::next(&mut websocket) => {
                                 let Some(message) = message else {
                                     break;
@@ -2298,7 +2379,7 @@ where
 async fn send_web_console_state_responses<S>(
     websocket: &mut WebSocketStream<S>,
     service: &SessionServiceImpl,
-    active_domain: Option<&Domain>,
+    active_domain: Option<&DomainName>,
 ) -> bool
 where
     WebSocketStream<S>: SinkExt<Message> + Unpin,
@@ -2325,7 +2406,7 @@ where
 fn web_console_server_error_response(message: String) -> SessionResponse {
     SessionResponse {
         event: Some(proto::session_response::Event::Server(ServerEvent {
-            level: ServerEventLevel::Error as i32,
+            level: i32::from(ServerEventLevel::Error),
             message,
         })),
     }
@@ -2358,24 +2439,24 @@ fn credentials_from_basic_authorization(value: &str) -> Option<BasicAuthCredenti
 }
 
 fn credentials_from_metadata(metadata: &MetadataMap) -> Option<BasicAuthCredentials> {
-    metadata
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(credentials_from_basic_authorization)
+    let value = metadata.get("authorization")?;
+    let Ok(value) = value.to_str() else {
+        return None;
+    };
+    credentials_from_basic_authorization(value)
 }
 
 fn credentials_from_web_console_request(
     request: &HyperRequest<HyperIncoming>,
 ) -> Option<BasicAuthCredentials> {
-    request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(credentials_from_basic_authorization)
-        .or_else(|| {
-            web_console_query_param(request.uri().query(), WEB_CONSOLE_AUTH_QUERY_PARAM)
-                .and_then(|token| credentials_from_basic_token(&token))
-        })
+    if let Some(value) = request.headers().get(AUTHORIZATION)
+        && let Ok(value) = value.to_str()
+        && let Some(credentials) = credentials_from_basic_authorization(value)
+    {
+        return Some(credentials);
+    }
+    let token = web_console_query_param(request.uri().query(), WEB_CONSOLE_AUTH_QUERY_PARAM)?;
+    credentials_from_basic_token(&token)
 }
 
 fn unauthorized_basic_response() -> HyperResponse<Full<Bytes>> {
@@ -2386,7 +2467,10 @@ fn unauthorized_basic_response() -> HyperResponse<Full<Bytes>> {
             format!("Basic realm=\"{BASIC_AUTH_REALM}\""),
         )
         .body(Full::new(Bytes::from_static(b"authentication failed")))
-        .expect("basic authentication response must build")
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        )
 }
 
 fn sanitized_upload_relative_path(raw: &str) -> Option<PathBuf> {
@@ -2404,7 +2488,7 @@ fn sanitized_upload_relative_path(raw: &str) -> Option<PathBuf> {
 
 async fn build_web_console_upload_archive(
     directory: &Path,
-    identifier: Identifier,
+    identifier: ModelName,
 ) -> Result<(TempPath, String), (StatusCode, String)> {
     let archive = tempfile::NamedTempFile::new().map_err(|_| {
         (
@@ -2413,14 +2497,12 @@ async fn build_web_console_upload_archive(
         )
     })?;
     let archive_path = archive.into_temp_path();
-    let file = File::create(<TempPath as AsRef<Path>>::as_ref(&archive_path))
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open temporary upload archive".to_string(),
-            )
-        })?;
+    let file = File::create(&archive_path).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to open temporary upload archive".to_string(),
+        )
+    })?;
     write_web_console_upload_archive(directory, file)
         .await
         .map_err(|message| {
@@ -2434,14 +2516,12 @@ async fn build_web_console_upload_archive(
         })?;
 
     let mut hasher = Hasher::new();
-    let mut file = File::open(<TempPath as AsRef<Path>>::as_ref(&archive_path))
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to read temporary upload archive".to_string(),
-            )
-        })?;
+    let mut file = File::open(&archive_path).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read temporary upload archive".to_string(),
+        )
+    })?;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         tokio::task::consume_budget().await;
@@ -2799,7 +2879,7 @@ pub struct Args {
     #[arg(long, env = "NERVIX_CLUSTER_ID", default_value = "default")]
     pub cluster_id: String,
     #[arg(long, env = "NERVIX_NODE_ID")]
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     #[arg(long, env = "NERVIX_GRPC_ADVERTISE_ADDR")]
     pub grpc_advertise_addr: Option<String>,
     #[arg(long, env = "NERVIX_CLUSTER_LISTEN_ADDR")]
@@ -2996,7 +3076,7 @@ pub enum Command {
     },
 }
 
-type PendingClusterCommands = Arc<DashMap<u64, PendingClusterCommand, RandomState>>;
+type PendingClusterCommands = DashMap<u64, PendingClusterCommand, RandomState>;
 
 enum PendingClusterCommand {
     DescribeRelay(oneshot::Sender<Result<bool, String>>),
@@ -3014,61 +3094,200 @@ enum PendingClusterCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct KafkaPartitionWatcherKey {
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
+}
+
+/// One relay whose subscription interest this node advertises to the cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SubscriptionInterestKey {
+    domain: DomainName,
+    relay: RelayName,
+}
+
+/// One statement of a model-mutation batch that reached the registry: which statement it was,
+/// the model it changed, and the message its own result reports.
+struct AppliedModelMutation {
+    index: usize,
+    model: ModelName,
+    message: String,
+}
+
+/// The last replicated clock state a domain was reconciled against, so a repeated state that
+/// changes neither the start version nor whether the domain runs is not reconciled again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DomainClockReconciliation {
+    start_version: u64,
+    running: bool,
+}
+
+/// A paced domain's clock as one committed transaction starts it: where its logical time begins,
+/// how fast it advances, and the start version that clock belongs to.
+struct StartedDomainClock {
+    domain_id: DomainName,
+    wall_started_at: Timestamp,
+    logical_start: Timestamp,
+    time_rate: String,
+    start_version: u64,
+}
+
+/// A domain schedule computed from a candidate graph, with how many runtime nodes it moves off
+/// the node that owns them today.
+struct PreparedDomainSchedule {
+    schedule: Option<nervix_models::DomainSchedule>,
+    relocations: usize,
+}
+
+/// The schedule change one model mutation makes: what the domain is scheduled as now, what it
+/// would be scheduled as, and how many runtime nodes that move relocates.
+#[derive(Default)]
+struct ScheduleTransition {
+    expected_schedule: Option<nervix_models::DomainSchedule>,
+    prepared_schedule: Option<nervix_models::DomainSchedule>,
+    planned_relocations: usize,
+}
+
+/// The hash map a lookup query reaches, as the cluster schedule describes it: the lookup model,
+/// the scheduled node that owns it, and the declared type of its key field.
+struct LookupTarget {
+    lookup: CreateLookup,
+    node: ScheduledNode,
+    key_ty: ParseAsType,
+}
+
+/// The relay a subscription attaches to, as the cluster schedule describes it: the relay model,
+/// the schema its records carry, and the branch key fields a subscription may bind.
+struct SubscriptionTarget {
+    relay: nervix_models::CreateRelay,
+    schema: nervix_models::CreateSchema,
+    branching: Vec<FieldName>,
+}
+
+/// A running background task and the token that stops it.
+struct BackgroundTask {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl BackgroundTask {
+    /// Stops the task and waits for it to finish, so the caller never drops a task that is still
+    /// touching the state it is about to replace.
+    async fn stop(self) {
+        self.cancel.cancel();
+        self.handle.join_after_shutdown("background task").await;
+    }
+}
+
+/// One Kafka partition watcher the leader runs: the ingestor it watches for, and the task doing
+/// the watching.
+struct KafkaPartitionWatcherTask {
+    spec: KafkaPartitionWatcherSpec,
+    task: BackgroundTask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KafkaPartitionWatcherSpec {
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     topic: String,
-    instances: u64,
+    instances: NonZeroU64,
     client: nervix_models::CreateClientKafka,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DrainMove {
     label: String,
-    promoted_replica: Option<String>,
-    fallback_node: Option<String>,
+    promoted_replica: Option<ClusterNodeName>,
+    fallback_node: Option<ClusterNodeName>,
+}
+
+#[derive(Clone, Copy)]
+enum AssignmentRelocation {
+    Planned,
+    Failure,
+}
+
+impl AssignmentRelocation {
+    fn target(
+        self,
+        desired_target: Option<ClusterNodeName>,
+        existing_replica: Option<ClusterNodeName>,
+    ) -> Option<ClusterNodeName> {
+        match self {
+            Self::Planned => desired_target.or(existing_replica),
+            Self::Failure => existing_replica.or(desired_target),
+        }
+    }
+
+    fn retains_former_replica(self) -> bool {
+        match self {
+            Self::Planned => true,
+            Self::Failure => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedOwnershipMove {
+    entity: NodeRef,
+    former_owner: ClusterNodeName,
+    destination: ClusterNodeName,
+    replicas: Vec<ClusterNodeName>,
+    promoted_replica: bool,
 }
 
 type AuthRateLimiter = DefaultKeyedRateLimiter<String>;
 
+/// The handle every gRPC request, background reconciliation task, and HTTP server clones. It is
+/// one `Arc` over the server's state, so handing the service to a spawned task costs a single
+/// refcount rather than one per piece of state the server owns.
 #[derive(Clone)]
 struct SessionServiceImpl {
+    inner: Arc<SessionServiceInner>,
+}
+
+/// Everything one Nervix server owns for as long as it serves. These fields are reached only
+/// through a `SessionServiceImpl` handle and therefore hold their values directly. The ones that
+/// keep an `Arc` of their own have a second owner outside the service, and each names it.
+struct SessionServiceInner {
+    /// Started and shut down by the application, which outlives the service handle.
     cluster: Arc<cluster::ClusterHandle>,
+    /// Started and shut down by the application, which outlives the service handle.
     consensus: Arc<ConsensusHandle>,
+    /// Also held by the application and by the registry reconciliation tasks it spawns.
     registry: Arc<Registry>,
+    /// Also held by the application startup that opened it and by the cluster API server.
     resource_store: Arc<ResourceStore>,
+    /// Built by the application and shared with the cluster API server.
     cluster_api_clients: Arc<ClusterApiClients>,
+    /// Also held by the HTTPS server, which reads the current certificate on every accept.
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     replica_count: usize,
     #[cfg(feature = "testing")]
     scheduler_mode: SchedulerMode,
     shutdown: CancellationToken,
     events: broadcast::Sender<ServerEvent>,
-    subscription_interest_counts: Arc<DashMap<(Domain, Identifier), usize, RandomState>>,
-    interconnect: Arc<Transport>,
-    domain_clocks: Arc<DashMap<Domain, DomainClockRuntimeState, RandomState>>,
-    domain_clock_reconciliations: Arc<DashMap<Domain, (u64, bool), RandomState>>,
-    domain_clock_events: Arc<Notify>,
-    next_cluster_command_correlation_id: Arc<AtomicU64>,
+    subscription_interest_counts: DashMap<SubscriptionInterestKey, usize, RandomState>,
+    interconnect: Transport,
+    domain_clocks: DashMap<DomainName, DomainClockRuntimeState, RandomState>,
+    domain_clock_reconciliations: DashMap<DomainName, DomainClockReconciliation, RandomState>,
+    domain_clock_events: Notify,
+    next_cluster_command_correlation_id: AtomicU64,
     pending_cluster_commands: PendingClusterCommands,
     service_tasks: TaskTracker,
     configured_basic_auth: Option<BasicAuthCredentials>,
-    auth_rate_limiter: Arc<AuthRateLimiter>,
-    failed_auth_rate_limit_keys: Arc<DashMap<String, (), RandomState>>,
+    auth_rate_limiter: AuthRateLimiter,
+    failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
     transaction_idle_timeout: Duration,
     transaction_tombstone_retention: Duration,
     transaction_max_statements: usize,
     transaction_max_source_bytes: u64,
     transaction_max_open: usize,
-    transaction_bindings: Arc<DashMap<String, String, RandomState>>,
+    transaction_bindings: DashMap<String, String, RandomState>,
+    /// Also held by every outstanding `TransactionExecutionLease`, which clears its entry on drop.
     transaction_executions: Arc<DashMap<String, (), RandomState>>,
-    transaction_commit_execution: Arc<AsyncMutex<()>>,
+    transaction_commit_execution: AsyncMutex<()>,
 }
 
 struct TransactionExecutionLease {
@@ -3090,11 +3309,11 @@ impl Drop for TransactionExecutionLease {
 }
 
 impl ClusterEntityGate {
-    fn new(service: &SessionServiceImpl, operation_id: u64, domain: &Domain) -> Self {
+    fn new(service: &SessionServiceImpl, operation_id: u64, domain: &DomainName) -> Self {
         Self {
             operation_id,
             domain: domain.clone(),
-            nodes: Vec::new(),
+            nodes: BTreeSet::new(),
             release_owner: Some(service.clone()),
         }
     }
@@ -3102,14 +3321,12 @@ impl ClusterEntityGate {
     /// Records a node before sending its engagement request. A response timeout is ambiguous: the
     /// remote node may already own the durable lease, so cleanup must include every attempted node
     /// and rely on idempotent release.
-    fn record_attempt(&mut self, node: String) {
-        if !self.nodes.iter().any(|candidate| candidate == &node) {
-            self.nodes.push(node);
-        }
+    fn record_attempt(&mut self, node: ClusterNodeName) {
+        self.nodes.insert(node);
     }
 
-    fn mark_released(&mut self, node: &str) {
-        self.nodes.retain(|candidate| candidate != node);
+    fn mark_released(&mut self, node: &ClusterNodeName) {
+        self.nodes.remove(node);
     }
 
     fn schedule_remaining_releases(&mut self) {
@@ -3124,6 +3341,10 @@ impl ClusterEntityGate {
             domain: self.domain.clone(),
             nodes: std::mem::take(&mut self.nodes),
         });
+    }
+
+    fn defer_release_to_lease_deadline(mut self) {
+        self.release_owner = None;
     }
 }
 
@@ -3158,7 +3379,7 @@ enum ActiveDomainError {
     #[error("invalid active domain")]
     Invalid,
     #[error("domain '{domain}' does not exist")]
-    NotFound { domain: Domain },
+    NotFound { domain: DomainName },
 }
 
 #[derive(Clone)]
@@ -3233,6 +3454,8 @@ const INTERNAL_TLS_KEY_FILE: &str = "node-key.pem";
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("failed to build the Tokio runtime")]
+    BuildRuntime,
     #[error("failed to parse server address")]
     ParseAddress,
     #[error("failed to bind gRPC listen address")]
@@ -3382,7 +3605,7 @@ pub struct Application {
     #[builder(default)]
     pub web_console_tls_key: Option<PathBuf>,
     pub cluster_id: String,
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     pub grpc_advertise_addr: cluster::HostPort,
     pub cluster_listen_addr: SocketAddr,
     pub cluster_advertise_addr: cluster::HostPort,
@@ -3448,9 +3671,9 @@ struct ApplicationStartup {
     db: Database,
     resource_store: Arc<ResourceStore>,
     registry: Arc<Registry>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
     consensus: Option<Arc<ConsensusHandle>>,
-    interconnect: Option<Arc<Transport>>,
+    interconnect: Option<Transport>,
 }
 
 impl ApplicationStartup {
@@ -3698,14 +3921,14 @@ impl SessionService for SessionServiceImpl {
         let mut inbound = request.into_inner();
         let service = self.clone();
         let (tx, rx) = mpsc::channel(16);
-        let mut event_rx = self.events.subscribe();
-        let mut runtime_event_rx = self.runtime.subscribe_events();
+        let mut event_rx = self.inner.events.subscribe();
+        let mut runtime_event_rx = self.inner.runtime.subscribe_events();
 
-        let service_tasks = service.service_tasks.clone();
+        let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
             let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
             let mut clean_close = false;
-            let shutdown = service.shutdown.clone();
+            let shutdown = service.inner.shutdown.clone();
             loop {
                 tokio::task::consume_budget().await;
                 tokio::select! {
@@ -3814,7 +4037,11 @@ impl SessionService for SessionServiceImpl {
                                     return;
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            // The session stays open and resumes from the newest event. Saying how
+                            // many it skipped is what stops the gap from looking like quiet.
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                warn!(skipped, "session fell behind the server event bus");
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -3823,7 +4050,7 @@ impl SessionService for SessionServiceImpl {
                             Ok(RuntimeEvent::Error(message)) => {
                                 let response = SessionResponse {
                                     event: Some(proto::session_response::Event::Server(ServerEvent {
-                                        level: ServerEventLevel::Error as i32,
+                                        level: i32::from(ServerEventLevel::Error),
                                         message,
                                     })),
                                 };
@@ -3833,7 +4060,11 @@ impl SessionService for SessionServiceImpl {
                                     return;
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            // As above: the runtime errors the session missed are gone, so the
+                            // count is the only record that they happened.
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                warn!(skipped, "session fell behind the runtime event bus");
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -3856,16 +4087,17 @@ impl SessionService for SessionServiceImpl {
         request: Request<tonic::Streaming<UploadResourceRequest>>,
     ) -> Result<Response<UploadResourceResponse>, Status> {
         let _authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
-        let leader = self.consensus.current_leader().await;
-        if leader.as_deref() != Some(self.consensus.local_node_id()) {
-            let leader_grpc_uri = match leader.as_deref() {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
+            let leader_grpc_uri = match leader.as_ref() {
                 Some(leader_id) => self
+                    .inner
                     .cluster
                     .gossip_state()
                     .await
                     .live_nodes
                     .into_iter()
-                    .find(|node| node.node_id == leader_id)
+                    .find(|node| node.node_id == *leader_id)
                     .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
                     .unwrap_or_default(),
                 None => String::new(),
@@ -3875,8 +4107,8 @@ impl SessionService for SessionServiceImpl {
                 message: "resource uploads must be sent to the cluster leader".to_string(),
                 version: 0,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::NotLeader as i32,
-                leader: leader.unwrap_or_default(),
+                kind: i32::from(CommandResultKind::NotLeader),
+                leader: leader.map_or_else(String::new, |leader| leader.to_string()),
                 leader_grpc_uri,
             }));
         }
@@ -3892,7 +4124,7 @@ impl SessionService for SessionServiceImpl {
                 "upload resource relay must start with metadata",
             ));
         };
-        let identifier = Identifier::parse(&start.name)
+        let identifier = ModelName::parse(&start.name)
             .map_err(|_| Status::invalid_argument("upload resource name is invalid"))?;
         let domain = match parse_request_domain(&start.domain) {
             Ok(domain) => domain,
@@ -3906,14 +4138,14 @@ impl SessionService for SessionServiceImpl {
             }
         };
 
-        let resources = self.consensus.current_resources().await;
-        if !resources.is_declared(&domain, &identifier) {
+        let resources = self.inner.consensus.current_resources().await;
+        if !resources.is_declared(&domain, &ResourceName::from(&identifier)) {
             return Ok(Response::new(UploadResourceResponse {
                 success: false,
                 message: format!("resource '{}' does not exist", identifier.as_str()),
                 version: 0,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
             }));
@@ -3922,7 +4154,7 @@ impl SessionService for SessionServiceImpl {
         let temp_archive = tempfile::NamedTempFile::new()
             .map_err(|_| Status::internal("failed to create temporary upload archive"))?;
         let temp_path = temp_archive.into_temp_path();
-        let mut file = File::create(<TempPath as AsRef<std::path::Path>>::as_ref(&temp_path))
+        let mut file = File::create(&temp_path)
             .await
             .map_err(|_| Status::internal("failed to open temporary upload archive"))?;
         let mut hasher = Hasher::new();
@@ -3938,7 +4170,9 @@ impl SessionService for SessionServiceImpl {
             file.write_all(&chunk)
                 .await
                 .map_err(|_| Status::internal("failed to write upload resource chunk"))?;
-            total_received = total_received.saturating_add(u64::try_from(chunk.len()).unwrap_or(0));
+            total_received = total_received
+                .checked_add(chunk.len().arch_into())
+                .ok_or_else(|| Status::invalid_argument("upload resource archive is too large"))?;
         }
         file.flush()
             .await
@@ -3954,7 +4188,7 @@ impl SessionService for SessionServiceImpl {
                 ),
                 version: 0,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
             }));
@@ -3965,12 +4199,7 @@ impl SessionService for SessionServiceImpl {
             encode_hex(hash.as_bytes())
         };
         match self
-            .install_uploaded_resource_archive(
-                &domain,
-                identifier,
-                <TempPath as AsRef<std::path::Path>>::as_ref(&temp_path),
-                root_checksum,
-            )
+            .install_uploaded_resource_archive(&domain, identifier, &temp_path, root_checksum)
             .await
         {
             Ok(version) => Ok(Response::new(UploadResourceResponse {
@@ -3978,28 +4207,29 @@ impl SessionService for SessionServiceImpl {
                 message: format!("uploaded resource version {version}"),
                 version,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Ok as i32,
+                kind: i32::from(CommandResultKind::Ok),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
             })),
             Err(message) => {
-                let leader = self.consensus.current_leader().await;
-                let leader_grpc_uri = match leader.as_deref() {
-                    Some(leader_id) if leader_id != self.consensus.local_node_id() => self
+                let leader = self.inner.consensus.current_leader().await;
+                let leader_grpc_uri = match leader.as_ref() {
+                    Some(leader_id) if leader_id != self.inner.consensus.local_node_id() => self
+                        .inner
                         .cluster
                         .gossip_state()
                         .await
                         .live_nodes
                         .into_iter()
-                        .find(|node| node.node_id == leader_id)
+                        .find(|node| node.node_id == *leader_id)
                         .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
                         .unwrap_or_default(),
                     _ => String::new(),
                 };
-                let kind = if leader.as_deref() != Some(self.consensus.local_node_id()) {
-                    CommandResultKind::NotLeader as i32
+                let kind = if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
+                    i32::from(CommandResultKind::NotLeader)
                 } else {
-                    CommandResultKind::Error as i32
+                    i32::from(CommandResultKind::Error)
                 };
                 Ok(Response::new(UploadResourceResponse {
                     success: false,
@@ -4007,7 +4237,7 @@ impl SessionService for SessionServiceImpl {
                     version: 0,
                     diagnostics: Vec::new(),
                     kind,
-                    leader: leader.unwrap_or_default(),
+                    leader: leader.map_or_else(String::new, |leader| leader.to_string()),
                     leader_grpc_uri,
                 }))
             }
@@ -4018,7 +4248,7 @@ impl SessionService for SessionServiceImpl {
 async fn apply_cluster_runtime_state(
     runtime: &Runtime,
     cluster: &cluster::ClusterHandle,
-    local_node_id: &str,
+    local_node_id: &ClusterNodeName,
     state: ConsensusRuntimeState,
 ) -> Result<(), crate::runtime::RuntimeError> {
     let has_running_domain = state
@@ -4071,19 +4301,20 @@ async fn apply_cluster_runtime_state(
 }
 
 impl SessionServiceImpl {
-    fn new_auth_rate_limiter() -> Arc<AuthRateLimiter> {
+    fn new_auth_rate_limiter() -> AuthRateLimiter {
         let quota = Quota::per_second(
-            NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND).expect("auth rate limit must be positive"),
+            NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND)
+                .assured("AUTH_RATE_LIMIT_PER_SECOND is a positive constant"),
         );
-        Arc::new(RateLimiter::keyed(quota))
+        RateLimiter::keyed(quota)
     }
 
     async fn apply_current_cluster_state(&self) -> Result<(), crate::runtime::RuntimeError> {
-        let state = self.consensus.current_runtime_state().await;
+        let state = self.inner.consensus.current_runtime_state().await;
         apply_cluster_runtime_state(
-            &self.runtime,
-            &self.cluster,
-            self.consensus.local_node_id(),
+            &self.inner.runtime,
+            &self.inner.cluster,
+            self.inner.consensus.local_node_id(),
             state,
         )
         .await
@@ -4092,7 +4323,7 @@ impl SessionServiceImpl {
     async fn authenticate_grpc_metadata(
         &self,
         metadata: &MetadataMap,
-    ) -> Result<Identifier, GrpcAuthenticationError> {
+    ) -> Result<UserName, GrpcAuthenticationError> {
         let Some(credentials) = credentials_from_metadata(metadata) else {
             return Err(GrpcAuthenticationError::Required);
         };
@@ -4104,40 +4335,53 @@ impl SessionServiceImpl {
     async fn authenticate_basic_credentials(
         &self,
         credentials: &BasicAuthCredentials,
-    ) -> Option<Identifier> {
-        let Ok(user_name) = Identifier::parse(&credentials.username) else {
+    ) -> Option<UserName> {
+        let Ok(user_name) = UserName::parse(&credentials.username) else {
             return None;
         };
-        let user = self.consensus.current_user(&user_name).await?;
+        let user = self.inner.consensus.current_user(&user_name).await?;
         let auth_rate_limit_key = user_name.as_str().to_string();
         if self
+            .inner
             .failed_auth_rate_limit_keys
             .contains_key(&auth_rate_limit_key)
         {
-            self.auth_rate_limiter
+            self.inner
+                .auth_rate_limiter
                 .until_key_ready(&auth_rate_limit_key)
                 .await;
         }
         let verified = verify_password_hash(user.password_hash, credentials.password.clone()).await;
         if verified {
-            self.failed_auth_rate_limit_keys
+            self.inner
+                .failed_auth_rate_limit_keys
                 .remove(&auth_rate_limit_key);
         } else {
-            self.failed_auth_rate_limit_keys
+            self.inner
+                .failed_auth_rate_limit_keys
                 .insert(auth_rate_limit_key, ());
         }
         verified.then_some(user_name)
     }
 
     fn next_cluster_command_correlation_id(&self) -> u64 {
-        self.next_cluster_command_correlation_id
+        self.inner
+            .next_cluster_command_correlation_id
             .fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Report a control-plane failure this node recovered from to the sessions attached to it.
+    ///
+    /// Unlike the runtime event bus, this one carries no fan-out task, so its only subscribers are
+    /// live sessions and a node serving none is the ordinary case rather than a startup window.
+    /// The event is therefore expected to find no receiver, and the log is what keeps the recovery
+    /// observable when it does.
     fn broadcast_error(&self, message: impl Into<String>) {
-        let _ = self.events.send(ServerEvent {
-            level: ServerEventLevel::Error as i32,
-            message: message.into(),
+        let message = message.into();
+        warn!(error = %message, "server error reported to sessions");
+        let _ = self.inner.events.send(ServerEvent {
+            level: i32::from(ServerEventLevel::Error),
+            message,
         });
     }
 
@@ -4149,7 +4393,7 @@ impl SessionServiceImpl {
     /// produced them, so `CREATE` and every present and future `ALTER` share one boundary.
     async fn validate_changed_model_bindings(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         pace: DomainPace,
         planned: &crate::registry::PlannedMutations,
     ) -> Result<(), String> {
@@ -4226,7 +4470,8 @@ impl SessionServiceImpl {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        self.runtime
+        self.inner
+            .runtime
             .prepare_domain_udfs(domain_udfs)
             .await
             .map(Some)
@@ -4235,23 +4480,24 @@ impl SessionServiceImpl {
 
     async fn validate_vhost_tls_binding(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         tls: &VhostTlsResource,
     ) -> Result<(), String> {
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let id = resolve_resource_id(&resources, domain, &tls.resource, tls.version)?;
-        load_vhost_tls_materials(&self.resource_store, &id).await?;
+        load_vhost_tls_materials(&self.inner.resource_store, &id).await?;
         Ok(())
     }
 
     async fn validate_lookup_binding(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         lookup: &CreateLookup,
     ) -> Result<(), String> {
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let id = resolve_resource_id(&resources, domain, &lookup.resource, None)?;
         let path = self
+            .inner
             .resource_store
             .resolve_content_path(&id, &lookup.path)
             .map_err(|error| error.to_string())?;
@@ -4260,7 +4506,7 @@ impl SessionServiceImpl {
 
     async fn validate_inferencer_binding(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         processor: &CreateInferencer,
     ) -> Result<(), String> {
         processor.execution_mode().map_err(|error| {
@@ -4270,7 +4516,7 @@ impl SessionServiceImpl {
                 error
             )
         })?;
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let id = resolve_resource_id(
             &resources,
             domain,
@@ -4278,6 +4524,7 @@ impl SessionServiceImpl {
             processor.resource_version,
         )?;
         let path = self
+            .inner
             .resource_store
             .resolve_content_path(&id, &processor.file)
             .map_err(|error| error.to_string())?;
@@ -4342,10 +4589,9 @@ impl SessionServiceImpl {
         model_metadata.validate_binding_names(processor)?;
 
         for mapping in &processor.inputs {
-            let model_type = model_metadata
-                .inputs
-                .get(&mapping.tensor)
-                .expect("validated ONNX input binding must exist");
+            let model_type = model_metadata.inputs.get(&mapping.tensor).verified(
+                "validate_binding_names above rejected any mapping this metadata does not carry",
+            );
             model_type.validate_declared_schema(
                 processor,
                 "input",
@@ -4355,10 +4601,9 @@ impl SessionServiceImpl {
         }
 
         for declaration in &processor.output_schema {
-            let model_type = model_metadata
-                .outputs
-                .get(&declaration.tensor)
-                .expect("validated ONNX output binding must exist");
+            let model_type = model_metadata.outputs.get(&declaration.tensor).verified(
+                "validate_binding_names above rejected any mapping this metadata does not carry",
+            );
             model_type.validate_declared_schema(
                 processor,
                 "output",
@@ -4419,16 +4664,17 @@ impl SessionServiceImpl {
 
     async fn refresh_http_tls_server_config(&self) -> Result<(), String> {
         nervix_interconnect::install_rustls_crypto_provider();
-        let resources = self.consensus.current_resources().await;
-        let domains = self.consensus.current_domains().await;
+        let resources = self.inner.consensus.current_resources().await;
+        let domains = self.inner.consensus.current_domains().await;
         let mut resolver = ResolvesServerCertUsingSni::new();
         let mut configured_tls = false;
 
         for domain_id in domains.keys() {
             tokio::task::consume_budget().await;
-            let Ok(vhost_ids) = self
-                .registry
-                .list_identifiers(domain_id, ModelKind::Vhost, "")
+            let Ok(vhost_ids) =
+                self.inner
+                    .registry
+                    .list_identifiers(domain_id, ModelKind::Vhost, "")
             else {
                 continue;
             };
@@ -4436,7 +4682,9 @@ impl SessionServiceImpl {
             for vhost_id in vhost_ids {
                 tokio::task::consume_budget().await;
                 let Ok(Some(Model::Vhost(vhost))) =
-                    self.registry.get(domain_id, ModelKind::Vhost, &vhost_id)
+                    self.inner
+                        .registry
+                        .get(domain_id, ModelKind::Vhost, &vhost_id)
                 else {
                     continue;
                 };
@@ -4459,21 +4707,21 @@ impl SessionServiceImpl {
                         }
                     };
                 let version = id.version;
-                let certified_key = match load_vhost_tls_materials(&self.resource_store, &id).await
-                {
-                    Ok(materials) => materials.certified_key,
-                    Err(error) => {
-                        warn!(
-                            domain = domain_id.as_str(),
-                            vhost = vhost.name.as_str(),
-                            resource = tls.resource.as_str(),
-                            version,
-                            error,
-                            "failed to load VHOST TLS materials"
-                        );
-                        continue;
-                    }
-                };
+                let certified_key =
+                    match load_vhost_tls_materials(&self.inner.resource_store, &id).await {
+                        Ok(materials) => materials.certified_key,
+                        Err(error) => {
+                            warn!(
+                                domain = domain_id.as_str(),
+                                vhost = vhost.name.as_str(),
+                                resource = tls.resource.as_str(),
+                                version,
+                                error,
+                                "failed to load VHOST TLS materials"
+                            );
+                            continue;
+                        }
+                    };
 
                 let mut applied_hostname = false;
                 for hostname in &vhost.hostnames {
@@ -4495,7 +4743,7 @@ impl SessionServiceImpl {
             }
         }
 
-        let mut guard = self.http_tls_server_config.write();
+        let mut guard = self.inner.http_tls_server_config.write();
         if configured_tls {
             let config = ServerConfig::builder()
                 .with_no_client_auth()
@@ -4508,21 +4756,22 @@ impl SessionServiceImpl {
     }
 
     async fn publish_resource_replica(&self, replica: ResourceNodeStatus) -> Result<(), String> {
-        let Some(leader_id) = self.consensus.current_leader().await else {
+        let Some(leader_id) = self.inner.consensus.current_leader().await else {
             return Err(
                 "failed to publish resource replica: cluster leader is unknown".to_string(),
             );
         };
 
-        if leader_id == self.consensus.local_node_id() {
+        if leader_id == self.inner.consensus.local_node_id().clone() {
             return self
+                .inner
                 .consensus
                 .put_resource_replica(replica)
                 .await
                 .map_err(|error| format!("failed to publish resource replica: {error}"));
         }
 
-        let gossip = self.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.gossip_state().await;
         let Some(leader_node) = gossip
             .live_nodes
             .into_iter()
@@ -4535,7 +4784,7 @@ impl SessionServiceImpl {
         };
 
         post_resource_replica(
-            self.cluster_api_clients.as_ref(),
+            self.inner.cluster_api_clients.as_ref(),
             &leader_node.cluster_api_advertise_addr,
             &replica,
         )
@@ -4543,9 +4792,23 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_resources_once(&self) {
-        let local_node_id = self.consensus.local_node_id().to_string();
-        let resources = self.consensus.current_resources().await;
-        let live_nodes = self.cluster.gossip_state().await.live_nodes;
+        let local_node_id = self.inner.consensus.local_node_id().clone();
+        let resources = self.inner.consensus.current_resources().await;
+        let live_nodes = self.inner.cluster.gossip_state().await.live_nodes;
+
+        // Replicas indexed by the resource version they hold and then by the node holding it. The
+        // loop below asks about one resource on one node at a time, so both questions resolve by
+        // key instead of scanning every replica for every resource and every live node.
+        let mut replicas_by_resource: HashMap<
+            ResourceId,
+            HashMap<&ClusterNodeName, &ResourceNodeStatus>,
+        > = HashMap::default();
+        for replica in resources.replicas.iter() {
+            replicas_by_resource
+                .entry(replica.key.version_key().resource_id())
+                .or_default()
+                .insert(&replica.key.node_id, replica);
+        }
 
         for resource in resources.versions.iter().cloned() {
             tokio::task::consume_budget().await;
@@ -4556,27 +4819,22 @@ impl SessionServiceImpl {
                 resource.id.version,
                 local_node_id.clone(),
             );
-            let local_replica = resources
-                .replicas
-                .iter()
-                .find(|replica| replica.key == local_key)
-                .cloned();
-            if local_replica.as_ref().is_some_and(|replica| {
-                replica.state == ResourceNodeState::Ready
-                    && replica.root_checksum.as_deref() == Some(resource.root_checksum.as_str())
-            }) {
+            let resource_replicas = replicas_by_resource.get(&resource.id);
+            let holds_current_resource = |node_id: &ClusterNodeName| {
+                resource_replicas.is_some_and(|replicas| {
+                    replicas.get(node_id).is_some_and(|replica| {
+                        replica.state == ResourceNodeState::Ready
+                            && replica.root_checksum.as_deref()
+                                == Some(resource.root_checksum.as_str())
+                    })
+                })
+            };
+            if holds_current_resource(&local_node_id) {
                 continue;
             }
 
             let Some(source_node) = live_nodes.iter().find(|node| {
-                node.node_id != local_node_id
-                    && resources.replicas.iter().any(|replica| {
-                        replica.key.version_key().resource_id() == resource.id
-                            && replica.key.node_id == node.node_id
-                            && replica.state == ResourceNodeState::Ready
-                            && replica.root_checksum.as_deref()
-                                == Some(resource.root_checksum.as_str())
-                    })
+                node.node_id != local_node_id && holds_current_resource(&node.node_id)
             }) else {
                 continue;
             };
@@ -4592,7 +4850,7 @@ impl SessionServiceImpl {
                 };
 
             let archive = match fetch_resource_archive(
-                self.cluster_api_clients.as_ref(),
+                self.inner.cluster_api_clients.as_ref(),
                 &source_node.cluster_api_advertise_addr,
                 &resource.id,
             )
@@ -4627,10 +4885,11 @@ impl SessionServiceImpl {
             }
 
             let manifest = match self
+                .inner
                 .resource_store
                 .install_from_archive_path(
                     resource.id.clone(),
-                    <TempPath as AsRef<std::path::Path>>::as_ref(&archive.path),
+                    &archive.path,
                     archive.root_checksum.clone(),
                     resource.created_by_node.clone(),
                     resource.created_at,
@@ -4686,17 +4945,25 @@ impl SessionServiceImpl {
 
     async fn register_subscription_interest(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> Result<(), String> {
-        let key = (domain.clone(), relay.clone());
+        let key = SubscriptionInterestKey {
+            domain: domain.clone(),
+            relay: relay.clone(),
+        };
         let first_interest = {
-            let mut entry = self.subscription_interest_counts.entry(key).or_insert(0);
+            let mut entry = self
+                .inner
+                .subscription_interest_counts
+                .entry(key)
+                .or_insert(0);
             *entry += 1;
             *entry == 1
         };
         if first_interest {
-            self.cluster
+            self.inner
+                .cluster
                 .set_local_subscription_interest(domain.as_str(), relay.as_str(), true)
                 .await;
         }
@@ -4712,11 +4979,12 @@ impl SessionServiceImpl {
 
     async fn wait_for_subscription_interest_visibility(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> Result<(), String> {
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let mut pending_nodes = self
+            .inner
             .cluster
             .live_node_ids()
             .await
@@ -4763,14 +5031,14 @@ impl SessionServiceImpl {
 
     async fn subscription_interest_is_visible(
         &self,
-        target_node_id: &str,
-        subscriber_node_id: &str,
-        domain: &Domain,
-        relay: &Identifier,
+        target_node_id: &ClusterNodeName,
+        subscriber_node_id: &ClusterNodeName,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> Result<bool, String> {
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands.insert(
+        self.inner.pending_cluster_commands.insert(
             correlation_id,
             PendingClusterCommand::SubscriptionInterestVisibility(tx),
         );
@@ -4780,7 +5048,7 @@ impl SessionServiceImpl {
                 ControlEnvelope::SubscriptionInterestVisibilityRequest(
                     RemoteSubscriptionInterestVisibilityRequest {
                         correlation_id,
-                        subscriber_node_id: subscriber_node_id.to_string(),
+                        subscriber_node_id: subscriber_node_id.clone(),
                         domain: domain.clone(),
                         relay: relay.clone(),
                     },
@@ -4788,7 +5056,7 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(SUBSCRIPTION_INTEREST_CHECK_TIMEOUT, rx).await {
@@ -4798,7 +5066,7 @@ impl SessionServiceImpl {
                 target_node_id
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "timed out checking subscription interest visibility on '{}'",
                     target_node_id
@@ -4812,6 +5080,7 @@ impl SessionServiceImpl {
         response: RemoteSubscriptionInterestVisibilityResponse,
     ) {
         if let Some((_, PendingClusterCommand::SubscriptionInterestVisibility(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -4819,10 +5088,13 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn unregister_subscription_interest(&self, domain: &Domain, relay: &Identifier) {
-        let key = (domain.clone(), relay.clone());
+    async fn unregister_subscription_interest(&self, domain: &DomainName, relay: &RelayName) {
+        let key = SubscriptionInterestKey {
+            domain: domain.clone(),
+            relay: relay.clone(),
+        };
         let mut should_clear = false;
-        if let Some(mut entry) = self.subscription_interest_counts.get_mut(&key) {
+        if let Some(mut entry) = self.inner.subscription_interest_counts.get_mut(&key) {
             if *entry <= 1 {
                 should_clear = true;
             } else {
@@ -4830,8 +5102,9 @@ impl SessionServiceImpl {
             }
         }
         if should_clear {
-            self.subscription_interest_counts.remove(&key);
-            self.cluster
+            self.inner.subscription_interest_counts.remove(&key);
+            self.inner
+                .cluster
                 .set_local_subscription_interest(domain.as_str(), relay.as_str(), false)
                 .await;
         }
@@ -4839,22 +5112,19 @@ impl SessionServiceImpl {
 
     async fn scheduled_stream_owner_nodes(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
-    ) -> Result<Vec<String>, String> {
-        let schedule = self.consensus.current_schedule().await;
+        domain: &DomainName,
+        relay: &RelayName,
+    ) -> Result<Vec<ClusterNodeName>, String> {
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(Vec::new());
         };
-        Ok(scheduled_branched_stream_owner_nodes(
-            domain_schedule,
-            relay,
-        ))
+        Ok(scheduled_relay_owner_nodes(domain_schedule, relay))
     }
 
     async fn dispatch_interconnect_control(
         &self,
-        node_id: &str,
+        node_id: &ClusterNodeName,
         envelope: ControlEnvelope,
     ) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -4862,12 +5132,13 @@ impl SessionServiceImpl {
             tokio::task::consume_budget().await;
             let result = async {
                 let target = self
+                    .inner
                     .cluster
                     .gossip_state()
                     .await
                     .live_nodes
                     .into_iter()
-                    .find(|node| node.node_id == node_id)
+                    .find(|node| node.node_id == node_id.clone())
                     .ok_or_else(|| format!("node '{node_id}' is not live"))?;
                 let addr = target
                     .interconnect_advertise_addr
@@ -4880,6 +5151,7 @@ impl SessionServiceImpl {
                     _ => InterconnectTransportMode::Plain,
                 };
                 let connection = self
+                    .inner
                     .interconnect
                     .connection_for(addr, "localhost", mode)
                     .await
@@ -4907,7 +5179,7 @@ impl SessionServiceImpl {
 
     async fn start_domain_clock(
         &self,
-        domain_id: Domain,
+        domain_id: DomainName,
         wall_started_at: Timestamp,
         logical_start: Timestamp,
         time_rate: String,
@@ -4927,7 +5199,7 @@ impl SessionServiceImpl {
         };
         for node_id in self.domain_tick_target_nodes(&domain_id).await {
             tokio::task::consume_budget().await;
-            if node_id == self.consensus.local_node_id() {
+            if node_id == self.inner.consensus.local_node_id().clone() {
                 self.handle_domain_clock_start(start.clone());
                 continue;
             }
@@ -4941,19 +5213,24 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_domain_clocks_from_state(&self) {
-        let domains = self.consensus.current_domains().await;
+        let domains = self.inner.consensus.current_domains().await;
         let known_domains = domains.keys().cloned().collect::<HashSet<_>>();
-        self.domain_clock_reconciliations
+        self.inner
+            .domain_clock_reconciliations
             .retain(|domain, _| known_domains.contains(domain));
         for (domain_id, domain) in domains {
             tokio::task::consume_budget().await;
             if let DomainPace::Unpaced = domain.config.pace {
-                self.domain_clock_reconciliations.remove(&domain_id);
+                self.inner.domain_clock_reconciliations.remove(&domain_id);
                 continue;
             }
             let running = !matches!(domain.status, DomainStatus::Stopped);
-            let observed = (domain.start_version, running);
+            let observed = DomainClockReconciliation {
+                start_version: domain.start_version,
+                running,
+            };
             if self
+                .inner
                 .domain_clock_reconciliations
                 .get(&domain_id)
                 .is_some_and(|current| *current.value() == observed)
@@ -4981,7 +5258,8 @@ impl SessionServiceImpl {
             };
             match result {
                 Ok(()) => {
-                    self.domain_clock_reconciliations
+                    self.inner
+                        .domain_clock_reconciliations
                         .insert(domain_id, observed);
                 }
                 Err(error) => {
@@ -4994,13 +5272,13 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn stop_domain_clock(&self, domain_id: &Domain) -> Result<(), String> {
+    async fn stop_domain_clock(&self, domain_id: &DomainName) -> Result<(), String> {
         let stop = DomainClockStop {
             domain_id: domain_id.clone(),
         };
         for node_id in self.domain_tick_target_nodes(domain_id).await {
             tokio::task::consume_budget().await;
-            if node_id == self.consensus.local_node_id() {
+            if node_id == self.inner.consensus.local_node_id().clone() {
                 self.handle_domain_clock_stop(stop.clone());
                 continue;
             }
@@ -5015,17 +5293,17 @@ impl SessionServiceImpl {
 
     fn handle_domain_clock_start(&self, start: DomainClockStart) {
         let domain_id = start.domain_id.clone();
-        self.runtime.handle_domain_clock_start(
+        self.inner.runtime.handle_domain_clock_start(
             &domain_id,
             start.logical_start,
             start.wall_started_at,
             &start.time_rate,
         );
-        if start.owner_node_id != self.consensus.local_node_id() {
-            self.domain_clock_events.notify_waiters();
+        if start.owner_node_id != self.inner.consensus.local_node_id().clone() {
+            self.inner.domain_clock_events.notify_waiters();
             return;
         }
-        self.domain_clocks.insert(
+        self.inner.domain_clocks.insert(
             domain_id.clone(),
             DomainClockRuntimeState {
                 wall_started_at: start.wall_started_at,
@@ -5035,50 +5313,58 @@ impl SessionServiceImpl {
             },
         );
         let service = self.clone();
-        self.service_tasks.spawn(async move {
+        self.inner.service_tasks.spawn(async move {
             emit_due_domain_ticks(&service, &domain_id).await;
         });
-        self.domain_clock_events.notify_waiters();
+        self.inner.domain_clock_events.notify_waiters();
     }
 
     fn handle_domain_clock_stop(&self, stop: DomainClockStop) {
-        self.runtime.handle_domain_clock_stop(&stop.domain_id);
-        self.domain_clocks.remove(&stop.domain_id);
-        self.domain_clock_events.notify_waiters();
+        self.inner.runtime.handle_domain_clock_stop(&stop.domain_id);
+        self.inner.domain_clocks.remove(&stop.domain_id);
+        self.inner.domain_clock_events.notify_waiters();
     }
 
     fn handle_domain_tick(&self, tick: DomainTickEnvelope) {
-        self.runtime.handle_domain_tick(&tick.domain_id, &tick.tick);
+        self.inner
+            .runtime
+            .handle_domain_tick(&tick.domain_id, &tick.tick);
     }
 
-    async fn domain_clock_owner(&self, domain_id: &Domain) -> Option<String> {
-        let mut live_nodes = self.cluster.live_node_ids().await;
+    async fn domain_clock_owner(&self, domain_id: &DomainName) -> Option<ClusterNodeName> {
+        let mut live_nodes = self.inner.cluster.live_node_ids().await;
         live_nodes.sort();
         if live_nodes.is_empty() {
             return None;
         }
+        // Wrapping is the meaning here: this is a string hash, so the multiply-and-add mixer
+        // is defined modulo the word size and every bit that falls off is intended to.
         let mut hash: usize = 0;
         for byte in domain_id.as_str().bytes() {
-            hash = hash.wrapping_mul(131).wrapping_add(byte as usize);
+            hash = hash.wrapping_mul(131).wrapping_add(usize::from(byte));
         }
         live_nodes.get(hash % live_nodes.len()).cloned()
     }
 
-    async fn domain_tick_target_nodes(&self, domain_id: &Domain) -> Vec<String> {
-        let Some(domain) = self.consensus.current_domain(domain_id).await else {
+    async fn domain_tick_target_nodes(&self, domain_id: &DomainName) -> Vec<ClusterNodeName> {
+        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return Vec::new();
         };
         if let DomainStatus::Stopped = domain.status {
             return Vec::new();
         }
-        let mut nodes = self.cluster.live_node_ids().await;
+        let mut nodes = self.inner.cluster.live_node_ids().await;
         nodes.sort();
         nodes.dedup();
         nodes
     }
 
-    async fn describe_stream(&self, domain: &Domain, describe: DescribeRelay) -> CommandResult {
-        let (ack_model, schema, branching) = match self
+    async fn describe_stream(&self, domain: &DomainName, describe: DescribeRelay) -> CommandResult {
+        let SubscriptionTarget {
+            relay: ack_model,
+            schema,
+            branching,
+        } = match self
             .subscription_target_from_schedule(domain, &describe.relay)
             .await
         {
@@ -5096,7 +5382,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5109,17 +5395,37 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
         };
 
+        let schedule = self.inner.consensus.current_schedule().await;
+        let scheduled_relay = if let Some(domain_schedule) = schedule.domain(domain) {
+            domain_schedule.nodes.get(&NodeRef::new(
+                ModelKind::Relay,
+                ModelName::from(&describe.relay),
+            ))
+        } else {
+            None
+        };
         if describe.bindings.is_empty() {
+            let metrics = match self
+                .describe_metrics_for_scheduled_node(
+                    domain,
+                    ModelKind::Relay,
+                    &describe.relay,
+                    scheduled_relay,
+                )
+                .await
+            {
+                Ok(metrics) => metrics,
+                Err(message) => return command_error(message),
+            };
             return command_ok(append_metrics_lines(
-                format_relay_describe_output(&ack_model, &branching),
-                self.runtime
-                    .describe_metrics_for(domain, "RELAY", &describe.relay),
+                format_relay_describe_output(&ack_model, &branching, scheduled_relay),
+                metrics,
             ));
         }
 
@@ -5139,7 +5445,7 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5155,13 +5461,13 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
         };
 
-        if let Some(domain_state) = self.consensus.current_domain(domain).await
+        if let Some(domain_state) = self.inner.consensus.current_domain(domain).await
             && let DomainStatus::Stopped = domain_state.status
         {
             return command_ok("not exists".to_string());
@@ -5181,16 +5487,17 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
         };
 
-        let local_node_id = self.consensus.local_node_id().to_string();
+        let local_node_id = self.inner.consensus.local_node_id().clone();
         let mut exists = false;
         if owner_nodes.is_empty() || owner_nodes.iter().any(|owner| owner == &local_node_id) {
             match self
+                .inner
                 .runtime
                 .describe_local_stream_exists(domain, &describe.relay, &key)
             {
@@ -5204,7 +5511,7 @@ impl SessionServiceImpl {
                             span_end: 0,
                         }],
                         message: error.to_string(),
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -5216,7 +5523,8 @@ impl SessionServiceImpl {
             }
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::DescribeRelay(tx));
             if let Err(message) = self
                 .dispatch_interconnect_control(
@@ -5230,7 +5538,7 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 return CommandResult {
                     success: false,
                     diagnostics: vec![Diagnostic {
@@ -5239,7 +5547,7 @@ impl SessionServiceImpl {
                         span_end: 0,
                     }],
                     message,
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -5254,13 +5562,13 @@ impl SessionServiceImpl {
                             span_end: 0,
                         }],
                         message,
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
                 Ok(Err(_)) => {
                     warn!(
-                        owner,
+                        %owner,
                         domain = domain.as_str(),
                         relay = describe.relay.as_str(),
                         "remote DESCRIBE RELAY response channel closed"
@@ -5268,9 +5576,9 @@ impl SessionServiceImpl {
                     continue;
                 }
                 Err(_) => {
-                    self.pending_cluster_commands.remove(&correlation_id);
+                    self.inner.pending_cluster_commands.remove(&correlation_id);
                     warn!(
-                        owner,
+                        %owner,
                         domain = domain.as_str(),
                         relay = describe.relay.as_str(),
                         "timed out waiting for remote DESCRIBE RELAY response"
@@ -5288,16 +5596,25 @@ impl SessionServiceImpl {
         if exists {
             lines.push(format!("capacity: {}", ack_model.buffer));
         }
-        lines.extend(
-            self.runtime
-                .describe_metrics_for(domain, "RELAY", &describe.relay),
-        );
+        let metrics = match self
+            .describe_metrics_for_scheduled_node(
+                domain,
+                ModelKind::Relay,
+                &describe.relay,
+                scheduled_relay,
+            )
+            .await
+        {
+            Ok(metrics) => metrics,
+            Err(message) => return command_error(message),
+        };
+        lines.extend(metrics);
 
         CommandResult {
             success: true,
             message: lines.join("\n"),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             ..Default::default()
         }
     }
@@ -5308,7 +5625,11 @@ impl SessionServiceImpl {
     ) -> Result<bool, String> {
         self.prepare_stream_owner_control_request(&request.domain, &request.relay)
             .await?;
-        let Some((ack_model, schema, branching)) = self
+        let Some(SubscriptionTarget {
+            relay: ack_model,
+            schema,
+            branching,
+        }) = self
             .subscription_target_from_schedule(&request.domain, &request.relay)
             .await?
         else {
@@ -5327,6 +5648,7 @@ impl SessionServiceImpl {
         )?;
         let key = branch_key_from_filter(&branching, &filter)?;
         match self
+            .inner
             .runtime
             .describe_local_stream_exists(&request.domain, &request.relay, &key)
         {
@@ -5338,6 +5660,7 @@ impl SessionServiceImpl {
 
     fn handle_describe_stream_response(&self, response: RemoteDescribeRelayResponse) {
         if let Some((_, PendingClusterCommand::DescribeRelay(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -5345,21 +5668,26 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn describe_domain(&self, domain: &Domain, _describe: DescribeDomain) -> CommandResult {
-        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+    async fn describe_domain(
+        &self,
+        domain: &DomainName,
+        _describe: DescribeDomain,
+    ) -> CommandResult {
+        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let mut lines = vec![
             format!("domain: {}", domain.as_str()),
             format!("status: {:?}", domain_state.status).to_ascii_lowercase(),
         ];
-        lines.extend(self.runtime.describe_domain_statistics(domain));
+        lines.extend(self.inner.runtime.describe_domain_statistics(domain));
         lines.push("placement:".to_string());
         lines.push(format!(
             "  default policy: {}",
             domain_state.config.placement.as_ref()
         ));
         let placement_plan = self
+            .inner
             .registry
             .placement_plan(domain, domain_state.config.placement);
         lines.push(format!(
@@ -5367,7 +5695,7 @@ impl SessionServiceImpl {
             placement_plan.as_ref().map_or(0, |plan| plan.rules.len())
         ));
         if let Some(plan) = placement_plan {
-            let schedule = self.consensus.current_schedule().await;
+            let schedule = self.inner.consensus.current_schedule().await;
             let domain_schedule = schedule.domain(domain);
             for (index, group) in plan.require_groups.iter().enumerate() {
                 lines.push(format!("  group {}:", index + 1));
@@ -5377,7 +5705,8 @@ impl SessionServiceImpl {
                 ));
                 lines.push(format!(
                     "    host: {}",
-                    placement_group_host(domain_schedule, &group.members).unwrap_or("(unassigned)")
+                    placement_group_host(domain_schedule, &group.members)
+                        .map_or("(unassigned)", ClusterNodeName::as_str)
                 ));
                 for bond in &group.bonds {
                     lines.push(format!(
@@ -5392,11 +5721,12 @@ impl SessionServiceImpl {
         command_ok(lines.join("\n"))
     }
 
-    async fn show_placements(&self, domain: &Domain) -> CommandResult {
-        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+    async fn show_placements(&self, domain: &DomainName) -> CommandResult {
+        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let Some(plan) = self
+            .inner
             .registry
             .placement_plan(domain, domain_state.config.placement)
         else {
@@ -5426,22 +5756,30 @@ impl SessionServiceImpl {
 
     async fn describe_placement(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribePlacement,
     ) -> CommandResult {
-        let Some(domain_state) = self.consensus.current_domain(domain).await else {
+        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let Some(plan) = self
+            .inner
             .registry
             .placement_plan(domain, domain_state.config.placement)
         else {
             return command_error(format!("placement '{}' not found", describe.name.as_str()));
         };
-        let Some(rule) = plan.rules.iter().find(|rule| rule.name == describe.name) else {
+        // The plan was just built for this describe and is walked once for the single named rule,
+        // so an index over it would cost the walk it replaces.
+        let Some(rule) = plan
+            .rules
+            .iter()
+            .find(|rule| rule.name == ModelName::from(&describe.name))
+        else {
             return command_error(format!("placement '{}' not found", describe.name.as_str()));
         };
         let form = match self
+            .inner
             .registry
             .get(domain, ModelKind::Placement, &describe.name)
         {
@@ -5519,7 +5857,7 @@ impl SessionServiceImpl {
                 ));
             }
         }
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let domain_schedule = schedule.domain(domain);
         for group in placement_groups_claimed_by_rule(&plan, rule) {
             lines.push(format!(
@@ -5528,7 +5866,8 @@ impl SessionServiceImpl {
             ));
             lines.push(format!(
                 "group host: {}",
-                placement_group_host(domain_schedule, &group.members).unwrap_or("(unassigned)")
+                placement_group_host(domain_schedule, &group.members)
+                    .map_or("(unassigned)", ClusterNodeName::as_str)
             ));
             for bond in &group.bonds {
                 lines.push(format!(
@@ -5544,16 +5883,18 @@ impl SessionServiceImpl {
 
     async fn describe_endpoint(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeEndpoint,
     ) -> CommandResult {
         match self
+            .inner
             .registry
             .get(domain, ModelKind::Endpoint, &describe.name)
         {
-            Ok(Some(Model::Endpoint(endpoint))) => {
-                command_ok(format_endpoint_describe_output(&describe.name, &endpoint))
-            }
+            Ok(Some(Model::Endpoint(endpoint))) => command_ok(format_endpoint_describe_output(
+                &ModelName::from(&describe.name),
+                &endpoint,
+            )),
             Ok(Some(_)) => command_error(format!(
                 "model '{}' is not an endpoint",
                 describe.name.as_str()
@@ -5565,7 +5906,7 @@ impl SessionServiceImpl {
 
     async fn describe_ingestor(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeIngestor,
     ) -> CommandResult {
         let (ingestor, ingestor_node) = match self
@@ -5583,21 +5924,26 @@ impl SessionServiceImpl {
             Err(message) => return command_error(message),
         };
 
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let summary = if ingestor_node.executes_on(local_node_id) {
-            self.runtime
+            self.inner
+                .runtime
                 .describe_local_ingestor(domain, &describe.ingestor)
                 .map(|summary| {
                     (
                         summary,
-                        self.runtime
-                            .describe_metrics_for(domain, "INGESTOR", &describe.ingestor),
+                        self.inner.runtime.describe_metrics_for(
+                            domain,
+                            "INGESTOR",
+                            &describe.ingestor,
+                        ),
                     )
                 })
         } else if let Some(owner) = ingestor_node.execution_node() {
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, mut rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::DescribeIngestor(tx));
             let deadline = tokio::time::Instant::now() + REMOTE_DESCRIBE_INGESTOR_TIMEOUT;
             loop {
@@ -5624,13 +5970,15 @@ impl SessionServiceImpl {
                     }
                     Err(_) if tokio::time::Instant::now() < deadline => {}
                     Err(_) => {
-                        self.pending_cluster_commands.remove(&correlation_id);
-                        break Err(dispatch_result.err().unwrap_or_else(|| {
-                            format!(
+                        self.inner.pending_cluster_commands.remove(&correlation_id);
+                        let error = match dispatch_result {
+                            Err(error) => error,
+                            Ok(()) => format!(
                                 "timed out waiting for DESCRIBE INGESTOR response from '{}'",
                                 owner
-                            )
-                        }));
+                            ),
+                        };
+                        break Err(error);
                     }
                 }
             }
@@ -5641,13 +5989,17 @@ impl SessionServiceImpl {
                     ready: false,
                     quiesce_state: None,
                     quiesce_counters: Default::default(),
-                    memory_backpressure_paused: self.runtime.ingestors_paused_for_memory_pressure(),
+                    memory_backpressure_paused: self
+                        .inner
+                        .runtime
+                        .ingestors_paused_for_memory_pressure(),
                     transient_error: None,
                     reconnect_backoff: None,
                     reconnect_wait_millis: None,
                     kafka_domain_offsets: None,
                 },
-                self.runtime
+                self.inner
+                    .runtime
                     .describe_metrics_for(domain, "INGESTOR", &describe.ingestor),
             ))
         };
@@ -5673,16 +6025,19 @@ impl SessionServiceImpl {
         self.prepare_owner_control_request(&request.domain, ModelKind::Ingestor, &request.name)
             .await?;
         let summary = self
+            .inner
             .runtime
             .describe_local_ingestor(&request.domain, &request.name)?;
-        let metrics = self
-            .runtime
-            .describe_metrics_for(&request.domain, "INGESTOR", &request.name);
+        let metrics =
+            self.inner
+                .runtime
+                .describe_metrics_for(&request.domain, "INGESTOR", &request.name);
         Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
     }
 
     fn handle_describe_ingestor_response(&self, response: RemoteDescribeIngestorResponse) {
         if let Some((_, PendingClusterCommand::DescribeIngestor(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -5692,10 +6047,10 @@ impl SessionServiceImpl {
 
     async fn dataflow_node_status_for_graph(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        identifier: &Identifier,
-    ) -> (DataflowNodeStatus, Option<String>, Option<u64>) {
+        identifier: &ModelName,
+    ) -> DataflowNodeHealth {
         dataflow_node_status_from_envelope(
             self.dataflow_node_status_envelope_for_graph(domain, kind, identifier)
                 .await,
@@ -5704,32 +6059,33 @@ impl SessionServiceImpl {
 
     async fn dataflow_node_status_envelope_for_graph(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> DataflowNodeStatusEnvelope {
+        let identifier = identifier.into();
         let Ok(model_kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
-            return self.local_dataflow_node_status_envelope(domain, kind, identifier);
+            return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         };
         if model_kind != ModelKind::Ingestor && model_kind != ModelKind::Emitter {
-            return self.local_dataflow_node_status_envelope(domain, kind, identifier);
+            return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         }
         let Some(node) = self
-            .scheduled_model_node(domain, model_kind, identifier)
+            .scheduled_model_node(domain, model_kind, identifier.clone())
             .await
         else {
-            return self.local_dataflow_node_status_envelope(domain, kind, identifier);
+            return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         };
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if node.executes_on(local_node_id) {
-            return self.local_dataflow_node_status_envelope(domain, kind, identifier);
+            return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         }
         let Some(owner) = node.execution_node() else {
-            return self.local_dataflow_node_status_envelope(domain, kind, identifier);
+            return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         };
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands.insert(
+        self.inner.pending_cluster_commands.insert(
             correlation_id,
             PendingClusterCommand::DataflowNodeStatus(tx),
         );
@@ -5746,13 +6102,13 @@ impl SessionServiceImpl {
             .await
             .is_err()
         {
-            self.pending_cluster_commands.remove(&correlation_id);
-            return self.local_dataflow_node_status_envelope(domain, kind, identifier);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
+            return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         }
         match tokio::time::timeout(Duration::from_secs(2), rx).await {
             Ok(Ok(Ok(status))) => status,
             _ => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 self.local_dataflow_node_status_envelope(domain, kind, identifier)
             }
         }
@@ -5760,21 +6116,27 @@ impl SessionServiceImpl {
 
     fn local_dataflow_node_status_envelope(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> DataflowNodeStatusEnvelope {
-        let (status, detail, reconnect_wait_millis) =
-            self.runtime.dataflow_node_status(domain, kind, identifier);
-        let (transient_error, reconnect_backoff, transient_wait_millis) = self
+        let identifier = identifier.into();
+        let health = self
+            .inner
+            .runtime
+            .dataflow_node_status(domain, kind, identifier.clone());
+        let transient = self
+            .inner
             .runtime
             .dataflow_node_transient_state(domain, kind, identifier);
         dataflow_node_status_to_envelope(
-            status,
-            detail,
-            transient_error,
-            reconnect_backoff,
-            reconnect_wait_millis.or(transient_wait_millis),
+            health.status,
+            health.detail,
+            transient.error,
+            transient.reconnect_backoff,
+            health
+                .reconnect_wait_millis
+                .or(transient.reconnect_wait_millis),
         )
     }
 
@@ -5784,25 +6146,30 @@ impl SessionServiceImpl {
     ) -> Result<DataflowNodeStatusEnvelope, String> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
-        let (status, detail, reconnect_wait_millis) = self.runtime.dataflow_node_status(
+        let health = self.inner.runtime.dataflow_node_status(
             &request.domain,
             request.kind.as_str(),
             &request.name,
         );
-        let (transient_error, reconnect_backoff, transient_wait_millis) = self
-            .runtime
-            .dataflow_node_transient_state(&request.domain, request.kind.as_str(), &request.name);
+        let transient = self.inner.runtime.dataflow_node_transient_state(
+            &request.domain,
+            request.kind.as_str(),
+            &request.name,
+        );
         Ok(dataflow_node_status_to_envelope(
-            status,
-            detail,
-            transient_error,
-            reconnect_backoff,
-            reconnect_wait_millis.or(transient_wait_millis),
+            health.status,
+            health.detail,
+            transient.error,
+            transient.reconnect_backoff,
+            health
+                .reconnect_wait_millis
+                .or(transient.reconnect_wait_millis),
         ))
     }
 
     fn handle_dataflow_node_status_response(&self, response: RemoteDataflowNodeStatusResponse) {
         if let Some((_, PendingClusterCommand::DataflowNodeStatus(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -5810,35 +6177,35 @@ impl SessionServiceImpl {
         }
     }
 
-    fn local_domain_drain_status(&self, domain: &Domain) -> DomainDrainStatusEnvelope {
-        let status = self.runtime.domain_drain_status(domain);
+    fn local_domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatusEnvelope {
+        let status = self.inner.runtime.domain_drain_status(domain);
         let emitter_publishing = status
             .emitter_publishing
             .into_iter()
             .map(emitter_publishing_drain_status_envelope)
             .collect();
         DomainDrainStatusEnvelope {
-            active_ingestors: u64::try_from(status.active_ingestors).unwrap_or(u64::MAX),
-            active_generators: u64::try_from(status.active_generators).unwrap_or(u64::MAX),
-            outstanding_acks: u64::try_from(status.outstanding_acks).unwrap_or(u64::MAX),
-            buffered_emitter_messages: u64::try_from(status.buffered_emitter_messages)
-                .unwrap_or(u64::MAX),
+            active_ingestors: status.active_ingestors.arch_into(),
+            active_generators: status.active_generators.arch_into(),
+            outstanding_acks: status.outstanding_acks.arch_into(),
+            buffered_emitter_messages: status.buffered_emitter_messages.arch_into(),
             emitter_publishing,
         }
     }
 
     async fn domain_drain_status_on_node(
         &self,
-        node_id: &str,
-        domain: &Domain,
+        node_id: &ClusterNodeName,
+        domain: &DomainName,
     ) -> Result<DomainDrainStatusEnvelope, String> {
-        if node_id == self.consensus.local_node_id() {
-            self.runtime.force_flush_domain_if_idle(domain);
+        if node_id == self.inner.consensus.local_node_id() {
+            self.inner.runtime.force_flush_domain_if_idle(domain);
             return Ok(self.local_domain_drain_status(domain));
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::DomainDrainStatus(tx));
         if let Err(error) = self
             .dispatch_interconnect_control(
@@ -5850,7 +6217,7 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(Duration::from_secs(2), rx).await {
@@ -5860,7 +6227,7 @@ impl SessionServiceImpl {
                 node_id
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "node '{}' timed out reporting domain drain status",
                     node_id
@@ -5871,6 +6238,7 @@ impl SessionServiceImpl {
 
     fn handle_domain_drain_status_response(&self, response: RemoteDomainDrainStatusResponse) {
         if let Some((_, PendingClusterCommand::DomainDrainStatus(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -5880,29 +6248,31 @@ impl SessionServiceImpl {
 
     fn local_entity_drain_status(
         &self,
-        domain: &Domain,
-        relays: &[Identifier],
-        affected_entities: &[crate::registry::RegistryEntity],
+        domain: &DomainName,
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+        purpose: EntityGatePurpose,
     ) -> EntityDrainStatusEnvelope {
-        let status = self
-            .runtime
-            .entity_drain_status(domain, relays, affected_entities);
+        let status =
+            self.inner
+                .runtime
+                .entity_drain_status(domain, relays, affected_entities, purpose);
         let emitter_publishing = status
             .emitter_publishing
             .into_iter()
             .map(emitter_publishing_drain_status_envelope)
             .collect();
         EntityDrainStatusEnvelope {
-            buffered_relay_batches: u64::try_from(status.buffered_relay_batches)
-                .unwrap_or(u64::MAX),
-            node_work_items: u64::try_from(status.node_work_items).unwrap_or(u64::MAX),
+            buffered_relay_batches: status.buffered_relay_batches.arch_into(),
+            node_work_items: status.node_work_items.arch_into(),
+            outstanding_acks: status.outstanding_acks.arch_into(),
             emitter_publishing,
         }
     }
 
     async fn engage_entity_gate_on_node(
         &self,
-        node_id: &str,
+        node_id: &ClusterNodeName,
         engagement: EntityGateEngagement<'_>,
     ) -> Result<(), String> {
         let EntityGateEngagement {
@@ -5910,25 +6280,28 @@ impl SessionServiceImpl {
             domain,
             relays,
             affected_entities,
+            purpose,
             deadline,
             reason,
         } = engagement;
-        if node_id == self.consensus.local_node_id() {
+        if node_id == self.inner.consensus.local_node_id() {
             return self
+                .inner
                 .runtime
                 .engage_entity_gate_operation(
                     operation_id,
                     domain,
                     relays,
                     affected_entities,
-                    deadline,
-                    reason,
+                    purpose,
+                    EntityGateLease { deadline, reason },
                 )
                 .await;
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::EntityGate(tx));
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
@@ -5940,27 +6313,22 @@ impl SessionServiceImpl {
                     operation_id,
                     domain: domain.clone(),
                     relays: relays.to_vec(),
-                    affected_entities: affected_entities
-                        .iter()
-                        .map(|entity| RemoteEntityReference {
-                            kind: entity.kind,
-                            identifier: entity.identifier.clone(),
-                        })
-                        .collect(),
+                    affected_entities: affected_entities.to_vec(),
+                    purpose,
                     deadline_millis,
                     reason: reason.to_string(),
                 }),
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(remaining.min(Duration::from_secs(2)), rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(format!("node '{node_id}' closed the entity gate request")),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!("node '{node_id}' timed out engaging entity gates"))
             }
         }
@@ -5968,22 +6336,27 @@ impl SessionServiceImpl {
 
     async fn entity_drain_status_on_node(
         &self,
-        node_id: &str,
-        domain: &Domain,
-        relays: &[Identifier],
-        affected_entities: &[crate::registry::RegistryEntity],
+        node_id: &ClusterNodeName,
+        domain: &DomainName,
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+        purpose: EntityGatePurpose,
         deadline: tokio::time::Instant,
     ) -> Result<EntityDrainStatusEnvelope, String> {
-        if node_id == self.consensus.local_node_id() {
-            let status = self.local_entity_drain_status(domain, relays, affected_entities);
-            if status.buffered_relay_batches != 0 || status.node_work_items != 0 {
-                self.runtime.force_flush_domain_if_idle(domain);
+        if node_id == self.inner.consensus.local_node_id() {
+            let status = self.local_entity_drain_status(domain, relays, affected_entities, purpose);
+            if status.buffered_relay_batches != 0
+                || status.node_work_items != 0
+                || status.outstanding_acks != 0
+            {
+                self.inner.runtime.force_flush_domain_if_idle(domain);
             }
             return Ok(status);
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::EntityDrainStatus(tx));
         if let Err(error) = self
             .dispatch_interconnect_control(
@@ -5992,18 +6365,13 @@ impl SessionServiceImpl {
                     correlation_id,
                     domain: domain.clone(),
                     relays: relays.to_vec(),
-                    affected_entities: affected_entities
-                        .iter()
-                        .map(|entity| RemoteEntityReference {
-                            kind: entity.kind,
-                            identifier: entity.identifier.clone(),
-                        })
-                        .collect(),
+                    affected_entities: affected_entities.to_vec(),
+                    purpose,
                 }),
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -6013,7 +6381,7 @@ impl SessionServiceImpl {
                 "node '{node_id}' closed the entity drain status request"
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "node '{node_id}' timed out reporting entity drain status"
                 ))
@@ -6023,19 +6391,21 @@ impl SessionServiceImpl {
 
     async fn release_entity_gate_on_node(
         &self,
-        node_id: &str,
+        node_id: &ClusterNodeName,
         operation_id: u64,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<(), String> {
-        if node_id == self.consensus.local_node_id() {
+        if node_id == self.inner.consensus.local_node_id() {
             return self
+                .inner
                 .runtime
                 .release_entity_gate_operation(operation_id, domain)
                 .await;
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::EntityGateRelease(tx));
         if let Err(error) = self
             .dispatch_interconnect_control(
@@ -6048,7 +6418,7 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(error);
         }
         match tokio::time::timeout(Duration::from_secs(2), rx).await {
@@ -6057,7 +6427,7 @@ impl SessionServiceImpl {
                 "node '{node_id}' closed the entity gate release request"
             )),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!("node '{node_id}' timed out releasing entity gates"))
             }
         }
@@ -6065,6 +6435,7 @@ impl SessionServiceImpl {
 
     fn handle_entity_gate_response(&self, response: RemoteEntityGateResponse) {
         if let Some((_, PendingClusterCommand::EntityGate(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6074,6 +6445,7 @@ impl SessionServiceImpl {
 
     fn handle_entity_drain_status_response(&self, response: RemoteEntityDrainStatusResponse) {
         if let Some((_, PendingClusterCommand::EntityDrainStatus(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6083,6 +6455,7 @@ impl SessionServiceImpl {
 
     fn handle_entity_gate_release_response(&self, response: RemoteEntityGateReleaseResponse) {
         if let Some((_, PendingClusterCommand::EntityGateRelease(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6092,7 +6465,7 @@ impl SessionServiceImpl {
 
     fn schedule_cluster_entity_gate_release(&self, release: PendingClusterEntityGateRelease) {
         let service = self.clone();
-        self.service_tasks.spawn(async move {
+        self.inner.service_tasks.spawn(async move {
             service.retry_cluster_entity_gate_release(release).await;
         });
     }
@@ -6107,7 +6480,7 @@ impl SessionServiceImpl {
             for node in nodes {
                 tokio::task::consume_budget().await;
                 let result = tokio::select! {
-                    _ = self.shutdown.cancelled() => return,
+                    _ = self.inner.shutdown.cancelled() => return,
                     result = self.release_entity_gate_on_node(
                         &node,
                         release.operation_id,
@@ -6115,12 +6488,14 @@ impl SessionServiceImpl {
                     ) => result,
                 };
                 match result {
-                    Ok(()) => release.nodes.retain(|candidate| candidate != &node),
+                    Ok(()) => {
+                        release.nodes.remove(&node);
+                    }
                     Err(error) => {
                         debug!(
                             domain = release.domain.as_str(),
                             operation_id = release.operation_id,
-                            node,
+                            %node,
                             error,
                             "entity gate release retry remains pending"
                         );
@@ -6131,30 +6506,50 @@ impl SessionServiceImpl {
                 return;
             }
             tokio::select! {
-                _ = self.shutdown.cancelled() => return,
+                _ = self.inner.shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
         }
     }
 
+    /// Cluster nodes the cluster considers usable: gossip peers that are not marked unavailable.
+    ///
+    /// Scheduling and failover read liveness this way, so every leader-orchestrated hold must too.
+    /// A node marked unavailable cannot answer a gate request, and contacting it only spends the
+    /// request deadline before the hold fails.
+    async fn available_node_ids(&self) -> Vec<ClusterNodeName> {
+        let gossip = self.inner.cluster.gossip_state().await;
+        gossip
+            .live_nodes
+            .into_iter()
+            .map(|node| node.node_id)
+            .filter(|node_id| !gossip.dead_node_ids.contains(node_id))
+            .collect()
+    }
+
     async fn engage_cluster_entity_gates(
         &self,
-        domain: &Domain,
-        relays: &[Identifier],
-        affected_entities: &[crate::registry::RegistryEntity],
+        domain: &DomainName,
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+        purpose: EntityGatePurpose,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
-        let mut nodes = self.cluster.live_node_ids().await;
+        let mut nodes = self.available_node_ids().await;
         if !nodes
             .iter()
-            .any(|node| node == self.consensus.local_node_id())
+            .any(|node| node == self.inner.consensus.local_node_id())
         {
-            nodes.push(self.consensus.local_node_id().to_string());
+            nodes.push(self.inner.consensus.local_node_id().clone());
         }
         nodes.sort();
         nodes.dedup();
         let operation_id = self.next_cluster_command_correlation_id();
         let mut gate = ClusterEntityGate::new(self, operation_id, domain);
+        let reason = match purpose {
+            EntityGatePurpose::ModelAlteration => "leader-orchestrated entity alteration",
+            EntityGatePurpose::OwnershipHandoff => "leader-orchestrated ownership handoff",
+        };
         for node in &nodes {
             tokio::task::consume_budget().await;
             gate.record_attempt(node.clone());
@@ -6166,15 +6561,17 @@ impl SessionServiceImpl {
                         domain,
                         relays,
                         affected_entities,
+                        purpose,
                         deadline,
-                        reason: "leader-orchestrated entity alteration",
+                        reason,
                     },
                 )
                 .await
             {
                 self.release_cluster_entity_gates(gate).await;
-                return Err(Report::new(DomainAlterError::PauseDomain {
+                return Err(Report::new(DomainAlterError::EntityGate {
                     domain: domain.clone(),
+                    operation: purpose.operation_name(),
                     reason: format!("failed to engage entity gates on node '{node}': {error}"),
                 }));
             }
@@ -6182,43 +6579,210 @@ impl SessionServiceImpl {
         Ok(gate)
     }
 
+    async fn begin_planned_ownership_handoff(
+        &self,
+        domain: &DomainName,
+        current: Option<&nervix_models::DomainSchedule>,
+        planned: Option<&nervix_models::DomainSchedule>,
+    ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
+        let moves = planned_ownership_moves(current, planned);
+        if moves.is_empty() {
+            return Ok(None);
+        }
+        let live_nodes = self
+            .available_node_ids()
+            .await
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if let Some(moved) = moves
+            .iter()
+            .find(|moved| !live_nodes.contains(&moved.former_owner))
+        {
+            return Err(Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: format!(
+                    "former owner '{}' is unavailable before ownership handoff",
+                    moved.former_owner
+                ),
+            }));
+        }
+        let affected_entities = moves
+            .iter()
+            .map(|moved| moved.entity.clone())
+            .collect::<Vec<_>>();
+        let relays = current
+            .map(|schedule| {
+                Runtime::ownership_handoff_relays_for_schedule(schedule, &affected_entities)
+            })
+            .unwrap_or_default();
+        let former_owners = moves
+            .iter()
+            .map(|moved| moved.former_owner.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let started_at = tokio::time::Instant::now();
+        let deadline = started_at + self.inner.runtime.entity_gate_deadline();
+        let gate = self
+            .engage_cluster_entity_gates(
+                domain,
+                &relays,
+                &affected_entities,
+                EntityGatePurpose::OwnershipHandoff,
+                deadline,
+            )
+            .await?;
+        #[cfg(feature = "testing")]
+        self.inner.runtime.pause_entity_gate_if_armed(domain).await;
+        if let Err(error) = self
+            .wait_for_cluster_entity_drain(
+                &gate,
+                &relays,
+                &affected_entities,
+                EntityGatePurpose::OwnershipHandoff,
+                &former_owners,
+                deadline,
+            )
+            .await
+        {
+            self.release_cluster_entity_gates(gate).await;
+            return Err(error);
+        }
+        Ok(Some(PlannedOwnershipHandoff {
+            gate,
+            moves,
+            started_at,
+        }))
+    }
+
+    async fn finish_planned_ownership_handoff(
+        &self,
+        domain: &DomainName,
+        handoff: PlannedOwnershipHandoff,
+    ) {
+        let hold_duration = handoff.started_at.elapsed();
+        for moved in &handoff.moves {
+            info!(
+                domain = domain.as_str(),
+                kind = moved.entity.kind.as_ref(),
+                name = moved.entity.identifier.as_str(),
+                former_owner = %moved.former_owner,
+                destination = %moved.destination,
+                hold_duration_millis = hold_duration.as_millis(),
+                promoted_replica = moved.promoted_replica,
+                "planned ownership handoff completed"
+            );
+            if !moved.promoted_replica {
+                warn!(
+                    domain = domain.as_str(),
+                    kind = moved.entity.kind.as_ref(),
+                    name = moved.entity.identifier.as_str(),
+                    former_owner = %moved.former_owner,
+                    destination = %moved.destination,
+                    "planned ownership handoff moved a runtime node without replicated state"
+                );
+            }
+        }
+        self.release_cluster_entity_gates(handoff.gate).await;
+    }
+
+    fn defer_planned_ownership_handoff_release(
+        &self,
+        domain: &DomainName,
+        handoff: PlannedOwnershipHandoff,
+        error: &crate::runtime::RuntimeError,
+    ) {
+        let hold_duration = handoff.started_at.elapsed();
+        for moved in &handoff.moves {
+            warn!(
+                domain = domain.as_str(),
+                kind = moved.entity.kind.as_ref(),
+                name = moved.entity.identifier.as_str(),
+                former_owner = %moved.former_owner,
+                destination = %moved.destination,
+                hold_duration_millis = hold_duration.as_millis(),
+                promoted_replica = moved.promoted_replica,
+                error = %error,
+                "planned ownership handoff activation failed; gate remains held until its deadline"
+            );
+        }
+        handoff.gate.defer_release_to_lease_deadline();
+    }
+
     async fn wait_for_cluster_entity_drain(
         &self,
-        domain: &Domain,
         gate: &ClusterEntityGate,
-        relays: &[Identifier],
-        affected_entities: &[crate::registry::RegistryEntity],
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+        purpose: EntityGatePurpose,
+        required_live_nodes: &[ClusterNodeName],
         deadline: tokio::time::Instant,
     ) -> Result<(), Report<DomainAlterError>> {
+        let domain = &gate.domain;
         let mut polling = interval(Duration::from_millis(25));
         polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_status = EntityDrainStatusEnvelope {
-            buffered_relay_batches: 0,
-            node_work_items: 0,
-            emitter_publishing: Vec::new(),
-        };
+        let mut last_status = None::<(ClusterNodeName, EntityDrainStatusEnvelope)>;
         loop {
             tokio::task::consume_budget().await;
             polling.tick().await;
+            if !required_live_nodes.is_empty() {
+                let live_nodes = self
+                    .available_node_ids()
+                    .await
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                if let Some(node) = required_live_nodes
+                    .iter()
+                    .find(|node| !live_nodes.contains(*node))
+                {
+                    return Err(Report::new(DomainAlterError::EntityGate {
+                        domain: domain.clone(),
+                        operation: purpose.operation_name(),
+                        reason: format!(
+                            "former owner '{node}' became unavailable during ownership handoff"
+                        ),
+                    }));
+                }
+            }
             let mut all_drained = true;
             for node in &gate.nodes {
                 tokio::task::consume_budget().await;
                 match self
-                    .entity_drain_status_on_node(node, domain, relays, affected_entities, deadline)
+                    .entity_drain_status_on_node(
+                        node,
+                        domain,
+                        relays,
+                        affected_entities,
+                        purpose,
+                        deadline,
+                    )
                     .await
                 {
                     Ok(status)
-                        if status.buffered_relay_batches == 0 && status.node_work_items == 0 => {}
+                        if status.buffered_relay_batches == 0
+                            && status.node_work_items == 0
+                            && status.outstanding_acks == 0 => {}
                     Ok(status) => {
                         all_drained = false;
-                        last_status = status;
+                        last_status = Some((node.clone(), status));
                     }
                     Err(error) => {
+                        if required_live_nodes.iter().any(|required| required == node) {
+                            return Err(Report::new(DomainAlterError::EntityGate {
+                                domain: domain.clone(),
+                                operation: purpose.operation_name(),
+                                reason: format!(
+                                    "former owner '{node}' became unavailable during ownership \
+                                     handoff: {error}"
+                                ),
+                            }));
+                        }
                         all_drained = false;
                         if tokio::time::Instant::now() >= deadline {
                             warn!(
                                 domain = domain.as_str(),
-                                node, error, "failed to retrieve entity drain status"
+                                %node, error, "failed to retrieve entity drain status"
                             );
                         }
                     }
@@ -6228,12 +6792,28 @@ impl SessionServiceImpl {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
+                let Some((pending_node, last_status)) = last_status.or_else(|| {
+                    // A gate holding no nodes has nothing left to drain, so there is no pending
+                    // node to name and no timeout to report.
+                    Some((
+                        gate.nodes.first().cloned()?,
+                        EntityDrainStatusEnvelope {
+                            buffered_relay_batches: 0,
+                            node_work_items: 0,
+                            outstanding_acks: 0,
+                            emitter_publishing: Vec::new(),
+                        },
+                    ))
+                }) else {
+                    return Ok(());
+                };
                 return Err(Report::new(DomainAlterError::EntityQuiesceTimeout {
                     domain: domain.clone(),
-                    buffered_relay_batches: usize::try_from(last_status.buffered_relay_batches)
-                        .unwrap_or(usize::MAX),
-                    node_work_items: usize::try_from(last_status.node_work_items)
-                        .unwrap_or(usize::MAX),
+                    operation: purpose.operation_name(),
+                    pending_node,
+                    buffered_relay_batches: last_status.buffered_relay_batches.arch_into(),
+                    node_work_items: last_status.node_work_items.arch_into(),
+                    outstanding_acks: last_status.outstanding_acks.arch_into(),
                     emitter_publishing: emitter_publishing_drain_summary(
                         &last_status.emitter_publishing,
                     ),
@@ -6254,7 +6834,7 @@ impl SessionServiceImpl {
                 Err(error) => {
                     warn!(
                         domain = domain.as_str(),
-                        node, error, "failed to release entity gates; scheduling retry"
+                        %node, error, "failed to release entity gates; scheduling retry"
                     );
                     self.broadcast_error(format!(
                         "failed to release entity gates on node '{node}' in domain '{}': {error}; \
@@ -6269,9 +6849,10 @@ impl SessionServiceImpl {
 
     async fn pause_and_drain_domain_for_alter(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<(), Report<DomainAlterError>> {
-        self.consensus
+        self.inner
+            .consensus
             .pause_domain(domain.clone())
             .await
             .map_err(|error| {
@@ -6301,22 +6882,22 @@ impl SessionServiceImpl {
 
     async fn wait_for_paused_domain_drain(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<(), Report<DomainAlterError>> {
-        let mut nodes = self.cluster.live_node_ids().await;
+        let mut nodes = self.inner.cluster.live_node_ids().await;
         if !nodes
             .iter()
-            .any(|node| node == self.consensus.local_node_id())
+            .any(|node| node == self.inner.consensus.local_node_id())
         {
-            nodes.push(self.consensus.local_node_id().to_string());
+            nodes.push(self.inner.consensus.local_node_id().clone());
         }
         nodes.sort();
         nodes.dedup();
 
-        let deadline = tokio::time::Instant::now() + self.runtime.domain_drain_timeout();
+        let deadline = tokio::time::Instant::now() + self.inner.runtime.domain_drain_timeout();
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_pending = None::<(String, DomainDrainStatusEnvelope)>;
+        let mut last_pending = None::<(ClusterNodeName, DomainDrainStatusEnvelope)>;
         let mut last_status_error = None;
 
         loop {
@@ -6382,7 +6963,7 @@ impl SessionServiceImpl {
 
     async fn abort_domain_alter_pause(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         reason: Report<DomainAlterError>,
     ) -> Report<DomainAlterError> {
         match self.resume_domain_after_alter(domain).await {
@@ -6396,9 +6977,10 @@ impl SessionServiceImpl {
 
     async fn resume_domain_after_alter(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<(), Report<DomainAlterError>> {
-        self.consensus
+        self.inner
+            .consensus
             .resume_domain(domain.clone())
             .await
             .map_err(|error| {
@@ -6420,16 +7002,20 @@ impl SessionServiceImpl {
     /// only a domain-paused alteration additionally has to resume the domain.
     async fn rollback_model_alteration(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         planned: crate::registry::PlannedMutations,
         classified_level: QuiesceLevel,
     ) -> Result<(), Report<DomainAlterError>> {
-        let runtime_changes = self.registry.rollback_committed(planned).map_err(|error| {
-            Report::new(DomainAlterError::Rollback {
-                domain: domain.clone(),
-                reason: format!("registry rollback failed: {error}"),
-            })
-        })?;
+        let runtime_changes = self
+            .inner
+            .registry
+            .rollback_committed(planned)
+            .map_err(|error| {
+                Report::new(DomainAlterError::Rollback {
+                    domain: domain.clone(),
+                    reason: format!("registry rollback failed: {error}"),
+                })
+            })?;
         self.publish_domain_schedule(domain, runtime_changes.graph)
             .await
             .map_err(|error| {
@@ -6447,11 +7033,12 @@ impl SessionServiceImpl {
 
     async fn describe_metrics_for_scheduled_node(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
         scheduled_node: Option<&ScheduledNode>,
     ) -> Result<Vec<String>, String> {
+        let identifier = identifier.into();
         self.describe_runtime_for_scheduled_node(domain, kind, identifier, scheduled_node)
             .await
             .map(|details| details.metrics)
@@ -6459,16 +7046,17 @@ impl SessionServiceImpl {
 
     async fn describe_runtime_for_scheduled_node(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
         scheduled_node: Option<&ScheduledNode>,
     ) -> Result<RemoteDescribeMetricsEnvelope, String> {
+        let identifier = identifier.into();
         let metric_kind = kind.as_str().to_ascii_uppercase();
         let Some(node) = scheduled_node else {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if node.executes_on(local_node_id) {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         }
@@ -6478,7 +7066,8 @@ impl SessionServiceImpl {
 
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
-        self.pending_cluster_commands
+        self.inner
+            .pending_cluster_commands
             .insert(correlation_id, PendingClusterCommand::DescribeMetrics(tx));
         if let Err(message) = self
             .dispatch_interconnect_control(
@@ -6492,14 +7081,14 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.pending_cluster_commands.remove(&correlation_id);
+            self.inner.pending_cluster_commands.remove(&correlation_id);
             return Err(message);
         }
         match tokio::time::timeout(Duration::from_secs(5), rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("describe metrics response channel closed".to_string()),
             Err(_) => {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 Err(format!(
                     "timed out waiting for DESCRIBE {} metrics response from '{}'",
                     kind.as_str(),
@@ -6511,19 +7100,22 @@ impl SessionServiceImpl {
 
     fn local_runtime_describe(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
         metric_kind: &str,
     ) -> RemoteDescribeMetricsEnvelope {
+        let identifier = identifier.into();
         let state = if let ModelKind::WasmProcessor = kind {
-            self.runtime
-                .describe_wasm_processor_state_for(domain, identifier)
+            self.inner
+                .runtime
+                .describe_wasm_processor_state_for(domain, identifier.clone())
         } else {
             Vec::new()
         };
         RemoteDescribeMetricsEnvelope {
             metrics: self
+                .inner
                 .runtime
                 .describe_metrics_for(domain, metric_kind, identifier),
             state,
@@ -6542,6 +7134,7 @@ impl SessionServiceImpl {
 
     fn handle_describe_metrics_response(&self, response: RemoteDescribeMetricsResponse) {
         if let Some((_, PendingClusterCommand::DescribeMetrics(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6549,7 +7142,11 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn describe_lookup(&self, domain: &Domain, describe: DescribeLookup) -> CommandResult {
+    async fn describe_lookup(
+        &self,
+        domain: &DomainName,
+        describe: DescribeLookup,
+    ) -> CommandResult {
         let lookup_target = match self
             .lookup_target_from_schedule(domain, &describe.name)
             .await
@@ -6557,7 +7154,12 @@ impl SessionServiceImpl {
             Ok(target) => target,
             Err(message) => return command_error(message),
         };
-        let Some((lookup, lookup_node, _)) = lookup_target else {
+        let Some(LookupTarget {
+            lookup,
+            node: lookup_node,
+            ..
+        }) = lookup_target
+        else {
             return command_error(format!(
                 "hash map '{}' does not exist in domain '{}'",
                 describe.name.as_str(),
@@ -6565,23 +7167,28 @@ impl SessionServiceImpl {
             ));
         };
 
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let summary = if lookup_node.executes_on(local_node_id) {
-            match self.runtime.describe_local_lookup(domain, &describe.name) {
-                Ok((_, resource_version, entry_count)) => Ok(LookupDescribeEnvelope {
+            match self
+                .inner
+                .runtime
+                .describe_local_lookup(domain, &describe.name)
+            {
+                Ok(description) => Ok(LookupDescribeEnvelope {
                     resource: lookup.resource.clone(),
-                    resource_version,
+                    resource_version: description.resource_version,
                     path: lookup.path.clone(),
                     decode_using_codec: lookup.decode_using_codec.clone(),
                     key_field: lookup.key_field.clone(),
-                    entry_count: entry_count as u64,
+                    entry_count: description.entry_count.arch_into(),
                 }),
                 Err(message) => Err(message),
             }
         } else if let Some(owner) = lookup_node.execution_node() {
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::DescribeLookup(tx));
             if let Err(message) = self
                 .dispatch_interconnect_control(
@@ -6594,14 +7201,14 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 return command_error(message);
             }
             match tokio::time::timeout(Duration::from_secs(5), rx).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) => Err("describe lookup response channel closed".to_string()),
                 Err(_) => {
-                    self.pending_cluster_commands.remove(&correlation_id);
+                    self.inner.pending_cluster_commands.remove(&correlation_id);
                     Err(format!(
                         "timed out waiting for DESCRIBE HASH MAP response from '{}'",
                         owner
@@ -6645,21 +7252,23 @@ impl SessionServiceImpl {
     ) -> Result<LookupDescribeEnvelope, String> {
         self.prepare_owner_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
-        let (lookup, resource_version, entry_count) = self
+        let description = self
+            .inner
             .runtime
             .describe_local_lookup(&request.domain, &request.name)?;
         Ok(LookupDescribeEnvelope {
-            resource: lookup.resource,
-            resource_version,
-            path: lookup.path,
-            decode_using_codec: lookup.decode_using_codec,
-            key_field: lookup.key_field,
-            entry_count: entry_count as u64,
+            resource: description.model.resource,
+            resource_version: description.resource_version,
+            path: description.model.path,
+            decode_using_codec: description.model.decode_using_codec,
+            key_field: description.model.key_field,
+            entry_count: description.entry_count.arch_into(),
         })
     }
 
     fn handle_describe_lookup_response(&self, response: RemoteDescribeLookupResponse) {
         if let Some((_, PendingClusterCommand::DescribeLookup(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
@@ -6669,13 +7278,14 @@ impl SessionServiceImpl {
 
     async fn describe_deduplicator(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeDeduplicator,
     ) -> CommandResult {
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::Deduplicator, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Deduplicator, &describe.name)
         {
@@ -6730,13 +7340,14 @@ impl SessionServiceImpl {
 
     async fn describe_junction(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeJunction,
     ) -> CommandResult {
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::Junction, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Junction, &describe.name)
         {
@@ -6787,13 +7398,14 @@ impl SessionServiceImpl {
 
     async fn describe_reingestor(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeReingestor,
     ) -> CommandResult {
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::Reingestor, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Reingestor, &describe.name)
         {
@@ -6844,13 +7456,14 @@ impl SessionServiceImpl {
 
     async fn describe_correlator(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeCorrelator,
     ) -> CommandResult {
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::Correlator, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Correlator, &describe.name)
         {
@@ -6901,13 +7514,14 @@ impl SessionServiceImpl {
 
     async fn describe_reorderer(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeReorderer,
     ) -> CommandResult {
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::Reorderer, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Reorderer, &describe.name)
         {
@@ -6956,11 +7570,16 @@ impl SessionServiceImpl {
         ))
     }
 
-    async fn describe_emitter(&self, domain: &Domain, describe: DescribeEmitter) -> CommandResult {
+    async fn describe_emitter(
+        &self,
+        domain: &DomainName,
+        describe: DescribeEmitter,
+    ) -> CommandResult {
         let scheduled_node = self
             .scheduled_model_node(domain, ModelKind::Emitter, &describe.name)
             .await;
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::Emitter, &describe.name)
         {
@@ -7023,29 +7642,31 @@ impl SessionServiceImpl {
 
     async fn describe_window_processor(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeWindowProcessor,
     ) -> CommandResult {
-        let model = match self
-            .registry
-            .get(domain, ModelKind::WindowProcessor, &describe.name)
-        {
-            Ok(Some(model)) => model,
-            Ok(None) => {
-                return command_error(format!(
-                    "window processor '{}' does not exist in domain '{}'",
-                    describe.name.as_str(),
-                    domain.as_str()
-                ));
-            }
-            Err(error) => {
-                return command_error(format!(
-                    "failed to read window processor '{}' in domain '{}': {error:?}",
-                    describe.name.as_str(),
-                    domain.as_str()
-                ));
-            }
-        };
+        let model =
+            match self
+                .inner
+                .registry
+                .get(domain, ModelKind::WindowProcessor, &describe.name)
+            {
+                Ok(Some(model)) => model,
+                Ok(None) => {
+                    return command_error(format!(
+                        "window processor '{}' does not exist in domain '{}'",
+                        describe.name.as_str(),
+                        domain.as_str()
+                    ));
+                }
+                Err(error) => {
+                    return command_error(format!(
+                        "failed to read window processor '{}' in domain '{}': {error:?}",
+                        describe.name.as_str(),
+                        domain.as_str()
+                    ));
+                }
+            };
         let Model::WindowProcessor(processor) = model else {
             return command_error(format!(
                 "model '{}' in domain '{}' is not a window processor",
@@ -7105,10 +7726,11 @@ impl SessionServiceImpl {
 
     async fn describe_wasm_processor(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeWasmProcessor,
     ) -> CommandResult {
         let model = match self
+            .inner
             .registry
             .get(domain, ModelKind::WasmProcessor, &describe.name)
         {
@@ -7164,29 +7786,29 @@ impl SessionServiceImpl {
 
     async fn scheduled_model_node(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Option<ScheduledNode> {
-        let schedule = self.consensus.current_schedule().await;
-        schedule.domain(domain).and_then(|domain_schedule| {
-            domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == kind && node.identifier == *identifier)
-                .cloned()
-        })
+        let identifier = identifier.into();
+        let schedule = self.inner.consensus.current_schedule().await;
+        let domain_schedule = schedule.domain(domain)?;
+        domain_schedule
+            .nodes
+            .get(&NodeRef::new(kind, identifier))
+            .cloned()
     }
 
     async fn prepare_owner_control_request(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<ScheduledNode, String> {
+        let identifier = identifier.into();
         self.prepare_control_request_domain(domain).await?;
         let node = self
-            .scheduled_model_node(domain, kind, identifier)
+            .scheduled_model_node(domain, kind, identifier.clone())
             .await
             .ok_or_else(|| {
                 format!(
@@ -7196,14 +7818,14 @@ impl SessionServiceImpl {
                     domain.as_str()
                 )
             })?;
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if !node.executes_on(local_node_id) {
             return Err(format!(
                 "{} '{}' in domain '{}' is owned by '{}' but request reached '{}'",
                 kind.as_str().to_ascii_lowercase(),
                 identifier.as_str(),
                 domain.as_str(),
-                node.execution_node().unwrap_or("-"),
+                node.execution_node().map_or("-", ClusterNodeName::as_str),
                 local_node_id
             ));
         }
@@ -7212,13 +7834,14 @@ impl SessionServiceImpl {
 
     async fn prepare_assigned_control_request(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<ScheduledNode, String> {
+        let identifier = identifier.into();
         self.prepare_control_request_domain(domain).await?;
         let node = self
-            .scheduled_model_node(domain, kind, identifier)
+            .scheduled_model_node(domain, kind, identifier.clone())
             .await
             .ok_or_else(|| {
                 format!(
@@ -7228,7 +7851,7 @@ impl SessionServiceImpl {
                     domain.as_str()
                 )
             })?;
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if !node.is_assigned_to(local_node_id) {
             return Err(format!(
                 "{} '{}' in domain '{}' is not assigned to '{}'",
@@ -7243,12 +7866,12 @@ impl SessionServiceImpl {
 
     async fn prepare_stream_owner_control_request(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> Result<(), String> {
         self.prepare_control_request_domain(domain).await?;
         let owner_nodes = self.scheduled_stream_owner_nodes(domain, relay).await?;
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         if !owner_nodes.iter().any(|owner| owner == local_node_id) {
             return Err(format!(
                 "stream '{}' in domain '{}' is not owned by '{}'",
@@ -7260,19 +7883,24 @@ impl SessionServiceImpl {
         Ok(())
     }
 
-    async fn prepare_control_request_domain(&self, domain: &Domain) -> Result<(), String> {
-        if self.consensus.current_domain(domain).await.is_none() {
+    async fn prepare_control_request_domain(&self, domain: &DomainName) -> Result<(), String> {
+        if self.inner.consensus.current_domain(domain).await.is_none() {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
         }
         self.reconcile_running_domain_runtime(domain).await
     }
 
-    async fn lookup_query(&self, domain: &Domain, query: LookupQuery) -> CommandResult {
+    async fn lookup_query(&self, domain: &DomainName, query: LookupQuery) -> CommandResult {
         let lookup_target = match self.lookup_target_from_schedule(domain, &query.name).await {
             Ok(target) => target,
             Err(message) => return command_error(message),
         };
-        let Some((lookup, lookup_node, key_ty)) = lookup_target else {
+        let Some(LookupTarget {
+            lookup,
+            node: lookup_node,
+            key_ty,
+        }) = lookup_target
+        else {
             return command_error(format!(
                 "hash map '{}' does not exist in domain '{}'",
                 query.name.as_str(),
@@ -7285,9 +7913,13 @@ impl SessionServiceImpl {
             Err(message) => return command_error(message),
         };
         let key = parsed.to_key_fragment();
-        let local_node_id = self.consensus.local_node_id();
+        let local_node_id = self.inner.consensus.local_node_id();
         let local_record = if lookup_node.is_assigned_to(local_node_id) {
-            Some(self.runtime.query_local_lookup(domain, &query.name, &key))
+            Some(
+                self.inner
+                    .runtime
+                    .query_local_lookup(domain, &query.name, &key),
+            )
         } else {
             None
         };
@@ -7298,7 +7930,7 @@ impl SessionServiceImpl {
                 if let Some(owner) = lookup_node.execution_node()
                     && owner != local_node_id
                 {
-                    targets.push(owner.to_string());
+                    targets.push(owner.clone());
                 }
                 for assigned in &lookup_node.assigned_nodes {
                     if assigned != local_node_id && !targets.contains(assigned) {
@@ -7315,7 +7947,7 @@ impl SessionServiceImpl {
             None => {
                 let mut targets = Vec::new();
                 if let Some(owner) = lookup_node.execution_node() {
-                    targets.push(owner.to_string());
+                    targets.push(owner.clone());
                 }
                 for assigned in &lookup_node.assigned_nodes {
                     if !targets.contains(assigned) {
@@ -7351,16 +7983,18 @@ impl SessionServiceImpl {
 
     async fn lookup_query_remote_candidates(
         &self,
-        domain: &Domain,
-        name: &Identifier,
+        domain: &DomainName,
+        name: impl Into<ModelName>,
         key: &str,
-        targets: Vec<String>,
+        targets: Vec<ClusterNodeName>,
     ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, String> {
+        let name = name.into();
         let mut errors = Vec::new();
         for target in targets {
             let correlation_id = self.next_cluster_command_correlation_id();
             let (tx, rx) = oneshot::channel();
-            self.pending_cluster_commands
+            self.inner
+                .pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::LookupQuery(tx));
             if let Err(message) = self
                 .dispatch_interconnect_control(
@@ -7368,13 +8002,13 @@ impl SessionServiceImpl {
                     ControlEnvelope::LookupRequest(RemoteLookupRequest {
                         correlation_id,
                         domain: domain.clone(),
-                        name: name.clone(),
+                        name: LookupName::from(&name),
                         key: key.to_string(),
                     }),
                 )
                 .await
             {
-                self.pending_cluster_commands.remove(&correlation_id);
+                self.inner.pending_cluster_commands.remove(&correlation_id);
                 errors.push(message);
                 continue;
             }
@@ -7385,7 +8019,7 @@ impl SessionServiceImpl {
                 },
                 Ok(Err(_)) => errors.push("lookup response channel closed".to_string()),
                 Err(_) => {
-                    self.pending_cluster_commands.remove(&correlation_id);
+                    self.inner.pending_cluster_commands.remove(&correlation_id);
                     errors.push(format!(
                         "timed out waiting for LOOKUP response from '{}'",
                         target
@@ -7405,20 +8039,25 @@ impl SessionServiceImpl {
     ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, String> {
         self.prepare_assigned_control_request(&request.domain, ModelKind::Lookup, &request.name)
             .await?;
-        self.runtime
+        self.inner
+            .runtime
             .query_local_lookup(&request.domain, &request.name, &request.key)
     }
 
     fn handle_lookup_response(&self, response: RemoteLookupResponse) {
         if let Some((_, PendingClusterCommand::LookupQuery(sender))) = self
+            .inner
             .pending_cluster_commands
             .remove(&response.correlation_id)
         {
-            let _ = sender.send(response.result.and_then(|record| {
-                record
-                    .map(|bytes| runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes))
-                    .transpose()
-            }));
+            let result = match response.result {
+                Ok(Some(bytes)) => {
+                    runtime_schema::RuntimeRecordBatch::from_arrow_ipc_bytes(&bytes).map(Some)
+                }
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(result);
         }
     }
 
@@ -7429,7 +8068,7 @@ impl SessionServiceImpl {
     async fn queued_configuration(
         &self,
         subscriptions: &SessionSubscriptions,
-        domain: Option<&Domain>,
+        domain: Option<&DomainName>,
     ) -> QueuedConfiguration {
         let (Some(domain), Some(id)) = (domain, subscriptions.transaction_id()) else {
             return QueuedConfiguration::default();
@@ -7440,7 +8079,7 @@ impl SessionServiceImpl {
         {
             return QueuedConfiguration::default();
         }
-        let Some(transaction) = self.consensus.current_transaction(id).await else {
+        let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
             return QueuedConfiguration::default();
         };
         if &transaction.domain != domain {
@@ -7469,13 +8108,17 @@ impl SessionServiceImpl {
         req: SuggestRequest,
         subscriptions: &SessionSubscriptions,
     ) -> SuggestResponse {
-        let cursor = usize::try_from(req.cursor).unwrap_or(req.input.len());
+        let cursor = req.cursor.arch_into();
         let domain = parse_request_domain(&req.domain).ok();
         let queued = self
             .queued_configuration(subscriptions, domain.as_ref())
             .await;
 
-        let (grammar_input, grammar_cursor, prefix) = completion_context(&req.input, cursor);
+        let CompletionContext {
+            grammar_input,
+            grammar_cursor,
+            prefix,
+        } = completion_context(&req.input, cursor);
         let grammar = suggest_client_statement(&grammar_input, grammar_cursor);
 
         let mut suggestions = Vec::new();
@@ -7504,10 +8147,13 @@ impl SessionServiceImpl {
 
         for kind in &semantic_kinds {
             if let Some(domain) = &domain
-                && self.consensus.current_domain(domain).await.is_some()
-                && let Ok(ids) =
-                    self.registry
-                        .resulting_identifiers(domain, *kind, &prefix, &queued.models)
+                && self.inner.consensus.current_domain(domain).await.is_some()
+                && let Ok(ids) = self.inner.registry.resulting_identifiers(
+                    domain,
+                    *kind,
+                    &prefix,
+                    &queued.models,
+                )
             {
                 suggestions.extend(ids.into_iter().map(|id| id.to_string()));
             }
@@ -7519,10 +8165,10 @@ impl SessionServiceImpl {
 
         if expects_runtime_node_ref
             && let Some(domain) = &domain
-            && self.consensus.current_domain(domain).await.is_some()
+            && self.inner.consensus.current_domain(domain).await.is_some()
         {
             suggestions.extend(placement_runtime_node_ref_suggestions(
-                &self.registry,
+                &self.inner.registry,
                 domain,
                 &prefix,
                 &queued.models,
@@ -7532,7 +8178,7 @@ impl SessionServiceImpl {
         if let Some(domain) = &domain
             && (expects_resource_ref || requested_resource_versions.is_some())
         {
-            let resources = self.consensus.current_resources().await;
+            let resources = self.inner.consensus.current_resources().await;
             if expects_resource_ref {
                 suggestions.extend(resource_ref_suggestions(&resources, domain, &prefix));
                 suggestions.extend(queued.resource_suggestions(&prefix));
@@ -7553,14 +8199,12 @@ impl SessionServiceImpl {
                 && !expects_session_subscription_ref
                 && !expects_runtime_node_ref)
         {
-            let domains = self.consensus.current_domains().await;
-            suggestions.extend(domains.into_keys().filter_map(|id| {
+            let domains = self.inner.consensus.current_domains().await;
+            for id in domains.into_keys() {
                 if prefix.is_empty() || id.as_str().starts_with(&prefix) {
-                    Some(id.to_string())
-                } else {
-                    None
+                    suggestions.push(id.to_string());
                 }
-            }));
+            }
         }
 
         let mut response_suggestions = SortedSet::from_unsorted(suggestions)
@@ -7568,14 +8212,14 @@ impl SessionServiceImpl {
             .into_iter()
             .map(|value| ApiSuggestion {
                 value,
-                kind: SuggestionKind::Text as i32,
+                kind: i32::from(SuggestionKind::Text),
             })
             .collect::<Vec<_>>();
 
         if let Some(fragment) = upload_resource_path_fragment(&req.input, cursor) {
             response_suggestions.push(ApiSuggestion {
                 value: fragment.to_string(),
-                kind: SuggestionKind::LocalDirectoryLookup as i32,
+                kind: i32::from(SuggestionKind::LocalDirectoryLookup),
             });
         }
 
@@ -7620,8 +8264,8 @@ impl SessionServiceImpl {
                 )
             });
         if is_transaction_request {
-            let leader = self.consensus.current_leader().await;
-            if leader.as_deref() != Some(self.consensus.local_node_id()) {
+            let leader = self.inner.consensus.current_leader().await;
+            if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return self
                     .command_with_transaction_status(
                         self.not_leader_response(&req.query, leader).await,
@@ -7663,7 +8307,7 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         if result.transaction.is_none()
             && let Some(id) = subscriptions.transaction_id()
-            && let Some(transaction) = self.consensus.current_transaction(id).await
+            && let Some(transaction) = self.inner.consensus.current_transaction(id).await
         {
             result.transaction = Some(transaction_status(&transaction));
         }
@@ -7675,10 +8319,11 @@ impl SessionServiceImpl {
     fn drop_transaction_bindings_if_armed(&self) {
         #[cfg(feature = "testing")]
         if self
+            .inner
             .runtime
-            .take_armed_transaction_binding_drop(self.consensus.local_node_id())
+            .take_armed_transaction_binding_drop(self.inner.consensus.local_node_id())
         {
-            self.transaction_bindings.clear();
+            self.inner.transaction_bindings.clear();
         }
     }
 
@@ -7689,7 +8334,7 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id() else {
             return Err(SessionTransactionBindingError::Unbound);
         };
-        match self.transaction_bindings.get(id) {
+        match self.inner.transaction_bindings.get(id) {
             Some(binding) if binding.value() == &subscriptions.session_id => Ok(()),
             Some(_) => Err(SessionTransactionBindingError::TakenOver { id: id.to_string() }),
             None => Err(SessionTransactionBindingError::Detached { id: id.to_string() }),
@@ -7701,11 +8346,12 @@ impl SessionServiceImpl {
             return;
         };
         if self
+            .inner
             .transaction_bindings
             .get(&id)
             .is_some_and(|binding| binding.value() == &subscriptions.session_id)
         {
-            self.transaction_bindings.remove(&id);
+            self.inner.transaction_bindings.remove(&id);
         }
     }
 
@@ -7713,17 +8359,20 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return;
         };
-        if self.consensus.current_leader().await.as_deref() != Some(self.consensus.local_node_id())
+        if self.inner.consensus.current_leader().await.as_ref()
+            != Some(self.inner.consensus.local_node_id())
             || self
+                .inner
                 .transaction_bindings
                 .get(&id)
                 .is_none_or(|binding| binding.value() != &subscriptions.session_id)
         {
             return;
         }
-        if let Some(transaction) = self.consensus.current_transaction(&id).await
+        if let Some(transaction) = self.inner.consensus.current_transaction(&id).await
             && matches!(transaction.state, TransactionState::Open)
             && let Err(error) = self
+                .inner
                 .consensus
                 .revert_transaction(id.clone(), subscriptions.user.clone(), current_timestamp())
                 .await
@@ -7742,13 +8391,13 @@ impl SessionServiceImpl {
         request: proto::AttachTransactionRequest,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_deref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return self
                 .not_leader_response(&format!("ATTACH TRANSACTION {}", request.id), leader)
                 .await;
         }
-        let Some(transaction) = self.consensus.current_transaction(&request.id).await else {
+        let Some(transaction) = self.inner.consensus.current_transaction(&request.id).await else {
             return command_error(format!("transaction '{}' is unknown", request.id));
         };
         if transaction.owner != subscriptions.user {
@@ -7773,6 +8422,7 @@ impl SessionServiceImpl {
         }
 
         let transaction = match self
+            .inner
             .consensus
             .touch_transaction(
                 request.id.clone(),
@@ -7785,7 +8435,8 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error.to_string()),
         };
         self.release_session_transaction_binding(subscriptions);
-        self.transaction_bindings
+        self.inner
+            .transaction_bindings
             .insert(request.id.clone(), subscriptions.session_id.clone());
         subscriptions.bind_transaction(request.id.clone());
         let mut result = command_ok(format!("attached transaction '{}'", request.id));
@@ -7817,12 +8468,14 @@ impl SessionServiceImpl {
                                 current_timestamp(),
                             );
                             match self
+                                .inner
                                 .consensus
-                                .open_transaction(transaction, self.transaction_max_open)
+                                .open_transaction(transaction, self.inner.transaction_max_open)
                                 .await
                             {
                                 Ok(transaction) => {
-                                    self.transaction_bindings
+                                    self.inner
+                                        .transaction_bindings
                                         .insert(id.clone(), subscriptions.session_id.clone());
                                     subscriptions.bind_transaction(id.clone());
                                     let mut result =
@@ -7874,7 +8527,7 @@ impl SessionServiceImpl {
             success: true,
             message: command_results_message(&results),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             results,
             transaction,
             ..Default::default()
@@ -7883,7 +8536,7 @@ impl SessionServiceImpl {
 
     /// Resolves the domain a `BEGIN` binds its transaction to. The domain must already exist,
     /// because a transaction can no longer create one and every statement it queues belongs to it.
-    async fn resolve_transaction_domain(&self, request_domain: &str) -> Result<Domain, String> {
+    async fn resolve_transaction_domain(&self, request_domain: &str) -> Result<DomainName, String> {
         let domain = match parse_request_domain(request_domain) {
             Ok(domain) => domain,
             Err(RequestDomainError::Missing) => {
@@ -7891,7 +8544,7 @@ impl SessionServiceImpl {
             }
             Err(RequestDomainError::Invalid) => return Err("invalid domain".to_string()),
         };
-        if self.consensus.current_domain(&domain).await.is_none() {
+        if self.inner.consensus.current_domain(&domain).await.is_none() {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
         }
         Ok(domain)
@@ -7934,12 +8587,12 @@ impl SessionServiceImpl {
             source: command.source,
             statement,
         };
-        let Some(transaction) = self.consensus.current_transaction(id).await else {
+        let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
         let limits = TransactionQueueLimits {
-            max_statements: self.transaction_max_statements,
-            max_source_bytes: self.transaction_max_source_bytes,
+            max_statements: self.inner.transaction_max_statements,
+            max_source_bytes: self.inner.transaction_max_source_bytes,
         };
         if let Err(error) =
             transaction.validate_queue_admission(&subscriptions.user, &domain, &queued, limits)
@@ -7954,6 +8607,7 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error),
         };
         match self
+            .inner
             .consensus
             .queue_transaction_statement(
                 id.to_string(),
@@ -7981,14 +8635,14 @@ impl SessionServiceImpl {
         candidate: &TransactionStatement,
     ) -> Result<Option<QuiesceLevel>, String> {
         let (mut domains, resources) = tokio::join!(
-            self.consensus.current_domains(),
-            self.consensus.current_resources(),
+            self.inner.consensus.current_domains(),
+            self.inner.consensus.current_resources(),
         );
         let mut resource_names = resources
             .next_version_by_resource
             .iter()
-            .filter(|(domain, _, _)| domain == &transaction.domain)
-            .map(|(_, identifier, _)| identifier.clone())
+            .filter(|counter| counter.domain == transaction.domain)
+            .map(|counter| counter.identifier.clone())
             .collect::<BTreeSet<_>>();
         let domain_id = &transaction.domain;
         let mut model_mutations = Vec::<RegistryMutation>::new();
@@ -8034,7 +8688,9 @@ impl SessionServiceImpl {
                     let _ = parse_start_point(&start.start)?;
                     domain.status = DomainStatus::Running;
                     domain.last_start = start.start.clone();
-                    domain.start_version = domain.start_version.saturating_add(1);
+                    domain.start_version = domain.start_version.checked_add(1).assured(
+                        "a domain cannot be started 2^64 times in the lifetime of a cluster",
+                    );
                 }
                 Statement::StopDomain(_) => {
                     let domain = domains
@@ -8070,8 +8726,9 @@ impl SessionServiceImpl {
                     if let Statement::Create(create) = statement
                         && create.if_not_exists
                         && self
+                            .inner
                             .registry
-                            .get(domain_id, create.body.kind(), create.body.identifier())
+                            .get(domain_id, create.body.kind(), create.body.name())
                             .map_err(|error| error.to_string())?
                             .is_some()
                     {
@@ -8093,6 +8750,7 @@ impl SessionServiceImpl {
         }
         tokio::task::consume_budget().await;
         let preflight = self
+            .inner
             .registry
             .preflight_transaction_mutations(domain_id, &model_mutations)
             .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
@@ -8104,7 +8762,7 @@ impl SessionServiceImpl {
         };
         let domain = domains
             .get(domain_id)
-            .expect("the transaction domain was checked while replaying the transaction");
+            .verified("replaying the transaction resolved this domain before reaching the step");
         self.validate_changed_model_bindings(domain_id, domain.config.pace, planned)
             .await?;
         let _ = self.prepare_planned_domain_udfs(planned).await?;
@@ -8157,8 +8815,9 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("REVERT requires an active transaction".to_string());
         };
-        let previous = self.consensus.current_transaction(&id).await;
+        let previous = self.inner.consensus.current_transaction(&id).await;
         match self
+            .inner
             .consensus
             .revert_transaction(id.clone(), subscriptions.user.clone(), current_timestamp())
             .await
@@ -8188,6 +8847,7 @@ impl SessionServiceImpl {
             return command_error("COMMIT requires an active transaction".to_string());
         };
         let started = match self
+            .inner
             .consensus
             .start_transaction_commit(id.clone(), subscriptions.user.clone(), current_timestamp())
             .await
@@ -8196,12 +8856,22 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error.to_string()),
         };
         let finished = if started.statements.is_empty() {
-            self.consensus
+            self.inner
+                .consensus
                 .finish_empty_transaction_commit(id.clone(), current_timestamp())
                 .await
                 .map_err(|error| error.to_string())
         } else {
-            self.execute_replicated_commit(&id).await
+            // A replicated commit owns its execution independently of the session. Keep its
+            // model-mutation future off the session's poll stack as well.
+            let service = self.clone();
+            let commit_id = id.clone();
+            match tokio::spawn(async move { service.execute_replicated_commit(&commit_id).await })
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("transaction '{id}' commit task failed: {error}")),
+            }
         };
         match finished {
             Ok(transaction) => {
@@ -8215,7 +8885,7 @@ impl SessionServiceImpl {
                     "transaction '{id}' commit remains in progress after an execution error: \
                      {error}"
                 ));
-                if let Some(transaction) = self.consensus.current_transaction(&id).await {
+                if let Some(transaction) = self.inner.consensus.current_transaction(&id).await {
                     result.transaction = Some(transaction_status(&transaction));
                 }
                 result
@@ -8224,20 +8894,20 @@ impl SessionServiceImpl {
     }
 
     async fn execute_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
-        let _commit_execution = self.transaction_commit_execution.lock().await;
+        let _commit_execution = self.inner.transaction_commit_execution.lock().await;
         let mut wait = interval(Duration::from_millis(100));
         let lease = loop {
             tokio::task::consume_budget().await;
-            match self.transaction_executions.entry(id.to_string()) {
+            match self.inner.transaction_executions.entry(id.to_string()) {
                 dashmap::mapref::entry::Entry::Vacant(entry) => {
                     entry.insert(());
                     break TransactionExecutionLease {
-                        executions: self.transaction_executions.clone(),
+                        executions: self.inner.transaction_executions.clone(),
                         id: id.to_string(),
                     };
                 }
                 dashmap::mapref::entry::Entry::Occupied(_) => {
-                    if let Some(transaction) = self.consensus.current_transaction(id).await
+                    if let Some(transaction) = self.inner.consensus.current_transaction(id).await
                         && matches!(transaction.state, TransactionState::Finished(_))
                     {
                         return Ok(transaction);
@@ -8253,8 +8923,9 @@ impl SessionServiceImpl {
     }
 
     async fn run_replicated_commit(&self, id: &str) -> Result<ReplicatedTransaction, String> {
-        self.registry
-            .synchronize_cluster_schedule(&self.consensus.current_schedule().await)
+        self.inner
+            .registry
+            .synchronize_cluster_schedule(&self.inner.consensus.current_schedule().await)
             .map_err(|error| {
                 format!(
                     "failed to synchronize registry before resuming transaction '{id}': {error}"
@@ -8262,12 +8933,13 @@ impl SessionServiceImpl {
             })?;
         loop {
             tokio::task::consume_budget().await;
-            if self.consensus.current_leader().await.as_deref()
-                != Some(self.consensus.local_node_id())
+            if self.inner.consensus.current_leader().await.as_ref()
+                != Some(self.inner.consensus.local_node_id())
             {
                 return Err("leadership changed while executing the commit".to_string());
             }
             let transaction = self
+                .inner
                 .consensus
                 .current_transaction(id)
                 .await
@@ -8282,6 +8954,7 @@ impl SessionServiceImpl {
             let first_statement = progress.next_statement;
             let Some(first) = transaction.statements.get(first_statement) else {
                 return self
+                    .inner
                     .consensus
                     .finish_empty_transaction_commit(id.to_string(), current_timestamp())
                     .await
@@ -8357,9 +9030,10 @@ impl SessionServiceImpl {
     async fn pause_transaction_commit_if_armed(&self, _transaction: &ReplicatedTransaction) {
         #[cfg(feature = "testing")]
         if let TransactionState::Committing(_) = _transaction.state {
-            self.runtime
+            self.inner
+                .runtime
                 .pause_transaction_commit_after_progress_if_armed(
-                    self.consensus.local_node_id(),
+                    self.inner.consensus.local_node_id(),
                     _transaction.completed_statement_count(),
                 )
                 .await;
@@ -8384,12 +9058,11 @@ impl SessionServiceImpl {
         let mut completed_model_mutation = false;
         for result in transaction.commit_results() {
             tokio::task::consume_budget().await;
-            let Some(statements) = transaction.statements.get(
-                result.first_statement
-                    ..result
-                        .first_statement
-                        .saturating_add(result.statement_count),
-            ) else {
+            let Some(statements) = result
+                .first_statement
+                .checked_add(result.statement_count)
+                .and_then(|end| transaction.statements.get(result.first_statement..end))
+            else {
                 return Err(format!(
                     "transaction '{}' has invalid recorded commit progress",
                     transaction.id
@@ -8408,7 +9081,7 @@ impl SessionServiceImpl {
             return Ok(());
         }
         let domain = &transaction.domain;
-        let Some(state) = self.consensus.current_domain(domain).await else {
+        let Some(state) = self.inner.consensus.current_domain(domain).await else {
             return Ok(());
         };
         if let DomainStatus::Paused = state.status {
@@ -8437,7 +9110,9 @@ impl SessionServiceImpl {
         quiesce_level: Option<QuiesceLevel>,
         effect: Option<TransactionStepEffect>,
     ) -> Result<ReplicatedTransaction, String> {
-        let next_statement = first_statement.saturating_add(statement_count);
+        let next_statement = first_statement
+            .checked_add(statement_count)
+            .assured("a recorded commit step counts statements of the transaction it belongs to");
         let completion = if result.success {
             (next_statement == transaction.statements.len())
                 .then_some(TransactionOutcome::Committed)
@@ -8447,8 +9122,29 @@ impl SessionServiceImpl {
                 error: result.message.clone(),
             })
         };
-        let effect = result.success.then_some(effect).flatten();
-        self.consensus
+        let effect = if result.success { effect } else { None };
+        let planned_relocations = match effect.as_ref() {
+            Some(
+                TransactionStepEffect::ReplaceDomainSchedule {
+                    expected_schedule,
+                    schedule,
+                    ..
+                }
+                | TransactionStepEffect::PutDomainAndSchedule {
+                    expected_schedule,
+                    schedule,
+                    ..
+                },
+            ) => {
+                let count =
+                    planned_ownership_moves(expected_schedule.as_deref(), schedule.as_deref())
+                        .len();
+                (count > 0).then_some(count)
+            }
+            _ => None,
+        };
+        self.inner
+            .consensus
             .advance_transaction_commit(TransactionCommitAdvance {
                 id: transaction.id.clone(),
                 expected_next_statement: first_statement,
@@ -8458,6 +9154,7 @@ impl SessionServiceImpl {
                     first_statement,
                     statement_count,
                     quiesce_level,
+                    planned_relocations,
                     result: replicated_command_result(&result),
                 },
                 effect,
@@ -8472,16 +9169,40 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         statement_index: usize,
     ) -> Result<ReplicatedTransaction, String> {
-        let queued = transaction
-            .statements
-            .get(statement_index)
-            .expect("replicated commit progress must point to a statement");
+        let queued = transaction.statements.get(statement_index).verified(
+            "the caller checked this index against the same statement list before dispatching the \
+             step",
+        );
         let mut start_clock = None;
         let mut stop_clock = None;
+        let mut ownership_handoff = None;
+        let mut step_quiesce_level = None;
         let domain_id = &transaction.domain;
+        let _alter_guard = if let Statement::AlterDomain(_) = &queued.statement {
+            let Some(guard) = self.inner.runtime.try_begin_domain_alter(domain_id) else {
+                return self
+                    .record_transaction_step(
+                        transaction,
+                        statement_index,
+                        1,
+                        command_error(
+                            DomainAlterError::ConcurrentAlter {
+                                domain: domain_id.clone(),
+                            }
+                            .to_string(),
+                        ),
+                        None,
+                        None,
+                    )
+                    .await;
+            };
+            Some(guard)
+        } else {
+            None
+        };
         let (result, effect) = match &queued.statement {
             Statement::AlterDomain(alter) => {
-                let Some(previous) = self.consensus.current_domain(domain_id).await else {
+                let Some(previous) = self.inner.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
                             transaction,
@@ -8505,44 +9226,77 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else if previous.config.placement == alter.policy {
+                    step_quiesce_level = Some(QuiesceLevel::Dynamic);
                     (
                         command_ok(format!(
-                            "domain '{}' placement is already {}; planned relocations: 0",
+                            "domain '{}' placement is already {}; {}\nplanned relocations: 0",
                             domain_id.as_str(),
-                            alter.policy.as_ref()
+                            alter.policy.as_ref(),
+                            quiesce_level_message(QuiesceLevel::Dynamic)
                         )),
                         None,
                     )
                 } else {
-                    let graph = self.registry.active_graph(domain_id);
+                    let graph = self.inner.registry.active_graph(domain_id);
                     let expected_schedule = self
+                        .inner
                         .consensus
                         .current_schedule()
                         .await
                         .domain(domain_id)
                         .cloned();
-                    let (schedule, relocations) = self
+                    let PreparedDomainSchedule {
+                        schedule,
+                        relocations,
+                    } = self
                         .prepare_domain_schedule(domain_id, graph, alter.policy)
                         .await?;
+                    let quiesce_level =
+                        if matches!(previous.status, DomainStatus::Running) && relocations > 0 {
+                            QuiesceLevel::EntityPause
+                        } else {
+                            QuiesceLevel::Dynamic
+                        };
+                    step_quiesce_level = Some(quiesce_level);
                     let mut next = previous.clone();
                     next.config.placement = alter.policy;
-                    (
-                        command_ok(format!(
-                            "set domain '{}' placement to {}; planned relocations: {relocations}",
-                            domain_id.as_str(),
-                            alter.policy.as_ref()
-                        )),
-                        Some(TransactionStepEffect::PutDomainAndSchedule {
-                            expected_domain: Box::new(previous),
-                            expected_schedule: expected_schedule.map(Box::new),
-                            domain: Box::new(next),
-                            schedule: schedule.map(Box::new),
-                        }),
-                    )
+                    let handoff = if let DomainStatus::Running = previous.status
+                        && relocations > 0
+                    {
+                        self.begin_planned_ownership_handoff(
+                            domain_id,
+                            expected_schedule.as_ref(),
+                            schedule.as_ref(),
+                        )
+                        .await
+                    } else {
+                        Ok(None)
+                    };
+                    match handoff {
+                        Ok(handoff) => {
+                            ownership_handoff = handoff;
+                            (
+                                command_ok(format!(
+                                    "set domain '{}' placement to {}; {}\nplanned relocations: \
+                                     {relocations}",
+                                    domain_id.as_str(),
+                                    alter.policy.as_ref(),
+                                    quiesce_level_message(quiesce_level)
+                                )),
+                                Some(TransactionStepEffect::PutDomainAndSchedule {
+                                    expected_domain: Box::new(previous),
+                                    expected_schedule: expected_schedule.map(Box::new),
+                                    domain: Box::new(next),
+                                    schedule: schedule.map(Box::new),
+                                }),
+                            )
+                        }
+                        Err(error) => (command_error(error.to_string()), None),
+                    }
                 }
             }
             Statement::CreateResource(create) => {
-                let resources = self.consensus.current_resources().await;
+                let resources = self.inner.consensus.current_resources().await;
                 if resources.is_declared(domain_id, &create.identifier) {
                     if create.if_not_exists {
                         (
@@ -8571,7 +9325,7 @@ impl SessionServiceImpl {
                 }
             }
             Statement::StartDomain(start) => {
-                let Some(domain) = self.consensus.current_domain(domain_id).await else {
+                let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
                             transaction,
@@ -8610,7 +9364,7 @@ impl SessionServiceImpl {
                             if let DomainPace::Paced = domain.config.pace
                                 && let DomainStartPoint::Resume = &start.start
                                 && let Ok(Some(resume_at)) =
-                                    self.runtime.current_paced_domain_time(domain_id)
+                                    self.inner.runtime.current_paced_domain_time(domain_id)
                             {
                                 logical_start = resume_at;
                             }
@@ -8624,13 +9378,16 @@ impl SessionServiceImpl {
                                 DomainStartPoint::At { .. } => start.start.clone(),
                             };
                             if let DomainPace::Paced = domain.config.pace {
-                                start_clock = Some((
-                                    domain_id.clone(),
+                                start_clock = Some(StartedDomainClock {
+                                    domain_id: domain_id.clone(),
                                     wall_started_at,
                                     logical_start,
-                                    time_rate.clone(),
-                                    domain.start_version.saturating_add(1),
-                                ));
+                                    time_rate: time_rate.clone(),
+                                    start_version: domain.start_version.checked_add(1).assured(
+                                        "a domain cannot be started 2^64 times in the lifetime of \
+                                         a cluster",
+                                    ),
+                                });
                             }
                             (
                                 command_ok(format!("starting domain '{}'", domain_id.as_str())),
@@ -8653,7 +9410,7 @@ impl SessionServiceImpl {
                 }
             }
             Statement::StopDomain(_) => {
-                let Some(domain) = self.consensus.current_domain(domain_id).await else {
+                let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
                     return self
                         .record_transaction_step(
                             transaction,
@@ -8699,21 +9456,53 @@ impl SessionServiceImpl {
         };
 
         let succeeded = result.success;
-        let advanced = self
-            .record_transaction_step(transaction, statement_index, 1, result, None, effect)
-            .await?;
+        let advanced = match self
+            .record_transaction_step(
+                transaction,
+                statement_index,
+                1,
+                result,
+                step_quiesce_level,
+                effect,
+            )
+            .await
+        {
+            Ok(advanced) => advanced,
+            Err(error) => {
+                if let Some(handoff) = ownership_handoff.take() {
+                    self.release_cluster_entity_gates(handoff.gate).await;
+                }
+                return Err(error);
+            }
+        };
         if succeeded {
-            if let Err(error) = self.apply_current_cluster_state().await {
+            let activation_error = self.apply_current_cluster_state().await.err();
+            if let Some(error) = &activation_error {
                 self.broadcast_error(format!(
                     "failed to reconcile runtime after transaction '{}' step {}: {error}",
                     transaction.id,
-                    statement_index.saturating_add(1)
+                    statement_index
+                        .checked_add(1)
+                        .assured("the index names a statement of a transaction held in memory")
                 ));
             }
-            if let Some((domain_id, wall_started_at, logical_start, time_rate, start_version)) =
-                start_clock
+            if let Some(handoff) = ownership_handoff.take() {
+                if let Some(error) = &activation_error {
+                    self.defer_planned_ownership_handoff_release(domain_id, handoff, error);
+                } else {
+                    self.finish_planned_ownership_handoff(domain_id, handoff)
+                        .await;
+                }
+            }
+            if let Some(StartedDomainClock {
+                domain_id,
+                wall_started_at,
+                logical_start,
+                time_rate,
+                start_version,
+            }) = start_clock
             {
-                self.runtime.handle_domain_clock_start(
+                self.inner.runtime.handle_domain_clock_start(
                     &domain_id,
                     logical_start,
                     wall_started_at,
@@ -8730,42 +9519,60 @@ impl SessionServiceImpl {
                 {
                     self.broadcast_error(error);
                 } else {
-                    self.domain_clock_reconciliations
-                        .insert(domain_id, (start_version, true));
+                    self.inner.domain_clock_reconciliations.insert(
+                        domain_id,
+                        DomainClockReconciliation {
+                            start_version,
+                            running: true,
+                        },
+                    );
                 }
             }
             if let Some((domain_id, start_version)) = stop_clock {
                 if let Err(error) = self.stop_domain_clock(&domain_id).await {
                     self.broadcast_error(error);
                 } else {
-                    self.domain_clock_reconciliations
-                        .insert(domain_id.clone(), (start_version, false));
+                    self.inner.domain_clock_reconciliations.insert(
+                        domain_id.clone(),
+                        DomainClockReconciliation {
+                            start_version,
+                            running: false,
+                        },
+                    );
                 }
-                self.runtime.handle_domain_clock_stop(&domain_id);
+                self.inner.runtime.handle_domain_clock_stop(&domain_id);
             }
+        }
+        if let Some(handoff) = ownership_handoff {
+            self.release_cluster_entity_gates(handoff.gate).await;
         }
         Ok(advanced)
     }
 
     async fn reconcile_transactions_once(&self) {
-        if self.consensus.current_leader().await.as_deref() != Some(self.consensus.local_node_id())
+        if self.inner.consensus.current_leader().await.as_ref()
+            != Some(self.inner.consensus.local_node_id())
         {
             return;
         }
         let now = current_timestamp();
-        let idle_before = subtract_timestamp_duration(now, self.transaction_idle_timeout);
+        let idle_before = subtract_timestamp_duration(now, self.inner.transaction_idle_timeout);
         let finished_before =
-            subtract_timestamp_duration(now, self.transaction_tombstone_retention);
-        let transactions = self.consensus.current_transactions().await;
+            subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
+        let transactions = self.inner.consensus.current_transactions().await;
 
         for transaction in transactions.values() {
             tokio::task::consume_budget().await;
             match &transaction.state {
                 TransactionState::Open
-                    if !self.transaction_bindings.contains_key(&transaction.id)
+                    if !self
+                        .inner
+                        .transaction_bindings
+                        .contains_key(&transaction.id)
                         && transaction.last_activity_at <= idle_before =>
                 {
                     match self
+                        .inner
                         .consensus
                         .expire_transaction(transaction.id.clone(), now, idle_before)
                         .await
@@ -8776,7 +9583,7 @@ impl SessionServiceImpl {
                                 Some(TransactionOutcome::Expired)
                             ) =>
                         {
-                            self.transaction_bindings.remove(&transaction.id);
+                            self.inner.transaction_bindings.remove(&transaction.id);
                             info!(
                                 transaction_id = transaction.id,
                                 owner = transaction.owner.as_str(),
@@ -8802,12 +9609,13 @@ impl SessionServiceImpl {
                     }
                 }
                 TransactionState::Finished(_) => {
-                    self.transaction_bindings.remove(&transaction.id);
+                    self.inner.transaction_bindings.remove(&transaction.id);
                 }
                 TransactionState::Open => {}
             }
         }
         if let Err(error) = self
+            .inner
             .consensus
             .remove_finished_transactions(finished_before)
             .await
@@ -8844,9 +9652,10 @@ impl SessionServiceImpl {
                         if !statement.is_model_mutation() {
                             break;
                         }
-                        let next = commands
-                            .next()
-                            .expect("peeked command must still be available");
+                        let next = commands.next().verified(
+                            "the peek above observed this command and nothing consumed the \
+                             iterator since",
+                        );
                         let ClientStatement::Server(statement) = next.statement else {
                             unreachable!("peeked model mutation statement must be next");
                         };
@@ -8887,14 +9696,14 @@ impl SessionServiceImpl {
         if !is_batch {
             return results
                 .pop()
-                .expect("non-empty results must contain the single result");
+                .verified("the empty check above already returned");
         }
 
         CommandResult {
             success: true,
             message: command_results_message(&results),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             results,
             ..Default::default()
         }
@@ -8927,12 +9736,12 @@ impl SessionServiceImpl {
             }
         };
 
-        let leader = self.consensus.current_leader().await;
-        if leader.as_deref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return self.not_leader_response(query, leader).await;
         }
 
-        let _alter_guard = match self.runtime.try_begin_domain_alter(&domain) {
+        let _alter_guard = match self.inner.runtime.try_begin_domain_alter(&domain) {
             Some(guard) => guard,
             None => {
                 return command_error(
@@ -8943,7 +9752,7 @@ impl SessionServiceImpl {
                 );
             }
         };
-        let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+        let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         let adopted_domain_pause =
@@ -8962,7 +9771,7 @@ impl SessionServiceImpl {
 
         let mut results = vec![None; statements.len()];
         let mut mutations = Vec::new();
-        let mut applied = Vec::new();
+        let mut applied = Vec::<AppliedModelMutation>::new();
         let mut refresh_http_tls = false;
 
         for (index, statement) in statements.into_iter().enumerate() {
@@ -8970,9 +9779,9 @@ impl SessionServiceImpl {
                 Statement::Create(create) => {
                     let if_not_exists = create.if_not_exists;
                     let model = create.body;
-                    let model_id = model.identifier().clone();
+                    let model_id = model.name();
                     let model_kind = model.kind();
-                    if let Ok(Some(_)) = self.registry.get(&domain, model_kind, &model_id)
+                    if let Ok(Some(_)) = self.inner.registry.get(&domain, model_kind, &model_id)
                         && if_not_exists
                     {
                         results[index] = Some(command_ok_already_existed(format!(
@@ -8984,190 +9793,194 @@ impl SessionServiceImpl {
                     }
 
                     refresh_http_tls |= model_kind == ModelKind::Vhost;
-                    applied.push((index, model_id.clone(), String::new()));
+                    applied.push(AppliedModelMutation {
+                        index,
+                        model: model_id.clone(),
+                        message: String::new(),
+                    });
                     mutations.push(RegistryMutation::Create(model));
                 }
                 Statement::AlterSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterSchema(alter));
                 }
                 Statement::AlterWireJsonSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered JSON wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterWireJsonSchema(alter));
                 }
                 Statement::AlterWireCborSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered CBOR wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterWireCborSchema(alter));
                 }
                 Statement::AlterWireAvroSchema(alter) => {
                     let model_id = alter.schema.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered AVRO wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterWireAvroSchema(alter));
                 }
                 Statement::AlterRelay(alter) => {
                     let model_id = alter.relay.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered relay '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
                 Statement::AlterJunction(alter) => {
                     let model_id = alter.junction.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered junction '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterJunction(alter));
                 }
                 Statement::AlterDeduplicator(alter) => {
                     let model_id = alter.deduplicator.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered deduplicator '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterDeduplicator(alter));
                 }
                 Statement::AlterReorderer(alter) => {
                     let model_id = alter.reorderer.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered reorderer '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterReorderer(alter));
                 }
                 Statement::AlterEmitter(alter) => {
                     let model_id = alter.emitter.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered emitter '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterEmitter(alter));
                 }
                 Statement::AlterIngestor(alter) => {
                     let model_id = alter.ingestor.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered ingestor '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterIngestor(alter));
                 }
                 Statement::AlterReingestor(alter) => {
                     let model_id = alter.reingestor.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered reingestor '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterReingestor(alter));
                 }
                 Statement::AlterGenerator(alter) => {
                     let model_id = alter.generator.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered generator '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterGenerator(alter));
                 }
                 Statement::AlterPlacement(alter) => {
                     let model_id = alter.placement.clone();
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: ModelName::from(&model_id),
+                        message: format!(
                             "altered placement '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str(),
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::AlterPlacement(alter));
                 }
                 Statement::Drop(drop) => {
                     let model_id = drop.name.clone();
                     refresh_http_tls |= drop.kind == ModelKind::Vhost;
-                    applied.push((
+                    applied.push(AppliedModelMutation {
                         index,
-                        model_id.clone(),
-                        format!(
+                        model: model_id.clone(),
+                        message: format!(
                             "dropped model '{}' from domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
-                    ));
+                    });
                     mutations.push(RegistryMutation::Drop(drop));
                 }
                 _ => unreachable!("model mutation batch contains a non-mutation statement"),
@@ -9178,9 +9991,11 @@ impl SessionServiceImpl {
         if !mutations.is_empty() {
             let error_target = applied
                 .first()
-                .map(|(_, id, _)| id.clone())
-                .expect("non-empty mutation batch must have a first model");
-            let planned = match self.registry.plan_mutations(&domain, &mutations) {
+                .map(|mutation| mutation.model.clone())
+                .verified(
+                    "every arm that records a mutation records an applied model in the same step",
+                );
+            let planned = match self.inner.registry.plan_mutations(&domain, &mutations) {
                 Ok(planned) => planned,
                 Err(err) => {
                     warn!(
@@ -9201,25 +10016,47 @@ impl SessionServiceImpl {
                 Ok(prepared) => prepared,
                 Err(error) => return command_error(error),
             };
-            let classified_level = if let DomainStatus::Running = domain_state.status {
+            let base_classified_level = if let DomainStatus::Running = domain_state.status {
                 planned.quiesce().level()
             } else {
                 QuiesceLevel::Dynamic
             };
-            let requires_domain_pause = classified_level.requires_domain_pause();
             let affected_entities = planned.quiesce().affected_entities().to_vec();
             let is_noop = planned.is_noop();
             let mut cluster_entity_gate = None;
-            let mut planned_relocations = 0usize;
-            let transaction_schedule = if !is_noop && transaction_step.is_some() {
+            let mut ownership_handoff = None;
+            let ScheduleTransition {
+                expected_schedule,
+                prepared_schedule,
+                planned_relocations,
+            } = if !is_noop {
                 #[cfg(feature = "testing")]
-                if self.runtime.take_armed_schedule_publication_fault(&domain) {
-                    return command_error(format!(
+                if self
+                    .inner
+                    .runtime
+                    .take_armed_schedule_publication_fault(&domain)
+                {
+                    let error = format!(
                         "injected schedule publication fault for domain '{}'",
                         domain.as_str()
-                    ));
+                    );
+                    return CommandResult {
+                        success: false,
+                        message: format!(
+                            "failed to publish schedule for domain '{}'",
+                            domain.as_str()
+                        ),
+                        diagnostics: vec![Diagnostic {
+                            message: error,
+                            span_start: 0,
+                            span_end: u32::try_from(query.len()).unwrap_or(0),
+                        }],
+                        kind: i32::from(CommandResultKind::Error),
+                        ..Default::default()
+                    };
                 }
                 let expected_schedule = self
+                    .inner
                     .consensus
                     .current_schedule()
                     .await
@@ -9233,15 +10070,27 @@ impl SessionServiceImpl {
                     )
                     .await
                 {
-                    Ok((schedule, relocations)) => {
-                        planned_relocations = relocations;
-                        Some((expected_schedule, schedule))
-                    }
+                    Ok(prepared) => ScheduleTransition {
+                        expected_schedule,
+                        prepared_schedule: prepared.schedule,
+                        planned_relocations: prepared.relocations,
+                    },
                     Err(error) => return command_error(error),
                 }
             } else {
-                None
+                ScheduleTransition::default()
             };
+            let classified_level = if matches!(domain_state.status, DomainStatus::Running)
+                && planned_relocations > 0
+            {
+                base_classified_level.max(QuiesceLevel::EntityPause)
+            } else {
+                base_classified_level
+            };
+            let requires_domain_pause = classified_level.requires_domain_pause();
+            let transaction_schedule = transaction_step
+                .is_some()
+                .then(|| (expected_schedule.clone(), prepared_schedule.clone()));
 
             if is_noop {
                 info!(
@@ -9257,26 +10106,35 @@ impl SessionServiceImpl {
             {
                 return command_error(error.to_string());
             }
-            if !is_noop && classified_level.requires_entity_pause() {
+            if !is_noop && base_classified_level.requires_entity_pause() {
                 let relays = self
+                    .inner
                     .runtime
                     .entity_pause_relays(&domain, &affected_entities);
-                let deadline = tokio::time::Instant::now() + self.runtime.entity_gate_deadline();
+                let deadline =
+                    tokio::time::Instant::now() + self.inner.runtime.entity_gate_deadline();
                 let gate = match self
-                    .engage_cluster_entity_gates(&domain, &relays, &affected_entities, deadline)
+                    .engage_cluster_entity_gates(
+                        &domain,
+                        &relays,
+                        &affected_entities,
+                        EntityGatePurpose::ModelAlteration,
+                        deadline,
+                    )
                     .await
                 {
                     Ok(gate) => gate,
                     Err(error) => return command_error(error.to_string()),
                 };
                 #[cfg(feature = "testing")]
-                self.runtime.pause_entity_gate_if_armed(&domain).await;
+                self.inner.runtime.pause_entity_gate_if_armed(&domain).await;
                 if let Err(error) = self
                     .wait_for_cluster_entity_drain(
-                        &domain,
                         &gate,
                         &relays,
                         &affected_entities,
+                        EntityGatePurpose::ModelAlteration,
+                        &[],
                         deadline,
                     )
                     .await
@@ -9286,12 +10144,36 @@ impl SessionServiceImpl {
                 }
                 cluster_entity_gate = Some(gate);
             }
+            if !is_noop
+                && matches!(domain_state.status, DomainStatus::Running)
+                && planned_relocations > 0
+            {
+                ownership_handoff = match self
+                    .begin_planned_ownership_handoff(
+                        &domain,
+                        expected_schedule.as_ref(),
+                        prepared_schedule.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(handoff) => handoff,
+                    Err(error) => {
+                        if let Some(gate) = cluster_entity_gate.take() {
+                            self.release_cluster_entity_gates(gate).await;
+                        }
+                        return command_error(error.to_string());
+                    }
+                };
+            }
 
             if !is_noop {
                 let mut rollback_plan = Some(planned.clone());
-                let runtime_changes = match self.registry.commit_planned(planned) {
+                let _runtime_changes = match self.inner.registry.commit_planned(planned) {
                     Ok(changes) => changes,
                     Err(err) => {
+                        if let Some(handoff) = ownership_handoff.take() {
+                            self.release_cluster_entity_gates(handoff.gate).await;
+                        }
                         if let Some(gate) = cluster_entity_gate.take() {
                             self.release_cluster_entity_gates(gate).await;
                         }
@@ -9322,7 +10204,8 @@ impl SessionServiceImpl {
                     }
                 };
                 if let Some(prepared_udfs) = prepared_udfs {
-                    self.runtime
+                    self.inner
+                        .runtime
                         .install_prepared_domain_udfs(&domain, prepared_udfs);
                 }
 
@@ -9337,13 +10220,19 @@ impl SessionServiceImpl {
                         domain: domain.clone(),
                         expected_schedule: transaction_schedule
                             .as_ref()
-                            .expect("transaction model mutation must prepare a schedule")
+                            .verified(
+                                "the schedule is prepared exactly when a transaction step is \
+                                 present, and this branch has one",
+                            )
                             .0
                             .clone()
                             .map(Box::new),
                         schedule: transaction_schedule
                             .clone()
-                            .expect("transaction model mutation must prepare a schedule")
+                            .verified(
+                                "the schedule is prepared exactly when a transaction step is \
+                                 present, and this branch has one",
+                            )
                             .1
                             .map(Box::new),
                     };
@@ -9360,7 +10249,18 @@ impl SessionServiceImpl {
                     {
                         Ok(transaction) => {
                             *transaction_step.outcome.lock() = Some(Ok(transaction));
-                            if let Err(error) = self.apply_current_cluster_state().await {
+                            let activation_error = self.apply_current_cluster_state().await.err();
+                            if let Some(handoff) = ownership_handoff.take() {
+                                if let Some(error) = &activation_error {
+                                    self.defer_planned_ownership_handoff_release(
+                                        &domain, handoff, error,
+                                    );
+                                } else {
+                                    self.finish_planned_ownership_handoff(&domain, handoff)
+                                        .await;
+                                }
+                            }
+                            if let Some(error) = activation_error {
                                 self.broadcast_error(format!(
                                     "failed to reconcile committed transaction model step in \
                                      domain '{}': {error}",
@@ -9369,13 +10269,20 @@ impl SessionServiceImpl {
                             }
                         }
                         Err(error) => {
+                            if let Some(handoff) = ownership_handoff.take() {
+                                self.release_cluster_entity_gates(handoff.gate).await;
+                            }
                             if let Some(gate) = cluster_entity_gate.take() {
                                 self.release_cluster_entity_gates(gate).await;
                             }
-                            let rollback_error = rollback_plan
-                                .take()
-                                .and_then(|plan| self.registry.rollback_committed(plan).err())
-                                .map(|rollback| rollback.to_string());
+                            let rollback_error = if let Some(plan) = rollback_plan.take() {
+                                match self.inner.registry.rollback_committed(plan) {
+                                    Ok(_) => None,
+                                    Err(rollback) => Some(rollback.to_string()),
+                                }
+                            } else {
+                                None
+                            };
                             if requires_domain_pause {
                                 let _ = self.resume_domain_after_alter(&domain).await;
                             }
@@ -9393,49 +10300,76 @@ impl SessionServiceImpl {
                             ));
                         }
                     }
-                } else if let Err(err) = self
-                    .publish_domain_schedule(&domain, runtime_changes.graph.clone())
-                    .await
-                    .map(|relocations| planned_relocations = relocations)
-                {
-                    if let Some(gate) = cluster_entity_gate.take() {
-                        self.release_cluster_entity_gates(gate).await;
-                    }
-                    if let Some(rollback_plan) = rollback_plan.take()
-                        && let Err(rollback_error) = self
-                            .rollback_model_alteration(&domain, rollback_plan, classified_level)
-                            .await
+                } else {
+                    if let Err(error) = self
+                        .inner
+                        .consensus
+                        .replace_domain_schedule(domain.clone(), prepared_schedule.clone())
+                        .await
                     {
+                        let err = error.to_string();
+                        if let Some(handoff) = ownership_handoff.take() {
+                            self.release_cluster_entity_gates(handoff.gate).await;
+                        }
+                        if let Some(gate) = cluster_entity_gate.take() {
+                            self.release_cluster_entity_gates(gate).await;
+                        }
+                        if let Some(rollback_plan) = rollback_plan.take()
+                            && let Err(rollback_error) = self
+                                .rollback_model_alteration(&domain, rollback_plan, classified_level)
+                                .await
+                        {
+                            return command_error(format!(
+                                "failed to publish model alteration schedule for domain '{}': \
+                                 {err}; {rollback_error}",
+                                domain.as_str()
+                            ));
+                        }
+                        self.broadcast_error(format!(
+                            "schedule publish failed in domain '{}': {}",
+                            domain.as_str(),
+                            err
+                        ));
+                        warn!(
+                            domain = domain.as_str(),
+                            error = %err,
+                            "failed to publish schedule for model mutation batch"
+                        );
+                        return CommandResult {
+                            success: false,
+                            message: format!(
+                                "failed to publish schedule for domain '{}'",
+                                domain.as_str()
+                            ),
+                            diagnostics: vec![Diagnostic {
+                                message: err,
+                                span_start: 0,
+                                span_end: u32::try_from(query.len()).unwrap_or(0),
+                            }],
+                            kind: i32::from(CommandResultKind::Error),
+                            ..Default::default()
+                        };
+                    }
+                    if let Err(error) = self.apply_current_cluster_state().await {
+                        if let Some(handoff) = ownership_handoff.take() {
+                            self.defer_planned_ownership_handoff_release(&domain, handoff, &error);
+                        }
+                        if let Some(gate) = cluster_entity_gate.take() {
+                            self.release_cluster_entity_gates(gate).await;
+                        }
+                        if requires_domain_pause {
+                            let _ = self.resume_domain_after_alter(&domain).await;
+                        }
                         return command_error(format!(
-                            "failed to publish model alteration schedule for domain '{}': {err}; \
-                             {rollback_error}",
+                            "committed models and schedule for domain '{}', but the destination \
+                             failed to activate: {error}",
                             domain.as_str()
                         ));
                     }
-                    self.broadcast_error(format!(
-                        "schedule publish failed in domain '{}': {}",
-                        domain.as_str(),
-                        err
-                    ));
-                    warn!(
-                        domain = domain.as_str(),
-                        error = %err,
-                        "failed to publish schedule for model mutation batch"
-                    );
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to publish schedule for domain '{}'",
-                            domain.as_str()
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: err,
-                            span_start: 0,
-                            span_end: u32::try_from(query.len()).unwrap_or(0),
-                        }],
-                        kind: CommandResultKind::Error as i32,
-                        ..Default::default()
-                    };
+                    if let Some(handoff) = ownership_handoff.take() {
+                        self.finish_planned_ownership_handoff(&domain, handoff)
+                            .await;
+                    }
                 }
 
                 if requires_domain_pause {
@@ -9499,9 +10433,11 @@ impl SessionServiceImpl {
             ));
         }
 
-        let result = completed_result.unwrap_or_else(|| {
+        let result = if let Some(result) = completed_result {
+            result
+        } else {
             model_mutation_success_result(&results, &applied, QuiesceLevel::Dynamic, 0)
-        });
+        };
         if let Some(transaction_step) = transaction_step
             && transaction_step.outcome.lock().is_none()
         {
@@ -9563,7 +10499,7 @@ impl SessionServiceImpl {
                         return command_error("invalid domain".to_string());
                     }
                 };
-                if self.consensus.current_domain(&domain).await.is_none() {
+                if self.inner.consensus.current_domain(&domain).await.is_none() {
                     return command_error(format!("domain '{}' does not exist", domain.as_str()));
                 }
                 if let Err(error) = self.reconcile_running_domain_runtime(&domain).await {
@@ -9613,21 +10549,25 @@ impl SessionServiceImpl {
         };
 
         if requires_leader(&statement) {
-            let leader = self.consensus.current_leader().await;
-            if leader.as_deref() != Some(self.consensus.local_node_id()) {
+            let leader = self.inner.consensus.current_leader().await;
+            if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return self.not_leader_response(query, leader).await;
             }
         }
 
         if requires_existing_domain(&statement) {
-            let domain = domain.as_ref().expect("domain required");
-            if self.consensus.current_domain(domain).await.is_none() {
+            let domain = domain
+                .as_ref()
+                .verified("this statement requires a request domain, which was resolved above");
+            if self.inner.consensus.current_domain(domain).await.is_none() {
                 return command_error(format!("domain '{}' does not exist", domain.as_str()));
             }
         }
 
         if requires_runtime_reconcile(&statement) {
-            let domain = domain.as_ref().expect("domain required");
+            let domain = domain
+                .as_ref()
+                .verified("this statement requires a request domain, which was resolved above");
             if let Err(error) = self.reconcile_running_domain_runtime(domain).await {
                 return command_error(error);
             }
@@ -9636,21 +10576,34 @@ impl SessionServiceImpl {
         match statement {
             Statement::CreateDomain(create) => self.create_domain(create).await,
             Statement::AlterDomain(alter) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.alter_domain(domain, alter).await
             }
             Statement::CreateUser(create) => self.create_user(create).await,
             Statement::CreateResource(create) => {
-                self.create_resource(domain.as_ref().expect("domain required"), create)
-                    .await
+                self.create_resource(
+                    domain.as_ref().verified(
+                        "this statement requires a request domain, which was resolved above",
+                    ),
+                    create,
+                )
+                .await
             }
             Statement::UploadResource(upload) => self.upload_resource_command(upload).await,
             Statement::StartDomain(start) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.start_domain(domain, start).await
             }
             Statement::StopDomain(stop) => {
-                let domain = domain.as_ref().expect("domain required");
+                // `STOP` names no domain, so it acts on the session's domain. It is excluded from
+                // `requires_request_domain`, which leaves the session free of one here.
+                let Some(domain) = domain.as_ref() else {
+                    return command_error("no active domain selected".to_string());
+                };
                 self.stop_domain(domain, stop).await
             }
             Statement::Create(_)
@@ -9676,78 +10629,129 @@ impl SessionServiceImpl {
                 self.set_node_cordoned(uncordon.node_id, false).await
             }
             Statement::DrainNode(drain) => self.drain_node(drain.node_id).await,
+            Statement::Relocate(relocation) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.relocate(domain, relocation).await
+            }
+            Statement::DescribeRelocation(relocation) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.describe_relocation(domain, relocation).await
+            }
             Statement::DescribeRelay(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_stream(domain, describe).await
             }
             Statement::DescribeDomain(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_domain(domain, describe).await
             }
             Statement::DescribeEndpoint(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_endpoint(domain, describe).await
             }
             Statement::DescribeIngestor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_ingestor(domain, describe).await
             }
             Statement::DescribeLookup(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_lookup(domain, describe).await
             }
             Statement::DescribeJunction(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_junction(domain, describe).await
             }
             Statement::DescribeDeduplicator(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_deduplicator(domain, describe).await
             }
             Statement::DescribeReingestor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_reingestor(domain, describe).await
             }
             Statement::DescribeCorrelator(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_correlator(domain, describe).await
             }
             Statement::DescribeReorderer(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_reorderer(domain, describe).await
             }
             Statement::DescribeEmitter(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_emitter(domain, describe).await
             }
             Statement::DescribeWindowProcessor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_window_processor(domain, describe).await
             }
             Statement::DescribeWasmProcessor(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_wasm_processor(domain, describe).await
             }
             Statement::DescribeUdf(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_udf(domain, describe)
             }
             Statement::DescribePlacement(describe) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.describe_placement(domain, describe).await
             }
             Statement::DescribeResource(describe) => {
-                self.describe_resource(domain.as_ref().expect("domain required"), describe)
-                    .await
+                self.describe_resource(
+                    domain.as_ref().verified(
+                        "this statement requires a request domain, which was resolved above",
+                    ),
+                    describe,
+                )
+                .await
             }
             Statement::LookupQuery(query) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.lookup_query(domain, query).await
             }
             Statement::ShowCreate(show) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 let name_span = find_identifier_span(query, &show.name).unwrap_or(0..0);
-                let model = match self.registry.get(domain, show.kind, &show.name) {
+                let model = match self.inner.registry.get(domain, show.kind, &show.name) {
                     Ok(Some(model)) => model,
                     Ok(None) => {
                         return CommandResult {
@@ -9767,7 +10771,7 @@ impl SessionServiceImpl {
                                 span_start: u32::try_from(name_span.start).unwrap_or(0),
                                 span_end: u32::try_from(name_span.end).unwrap_or(0),
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -9780,7 +10784,7 @@ impl SessionServiceImpl {
                                 span_start: 0,
                                 span_end: 0,
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -9799,7 +10803,7 @@ impl SessionServiceImpl {
                                 span_start: 0,
                                 span_end: 0,
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -9809,27 +10813,33 @@ impl SessionServiceImpl {
                     success: true,
                     message: canonical,
                     diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
+                    kind: i32::from(CommandResultKind::Ok),
                     ..Default::default()
                 }
             }
             Statement::ShowRelayMaterializedState(show) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.show_stream_materialized_state(domain, show).await
             }
             Statement::ShowUdfs(_) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.show_udfs(domain)
             }
             Statement::ShowPlacements(_) => {
-                let domain = domain.as_ref().expect("domain required");
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
                 self.show_placements(domain).await
             }
             Statement::ShowClusterStatus(_) => CommandResult {
                 success: true,
-                message: render_cluster_status(&self.cluster, &self.consensus).await,
+                message: render_cluster_status(&self.inner.cluster, &self.inner.consensus).await,
                 diagnostics: Vec::new(),
-                kind: CommandResultKind::Ok as i32,
+                kind: i32::from(CommandResultKind::Ok),
                 ..Default::default()
             },
             Statement::ShowTransactions(_) => self.show_transactions().await,
@@ -9838,7 +10848,7 @@ impl SessionServiceImpl {
 
     async fn show_transactions(&self) -> CommandResult {
         let now = current_timestamp();
-        let transactions = self.consensus.current_transactions().await;
+        let transactions = self.inner.consensus.current_transactions().await;
         let message = if transactions.is_empty() {
             "no transactions".to_string()
         } else {
@@ -9885,7 +10895,7 @@ impl SessionServiceImpl {
                 "missing resource query parameter",
             );
         };
-        let identifier = match Identifier::parse(resource_name.trim()) {
+        let identifier = match ResourceName::parse(resource_name.trim()) {
             Ok(identifier) => identifier,
             Err(_) => {
                 return web_console_upload_text_response(
@@ -9900,7 +10910,7 @@ impl SessionServiceImpl {
                 "missing domain query parameter",
             );
         };
-        let domain = match Domain::parse(domain_name.trim()) {
+        let domain = match DomainName::parse(domain_name.trim()) {
             Ok(domain) => domain,
             Err(_) => {
                 return web_console_upload_text_response(
@@ -9909,14 +10919,14 @@ impl SessionServiceImpl {
                 );
             }
         };
-        let leader = self.consensus.current_leader().await;
-        if leader.as_deref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return web_console_upload_text_response(
                 StatusCode::CONFLICT,
                 "resource uploads must be sent to the cluster leader",
             );
         }
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         if !resources.is_declared(&domain, &identifier) {
             return web_console_upload_text_response(
                 StatusCode::NOT_FOUND,
@@ -9944,13 +10954,13 @@ impl SessionServiceImpl {
         };
 
         match self
-            .stage_web_console_resource_upload(request, boundary, identifier.clone())
+            .stage_web_console_resource_upload(request, boundary, ModelName::from(&identifier))
             .await
         {
             Ok((archive_path, root_checksum)) => match self
                 .install_uploaded_resource_archive(
                     &domain,
-                    identifier,
+                    ModelName::from(&identifier),
                     &archive_path,
                     root_checksum,
                 )
@@ -9970,7 +10980,7 @@ impl SessionServiceImpl {
         &self,
         request: HyperRequest<HyperIncoming>,
         boundary: String,
-        identifier: Identifier,
+        identifier: ModelName,
     ) -> Result<(TempPath, String), (StatusCode, String)> {
         let upload_dir = tempfile::tempdir().map_err(|_| {
             (
@@ -10034,7 +11044,9 @@ impl SessionServiceImpl {
                     "failed to flush temporary uploaded file".to_string(),
                 )
             })?;
-            file_count = file_count.saturating_add(1);
+            file_count = file_count
+                .checked_add(1)
+                .assured("the files counted here were each written to the local filesystem");
         }
         if file_count == 0 {
             return Err((
@@ -10090,19 +11102,19 @@ impl SessionServiceImpl {
     async fn process_web_console_active_domain_request(
         &self,
         request: SetActiveDomainRequest,
-        active_domain: &mut Option<Domain>,
+        active_domain: &mut Option<DomainName>,
     ) -> Result<SessionResponse, ActiveDomainError> {
-        let domain = match Domain::parse(request.domain.trim()) {
+        let domain = match DomainName::parse(request.domain.trim()) {
             Ok(domain) => domain,
             Err(_) => return Err(ActiveDomainError::Invalid),
         };
-        if self.consensus.current_domain(&domain).await.is_none() {
+        if self.inner.consensus.current_domain(&domain).await.is_none() {
             return Err(ActiveDomainError::NotFound { domain });
         }
         *active_domain = Some(domain.clone());
         Ok(SessionResponse {
             event: Some(proto::session_response::Event::Server(ServerEvent {
-                level: ServerEventLevel::Info as i32,
+                level: i32::from(ServerEventLevel::Info),
                 message: format!("using domain '{}'", domain.as_str()),
             })),
         })
@@ -10135,17 +11147,18 @@ impl SessionServiceImpl {
         self.process_command(req, tx, subscriptions).await
     }
 
-    async fn reconcile_running_domain_runtime(&self, domain: &Domain) -> Result<(), String> {
-        let state = self.consensus.current_runtime_state().await;
+    async fn reconcile_running_domain_runtime(&self, domain: &DomainName) -> Result<(), String> {
+        let state = self.inner.consensus.current_runtime_state().await;
         let Some(domain_state) = state.domains.get(domain) else {
             return Ok(());
         };
         if !matches!(domain_state.status, DomainStatus::Running) {
             return Ok(());
         }
-        self.runtime
+        self.inner
+            .runtime
             .apply_cluster_state(
-                self.consensus.local_node_id(),
+                self.inner.consensus.local_node_id(),
                 state.revision,
                 &state.domains,
                 &state.schedule,
@@ -10157,7 +11170,8 @@ impl SessionServiceImpl {
                     domain.as_str()
                 )
             })?;
-        self.runtime
+        self.inner
+            .runtime
             .start_running_domain_ingestors()
             .await
             .map_err(|error| {
@@ -10169,7 +11183,13 @@ impl SessionServiceImpl {
     }
 
     async fn create_domain(&self, create: CreateStatement<CreateDomain>) -> CommandResult {
-        if self.consensus.current_domain(&create.id).await.is_some() {
+        if self
+            .inner
+            .consensus
+            .current_domain(&create.id)
+            .await
+            .is_some()
+        {
             if create.if_not_exists {
                 return command_ok_already_existed(format!(
                     "domain '{}' already exists",
@@ -10190,7 +11210,7 @@ impl SessionServiceImpl {
             last_start: DomainStartPoint::Resume,
             clock: None,
         };
-        match self.consensus.put_domain(state).await {
+        match self.inner.consensus.put_domain(state).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     self.broadcast_error(format!(
@@ -10207,8 +11227,8 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn alter_domain(&self, domain: &Domain, alter: AlterDomain) -> CommandResult {
-        let _alter_guard = match self.runtime.try_begin_domain_alter(domain) {
+    async fn alter_domain(&self, domain: &DomainName, alter: AlterDomain) -> CommandResult {
+        let _alter_guard = match self.inner.runtime.try_begin_domain_alter(domain) {
             Some(guard) => guard,
             None => {
                 return command_error(
@@ -10219,7 +11239,7 @@ impl SessionServiceImpl {
                 );
             }
         };
-        let Some(previous_state) = self.consensus.current_domain(domain).await else {
+        let Some(previous_state) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         if let DomainStatus::Paused = previous_state.status {
@@ -10230,32 +11250,42 @@ impl SessionServiceImpl {
         }
         if previous_state.config.placement == alter.policy {
             return command_ok(format!(
-                "domain '{}' placement is already {}; planned relocations: 0",
+                "domain '{}' placement is already {}; {}\nplanned relocations: 0",
                 domain.as_str(),
                 alter.policy.as_ref(),
+                quiesce_level_message(QuiesceLevel::Dynamic),
             ));
         }
 
-        let current_schedule = self.consensus.current_schedule().await;
+        let current_schedule = self.inner.consensus.current_schedule().await;
         let previous_schedule = current_schedule.domain(domain).cloned();
-        let live_node_ids = self.cluster.live_node_ids().await;
-        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
+        let live_voters = self
+            .inner
+            .consensus
+            .live_voter_ids(live_node_ids.clone())
+            .await;
         let cluster_nodes = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
-        let next_schedule = self.registry.active_graph(domain).map(|graph| {
+        let next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 domain,
                 &cluster_nodes,
-                self.replica_count,
+                self.inner.replica_count,
                 alter.policy,
-                self.scheduler_mode,
+                self.inner.scheduler_mode,
             );
             #[cfg(not(feature = "testing"))]
-            let mut schedule =
-                graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count, alter.policy);
+            let mut schedule = graph.schedule_for_domain(
+                domain,
+                &cluster_nodes,
+                self.inner.replica_count,
+                alter.policy,
+            );
             Self::merge_existing_schedule_data(
                 &mut schedule,
                 previous_schedule.as_ref(),
@@ -10265,60 +11295,89 @@ impl SessionServiceImpl {
         });
         let relocations =
             planned_relocation_count(previous_schedule.as_ref(), next_schedule.as_ref());
+        let quiesce_level =
+            if matches!(previous_state.status, DomainStatus::Running) && relocations > 0 {
+                QuiesceLevel::EntityPause
+            } else {
+                QuiesceLevel::Dynamic
+            };
         let mut next_state = previous_state.clone();
         next_state.config.placement = alter.policy;
 
         #[cfg(feature = "testing")]
-        if self.runtime.take_armed_schedule_publication_fault(domain) {
+        if self
+            .inner
+            .runtime
+            .take_armed_schedule_publication_fault(domain)
+        {
             return command_error(format!(
                 "injected schedule publication fault for domain '{}'",
                 domain.as_str()
             ));
         }
+        let handoff = if let DomainStatus::Running = previous_state.status
+            && relocations > 0
+        {
+            self.begin_planned_ownership_handoff(
+                domain,
+                previous_schedule.as_ref(),
+                next_schedule.as_ref(),
+            )
+            .await
+        } else {
+            Ok(None)
+        };
+        let handoff = match handoff {
+            Ok(handoff) => handoff,
+            Err(error) => return command_error(error.to_string()),
+        };
         if let Err(error) = self
+            .inner
             .consensus
             .put_domain_and_schedule(next_state, next_schedule)
             .await
         {
+            if let Some(handoff) = handoff {
+                self.release_cluster_entity_gates(handoff.gate).await;
+            }
             return command_error(format!(
                 "failed to alter placement for domain '{}': {error}",
                 domain.as_str()
             ));
         }
-        if let Err(error) = self.apply_current_cluster_state().await {
-            let rollback = self
-                .consensus
-                .put_domain_and_schedule(previous_state, previous_schedule)
-                .await
-                .map_err(|rollback_error| rollback_error.to_string());
-            if rollback.is_ok() {
-                let _ = self.apply_current_cluster_state().await;
+        let activation_error = self.apply_current_cluster_state().await.err();
+        if let Some(error) = activation_error {
+            if let Some(handoff) = handoff {
+                self.defer_planned_ownership_handoff_release(domain, handoff, &error);
             }
-            return command_error(match rollback {
-                Ok(()) => format!(
-                    "failed to activate placement for domain '{}': {error}; the domain default \
-                     and schedule were restored",
-                    domain.as_str(),
-                ),
-                Err(rollback_error) => format!(
-                    "failed to activate placement for domain '{}': {error}; failed to restore the \
-                     prior domain default and schedule: {rollback_error}",
-                    domain.as_str(),
-                ),
-            });
+            return command_error(format!(
+                "committed placement and schedule for domain '{}', but the destination failed to \
+                 activate: {error}",
+                domain.as_str()
+            ));
+        }
+        if let Some(handoff) = handoff {
+            self.finish_planned_ownership_handoff(domain, handoff).await;
         }
 
         command_ok(format!(
-            "set domain '{}' placement to {}; planned relocations: {relocations}",
+            "set domain '{}' placement to {}; {}\nplanned relocations: {relocations}",
             domain.as_str(),
             alter.policy.as_ref(),
+            quiesce_level_message(quiesce_level),
         ))
     }
 
     async fn create_user(&self, create: CreateStatement<CreateUser>) -> CommandResult {
         let if_not_exists = create.if_not_exists;
         let create = create.body;
-        if self.consensus.current_user(&create.name).await.is_some() {
+        if self
+            .inner
+            .consensus
+            .current_user(&create.name)
+            .await
+            .is_some()
+        {
             if if_not_exists {
                 return command_ok_already_existed(format!(
                     "user '{}' already exists",
@@ -10336,7 +11395,7 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        match self.consensus.create_user(user).await {
+        match self.inner.consensus.create_user(user).await {
             Ok(()) => command_ok(format!("created user '{}'", create.name.as_str())),
             Err(error) => command_error(format!(
                 "failed to create user '{}': {error}",
@@ -10347,10 +11406,10 @@ impl SessionServiceImpl {
 
     async fn create_resource(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         create: CreateStatement<CreateResource>,
     ) -> CommandResult {
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         if resources.is_declared(domain, &create.identifier) {
             if create.if_not_exists {
                 return command_ok_already_existed(format!(
@@ -10364,6 +11423,7 @@ impl SessionServiceImpl {
             ));
         }
         match self
+            .inner
             .consensus
             .create_resource_catalog(domain, &create.identifier)
             .await
@@ -10387,15 +11447,16 @@ impl SessionServiceImpl {
 
     async fn install_uploaded_resource_archive(
         &self,
-        domain: &Domain,
-        identifier: Identifier,
+        domain: &DomainName,
+        identifier: ModelName,
         archive_path: &Path,
         root_checksum: String,
     ) -> Result<u64, String> {
         let created_at = current_timestamp();
         let version = match self
+            .inner
             .consensus
-            .allocate_resource_version(domain, &identifier)
+            .allocate_resource_version(domain, &ResourceName::from(&identifier))
             .await
         {
             Ok(version) => version,
@@ -10406,15 +11467,16 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        let id = ResourceId::new(domain.clone(), identifier.clone(), version);
+        let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier), version);
 
         let manifest = match self
+            .inner
             .resource_store
             .install_from_archive_path(
                 id.clone(),
                 archive_path,
                 root_checksum,
-                self.consensus.local_node_id(),
+                self.inner.consensus.local_node_id().clone(),
                 created_at,
             )
             .await
@@ -10430,11 +11492,16 @@ impl SessionServiceImpl {
         };
 
         if let Err(error) = self
+            .inner
             .consensus
             .put_resource_version(manifest.resource.clone())
             .await
         {
-            let cleanup_suffix = match self.resource_store.remove_version(&manifest.resource.id) {
+            let cleanup_suffix = match self
+                .inner
+                .resource_store
+                .remove_version(&manifest.resource.id)
+            {
                 Ok(()) => String::new(),
                 Err(cleanup_error) => {
                     format!("; local cleanup also failed: {cleanup_error}")
@@ -10448,18 +11515,19 @@ impl SessionServiceImpl {
         }
 
         if let Err(error) = self
+            .inner
             .consensus
             .put_resource_replica(ResourceNodeStatus {
                 key: ResourceReplicaKey::new(
                     manifest.resource.id.domain.clone(),
                     manifest.resource.id.identifier.clone(),
                     manifest.resource.id.version,
-                    self.consensus.local_node_id(),
+                    self.inner.consensus.local_node_id().clone(),
                 ),
                 state: ResourceNodeState::Ready,
                 root_checksum: Some(manifest.resource.root_checksum.clone()),
                 last_verified_at: Some(created_at),
-                source_node_id: Some(self.consensus.local_node_id().to_string()),
+                source_node_id: Some(self.inner.consensus.local_node_id().clone()),
                 error: None,
             })
             .await
@@ -10473,16 +11541,17 @@ impl SessionServiceImpl {
 
         self.wait_for_resource_cluster_ready(&manifest.resource.id)
             .await?;
-        self.runtime
-            .sync_resource_versions(&self.consensus.current_resources().await);
+        self.inner
+            .runtime
+            .sync_resource_versions(&self.inner.consensus.current_resources().await);
         if let Err(error) = self.refresh_http_tls_server_config().await {
             self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
         Ok(manifest.resource.id.version)
     }
 
-    async fn start_domain(&self, domain_id: &Domain, start: StartDomain) -> CommandResult {
-        let Some(domain) = self.consensus.current_domain(domain_id).await else {
+    async fn start_domain(&self, domain_id: &DomainName, start: StartDomain) -> CommandResult {
+        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
         };
         if let Err(message) = validate_domain_config(&domain.config) {
@@ -10506,7 +11575,7 @@ impl SessionServiceImpl {
         };
         if let DomainPace::Paced = domain.config.pace
             && let DomainStartPoint::Resume = &start.start
-            && let Ok(Some(resume_at)) = self.runtime.current_paced_domain_time(domain_id)
+            && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
         {
             logical_start = resume_at;
         }
@@ -10520,6 +11589,7 @@ impl SessionServiceImpl {
             DomainStartPoint::At { .. } => start.start.clone(),
         };
         match self
+            .inner
             .consensus
             .start_domain(
                 domain_id.clone(),
@@ -10534,7 +11604,7 @@ impl SessionServiceImpl {
         {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
-                    let _ = self.consensus.stop_domain(domain_id.clone()).await;
+                    let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
                     let _ = self.apply_current_cluster_state().await;
                     return command_error(format!(
                         "failed to start domain '{}': {error}",
@@ -10542,7 +11612,7 @@ impl SessionServiceImpl {
                     ));
                 }
                 if let DomainPace::Paced = domain.config.pace {
-                    self.runtime.handle_domain_clock_start(
+                    self.inner.runtime.handle_domain_clock_start(
                         domain_id,
                         logical_start,
                         wall_started_at,
@@ -10559,13 +11629,19 @@ impl SessionServiceImpl {
                         )
                         .await
                 {
-                    let _ = self.consensus.stop_domain(domain_id.clone()).await;
+                    let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
                     return command_error(message);
                 }
                 if let DomainPace::Paced = domain.config.pace {
-                    self.domain_clock_reconciliations.insert(
+                    self.inner.domain_clock_reconciliations.insert(
                         domain_id.clone(),
-                        (domain.start_version.saturating_add(1), true),
+                        DomainClockReconciliation {
+                            start_version: domain.start_version.checked_add(1).assured(
+                                "a domain cannot be started 2^64 times in the lifetime of a \
+                                 cluster",
+                            ),
+                            running: true,
+                        },
                     );
                 }
                 command_ok(format!("starting domain '{}'", domain_id.as_str()))
@@ -10577,8 +11653,8 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn stop_domain(&self, domain_id: &Domain, _stop: StopDomain) -> CommandResult {
-        let Some(domain) = self.consensus.current_domain(domain_id).await else {
+    async fn stop_domain(&self, domain_id: &DomainName, _stop: StopDomain) -> CommandResult {
+        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
         };
         if let DomainStatus::Stopped = domain.status {
@@ -10593,11 +11669,16 @@ impl SessionServiceImpl {
             return command_error(message);
         }
         if let DomainPace::Paced = domain.config.pace {
-            self.runtime.handle_domain_clock_stop(domain_id);
-            self.domain_clock_reconciliations
-                .insert(domain_id.clone(), (domain.start_version, false));
+            self.inner.runtime.handle_domain_clock_stop(domain_id);
+            self.inner.domain_clock_reconciliations.insert(
+                domain_id.clone(),
+                DomainClockReconciliation {
+                    start_version: domain.start_version,
+                    running: false,
+                },
+            );
         }
-        match self.consensus.stop_domain(domain_id.clone()).await {
+        match self.inner.consensus.stop_domain(domain_id.clone()).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     self.broadcast_error(format!(
@@ -10616,20 +11697,25 @@ impl SessionServiceImpl {
 
     async fn show_stream_materialized_state(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         show: ShowRelayMaterializedState,
     ) -> CommandResult {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return command_error(format!(
                 "domain '{}' has no active schedule",
                 domain.as_str()
             ));
         };
-        let Some(materializer) = domain_schedule
+        let Some(relay_node) = domain_schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Materializer && node.identifier == show.relay)
+            .get(&NodeRef::new(
+                ModelKind::Relay,
+                ModelName::from(&show.relay),
+            ))
+            .filter(|node| {
+                matches!(node.config.as_ref(), Model::Relay(relay) if relay.materialized_state.is_some())
+            })
         else {
             return command_error(format!(
                 "stream '{}' in domain '{}' is not materialized",
@@ -10639,13 +11725,15 @@ impl SessionServiceImpl {
         };
 
         let entries = match self
+            .inner
             .runtime
             .local_materialized_stream_state(domain, &show.relay)
         {
             Ok(entries) if !entries.is_empty() => entries,
-            Ok(_) if !materializer.executes_on(self.consensus.local_node_id()) => {
-                if let Some(primary_node) = materializer.primary_node() {
+            Ok(_) if !relay_node.executes_on(self.inner.consensus.local_node_id()) => {
+                if let Some(primary_node) = relay_node.primary_node() {
                     match self
+                        .inner
                         .runtime
                         .remote_materialized_stream_state(primary_node, domain, &show.relay)
                         .await
@@ -10662,7 +11750,7 @@ impl SessionServiceImpl {
         };
 
         let message = if entries.is_empty() {
-            format_materialized_stream_state_output(&show.relay, materializer, Vec::new())
+            format_materialized_stream_state_output(&show.relay, relay_node, Vec::new())
         } else {
             let entry_lines = entries
                 .into_iter()
@@ -10681,13 +11769,17 @@ impl SessionServiceImpl {
                     )
                 })
                 .collect::<Vec<_>>();
-            format_materialized_stream_state_output(&show.relay, materializer, entry_lines)
+            format_materialized_stream_state_output(&show.relay, relay_node, entry_lines)
         };
         command_ok(message)
     }
 
-    fn describe_udf(&self, domain: &Domain, describe: DescribeUdf) -> CommandResult {
-        let model = match self.registry.get(domain, ModelKind::Udf, &describe.name) {
+    fn describe_udf(&self, domain: &DomainName, describe: DescribeUdf) -> CommandResult {
+        let model = match self
+            .inner
+            .registry
+            .get(domain, ModelKind::Udf, &describe.name)
+        {
             Ok(Some(Model::Udf(udf))) => udf,
             Ok(Some(_)) => unreachable!("UDF registry keys only contain UDF models"),
             Ok(None) => {
@@ -10714,28 +11806,29 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let references = self
-            .registry
-            .active_graph(domain)
-            .map(|graph| {
-                let mut references = graph
-                    .edges()
-                    .into_iter()
-                    .filter_map(|(from, to, edge)| {
-                        (edge == crate::registry::EdgeKind::RequiredBy && from == model.name)
-                            .then_some(to)
-                    })
-                    .collect::<Vec<_>>();
-                references.sort();
-                references.dedup();
+        let references = if let Some(graph) = self.inner.registry.active_graph(domain) {
+            let mut references = Vec::new();
+            for edge in graph.edges() {
+                if edge.kind == crate::registry::EdgeKind::RequiredBy
+                    && edge.from == ModelName::from(&model.name)
+                {
+                    references.push(edge.to);
+                }
+            }
+            references.sort();
+            references.dedup();
+            if references.is_empty() {
+                "(none)".to_string()
+            } else {
                 references
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(|name| name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            })
-            .filter(|references| !references.is_empty())
-            .unwrap_or_else(|| "(none)".to_string());
+            }
+        } else {
+            "(none)".to_string()
+        };
         command_ok(format!(
             "name: {}\nlanguage: {}\nsignature: ({arguments}) -> {}{}\nvolatile: {}\ncode_hash: \
              {}\nreferencing_nodes: {references}",
@@ -10752,13 +11845,17 @@ impl SessionServiceImpl {
         ))
     }
 
-    fn show_udfs(&self, domain: &Domain) -> CommandResult {
-        match self.registry.list_identifiers(domain, ModelKind::Udf, "") {
+    fn show_udfs(&self, domain: &DomainName) -> CommandResult {
+        match self
+            .inner
+            .registry
+            .list_identifiers(domain, ModelKind::Udf, "")
+        {
             Ok(identifiers) if identifiers.is_empty() => command_ok("(none)".to_string()),
             Ok(identifiers) => command_ok(
                 identifiers
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(|name| name.as_str())
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
@@ -10768,11 +11865,11 @@ impl SessionServiceImpl {
 
     async fn describe_resource(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         describe: DescribeResource,
     ) -> CommandResult {
         if describe.version.is_none() {
-            let resources = self.consensus.current_resources().await;
+            let resources = self.inner.consensus.current_resources().await;
             if !resources.is_declared(domain, &describe.identifier) {
                 return command_error(format!(
                     "resource '{}' does not exist",
@@ -10815,9 +11912,11 @@ impl SessionServiceImpl {
             return command_ok(lines.join("\n"));
         }
 
-        let version = describe.version.expect("checked above");
+        let version = describe
+            .version
+            .verified("the branch above returned for the absent case");
         let id = ResourceId::new(domain.clone(), describe.identifier.clone(), version);
-        let resources = self.consensus.current_resources().await;
+        let resources = self.inner.consensus.current_resources().await;
         let Some(resource) = resources
             .versions
             .iter()
@@ -10837,7 +11936,7 @@ impl SessionServiceImpl {
             .filter(|replica| replica.key.version_key().resource_id() == id)
             .cloned()
             .collect::<Vec<_>>();
-        let gossip = self.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.gossip_state().await;
         let live_node_ids = gossip
             .live_nodes
             .iter()
@@ -10845,7 +11944,7 @@ impl SessionServiceImpl {
             .collect::<BTreeSet<_>>();
         let mut live_node_ids = live_node_ids;
         if live_node_ids.is_empty() {
-            live_node_ids.insert(self.consensus.local_node_id().to_string());
+            live_node_ids.insert(self.inner.consensus.local_node_id().clone());
         }
         let dead_node_ids = gossip.dead_node_ids;
         let node_ids = live_node_ids
@@ -10929,24 +12028,34 @@ impl SessionServiceImpl {
                     },
                     |replica| replica.state.as_ref(),
                 );
+                let checksum = if let Some(replica) = replica {
+                    replica.root_checksum.as_deref().unwrap_or("-")
+                } else {
+                    "-"
+                };
+                let verified_at = if let Some(replica) = replica
+                    && let Some(value) = replica.last_verified_at
+                {
+                    value.to_string()
+                } else {
+                    "-".to_string()
+                };
+                let source = if let Some(replica) = replica {
+                    replica
+                        .source_node_id
+                        .as_ref()
+                        .map_or("-", ClusterNodeName::as_str)
+                } else {
+                    "-"
+                };
+                let error = if let Some(replica) = replica {
+                    replica.error.as_deref().unwrap_or("-")
+                } else {
+                    "-"
+                };
                 lines.push(format!(
                     "- {} topology={} state={} checksum={} verified_at={} source={} error={}",
-                    node_id,
-                    topology,
-                    state,
-                    replica
-                        .and_then(|replica| replica.root_checksum.as_deref())
-                        .unwrap_or("-"),
-                    replica
-                        .and_then(|replica| replica.last_verified_at)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "-".to_string()),
-                    replica
-                        .and_then(|replica| replica.source_node_id.as_deref())
-                        .unwrap_or("-"),
-                    replica
-                        .and_then(|replica| replica.error.as_deref())
-                        .unwrap_or("-"),
+                    node_id, topology, state, checksum, verified_at, source, error,
                 ));
             }
         }
@@ -10972,7 +12081,7 @@ impl SessionServiceImpl {
         &self,
         resource: &nervix_models::ResourceVersion,
     ) -> Vec<String> {
-        match self.resource_store.read_manifest(&resource.id) {
+        match self.inner.resource_store.read_manifest(&resource.id) {
             Ok(manifest) if manifest.entries.is_empty() => vec!["  - none".to_string()],
             Ok(manifest) => manifest
                 .entries
@@ -11003,17 +12112,17 @@ impl SessionServiceImpl {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             tokio::task::consume_budget().await;
-            let resources = self.consensus.current_resources().await;
+            let resources = self.inner.consensus.current_resources().await;
             let replicas = resources
                 .replicas
                 .iter()
                 .filter(|replica| replica.key.version_key().resource_id() == *id)
                 .collect::<Vec<_>>();
-            let gossip = self.cluster.gossip_state().await;
+            let gossip = self.inner.cluster.gossip_state().await;
             let live_node_ids = gossip
                 .live_nodes
                 .iter()
-                .map(|node| node.node_id.as_str())
+                .map(|node| &node.node_id)
                 .collect::<BTreeSet<_>>();
             let all_ready = !live_node_ids.is_empty()
                 && live_node_ids.iter().all(|node_id| {
@@ -11038,27 +12147,36 @@ impl SessionServiceImpl {
 
     async fn publish_domain_schedule(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         graph: Option<ActiveGraph>,
     ) -> Result<usize, String> {
         #[cfg(feature = "testing")]
-        if self.runtime.take_armed_schedule_publication_fault(domain) {
+        if self
+            .inner
+            .runtime
+            .take_armed_schedule_publication_fault(domain)
+        {
             return Err(format!(
                 "injected schedule publication fault for domain '{}'",
                 domain.as_str()
             ));
         }
         let default_policy = self
+            .inner
             .consensus
             .current_domain(domain)
             .await
             .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
             .config
             .placement;
-        let (schedule, relocations) = self
+        let PreparedDomainSchedule {
+            schedule,
+            relocations,
+        } = self
             .prepare_domain_schedule(domain, graph, default_policy)
             .await?;
-        self.consensus
+        self.inner
+            .consensus
             .replace_domain_schedule(domain.clone(), schedule)
             .await
             .map_err(|error| error.to_string())?;
@@ -11073,32 +12191,37 @@ impl SessionServiceImpl {
 
     async fn prepare_domain_schedule(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
-    ) -> Result<(Option<nervix_models::DomainSchedule>, usize), String> {
-        let live_node_ids = self.cluster.live_node_ids().await;
-        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+    ) -> Result<PreparedDomainSchedule, String> {
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
+        let live_voters = self
+            .inner
+            .consensus
+            .live_voter_ids(live_node_ids.clone())
+            .await;
         let cluster_nodes = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
-        let current = self.consensus.current_schedule().await;
+        let current = self.inner.consensus.current_schedule().await;
         let schedule = match graph {
             Some(graph) => {
                 #[cfg(feature = "testing")]
                 let mut schedule = graph.schedule_for_domain_with_mode(
                     domain,
                     &cluster_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     placement,
-                    self.scheduler_mode,
+                    self.inner.scheduler_mode,
                 );
                 #[cfg(not(feature = "testing"))]
                 let mut schedule = graph.schedule_for_domain(
                     domain,
                     &cluster_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     placement,
                 );
                 Self::merge_existing_schedule_data(
@@ -11106,16 +12229,24 @@ impl SessionServiceImpl {
                     current.domain(domain),
                     &live_voters,
                 );
+                prefer_former_owners_as_replicas(
+                    current.domain(domain),
+                    &mut schedule,
+                    &live_voters,
+                );
                 Some(schedule)
             }
             None => None,
         };
         let relocations = planned_relocation_count(current.domain(domain), schedule.as_ref());
-        Ok((schedule, relocations))
+        Ok(PreparedDomainSchedule {
+            schedule,
+            relocations,
+        })
     }
 
-    async fn drop_node(&self, node_id: String) -> CommandResult {
-        let gossip = self.cluster.gossip_state().await;
+    async fn drop_node(&self, node_id: ClusterNodeName) -> CommandResult {
+        let gossip = self.inner.cluster.gossip_state().await;
         let is_live = gossip
             .live_nodes
             .iter()
@@ -11126,9 +12257,9 @@ impl SessionServiceImpl {
             ));
         }
 
-        let membership_nodes = self.consensus.membership_nodes().await;
+        let membership_nodes = self.inner.consensus.membership_nodes().await;
         if membership_nodes.contains_key(&node_id) {
-            let voters = self.consensus.membership_voter_ids().await;
+            let voters = self.inner.consensus.membership_voter_ids().await;
             let live_node_ids = gossip
                 .live_nodes
                 .iter()
@@ -11140,39 +12271,44 @@ impl SessionServiceImpl {
             }
         }
 
-        let current_schedule = self.consensus.current_schedule().await;
-        match self.consensus.drop_node(&node_id).await {
+        let current_schedule = self.inner.consensus.current_schedule().await;
+        match self.inner.consensus.drop_node(&node_id).await {
             Ok(()) => {}
             Err(error) => {
                 return command_error(format!("failed to drop node '{node_id}': {error}"));
             }
         }
 
-        let live_node_ids = self.cluster.live_node_ids().await;
-        let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
+        let live_voters = self
+            .inner
+            .consensus
+            .live_voter_ids(live_node_ids.clone())
+            .await;
         let schedulable_nodes = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
         let (cluster_nodes, preservable_nodes) =
             Self::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
-        for (domain, graph) in self.registry.active_graphs() {
-            let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+        for (domain, graph) in self.inner.registry.active_graphs() {
+            let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
                 continue;
             };
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 &domain,
                 cluster_nodes,
-                self.replica_count,
+                self.inner.replica_count,
                 domain_state.config.placement,
-                self.scheduler_mode,
+                self.inner.scheduler_mode,
             );
             #[cfg(not(feature = "testing"))]
             let mut schedule = graph.schedule_for_domain(
                 &domain,
                 cluster_nodes,
-                self.replica_count,
+                self.inner.replica_count,
                 domain_state.config.placement,
             );
             Self::merge_existing_schedule_data(
@@ -11181,6 +12317,7 @@ impl SessionServiceImpl {
                 preservable_nodes,
             );
             if let Err(error) = self
+                .inner
                 .consensus
                 .replace_domain_schedule(domain.clone(), Some(schedule))
                 .await
@@ -11197,16 +12334,16 @@ impl SessionServiceImpl {
     }
 
     fn drop_node_schedule_node_sets<'nodes>(
-        live_voters: &'nodes [String],
-        schedulable_nodes: &'nodes [String],
-    ) -> (&'nodes [String], &'nodes [String]) {
+        live_voters: &'nodes [ClusterNodeName],
+        schedulable_nodes: &'nodes [ClusterNodeName],
+    ) -> (&'nodes [ClusterNodeName], &'nodes [ClusterNodeName]) {
         (schedulable_nodes, live_voters)
     }
 
     fn drop_node_quorum_error(
-        node_id: &str,
-        voters: &BTreeSet<String>,
-        live_node_ids: &BTreeSet<String>,
+        node_id: &ClusterNodeName,
+        voters: &BTreeSet<ClusterNodeName>,
+        live_node_ids: &BTreeSet<ClusterNodeName>,
     ) -> Option<String> {
         if voters.is_empty() {
             return None;
@@ -11233,13 +12370,14 @@ impl SessionServiceImpl {
         voter_count / 2 + 1
     }
 
-    async fn set_node_cordoned(&self, node_id: String, cordoned: bool) -> CommandResult {
-        let membership = self.consensus.membership_nodes().await;
+    async fn set_node_cordoned(&self, node_id: ClusterNodeName, cordoned: bool) -> CommandResult {
+        let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(&node_id) {
             return command_error(format!("node '{node_id}' is not a raft member"));
         }
 
         if let Err(error) = self
+            .inner
             .consensus
             .set_node_cordoned(node_id.clone(), cordoned)
             .await
@@ -11252,13 +12390,14 @@ impl SessionServiceImpl {
         command_ok(format!("{action} node '{node_id}'"))
     }
 
-    async fn drain_node(&self, node_id: String) -> CommandResult {
-        let membership = self.consensus.membership_nodes().await;
+    async fn drain_node(&self, node_id: ClusterNodeName) -> CommandResult {
+        let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(&node_id) {
             return command_error(format!("node '{node_id}' is not a raft member"));
         }
 
         if let Err(error) = self
+            .inner
             .consensus
             .set_node_cordoned(node_id.clone(), true)
             .await
@@ -11268,152 +12407,254 @@ impl SessionServiceImpl {
             ));
         }
 
+        let initial_schedule = self.inner.consensus.current_schedule().await;
+        let total = initial_schedule
+            .domains
+            .values()
+            .flat_map(|schedule| schedule.nodes.values())
+            .filter(|node| node.execution_node() == Some(&node_id))
+            .count();
         let mut moved = 0usize;
+        let mut outcomes = Vec::new();
+        let mut failed = false;
+        let mut failed_units = BTreeSet::<(DomainName, String)>::new();
+        let mut failed_domains = BTreeSet::<DomainName>::new();
         loop {
-            let live_node_ids = self.cluster.live_node_ids().await;
-            let live_voters = self.consensus.live_voter_ids(live_node_ids.clone()).await;
+            let live_node_ids = self.inner.cluster.live_node_ids().await;
+            let live_voters = self
+                .inner
+                .consensus
+                .live_voter_ids(live_node_ids.clone())
+                .await;
             let replacement_nodes = self
+                .inner
                 .consensus
                 .schedulable_live_voter_ids(live_node_ids)
                 .await;
             if replacement_nodes.is_empty() {
-                return command_error(format!(
-                    "cannot drain node '{node_id}': no live schedulable raft voters remain"
+                failed = true;
+                outcomes.push(format!(
+                    "- owner={node_id} failed: no live schedulable raft voters remain"
                 ));
+                break;
             }
             let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
             let replacement_node_set = replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
-            let current_schedule = self.consensus.current_schedule().await;
-            let mut moved_this_iteration = false;
+            let mut handled_this_iteration = false;
 
-            for (domain, graph) in self.registry.active_graphs() {
-                let Some(domain_state) = self.consensus.current_domain(&domain).await else {
+            for (domain, graph) in self.inner.registry.active_graphs() {
+                if failed_domains.contains(&domain) {
+                    continue;
+                }
+                let Some(_alter_guard) = self.inner.runtime.try_begin_domain_alter(&domain) else {
+                    failed = true;
+                    failed_domains.insert(domain.clone());
+                    outcomes.push(format!(
+                        "- domain={} owner={node_id} failed: a model or schedule change is \
+                         already in progress",
+                        domain.as_str()
+                    ));
                     continue;
                 };
+                let Some(domain_state) = self.inner.consensus.current_domain(&domain).await else {
+                    continue;
+                };
+                let current_schedule = self.inner.consensus.current_schedule().await;
                 #[cfg(feature = "testing")]
                 let desired = graph.schedule_for_domain_with_mode(
                     &domain,
                     &replacement_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     domain_state.config.placement,
-                    self.scheduler_mode,
+                    self.inner.scheduler_mode,
                 );
                 #[cfg(not(feature = "testing"))]
                 let desired = graph.schedule_for_domain(
                     &domain,
                     &replacement_nodes,
-                    self.replica_count,
+                    self.inner.replica_count,
                     domain_state.config.placement,
                 );
                 let Some(current_domain) = current_schedule.domain(&domain) else {
                     if let Err(error) = self
+                        .inner
                         .consensus
                         .replace_domain_schedule(domain.clone(), Some(desired))
                         .await
                     {
-                        return command_error(format!(
-                            "cordoned node '{node_id}', but failed to publish schedule for domain \
-                             '{}': {error}",
+                        failed = true;
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={} owner={node_id} failed: could not publish initial \
+                             schedule: {error}",
                             domain.as_str()
                         ));
+                        handled_this_iteration = true;
+                        break;
                     }
                     if let Err(error) = self.apply_current_cluster_state().await {
-                        return command_error(format!(
-                            "cordoned node '{node_id}', but failed to activate the updated \
-                             schedule for domain '{}': {error}",
+                        failed = true;
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={} owner={node_id} failed: could not activate initial \
+                             schedule: {error}",
                             domain.as_str()
                         ));
                     }
-                    moved_this_iteration = true;
+                    handled_this_iteration = true;
                     break;
                 };
 
                 let mut next = current_domain.clone();
-                let Some(drain_move) = Self::move_next_scheduled_node_for_drain(
+                let excluded = failed_units
+                    .iter()
+                    .filter_map(|(failed_domain, label)| {
+                        (failed_domain == &domain).then_some(label.clone())
+                    })
+                    .collect::<BTreeSet<_>>();
+                let Some(drain_move) = Self::move_next_scheduled_node_for_drain_excluding(
                     &mut next,
                     &desired,
                     &node_id,
                     &live_voter_set,
                     &replacement_node_set,
+                    &excluded,
                 ) else {
                     continue;
                 };
-                moved += 1;
-                if let Some(replica) = drain_move.promoted_replica.as_deref() {
-                    info!(
-                        domain = domain.as_str(),
-                        node = drain_move.label,
-                        drained_node = node_id,
-                        promoted_replica = replica,
-                        "drain promoted live replica to primary"
-                    );
-                } else if let Some(fallback_node) = drain_move.fallback_node.as_deref() {
-                    warn!(
-                        domain = domain.as_str(),
-                        node = drain_move.label,
-                        drained_node = node_id,
-                        fallback_node,
-                        "drain found no live replica; moving scheduled node without local \
-                         replicated state"
-                    );
-                }
+                let unit_key = (domain.clone(), drain_move.label.clone());
+                let planned_moves = planned_ownership_moves(Some(current_domain), Some(&next));
+                let mut handoff = match self
+                    .begin_planned_ownership_handoff(&domain, Some(current_domain), Some(&next))
+                    .await
+                {
+                    Ok(handoff) => handoff,
+                    Err(error) => {
+                        failed = true;
+                        failed_units.insert(unit_key);
+                        if planned_moves.is_empty() {
+                            outcomes.push(format!(
+                                "- {} owner={node_id} failed: {error}",
+                                drain_move.label
+                            ));
+                        } else {
+                            outcomes.extend(planned_moves.iter().map(|moved| {
+                                format!(
+                                    "- kind={} name={} owner={} failed: {error}",
+                                    moved.entity.kind.as_ref(),
+                                    moved.entity.identifier.as_str(),
+                                    moved.former_owner
+                                )
+                            }));
+                        }
+                        handled_this_iteration = true;
+                        break;
+                    }
+                };
                 if let Err(error) = self
+                    .inner
                     .consensus
                     .replace_domain_schedule(domain.clone(), Some(next))
                     .await
                 {
-                    return command_error(format!(
-                        "cordoned node '{node_id}', but failed to move scheduled graph node {} \
-                         for domain '{}': {error}",
-                        moved,
-                        domain.as_str()
-                    ));
+                    if let Some(handoff) = handoff.take() {
+                        self.release_cluster_entity_gates(handoff.gate).await;
+                    }
+                    failed = true;
+                    failed_units.insert(unit_key);
+                    outcomes.extend(planned_moves.iter().map(|moved| {
+                        format!(
+                            "- kind={} name={} owner={} failed: schedule commit failed: {error}",
+                            moved.entity.kind.as_ref(),
+                            moved.entity.identifier.as_str(),
+                            moved.former_owner
+                        )
+                    }));
+                    handled_this_iteration = true;
+                    break;
                 }
-                if let Err(error) = self.apply_current_cluster_state().await {
-                    return command_error(format!(
-                        "cordoned node '{node_id}', but failed to activate moved scheduled graph \
-                         node {moved} for domain '{}': {error}",
-                        domain.as_str()
-                    ));
+                moved = moved
+                    .checked_add(planned_moves.len())
+                    .assured("the moves counted here are schedule entries held in memory");
+                let activation_error = self.apply_current_cluster_state().await.err();
+                for ownership_move in &planned_moves {
+                    if activation_error.is_none() {
+                        outcomes.push(format_planned_ownership_move(ownership_move));
+                    } else if let Some(error) = &activation_error {
+                        failed = true;
+                        outcomes.push(format!(
+                            "- kind={} name={} owner={} failed: destination '{}' did not \
+                             activate: {error}",
+                            ownership_move.entity.kind.as_ref(),
+                            ownership_move.entity.identifier.as_str(),
+                            ownership_move.former_owner,
+                            ownership_move.destination
+                        ));
+                    }
                 }
-                moved_this_iteration = true;
+                if let Some(handoff) = handoff {
+                    debug_assert_eq!(handoff.moves, planned_moves);
+                    if let Some(error) = &activation_error {
+                        self.defer_planned_ownership_handoff_release(&domain, handoff, error);
+                    } else {
+                        self.finish_planned_ownership_handoff(&domain, handoff)
+                            .await;
+                    }
+                }
+                handled_this_iteration = true;
                 break;
             }
 
-            if !moved_this_iteration {
+            if !handled_this_iteration {
                 break;
             }
         }
 
-        command_ok(format!(
-            "drained node '{node_id}' (moved {moved} scheduled graph node(s))"
-        ))
+        let level = if total == 0 {
+            QuiesceLevel::Dynamic
+        } else {
+            QuiesceLevel::EntityPause
+        };
+        let mut message = format!(
+            "drained node '{node_id}' (moved {moved} of {total} scheduled graph node(s))\n{}",
+            quiesce_level_message(level)
+        );
+        if !outcomes.is_empty() {
+            message.push('\n');
+            message.push_str(&outcomes.join("\n"));
+        }
+        if failed {
+            command_error(message)
+        } else {
+            command_ok(message)
+        }
     }
 
     async fn drain_local_node_before_shutdown(&self) {
-        let local_node_id = self.consensus.local_node_id().to_string();
-        let live_node_ids = self.cluster.live_node_ids().await;
+        let local_node_id = self.inner.consensus.local_node_id().clone();
+        let live_node_ids = self.inner.cluster.live_node_ids().await;
         let drain_targets = self
+            .inner
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
         if !drain_targets
             .iter()
-            .any(|node_id| node_id != &local_node_id)
+            .any(|node_id| *node_id != local_node_id)
         {
             warn!(
-                node_id = local_node_id,
+                node_id = %local_node_id,
                 "skipping graceful shutdown drain: no live schedulable replacement nodes remain"
             );
             return;
         }
-        let leader = self.consensus.current_leader().await;
-        match leader.as_deref() {
-            Some(leader_id) if leader_id == local_node_id => {
+        let leader = self.inner.consensus.current_leader().await;
+        match leader.as_ref() {
+            Some(leader_id) if *leader_id == local_node_id => {
                 let result = self.drain_node(local_node_id.clone()).await;
                 if result.success {
                     info!(
-                        node_id = local_node_id,
+                        node_id = %local_node_id,
                         message = result.message,
                         "drained local node before graceful shutdown"
                     );
@@ -11421,7 +12662,7 @@ impl SessionServiceImpl {
                         .await;
                 } else {
                     warn!(
-                        node_id = local_node_id,
+                        node_id = %local_node_id,
                         message = result.message,
                         "failed to drain local node before graceful shutdown"
                     );
@@ -11432,8 +12673,8 @@ impl SessionServiceImpl {
             Some(leader_id) => {
                 let Some(leader_grpc_uri) = self.leader_grpc_uri(leader_id).await else {
                     warn!(
-                        node_id = local_node_id,
-                        leader = leader_id,
+                        node_id = %local_node_id,
+                        leader = %leader_id,
                         "failed to drain local node before graceful shutdown: leader grpc uri is \
                          unknown"
                     );
@@ -11444,7 +12685,7 @@ impl SessionServiceImpl {
                     "default",
                     grpc_client_connect_options(
                         &leader_grpc_uri,
-                        self.configured_basic_auth.as_ref(),
+                        self.inner.configured_basic_auth.as_ref(),
                     ),
                 )
                 .await
@@ -11453,8 +12694,8 @@ impl SessionServiceImpl {
                         match client.execute(format!("DRAIN NODE {local_node_id};")).await {
                             Ok(outcome) if outcome.success => {
                                 info!(
-                                    node_id = local_node_id,
-                                    leader = leader_id,
+                                    node_id = %local_node_id,
+                                    leader = %leader_id,
                                     message = outcome.message,
                                     "drained local node through leader before graceful shutdown"
                                 );
@@ -11467,8 +12708,8 @@ impl SessionServiceImpl {
                             }
                             Ok(outcome) => {
                                 warn!(
-                                    node_id = local_node_id,
-                                    leader = leader_id,
+                                    node_id = %local_node_id,
+                                    leader = %leader_id,
                                     message = outcome.message,
                                     "failed to drain local node through leader before graceful \
                                      shutdown"
@@ -11482,8 +12723,8 @@ impl SessionServiceImpl {
                             }
                             Err(error) => {
                                 warn!(
-                                    node_id = local_node_id,
-                                    leader = leader_id,
+                                    node_id = %local_node_id,
+                                    leader = %leader_id,
                                     error = %error,
                                     "failed to drain local node through leader before graceful shutdown"
                                 );
@@ -11492,8 +12733,8 @@ impl SessionServiceImpl {
                     }
                     Err(error) => {
                         warn!(
-                            node_id = local_node_id,
-                            leader = leader_id,
+                            node_id = %local_node_id,
+                            leader = %leader_id,
                             leader_grpc_uri,
                             error = %error,
                             "failed to connect to leader for graceful shutdown drain"
@@ -11503,28 +12744,29 @@ impl SessionServiceImpl {
             }
             None => {
                 warn!(
-                    node_id = local_node_id,
+                    node_id = %local_node_id,
                     "failed to drain local node before graceful shutdown: raft leader is unknown"
                 );
             }
         }
     }
 
-    async fn uncordon_local_node_after_shutdown_drain(&self, local_node_id: &str) {
+    async fn uncordon_local_node_after_shutdown_drain(&self, local_node_id: &ClusterNodeName) {
         match self
+            .inner
             .consensus
-            .set_node_cordoned(local_node_id.to_string(), false)
+            .set_node_cordoned(local_node_id.clone(), false)
             .await
         {
             Ok(()) => {
                 info!(
-                    node_id = local_node_id,
+                    node_id = %local_node_id,
                     "cleared shutdown drain cordon before graceful shutdown"
                 );
             }
             Err(error) => {
                 warn!(
-                    node_id = local_node_id,
+                    node_id = %local_node_id,
                     error = %error,
                     "failed to clear shutdown drain cordon before graceful shutdown"
                 );
@@ -11535,8 +12777,8 @@ impl SessionServiceImpl {
     async fn uncordon_local_node_through_leader_after_shutdown_drain(
         &self,
         client: &NervixClient,
-        local_node_id: &str,
-        leader_id: &str,
+        local_node_id: &ClusterNodeName,
+        leader_id: &ClusterNodeName,
     ) {
         match client
             .execute(format!("UNCORDON NODE {local_node_id};"))
@@ -11544,24 +12786,24 @@ impl SessionServiceImpl {
         {
             Ok(outcome) if outcome.success => {
                 info!(
-                    node_id = local_node_id,
-                    leader = leader_id,
+                    node_id = %local_node_id,
+                    leader = %leader_id,
                     message = outcome.message,
                     "cleared shutdown drain cordon through leader"
                 );
             }
             Ok(outcome) => {
                 warn!(
-                    node_id = local_node_id,
-                    leader = leader_id,
+                    node_id = %local_node_id,
+                    leader = %leader_id,
                     message = outcome.message,
                     "failed to clear shutdown drain cordon through leader"
                 );
             }
             Err(error) => {
                 warn!(
-                    node_id = local_node_id,
-                    leader = leader_id,
+                    node_id = %local_node_id,
+                    leader = %leader_id,
                     error = %error,
                     "failed to clear shutdown drain cordon through leader"
                 );
@@ -11569,27 +12811,71 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn leader_grpc_uri(&self, leader_id: &str) -> Option<String> {
-        self.cluster
+    async fn leader_grpc_uri(&self, leader_id: &ClusterNodeName) -> Option<String> {
+        self.inner
+            .cluster
             .gossip_state()
             .await
             .live_nodes
             .into_iter()
-            .find(|node| node.node_id == leader_id)
+            .find(|node| node.node_id == *leader_id)
             .and_then(|node| grpc_uri_from_advertise_addr(&node.grpc_advertise_addr))
     }
 
+    #[cfg(test)]
     fn move_next_scheduled_node_for_drain(
         schedule: &mut nervix_models::DomainSchedule,
         desired: &nervix_models::DomainSchedule,
-        node_id: &str,
-        live_nodes: &BTreeSet<String>,
-        target_nodes: &BTreeSet<String>,
+        node_id: &ClusterNodeName,
+        live_nodes: &BTreeSet<ClusterNodeName>,
+        target_nodes: &BTreeSet<ClusterNodeName>,
     ) -> Option<DrainMove> {
-        for group in &desired.placement_groups {
+        Self::move_next_scheduled_node_for_drain_excluding(
+            schedule,
+            desired,
+            node_id,
+            live_nodes,
+            target_nodes,
+            &BTreeSet::new(),
+        )
+    }
+
+    fn move_next_scheduled_node_for_drain_excluding(
+        schedule: &mut nervix_models::DomainSchedule,
+        desired: &nervix_models::DomainSchedule,
+        node_id: &ClusterNodeName,
+        live_nodes: &BTreeSet<ClusterNodeName>,
+        target_nodes: &BTreeSet<ClusterNodeName>,
+        // Failed units are keyed by their human-readable label, which is a node id for a single
+        // node and a bracketed member list for a placement group, so this stays a string set.
+        excluded: &BTreeSet<String>,
+    ) -> Option<DrainMove> {
+        let mut groups = desired.placement_groups.iter().collect::<Vec<_>>();
+        groups.sort_by(|left, right| {
+            left.members
+                .first()
+                .map(|member| (member.kind.as_ref(), &member.identifier))
+                .cmp(
+                    &right
+                        .members
+                        .first()
+                        .map(|member| (member.kind.as_ref(), &member.identifier)),
+                )
+                .then_with(|| left.members.len().cmp(&right.members.len()))
+        });
+        for group in groups {
+            let label = format!(
+                "placement group [{}]",
+                format_placement_runtime_nodes(&group.members)
+            );
+            if excluded.contains(&label) {
+                continue;
+            }
             let needs_relocation = group.members.iter().any(|member| {
-                scheduled_node_for_placement_member(schedule, member)
-                    .is_some_and(|node| node.is_assigned_to(node_id))
+                schedule
+                    .nodes
+                    .get(member)
+                    .is_some_and(|node| node.execution_node() == Some(node_id))
             });
             if needs_relocation {
                 return Self::relocate_placement_group_assignment(
@@ -11599,6 +12885,7 @@ impl SessionServiceImpl {
                     node_id,
                     live_nodes,
                     target_nodes,
+                    AssignmentRelocation::Planned,
                 );
             }
         }
@@ -11608,20 +12895,29 @@ impl SessionServiceImpl {
             .iter()
             .flat_map(|group| group.members.iter().cloned())
             .collect::<HashSet<_>>();
-        for node in &mut schedule.nodes {
-            if grouped_members.contains(&PlacementRuntimeNode::new(
-                node.kind,
-                node.identifier.clone(),
-            )) {
+        let mut node_indices = (0..schedule.nodes.len()).collect::<Vec<_>>();
+        node_indices.sort_by(|left, right| {
+            let left = &schedule.nodes[*left];
+            let right = &schedule.nodes[*right];
+            left.kind
+                .as_ref()
+                .cmp(right.kind.as_ref())
+                .then_with(|| left.identifier.cmp(&right.identifier))
+        });
+        for node_index in node_indices {
+            let node = &schedule.nodes[node_index];
+            if grouped_members.contains(&node.identity()) {
                 continue;
             }
-            if !node.is_assigned_to(node_id) {
+            if node.execution_node() != Some(node_id) {
+                continue;
+            }
+            let label = format!("{} {}", node.kind.as_ref(), node.identifier.as_str());
+            if excluded.contains(&label) {
                 continue;
             }
 
-            let Some(desired_node) = desired.nodes.iter().find(|candidate| {
-                candidate.kind == node.kind && candidate.identifier == node.identifier
-            }) else {
+            let Some(desired_node) = desired.nodes.get(&node.identity()) else {
                 continue;
             };
             if desired_node.assigned_nodes.is_empty()
@@ -11633,12 +12929,14 @@ impl SessionServiceImpl {
                 continue;
             }
 
+            let node = &mut schedule.nodes[node_index];
             return Self::relocate_scheduled_node_assignment(
                 node,
                 desired_node,
                 node_id,
                 live_nodes,
                 target_nodes,
+                AssignmentRelocation::Planned,
             );
         }
         None
@@ -11648,64 +12946,64 @@ impl SessionServiceImpl {
         schedule: &mut nervix_models::DomainSchedule,
         desired: &nervix_models::DomainSchedule,
         group: &PlacementGroupSchedule,
-        unavailable_node_id: &str,
-        live_nodes: &BTreeSet<String>,
-        target_nodes: &BTreeSet<String>,
+        unavailable_node_id: &ClusterNodeName,
+        live_nodes: &BTreeSet<ClusterNodeName>,
+        target_nodes: &BTreeSet<ClusterNodeName>,
+        relocation: AssignmentRelocation,
     ) -> Option<DrainMove> {
+        let retain_former_replica = relocation.retains_former_replica();
         let current_nodes = group
             .members
             .iter()
-            .map(|member| scheduled_node_for_placement_member(schedule, member).cloned())
+            .map(|member| schedule.nodes.get(member).cloned())
             .collect::<Option<Vec<_>>>()?;
         let desired_nodes = group
             .members
             .iter()
-            .map(|member| scheduled_node_for_placement_member(desired, member).cloned())
+            .map(|member| desired.nodes.get(member).cloned())
             .collect::<Option<Vec<_>>>()?;
-        let old_primary = schedule
+        let old_primary = if let Some(candidate) = schedule
             .placement_groups
             .iter()
             .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
-            .and_then(|candidate| candidate.primary_node.clone())
-            .or_else(|| {
-                current_nodes
-                    .first()
-                    .and_then(|node| node.primary_node.clone())
-            });
+            && let Some(primary) = candidate.primary_node.as_ref()
+        {
+            Some(primary.clone())
+        } else if let Some(node) = current_nodes.first() {
+            node.primary_node.clone()
+        } else {
+            None
+        };
         let preserved_primary = old_primary.as_ref().filter(|primary| {
-            primary.as_str() != unavailable_node_id
+            *primary != unavailable_node_id
                 && live_nodes.contains(*primary)
                 && current_nodes.iter().all(|node| {
                     node.primary_node.as_ref() == Some(*primary)
                         && node.assigned_nodes.contains(*primary)
                 })
         });
-        let desired_target = group
-            .primary_node
-            .as_ref()
-            .filter(|node_id| target_nodes.contains(*node_id))
-            .cloned()
-            .or_else(|| {
-                desired_nodes
-                    .first()
-                    .and_then(|node| node.primary_node.clone())
-                    .filter(|node_id| target_nodes.contains(node_id))
-            })
-            .or_else(|| {
-                desired_nodes
-                    .first()
-                    .and_then(|node| {
-                        node.assigned_nodes
-                            .iter()
-                            .find(|node_id| target_nodes.contains(*node_id))
-                    })
-                    .cloned()
-            });
+        let desired_target = if let Some(node_id) = group.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else if let Some(node) = desired_nodes.first()
+            && let Some(node_id) = node.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else if let Some(node) = desired_nodes.first() {
+            node.assigned_nodes
+                .iter()
+                .find(|node_id| target_nodes.contains(*node_id))
+                .cloned()
+        } else {
+            None
+        };
         let mut common_replicas = current_nodes
             .first()?
             .assigned_nodes
             .iter()
-            .filter(|node_id| node_id.as_str() != unavailable_node_id)
+            .filter(|node_id| *node_id != unavailable_node_id)
             .filter(|node_id| target_nodes.contains(*node_id))
             .cloned()
             .collect::<Vec<_>>();
@@ -11714,11 +13012,15 @@ impl SessionServiceImpl {
                 .iter()
                 .all(|node| node.assigned_nodes.contains(candidate))
         });
-        let target = preserved_primary
-            .cloned()
-            .or(desired_target)
-            .or_else(|| common_replicas.first().cloned())
-            .or_else(|| target_nodes.first().cloned())?;
+        let target = if let Some(primary) = preserved_primary {
+            primary.clone()
+        } else if let Some(target) =
+            relocation.target(desired_target, common_replicas.first().cloned())
+        {
+            target
+        } else {
+            target_nodes.first()?.clone()
+        };
         let primary_changed = old_primary.as_ref() != Some(&target);
         let promoted_replica = (primary_changed
             && current_nodes
@@ -11735,22 +13037,32 @@ impl SessionServiceImpl {
                 .max(desired_node.assigned_nodes.len())
                 .max(1);
             let mut assigned_nodes = vec![target.clone()];
+            if retain_former_replica
+                && live_nodes.contains(unavailable_node_id)
+                && unavailable_node_id != &target
+            {
+                assigned_nodes.push(unavailable_node_id.clone());
+            }
             for assigned in desired_node
                 .assigned_nodes
                 .iter()
                 .chain(&current_node.assigned_nodes)
                 .chain(target_nodes)
             {
-                if assigned.as_str() != unavailable_node_id
-                    && target_nodes.contains(assigned)
+                if (target_nodes.contains(assigned)
+                    || retain_former_replica
+                        && assigned == unavailable_node_id
+                        && live_nodes.contains(assigned))
                     && !assigned_nodes.contains(assigned)
                 {
                     assigned_nodes.push(assigned.clone());
                 }
             }
             assigned_nodes.truncate(replica_slots);
-            let node = scheduled_node_for_placement_member_mut(schedule, member)
-                .expect("validated placement group member must remain scheduled");
+            let node = schedule.nodes.get_mut(member).verified(
+                "the early return above required every group member to resolve in this same \
+                 schedule",
+            );
             node.primary_node = Some(target.clone());
             node.assigned_nodes = assigned_nodes;
         }
@@ -11774,10 +13086,12 @@ impl SessionServiceImpl {
     fn relocate_scheduled_node_assignment(
         node: &mut ScheduledNode,
         desired_node: &ScheduledNode,
-        unavailable_node_id: &str,
-        live_nodes: &BTreeSet<String>,
-        target_nodes: &BTreeSet<String>,
+        unavailable_node_id: &ClusterNodeName,
+        live_nodes: &BTreeSet<ClusterNodeName>,
+        target_nodes: &BTreeSet<ClusterNodeName>,
+        relocation: AssignmentRelocation,
     ) -> Option<DrainMove> {
+        let retain_former_replica = relocation.retains_former_replica();
         if !node.is_assigned_to(unavailable_node_id) {
             return None;
         }
@@ -11786,46 +13100,54 @@ impl SessionServiceImpl {
         let old_primary = node.primary_node.clone();
         let preserved_primary = old_primary
             .as_ref()
-            .filter(|primary| {
-                primary.as_str() != unavailable_node_id && live_nodes.contains(*primary)
-            })
+            .filter(|primary| *primary != unavailable_node_id && live_nodes.contains(*primary))
             .cloned();
-        let desired_target = desired_node
-            .primary_node
-            .as_ref()
-            .filter(|node_id| target_nodes.contains(*node_id))
-            .cloned()
-            .or_else(|| {
-                desired_node
-                    .assigned_nodes
-                    .iter()
-                    .find(|node_id| target_nodes.contains(*node_id))
-                    .cloned()
-            });
+        let desired_target = if let Some(node_id) = desired_node.primary_node.as_ref()
+            && target_nodes.contains(node_id)
+        {
+            Some(node_id.clone())
+        } else {
+            desired_node
+                .assigned_nodes
+                .iter()
+                .find(|node_id| target_nodes.contains(*node_id))
+                .cloned()
+        };
         let existing_replica = node
             .assigned_nodes
             .iter()
-            .filter(|assigned| assigned.as_str() != unavailable_node_id)
+            .filter(|assigned| *assigned != unavailable_node_id)
             .find(|assigned| target_nodes.contains(*assigned))
             .cloned();
-        let target = preserved_primary
-            .or(desired_target)
-            .or(existing_replica)
-            .or_else(|| target_nodes.first().cloned())?;
+        let target = if let Some(primary) = preserved_primary {
+            primary
+        } else if let Some(target) = relocation.target(desired_target, existing_replica) {
+            target
+        } else {
+            target_nodes.first()?.clone()
+        };
         let replica_slots = node
             .assigned_nodes
             .len()
             .max(desired_node.assigned_nodes.len())
             .max(1);
         let mut assigned_nodes = vec![target.clone()];
+        if retain_former_replica
+            && live_nodes.contains(unavailable_node_id)
+            && unavailable_node_id != &target
+        {
+            assigned_nodes.push(unavailable_node_id.clone());
+        }
         for assigned in desired_node
             .assigned_nodes
             .iter()
             .chain(&node.assigned_nodes)
             .chain(target_nodes)
         {
-            if assigned.as_str() != unavailable_node_id
-                && target_nodes.contains(assigned)
+            if (target_nodes.contains(assigned)
+                || retain_former_replica
+                    && assigned == unavailable_node_id
+                    && live_nodes.contains(assigned))
                 && !assigned_nodes.contains(assigned)
             {
                 assigned_nodes.push(assigned.clone());
@@ -11847,8 +13169,8 @@ impl SessionServiceImpl {
     fn failover_unavailable_scheduled_nodes(
         schedule: &mut nervix_models::DomainSchedule,
         desired: Option<&nervix_models::DomainSchedule>,
-        live_nodes: &BTreeSet<String>,
-        target_nodes: &BTreeSet<String>,
+        live_nodes: &BTreeSet<ClusterNodeName>,
+        target_nodes: &BTreeSet<ClusterNodeName>,
     ) -> Vec<DrainMove> {
         let mut moves = Vec::new();
         if target_nodes.is_empty() {
@@ -11857,7 +13179,7 @@ impl SessionServiceImpl {
 
         let generated_desired = desired.is_none().then(|| {
             let mut generated = schedule.clone();
-            for node in &mut generated.nodes {
+            for node in generated.nodes.values_mut() {
                 let replica_slots = node.assigned_nodes.len().max(1);
                 node.assigned_nodes = target_nodes.iter().take(replica_slots).cloned().collect();
                 node.primary_node = node.assigned_nodes.first().cloned();
@@ -11869,7 +13191,7 @@ impl SessionServiceImpl {
         });
         let desired = desired
             .or(generated_desired.as_ref())
-            .expect("failover always has a desired schedule");
+            .verified("the generated schedule is built exactly when no desired schedule was given");
 
         let groups = schedule.placement_groups.clone();
         let mut grouped_members = HashSet::default();
@@ -11878,7 +13200,7 @@ impl SessionServiceImpl {
             let current_nodes = group
                 .members
                 .iter()
-                .map(|member| scheduled_node_for_placement_member(schedule, member).cloned())
+                .map(|member| schedule.nodes.get(member).cloned())
                 .collect::<Option<Vec<_>>>();
             let Some(current_nodes) = current_nodes else {
                 continue;
@@ -11891,18 +13213,17 @@ impl SessionServiceImpl {
             if !has_unavailable_assignment {
                 continue;
             }
-            let unavailable_node_id = group
-                .primary_node
-                .as_ref()
-                .filter(|node_id| !live_nodes.contains(*node_id))
-                .cloned()
-                .or_else(|| {
-                    current_nodes
-                        .iter()
-                        .flat_map(|node| node.assigned_nodes.iter())
-                        .find(|node_id| !live_nodes.contains(*node_id))
-                        .cloned()
-                });
+            let unavailable_node_id = if let Some(node_id) = group.primary_node.as_ref()
+                && !live_nodes.contains(node_id)
+            {
+                Some(node_id.clone())
+            } else {
+                current_nodes
+                    .iter()
+                    .flat_map(|node| node.assigned_nodes.iter())
+                    .find(|node_id| !live_nodes.contains(*node_id))
+                    .cloned()
+            };
             let Some(unavailable_node_id) = unavailable_node_id else {
                 continue;
             };
@@ -11918,16 +13239,14 @@ impl SessionServiceImpl {
                 &unavailable_node_id,
                 live_nodes,
                 target_nodes,
+                AssignmentRelocation::Failure,
             ) {
                 moves.push(failover_move);
             }
         }
 
-        for node in &mut schedule.nodes {
-            if grouped_members.contains(&PlacementRuntimeNode::new(
-                node.kind,
-                node.identifier.clone(),
-            )) {
+        for node in schedule.nodes.values_mut() {
+            if grouped_members.contains(&node.identity()) {
                 continue;
             }
             if node.assigned_nodes.is_empty() {
@@ -11943,9 +13262,7 @@ impl SessionServiceImpl {
                 continue;
             }
 
-            let Some(desired_node) = desired.nodes.iter().find(|candidate| {
-                candidate.kind == node.kind && candidate.identifier == node.identifier
-            }) else {
+            let Some(desired_node) = desired.nodes.get(&node.identity()) else {
                 continue;
             };
 
@@ -11956,6 +13273,7 @@ impl SessionServiceImpl {
                     &unavailable_node_id,
                     live_nodes,
                     target_nodes,
+                    AssignmentRelocation::Failure,
                 ) {
                     moves.push(failover_move);
                 }
@@ -11968,17 +13286,15 @@ impl SessionServiceImpl {
     fn merge_existing_schedule_data(
         schedule: &mut nervix_models::DomainSchedule,
         existing: Option<&nervix_models::DomainSchedule>,
-        live_node_ids: &[String],
+        live_node_ids: &[ClusterNodeName],
     ) {
         let Some(existing) = existing else {
             return;
         };
         let live_node_ids = live_node_ids.iter().cloned().collect::<BTreeSet<_>>();
 
-        for node in &mut schedule.nodes {
-            if let Some(existing_node) = existing.nodes.iter().find(|candidate| {
-                candidate.kind == node.kind && candidate.identifier == node.identifier
-            }) {
+        for node in schedule.nodes.values_mut() {
+            if let Some(existing_node) = existing.nodes.get(&node.identity()) {
                 node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
             }
         }
@@ -11989,22 +13305,24 @@ impl SessionServiceImpl {
             grouped_members.extend(members.iter().cloned());
             let existing_nodes = members
                 .iter()
-                .map(|member| scheduled_node_for_placement_member(existing, member))
+                .map(|member| existing.nodes.get(member))
                 .collect::<Option<Vec<_>>>();
-            let common_primary = existing_nodes.as_ref().and_then(|nodes| {
-                let primary = nodes.first()?.primary_node.as_ref()?;
-                (live_node_ids.contains(primary)
-                    && nodes.iter().all(|node| {
-                        node.primary_node.as_ref() == Some(primary)
-                            && node.assigned_nodes.contains(primary)
-                    }))
-                .then(|| primary.clone())
-            });
+            let common_primary = if let Some(nodes) = existing_nodes.as_ref()
+                && let Some(first) = nodes.first()
+                && let Some(primary) = first.primary_node.as_ref()
+                && live_node_ids.contains(primary)
+                && nodes.iter().all(|node| {
+                    node.primary_node.as_ref() == Some(primary)
+                        && node.assigned_nodes.contains(primary)
+                }) {
+                Some(primary.clone())
+            } else {
+                None
+            };
 
             if let (Some(existing_nodes), Some(primary)) = (existing_nodes, common_primary) {
                 for (member, existing_node) in members.iter().zip(existing_nodes) {
-                    let Some(node) = scheduled_node_for_placement_member_mut(schedule, member)
-                    else {
+                    let Some(node) = schedule.nodes.get_mut(member) else {
                         continue;
                     };
                     let desired_assigned_nodes = node.assigned_nodes.clone();
@@ -12028,22 +13346,21 @@ impl SessionServiceImpl {
                     node.assigned_nodes = assigned_nodes;
                 }
             }
-            schedule.placement_groups[group_index].primary_node = members
-                .first()
-                .and_then(|member| scheduled_node_for_placement_member(schedule, member))
-                .and_then(|node| node.primary_node.clone());
+            schedule.placement_groups[group_index].primary_node = if let Some(member) =
+                members.first()
+                && let Some(node) = schedule.nodes.get(member)
+            {
+                node.primary_node.clone()
+            } else {
+                None
+            };
         }
 
-        for node in &mut schedule.nodes {
-            if grouped_members.contains(&PlacementRuntimeNode::new(
-                node.kind,
-                node.identifier.clone(),
-            )) {
+        for node in schedule.nodes.values_mut() {
+            if grouped_members.contains(&node.identity()) {
                 continue;
             }
-            let Some(existing_node) = existing.nodes.iter().find(|candidate| {
-                candidate.kind == node.kind && candidate.identifier == node.identifier
-            }) else {
+            let Some(existing_node) = existing.nodes.get(&node.identity()) else {
                 continue;
             };
             if Self::scheduled_node_should_follow_desired_assignment(node) {
@@ -12087,6 +13404,7 @@ impl SessionServiceImpl {
                     &unavailable_node_id,
                     &live_node_ids,
                     &target_nodes,
+                    AssignmentRelocation::Failure,
                 )
                 .is_some()
                 {
@@ -12101,17 +13419,7 @@ impl SessionServiceImpl {
     }
 
     fn scheduled_node_should_follow_desired_assignment(node: &ScheduledNode) -> bool {
-        if let Model::Ingestor(CreateIngestor {
-            source:
-                IngestSource::Endpoint { .. }
-                | IngestSource::Websockets { .. }
-                | IngestSource::Syslog { .. },
-            ..
-        }) = node.config.as_ref()
-        {
-            return true;
-        }
-        false
+        node.config.executes_on_every_cluster_node()
     }
 
     fn kafka_partition_watcher_specs(
@@ -12119,8 +13427,8 @@ impl SessionServiceImpl {
         schedule: &nervix_models::ClusterSchedule,
     ) -> Vec<KafkaPartitionWatcherSpec> {
         let mut specs = Vec::new();
-        for domain_schedule in &schedule.domains {
-            for node in &domain_schedule.nodes {
+        for domain_schedule in schedule.domains.values() {
+            for node in domain_schedule.nodes.values() {
                 let Model::Ingestor(ingestor) = node.config.as_ref() else {
                     continue;
                 };
@@ -12134,9 +13442,10 @@ impl SessionServiceImpl {
                 else {
                     continue;
                 };
-                let Some(client_node) = domain_schedule.nodes.iter().find(|candidate| {
-                    candidate.kind == ModelKind::Client && candidate.identifier == *client
-                }) else {
+                let Some(client_node) = domain_schedule
+                    .nodes
+                    .get(&NodeRef::new(ModelKind::Client, ModelName::from(client)))
+                else {
                     continue;
                 };
                 let Model::ClientKafka(client_model) = client_node.config.as_ref() else {
@@ -12161,27 +13470,26 @@ impl SessionServiceImpl {
 
     async fn publish_kafka_partition_schedule(
         &self,
-        domain: &Domain,
-        ingestor: &Identifier,
+        domain: &DomainName,
+        ingestor: &IngestorName,
         topic: &str,
-        instances: u64,
+        instances: NonZeroU64,
         observed_partitions: Vec<i32>,
     ) -> Result<(), String> {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_deref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return Ok(());
         }
 
-        let current = self.consensus.current_schedule().await;
+        let current = self.inner.consensus.current_schedule().await;
         let Some(existing_domain_schedule) = current.domain(domain) else {
             return Ok(());
         };
         let mut next_domain_schedule = existing_domain_schedule.clone();
-        let Some(ingestor_node) = next_domain_schedule
-            .nodes
-            .iter_mut()
-            .find(|node| node.kind == ModelKind::Ingestor && node.identifier == *ingestor)
-        else {
+        let Some(ingestor_node) = next_domain_schedule.nodes.get_mut(&NodeRef::new(
+            ModelKind::Ingestor,
+            ModelName::from(ingestor),
+        )) else {
             return Ok(());
         };
         let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
@@ -12208,10 +13516,14 @@ impl SessionServiceImpl {
             {
                 return Ok(());
             }
-            next_schedule.rebalance_epoch = existing_schedule.rebalance_epoch.saturating_add(1);
+            next_schedule.rebalance_epoch = existing_schedule
+                .rebalance_epoch
+                .checked_add(1)
+                .assured("a cluster cannot observe 2^64 partition rebalances");
         }
         ingestor_node.kafka_partition_schedule = Some(next_schedule);
-        self.consensus
+        self.inner
+            .consensus
             .replace_domain_schedule(domain.clone(), Some(next_domain_schedule))
             .await
             .map_err(|error| error.to_string())
@@ -12220,16 +13532,12 @@ impl SessionServiceImpl {
     async fn reconcile_kafka_partition_watchers(
         &self,
         schedule: &nervix_models::ClusterSchedule,
-        tasks: &mut HashMap<
-            KafkaPartitionWatcherKey,
-            (KafkaPartitionWatcherSpec, CancellationToken, JoinHandle<()>),
-        >,
+        tasks: &mut HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask>,
     ) {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_deref() != Some(self.consensus.local_node_id()) {
-            for (_, (_, cancel, handle)) in tasks.drain() {
-                cancel.cancel();
-                let _ = handle.await;
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
+            for (_, watcher) in tasks.drain() {
+                watcher.task.stop().await;
             }
             return;
         }
@@ -12248,28 +13556,20 @@ impl SessionServiceImpl {
             })
             .collect::<HashMap<_, _>>();
 
-        let stale_keys = tasks
-            .iter()
-            .filter_map(|(key, (spec, _, _))| {
-                desired
-                    .get(key)
-                    .filter(|desired_spec| *desired_spec == spec)
-                    .is_none()
-                    .then_some(key.clone())
-            })
-            .collect::<Vec<_>>();
+        let mut stale_keys = Vec::new();
+        for (key, watcher) in tasks.iter() {
+            if desired.get(key) != Some(&watcher.spec) {
+                stale_keys.push(key.clone());
+            }
+        }
         for key in stale_keys {
-            if let Some((_, cancel, handle)) = tasks.remove(&key) {
-                cancel.cancel();
-                let _ = handle.await;
+            if let Some(watcher) = tasks.remove(&key) {
+                watcher.task.stop().await;
             }
         }
 
         for (key, spec) in desired {
-            if tasks
-                .get(&key)
-                .is_some_and(|(existing, _, _)| existing == &spec)
-            {
+            if tasks.get(&key).is_some_and(|watcher| watcher.spec == spec) {
                 continue;
             }
             let cancel = CancellationToken::new();
@@ -12277,7 +13577,7 @@ impl SessionServiceImpl {
             let service = self.clone();
             let spec_for_task = spec.clone();
             let handle = tokio::spawn(async move {
-                let resolved = match service.runtime.resolve_client_config(
+                let resolved = match service.inner.runtime.resolve_client_config(
                     &spec_for_task.domain,
                     spec_for_task.client.mount.as_ref(),
                     &spec_for_task.client.config,
@@ -12339,7 +13639,7 @@ impl SessionServiceImpl {
                                 error
                             ));
                             tokio::select! {
-                                _ = service.shutdown.cancelled() => break,
+                                _ = service.inner.shutdown.cancelled() => break,
                                 _ = cancel_child.cancelled() => break,
                                 _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
                             }
@@ -12369,47 +13669,44 @@ impl SessionServiceImpl {
                         }
                     }
                     tokio::select! {
-                        _ = service.shutdown.cancelled() => break,
+                        _ = service.inner.shutdown.cancelled() => break,
                         _ = cancel_child.cancelled() => break,
                         _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
                     }
                 }
             });
-            tasks.insert(key, (spec, cancel, handle));
+            tasks.insert(
+                key,
+                KafkaPartitionWatcherTask {
+                    spec,
+                    task: BackgroundTask { cancel, handle },
+                },
+            );
         }
     }
 
     async fn subscription_target_from_schedule(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
-    ) -> Result<
-        Option<(
-            nervix_models::CreateRelay,
-            nervix_models::CreateSchema,
-            Vec<Identifier>,
-        )>,
-        String,
-    > {
-        let schedule = self.consensus.current_schedule().await;
+        domain: &DomainName,
+        relay: &RelayName,
+    ) -> Result<Option<SubscriptionTarget>, String> {
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
         let Some(relay_node) = domain_schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+            .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
         else {
             return Ok(None);
         };
         let Model::Relay(ack_model) = relay_node.config.as_ref() else {
             return Err("scheduled relay node has invalid model kind".to_string());
         };
-        let Some(schema_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Schema && node.identifier == ack_model.schema)
-        else {
+        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
+            ModelKind::Schema,
+            ModelName::from(&ack_model.schema),
+        )) else {
             return Err(format!(
                 "stream '{}' references missing scheduled schema '{}'",
                 relay.as_str(),
@@ -12419,21 +13716,22 @@ impl SessionServiceImpl {
         let Model::Schema(schema) = schema_node.config.as_ref() else {
             return Err("scheduled schema node has invalid model kind".to_string());
         };
-        Ok(Some((
-            ack_model.clone(),
-            schema.clone(),
-            relay_node.effective_branching.clone().unwrap_or_default(),
-        )))
+        Ok(Some(SubscriptionTarget {
+            relay: ack_model.clone(),
+            schema: schema.clone(),
+            branching: relay_node.effective_branching.clone().unwrap_or_default(),
+        }))
     }
 
     async fn subscription_stream_schema(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> Result<Option<nervix_models::CreateSchema>, String> {
-        match self.registry.get(domain, ModelKind::Relay, relay) {
+        match self.inner.registry.get(domain, ModelKind::Relay, relay) {
             Ok(Some(Model::Relay(ack_model))) => {
                 match self
+                    .inner
                     .registry
                     .get(domain, ModelKind::Schema, &ack_model.schema)
                 {
@@ -12459,7 +13757,7 @@ impl SessionServiceImpl {
             Ok(None) => self
                 .subscription_target_from_schedule(domain, relay)
                 .await
-                .map(|resolved| resolved.map(|(_, schema, _)| schema)),
+                .map(|resolved| resolved.map(|target| target.schema)),
             Err(err) => Err(format!(
                 "failed to resolve relay '{}' for subscription: {err}",
                 relay.as_str()
@@ -12469,15 +13767,19 @@ impl SessionServiceImpl {
 
     async fn subscription_branch_schema(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
-        match self.registry.get(domain, ModelKind::Relay, relay) {
+        match self.inner.registry.get(domain, ModelKind::Relay, relay) {
             Ok(Some(Model::Relay(relay_model))) => {
                 let Some(branch_ref) = relay_model.branching.branch() else {
                     return Ok(None);
                 };
-                let branch = match self.registry.get(domain, ModelKind::Branch, branch_ref) {
+                let branch = match self
+                    .inner
+                    .registry
+                    .get(domain, ModelKind::Branch, branch_ref)
+                {
                     Ok(Some(Model::Branch(branch))) => branch,
                     Ok(Some(_)) => {
                         return Err(format!(
@@ -12501,7 +13803,11 @@ impl SessionServiceImpl {
                         ));
                     }
                 };
-                match self.registry.get(domain, ModelKind::Schema, &branch.schema) {
+                match self
+                    .inner
+                    .registry
+                    .get(domain, ModelKind::Schema, &branch.schema)
+                {
                     Ok(Some(Model::Schema(schema))) => {
                         Ok(Some(runtime_schema::compile_schema(&schema).arrow_schema()))
                     }
@@ -12536,17 +13842,16 @@ impl SessionServiceImpl {
 
     async fn subscription_branch_schema_from_schedule(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
         let Some(relay_node) = domain_schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Relay && node.identifier == *relay)
+            .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
         else {
             return Ok(None);
         };
@@ -12554,11 +13859,10 @@ impl SessionServiceImpl {
             return Err("scheduled relay node has invalid model kind".to_string());
         };
         if let Some(branch_ref) = relay_model.branching.branch() {
-            let Some(branch_node) = domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Branch && node.identifier == *branch_ref)
-            else {
+            let Some(branch_node) = domain_schedule.nodes.get(&NodeRef::new(
+                ModelKind::Branch,
+                ModelName::from(branch_ref),
+            )) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled branch '{}'",
                     relay.as_str(),
@@ -12568,11 +13872,10 @@ impl SessionServiceImpl {
             let Model::Branch(branch) = branch_node.config.as_ref() else {
                 return Err("scheduled branch node has invalid model kind".to_string());
             };
-            let Some(schema_node) = domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Schema && node.identifier == branch.schema)
-            else {
+            let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
+                ModelKind::Schema,
+                ModelName::from(&branch.schema),
+            )) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled branch schema '{}'",
                     relay.as_str(),
@@ -12592,11 +13895,10 @@ impl SessionServiceImpl {
         if branching.is_empty() {
             return Ok(None);
         }
-        let Some(schema_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Schema && node.identifier == relay_model.schema)
-        else {
+        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
+            ModelKind::Schema,
+            ModelName::from(&relay_model.schema),
+        )) else {
             return Err(format!(
                 "stream '{}' references missing scheduled schema '{}'",
                 relay.as_str(),
@@ -12634,15 +13936,15 @@ impl SessionServiceImpl {
 
     async fn subscription_materialized_context(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<
         (
-            HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-            HashMap<Identifier, Option<String>>,
+            HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+            HashMap<RelayName, Option<ClusterNodeName>>,
         ),
         String,
     > {
-        let schedule = self.consensus.current_schedule().await;
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok((HashMap::default(), HashMap::default()));
         };
@@ -12651,7 +13953,7 @@ impl SessionServiceImpl {
         let mut owners = HashMap::default();
         for relay_node in domain_schedule
             .nodes
-            .iter()
+            .values()
             .filter(|node| node.kind == ModelKind::Relay)
         {
             let Model::Relay(ack_model) = relay_node.config.as_ref() else {
@@ -12660,11 +13962,10 @@ impl SessionServiceImpl {
             if ack_model.materialized_state.is_none() {
                 continue;
             }
-            let Some(schema_node) = domain_schedule
-                .nodes
-                .iter()
-                .find(|node| node.kind == ModelKind::Schema && node.identifier == ack_model.schema)
-            else {
+            let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
+                ModelKind::Schema,
+                ModelName::from(&ack_model.schema),
+            )) else {
                 return Err(format!(
                     "stream '{}' references missing scheduled schema '{}'",
                     ack_model.name.as_str(),
@@ -12683,17 +13984,7 @@ impl SessionServiceImpl {
                     relay_node.effective_branching.clone().unwrap_or_default(),
                 ),
             );
-            owners.insert(ack_model.name.clone(), None);
-        }
-        for node in domain_schedule
-            .nodes
-            .iter()
-            .filter(|node| node.kind == ModelKind::Materializer)
-        {
-            owners.insert(
-                node.identifier.clone(),
-                node.primary_node().map(str::to_string),
-            );
+            owners.insert(ack_model.name.clone(), relay_node.primary_node().cloned());
         }
 
         Ok((specs, owners))
@@ -12701,26 +13992,27 @@ impl SessionServiceImpl {
 
     async fn lookup_target_from_schedule(
         &self,
-        domain: &Domain,
-        name: &Identifier,
-    ) -> Result<Option<(CreateLookup, ScheduledNode, ParseAsType)>, String> {
-        let schedule = self.consensus.current_schedule().await;
+        domain: &DomainName,
+        name: impl Into<ModelName>,
+    ) -> Result<Option<LookupTarget>, String> {
+        let name = name.into();
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
         let Some(lookup_node) = domain_schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Lookup && node.identifier == *name)
+            .get(&NodeRef::new(ModelKind::Lookup, name.clone()))
         else {
             return Ok(None);
         };
         let Model::Lookup(lookup) = lookup_node.config.as_ref() else {
             return Err("scheduled lookup node has invalid model kind".to_string());
         };
-        let Some(codec_node) = domain_schedule.nodes.iter().find(|node| {
-            node.kind == ModelKind::Codec && node.identifier == lookup.decode_using_codec
-        }) else {
+        let Some(codec_node) = domain_schedule.nodes.get(&NodeRef::new(
+            ModelKind::Codec,
+            ModelName::from(&lookup.decode_using_codec),
+        )) else {
             return Err(format!(
                 "lookup '{}' references missing scheduled codec '{}'",
                 name.as_str(),
@@ -12730,11 +14022,10 @@ impl SessionServiceImpl {
         let Model::Codec(codec) = codec_node.config.as_ref() else {
             return Err("scheduled codec node has invalid model kind".to_string());
         };
-        let Some(schema_node) = domain_schedule
-            .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Schema && node.identifier == codec.schema)
-        else {
+        let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
+            ModelKind::Schema,
+            ModelName::from(&codec.schema),
+        )) else {
             return Err(format!(
                 "lookup '{}' references missing scheduled schema '{}'",
                 name.as_str(),
@@ -12756,26 +14047,26 @@ impl SessionServiceImpl {
                 schema.name.as_str()
             ));
         };
-        Ok(Some((
-            lookup.clone(),
-            lookup_node.clone(),
-            field.ty.clone(),
-        )))
+        Ok(Some(LookupTarget {
+            lookup: lookup.clone(),
+            node: lookup_node.clone(),
+            key_ty: field.ty.clone(),
+        }))
     }
 
     async fn ingestor_target_from_schedule(
         &self,
-        domain: &Domain,
-        name: &Identifier,
+        domain: &DomainName,
+        name: impl Into<ModelName>,
     ) -> Result<Option<(CreateIngestor, ScheduledNode)>, String> {
-        let schedule = self.consensus.current_schedule().await;
+        let name = name.into();
+        let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
         };
         let Some(ingestor_node) = domain_schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == ModelKind::Ingestor && node.identifier == *name)
+            .get(&NodeRef::new(ModelKind::Ingestor, name))
         else {
             return Ok(None);
         };
@@ -12787,7 +14078,7 @@ impl SessionServiceImpl {
 
     async fn create_subscription(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         subscription: nervix_models::CreateSubscription,
         tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
@@ -12807,7 +14098,7 @@ impl SessionServiceImpl {
                     span_start: 0,
                     span_end: 0,
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             };
         }
@@ -12827,13 +14118,14 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
             };
 
         match self
+            .inner
             .registry
             .get(domain, ModelKind::Relay, &subscription.relay)
         {
@@ -12857,7 +14149,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -12870,7 +14162,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -12884,7 +14176,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -12895,7 +14187,7 @@ impl SessionServiceImpl {
             .await
             .ok()
             .flatten()
-            .map(|(_, _, branching)| branching)
+            .map(|target| target.branching)
             .unwrap_or_default();
         let relay_branch_schema = match self
             .subscription_branch_schema(domain, &subscription.relay)
@@ -12915,7 +14207,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -12936,7 +14228,7 @@ impl SessionServiceImpl {
                             span_start: 0,
                             span_end: 0,
                         }],
-                        kind: CommandResultKind::Error as i32,
+                        kind: i32::from(CommandResultKind::Error),
                         ..Default::default()
                     };
                 }
@@ -12946,7 +14238,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(Some(schema)) => {
-                let udfs = self.runtime.udf_executor(domain);
+                let udfs = self.inner.runtime.udf_executor(domain);
                 let schema = runtime_schema::compile_schema(&schema);
                 let input_sensitivity = schema.vm_sensitivity();
                 let filter_map = match compile_session_filter_map_program(
@@ -12980,7 +14272,7 @@ impl SessionServiceImpl {
                                 span_start: 0,
                                 span_end: 0,
                             }],
-                            kind: CommandResultKind::Error as i32,
+                            kind: i32::from(CommandResultKind::Error),
                             ..Default::default()
                         };
                     }
@@ -13004,7 +14296,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -13017,14 +14309,14 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
         };
 
         let relay = subscription.relay.clone();
-        let receiver = match self.runtime.subscribe_stream(domain, &relay).await {
+        let receiver = match self.inner.runtime.subscribe_stream(domain, &relay).await {
             Ok(receiver) => receiver,
             Err(err) => {
                 return CommandResult {
@@ -13038,7 +14330,7 @@ impl SessionServiceImpl {
                         span_start: 0,
                         span_end: 0,
                     }],
-                    kind: CommandResultKind::Error as i32,
+                    kind: i32::from(CommandResultKind::Error),
                     ..Default::default()
                 };
             }
@@ -13060,7 +14352,7 @@ impl SessionServiceImpl {
                 sensitivity: subscription_sensitivity,
                 delivery_behavior: subscription.delivery_behavior,
                 batch_sample_rate,
-                runtime: self.runtime.clone(),
+                runtime: self.inner.runtime.clone(),
                 materialized_stream_owner_nodes,
                 receiver,
                 tx: tx.clone(),
@@ -13075,7 +14367,7 @@ impl SessionServiceImpl {
                 domain.as_str()
             ),
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             ..Default::default()
         }
     }
@@ -13087,8 +14379,8 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         match subscriptions.remove(&subscription.name).await {
             Some((subscription_domain, relay)) => {
-                if !subscriptions.contains_domain_stream(&subscription_domain, &relay) {
-                    self.unregister_subscription_interest(&subscription_domain, &relay)
+                if !subscriptions.contains_domain_stream(&subscription_domain, &relay.clone()) {
+                    self.unregister_subscription_interest(&subscription_domain, &relay.clone())
                         .await;
                 }
                 CommandResult {
@@ -13099,7 +14391,7 @@ impl SessionServiceImpl {
                         subscription_domain.as_str()
                     ),
                     diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
+                    kind: i32::from(CommandResultKind::Ok),
                     ..Default::default()
                 }
             }
@@ -13114,7 +14406,7 @@ impl SessionServiceImpl {
                     span_start: 0,
                     span_end: 0,
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             },
         }
@@ -13139,7 +14431,7 @@ impl SessionTransactionBindingError {
         let detached = matches!(self, Self::Detached { .. });
         let mut result = command_error(self.to_string());
         if detached {
-            result.kind = CommandResultKind::TransactionDetached as i32;
+            result.kind = i32::from(CommandResultKind::TransactionDetached);
         }
         result
     }
@@ -13151,11 +14443,11 @@ enum RequestDomainError {
     Invalid,
 }
 
-fn parse_request_domain(raw: &str) -> Result<Domain, RequestDomainError> {
+fn parse_request_domain(raw: &str) -> Result<DomainName, RequestDomainError> {
     if raw.trim().is_empty() {
         Err(RequestDomainError::Missing)
     } else {
-        Domain::parse(raw.trim()).map_err(|_| RequestDomainError::Invalid)
+        DomainName::parse(raw.trim()).map_err(|_| RequestDomainError::Invalid)
     }
 }
 
@@ -13167,10 +14459,8 @@ fn runtime_ingestor_describe_to_envelope(
         running: summary.running,
         ready: summary.ready,
         quiesce_state: summary.quiesce_state,
-        quiesce_buffered_records: u64::try_from(summary.quiesce_counters.buffered_records)
-            .unwrap_or(u64::MAX),
-        quiesce_buffered_bytes: u64::try_from(summary.quiesce_counters.buffered_bytes)
-            .unwrap_or(u64::MAX),
+        quiesce_buffered_records: summary.quiesce_counters.buffered_records.arch_into(),
+        quiesce_buffered_bytes: summary.quiesce_counters.buffered_bytes.arch_into(),
         quiesce_dropped_total: summary.quiesce_counters.dropped_total,
         quiesce_rejected_total: summary.quiesce_counters.rejected_total,
         memory_backpressure_paused: summary.memory_backpressure_paused,
@@ -13199,10 +14489,8 @@ fn runtime_ingestor_describe_from_envelope(
             ready: summary.ready,
             quiesce_state: summary.quiesce_state,
             quiesce_counters: crate::runtime::IngestorQuiesceCounters {
-                buffered_records: usize::try_from(summary.quiesce_buffered_records)
-                    .unwrap_or(usize::MAX),
-                buffered_bytes: usize::try_from(summary.quiesce_buffered_bytes)
-                    .unwrap_or(usize::MAX),
+                buffered_records: summary.quiesce_buffered_records.arch_into(),
+                buffered_bytes: summary.quiesce_buffered_bytes.arch_into(),
                 dropped_total: summary.quiesce_dropped_total,
                 rejected_total: summary.quiesce_rejected_total,
             },
@@ -13244,15 +14532,16 @@ fn dataflow_node_status_to_envelope(
     }
 }
 
-fn dataflow_node_status_from_envelope(
-    envelope: DataflowNodeStatusEnvelope,
-) -> (DataflowNodeStatus, Option<String>, Option<u64>) {
-    let status = if envelope.status.eq_ignore_ascii_case("ERROR") {
-        DataflowNodeStatus::Error
-    } else {
-        DataflowNodeStatus::Ok
-    };
-    (status, envelope.detail, envelope.reconnect_wait_millis)
+fn dataflow_node_status_from_envelope(envelope: DataflowNodeStatusEnvelope) -> DataflowNodeHealth {
+    DataflowNodeHealth {
+        status: if envelope.status.eq_ignore_ascii_case("ERROR") {
+            DataflowNodeStatus::Error
+        } else {
+            DataflowNodeStatus::Ok
+        },
+        detail: envelope.detail,
+        reconnect_wait_millis: envelope.reconnect_wait_millis,
+    }
 }
 
 fn format_timestamp_source(source: Option<&IngestTimestampSource>) -> &'static str {
@@ -13285,7 +14574,7 @@ fn format_ingestor_source(source: &IngestSource) -> &'static str {
     }
 }
 
-fn format_endpoint_describe_output(name: &Identifier, endpoint: &CreateEndpoint) -> String {
+fn format_endpoint_describe_output(name: &ModelName, endpoint: &CreateEndpoint) -> String {
     [
         format!("endpoint: {}", name.as_str()),
         "kind: ENDPOINT".to_string(),
@@ -13306,11 +14595,12 @@ fn format_kafka_offset_mode(offset_mode: &KafkaOffsetMode) -> String {
 }
 
 fn format_ingestor_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     ingestor: &CreateIngestor,
     ingestor_node: &ScheduledNode,
     summary: &RuntimeIngestorDescribe,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
@@ -13320,12 +14610,17 @@ fn format_ingestor_describe_output(
             ingestor
                 .output_routes
                 .relays()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
         format!("codec: {}", ingestor.decode_using_codec.as_str()),
-        format!("owner: {}", ingestor_node.execution_node().unwrap_or("-"),),
+        format!(
+            "owner: {}",
+            ingestor_node
+                .execution_node()
+                .map_or("-", ClusterNodeName::as_str)
+        ),
         format!(
             "timestamp: {}",
             format_timestamp_source(ingestor.timestamp_source.as_ref())
@@ -13430,7 +14725,7 @@ fn format_ingestor_describe_output(
         } else if let KafkaOffsetMode::Domain = offset_mode {
             lines.push("kafka observed partitions: -".to_string());
             lines.push("kafka rebalance epoch: 0".to_string());
-            for instance_idx in 0..*instances {
+            for instance_idx in 0..instances.get() {
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
@@ -13452,7 +14747,7 @@ fn format_ingestor_describe_output(
 fn format_branch_selection(branched_by: &BranchSelection) -> &str {
     branched_by
         .branch()
-        .map(Identifier::as_str)
+        .map(|name| name.as_str())
         .unwrap_or("UNBRANCHED")
 }
 
@@ -13475,26 +14770,25 @@ fn append_metrics_lines(mut output: String, metrics: Vec<String>) -> String {
 
 fn format_relay_describe_output(
     relay: &nervix_models::CreateRelay,
-    branching: &[Identifier],
+    branching: &[FieldName],
+    scheduled_node: Option<&ScheduledNode>,
 ) -> String {
     let mut lines = vec![
         format!("relay: {}", relay.name.as_str()),
         "kind: RELAY".to_string(),
+    ];
+    lines.extend(format_schedule_placement_lines(scheduled_node));
+    lines.extend([
         format!("schema: {}", relay.schema.as_str()),
-        format!(
-            "branched by: {}",
-            relay
-                .branching
-                .branch()
-                .map(Identifier::as_str)
-                .unwrap_or_else(|| {
-                    if relay.branching.is_unbranched() {
-                        "UNBRANCHED"
-                    } else {
-                        "-"
-                    }
-                })
-        ),
+        format!("branched by: {}", {
+            if let Some(branch) = relay.branching.branch() {
+                branch.as_str()
+            } else if relay.branching.is_unbranched() {
+                "UNBRANCHED"
+            } else {
+                "-"
+            }
+        }),
         format!(
             "branch fields: {}",
             if branching.is_empty() {
@@ -13502,7 +14796,7 @@ fn format_relay_describe_output(
             } else {
                 branching
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(|name| name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             }
@@ -13516,7 +14810,7 @@ fn format_relay_describe_output(
                 "none"
             }
         ),
-    ];
+    ]);
     if !branching.is_empty() {
         lines.push("branch-local describe: use WHERE bindings".to_string());
     }
@@ -13529,7 +14823,7 @@ fn format_schedule_placement_lines(scheduled_node: Option<&ScheduledNode>) -> Ve
             "owner: {}",
             scheduled_node
                 .and_then(ScheduledNode::execution_node)
-                .unwrap_or("-")
+                .map_or("-", ClusterNodeName::as_str)
         ),
         format!(
             "replicas: {}",
@@ -13542,7 +14836,12 @@ fn format_schedule_placement_lines(scheduled_node: Option<&ScheduledNode>) -> Ve
 }
 
 fn format_replica_nodes(scheduled_node: &ScheduledNode) -> String {
-    scheduled_node.replica_nodes().join(", ")
+    scheduled_node
+        .replica_nodes()
+        .iter()
+        .map(|node| node.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
@@ -13580,16 +14879,17 @@ fn processor_input_names(inputs: &ProcessorInputs) -> String {
     inputs
         .relays()
         .iter()
-        .map(Identifier::as_str)
+        .map(|name| name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
 }
 
 fn format_lookup_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     scheduled_node: &ScheduledNode,
     summary: &LookupDescribeEnvelope,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("hash map: {}", name.as_str()),
         "kind: HASH MAP".to_string(),
@@ -13620,10 +14920,11 @@ fn format_expression_list(expressions: &[nervix_models::Expression]) -> String {
 }
 
 fn format_deduplicator_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     deduplicator: &CreateDeduplicator,
     scheduled_node: Option<&ScheduledNode>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("deduplicator: {}", name.as_str()),
         "kind: DEDUPLICATOR".to_string(),
@@ -13663,10 +14964,11 @@ fn format_deduplicator_describe_output(
 }
 
 fn format_junction_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     junction: &CreateJunction,
     scheduled_node: Option<&ScheduledNode>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("junction: {}", name.as_str()),
         "kind: JUNCTION".to_string(),
@@ -13691,10 +14993,11 @@ fn format_junction_describe_output(
 }
 
 fn format_reingestor_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     reingestor: &CreateReingestor,
     scheduled_node: Option<&ScheduledNode>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("reingestor: {}", name.as_str()),
         "kind: REINGESTOR".to_string(),
@@ -13717,10 +15020,11 @@ fn format_reingestor_describe_output(
 }
 
 fn format_correlator_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     correlator: &CreateCorrelator,
     scheduled_node: Option<&ScheduledNode>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("correlator: {}", name.as_str()),
         "kind: CORRELATOR".to_string(),
@@ -13775,10 +15079,11 @@ fn format_correlation_timeout_action(action: &nervix_models::CorrelationTimeoutA
 }
 
 fn format_reorderer_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     reorderer: &CreateReorderer,
     scheduled_node: Option<&ScheduledNode>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("reorderer: {}", name.as_str()),
         "kind: REORDERER".to_string(),
@@ -13806,11 +15111,12 @@ fn format_reorderer_describe_output(
 }
 
 fn format_emitter_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     emitter: &CreateEmitter,
     scheduled_node: Option<&ScheduledNode>,
     status: Option<&DataflowNodeStatusEnvelope>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("emitter: {}", name.as_str()),
         "kind: EMITTER".to_string(),
@@ -13842,7 +15148,7 @@ fn format_emitter_describe_output(
                 .from
                 .relays()
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -13851,7 +15157,7 @@ fn format_emitter_describe_output(
             emitter
                 .encode_using_codec
                 .as_ref()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .unwrap_or("none")
         ),
         format!("sink: {}", format_emit_sink(&emitter.sink)),
@@ -14068,11 +15374,12 @@ fn format_emit_sink(sink: &EmitSink) -> String {
 }
 
 fn format_window_processor_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     processor: &CreateWindowProcessor,
     aggregate: &WindowAggregateProgram,
     scheduled_node: Option<&ScheduledNode>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("window processor: {}", name.as_str()),
         "kind: WINDOW PROCESSOR".to_string(),
@@ -14103,11 +15410,12 @@ fn format_window_processor_describe_output(
 }
 
 fn format_wasm_processor_describe_output(
-    name: &Identifier,
+    name: impl Into<ModelName>,
     processor: &nervix_models::CreateWasmProcessor,
     scheduled_node: Option<&ScheduledNode>,
     state_lines: Vec<String>,
 ) -> String {
+    let name = name.into();
     let mut lines = vec![
         format!("wasm processor: {}", name.as_str()),
         "kind: WASM PROCESSOR".to_string(),
@@ -14145,13 +15453,13 @@ fn format_wasm_processor_describe_output(
 }
 
 fn format_materialized_stream_state_output(
-    relay: &Identifier,
+    relay: &RelayName,
     scheduled_node: &ScheduledNode,
     entries: Vec<String>,
 ) -> String {
     let mut lines = vec![
         format!("materialized relay: {}", relay.as_str()),
-        "kind: MATERIALIZER".to_string(),
+        "kind: RELAY".to_string(),
     ];
     lines.extend(format_schedule_placement_lines(Some(scheduled_node)));
     if entries.is_empty() {
@@ -14218,22 +15526,11 @@ fn format_f64_for_describe(value: f64) -> String {
     }
 }
 
-fn format_identifiers(identifiers: &[Identifier]) -> String {
-    identifiers
-        .iter()
-        .map(Identifier::as_str)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn format_placement_runtime_nodes(nodes: &[PlacementRuntimeNode]) -> String {
+fn format_placement_runtime_nodes(nodes: &[NodeRef]) -> String {
     format_placement_runtime_nodes_in_context(nodes, nodes)
 }
 
-fn format_placement_runtime_nodes_in_context(
-    nodes: &[PlacementRuntimeNode],
-    context: &[PlacementRuntimeNode],
-) -> String {
+fn format_placement_runtime_nodes_in_context(nodes: &[NodeRef], context: &[NodeRef]) -> String {
     nodes
         .iter()
         .map(|node| format_placement_runtime_node(node, context))
@@ -14241,10 +15538,7 @@ fn format_placement_runtime_nodes_in_context(
         .join(", ")
 }
 
-fn format_placement_runtime_node(
-    node: &PlacementRuntimeNode,
-    context: &[PlacementRuntimeNode],
-) -> String {
+fn format_placement_runtime_node(node: &NodeRef, context: &[NodeRef]) -> String {
     let kind_collision = context
         .iter()
         .any(|candidate| candidate.identifier == node.identifier && candidate.kind != node.kind);
@@ -14255,7 +15549,7 @@ fn format_placement_runtime_node(
     }
 }
 
-fn placement_rule_runtime_nodes(rule: &PlacementRulePlan) -> Vec<PlacementRuntimeNode> {
+fn placement_rule_runtime_nodes(rule: &PlacementRulePlan) -> Vec<NodeRef> {
     let mut nodes = Vec::new();
     for endpoint in &rule.endpoint_pairs {
         for node in std::iter::once(&endpoint.source)
@@ -14270,10 +15564,7 @@ fn placement_rule_runtime_nodes(rule: &PlacementRulePlan) -> Vec<PlacementRuntim
     nodes
 }
 
-fn placement_rule_endpoint_nodes(
-    rule: &PlacementRulePlan,
-    sources: bool,
-) -> Vec<PlacementRuntimeNode> {
+fn placement_rule_endpoint_nodes(rule: &PlacementRulePlan, sources: bool) -> Vec<NodeRef> {
     let mut nodes = Vec::new();
     for endpoint in &rule.endpoint_pairs {
         let node = if sources {
@@ -14315,7 +15606,7 @@ fn placement_rule_coverage_status(rule: &PlacementRulePlan) -> &'static str {
 #[derive(Debug, Default)]
 struct QueuedConfiguration {
     models: Vec<RegistryMutation>,
-    resources: BTreeSet<Identifier>,
+    resources: BTreeSet<ResourceName>,
 }
 
 impl QueuedConfiguration {
@@ -14326,14 +15617,14 @@ impl QueuedConfiguration {
         self.resources
             .iter()
             .filter(|identifier| identifier.as_str().starts_with(&prefix))
-            .map(Identifier::to_string)
+            .map(|name| name.to_string())
             .collect()
     }
 }
 
 fn placement_runtime_node_ref_suggestions(
     registry: &Registry,
-    domain: &Domain,
+    domain: &DomainName,
     prefix: &str,
     queued: &[RegistryMutation],
 ) -> Vec<String> {
@@ -14345,13 +15636,12 @@ fn placement_runtime_node_ref_suggestions(
     let eligible = models
         .iter()
         .filter(|model| {
-            placement_member_model_is_eligible(model)
-                && model.identifier().as_str().starts_with(&prefix)
+            placement_member_model_is_eligible(model) && model.name().as_str().starts_with(&prefix)
         })
-        .map(|model| model.identifier().clone())
+        .map(|model| model.name())
         .collect::<Vec<_>>();
 
-    let mut counts = HashMap::<Identifier, usize>::default();
+    let mut counts = HashMap::<ModelName, usize>::default();
     for identifier in &eligible {
         *counts.entry(identifier.clone()).or_default() += 1;
     }
@@ -14376,80 +15666,60 @@ fn placement_member_model_is_eligible(model: &Model) -> bool {
         | Model::WindowProcessor(_)
         | Model::Emitter(_) => true,
         Model::Ingestor(ingestor) => !matches!(&ingestor.source, IngestSource::Endpoint { .. }),
-        Model::Relay(relay) => relay.materialized_state.is_some(),
+        Model::Relay(_) => true,
         _ => false,
     }
 }
 
-fn ordered_placement_corridor(endpoint: &PlacementEndpointPairPlan) -> Vec<PlacementRuntimeNode> {
-    let mut ordered = endpoint
+fn ordered_placement_corridor(endpoint: &PlacementEndpointPairPlan) -> Vec<NodeRef> {
+    let longest_witness = endpoint
         .witnesses
         .iter()
-        .max_by_key(|witness| witness.path.len())
-        .map(|witness| witness.path.clone())
-        .unwrap_or_else(|| {
-            if endpoint.source == endpoint.destination {
-                vec![endpoint.source.clone()]
-            } else {
-                vec![endpoint.source.clone(), endpoint.destination.clone()]
-            }
-        });
+        .max_by_key(|witness| witness.path.len());
+    let mut ordered = if let Some(witness) = longest_witness {
+        witness.path.clone()
+    } else if endpoint.source == endpoint.destination {
+        vec![endpoint.source.clone()]
+    } else {
+        vec![endpoint.source.clone(), endpoint.destination.clone()]
+    };
+    let mut seen = HashSet::default();
     let mut unique = Vec::with_capacity(endpoint.corridor.len());
     for node in ordered.drain(..).chain(endpoint.corridor.iter().cloned()) {
-        if !unique.contains(&node) {
+        if seen.insert(node.clone()) {
             unique.push(node);
         }
     }
     unique
 }
 
-fn placement_claim_owner(rules: &[Identifier]) -> String {
+fn placement_claim_owner(rules: &[PlacementName]) -> String {
     if rules.is_empty() {
         "domain default".to_string()
     } else {
-        format_identifiers(rules)
+        rules
+            .iter()
+            .map(|rule| rule.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
-fn scheduled_node_for_placement_member<'a>(
-    schedule: &'a nervix_models::DomainSchedule,
-    member: &PlacementRuntimeNode,
-) -> Option<&'a ScheduledNode> {
-    schedule
-        .nodes
-        .iter()
-        .find(|node| node.kind == member.kind && node.identifier == member.identifier)
-}
-
-fn scheduled_node_for_placement_member_mut<'a>(
-    schedule: &'a mut nervix_models::DomainSchedule,
-    member: &PlacementRuntimeNode,
-) -> Option<&'a mut ScheduledNode> {
-    schedule
-        .nodes
-        .iter_mut()
-        .find(|node| node.kind == member.kind && node.identifier == member.identifier)
-}
-
-fn placement_group_members_equal(
-    left: &[PlacementRuntimeNode],
-    right: &[PlacementRuntimeNode],
-) -> bool {
+fn placement_group_members_equal(left: &[NodeRef], right: &[NodeRef]) -> bool {
+    let right = right.iter().collect::<HashSet<_>>();
     left.len() == right.len() && left.iter().all(|member| right.contains(member))
 }
 
 fn placement_group_host<'a>(
     schedule: Option<&'a nervix_models::DomainSchedule>,
-    members: &[PlacementRuntimeNode],
-) -> Option<&'a str> {
-    schedule
-        .and_then(|schedule| {
-            schedule
-                .placement_groups
-                .iter()
-                .find(|group| placement_group_members_equal(&group.members, members))
-        })
-        .and_then(|group| group.primary_node.as_deref())
+    members: &[NodeRef],
+) -> Option<&'a ClusterNodeName> {
+    let schedule = schedule?;
+    let group = schedule
+        .placement_groups
+        .iter()
+        .find(|group| placement_group_members_equal(&group.members, members))?;
+    group.primary_node.as_ref()
 }
 
 fn placement_groups_claimed_by_rule<'a>(
@@ -14477,26 +15747,94 @@ fn planned_relocation_count(
     current: Option<&nervix_models::DomainSchedule>,
     planned: Option<&nervix_models::DomainSchedule>,
 ) -> usize {
-    let (Some(current), Some(planned)) = (current, planned) else {
-        return 0;
+    planned_ownership_moves(current, planned).len()
+}
+
+fn prefer_former_owners_as_replicas(
+    current: Option<&nervix_models::DomainSchedule>,
+    planned: &mut nervix_models::DomainSchedule,
+    live_nodes: &[ClusterNodeName],
+) {
+    let Some(current) = current else {
+        return;
     };
-    planned
-        .nodes
-        .iter()
-        .filter(|planned_node| {
-            current
-                .nodes
-                .iter()
-                .find(|current_node| {
-                    current_node.kind == planned_node.kind
-                        && current_node.identifier == planned_node.identifier
-                })
-                .is_some_and(|current_node| {
-                    !current_node.assigned_nodes.is_empty()
-                        && current_node.primary_node != planned_node.primary_node
-                })
-        })
-        .count()
+    let live_nodes = live_nodes.iter().collect::<BTreeSet<_>>();
+    for (identity, planned_node) in &mut planned.nodes {
+        let Some(current_node) = current.nodes.get(identity) else {
+            continue;
+        };
+        let (Some(former_owner), Some(destination)) = (
+            current_node.execution_node(),
+            planned_node.execution_node().cloned(),
+        ) else {
+            continue;
+        };
+        let replica_slots = planned_node.assigned_nodes.len();
+        if *former_owner == destination || replica_slots < 2 || !live_nodes.contains(former_owner) {
+            continue;
+        }
+        let mut assigned_nodes = vec![destination, former_owner.clone()];
+        for assigned in &planned_node.assigned_nodes {
+            if !assigned_nodes.contains(assigned) {
+                assigned_nodes.push(assigned.clone());
+            }
+        }
+        assigned_nodes.truncate(replica_slots);
+        planned_node.assigned_nodes = assigned_nodes;
+    }
+}
+
+fn planned_ownership_moves(
+    current: Option<&nervix_models::DomainSchedule>,
+    planned: Option<&nervix_models::DomainSchedule>,
+) -> Vec<PlannedOwnershipMove> {
+    let (Some(current), Some(planned)) = (current, planned) else {
+        return Vec::new();
+    };
+    let mut moves = Vec::new();
+    for (identity, planned_node) in &planned.nodes {
+        let Some(current_node) = current.nodes.get(identity) else {
+            continue;
+        };
+        let Some(former_owner) = current_node.execution_node() else {
+            continue;
+        };
+        let Some(destination) = planned_node.execution_node() else {
+            continue;
+        };
+        if former_owner == destination {
+            continue;
+        }
+        moves.push(PlannedOwnershipMove {
+            entity: NodeRef {
+                kind: planned_node.kind,
+                identifier: planned_node.identifier.clone(),
+            },
+            former_owner: former_owner.clone(),
+            destination: destination.clone(),
+            replicas: planned_node.replica_nodes().into_iter().cloned().collect(),
+            promoted_replica: current_node.is_assigned_to(destination),
+        });
+    }
+    moves.sort_by(|left, right| left.entity.cmp(&right.entity));
+    moves
+}
+
+fn format_planned_ownership_move(moved: &PlannedOwnershipMove) -> String {
+    let replicas = if moved.replicas.is_empty() {
+        "none".to_string()
+    } else {
+        moved.replicas.join(",")
+    };
+    format!(
+        "- kind={} name={} from={} to={} replicas={} promoted_replica={}",
+        moved.entity.kind.as_ref(),
+        moved.entity.identifier.as_str(),
+        moved.former_owner,
+        moved.destination,
+        replicas,
+        if moved.promoted_replica { "yes" } else { "no" }
+    )
 }
 
 fn requires_request_domain(statement: &Statement) -> bool {
@@ -14554,6 +15892,7 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeWasmProcessor(_)
             | Statement::DescribeWindowProcessor(_)
             | Statement::DescribePlacement(_)
+            | Statement::DescribeRelocation(_)
             | Statement::LookupQuery(_)
             | Statement::ShowCreate(_)
             | Statement::ShowUdfs(_)
@@ -14662,11 +16001,11 @@ fn password_argon2() -> Argon2<'static> {
         TESTING_ARGON2_PARALLELISM,
         None,
     )
-    .expect("testing Argon2 parameters must be valid");
+    .assured("the testing cost constants are inside the ranges Argon2 accepts");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
-async fn user_credentials(name: Identifier, password: String) -> Result<UserCredentials, String> {
+async fn user_credentials(name: UserName, password: String) -> Result<UserCredentials, String> {
     let password_hash = hash_password(password).await?;
     Ok(UserCredentials {
         name,
@@ -14674,15 +16013,20 @@ async fn user_credentials(name: Identifier, password: String) -> Result<UserCred
     })
 }
 
-fn add_scaled_duration_to_timestamp(base: Timestamp, delta: Duration, scale: u64) -> Timestamp {
+/// `base` advanced by `delta` repeated `scale` times, or `None` when a domain has run long
+/// enough that the result leaves the representable timestamp range.
+fn add_scaled_duration_to_timestamp(
+    base: Timestamp,
+    delta: Duration,
+    scale: u64,
+) -> Option<Timestamp> {
     let scaled_nanos = delta
         .as_nanos()
-        .saturating_mul(u128::from(scale))
-        .min(i64::MAX as u128) as i64;
+        .checked_mul(u128::from(scale))
+        .and_then(|nanos| i64::try_from(nanos).ok())?;
     base.into_datetime()
         .checked_add_signed(TimeDelta::nanoseconds(scaled_nanos))
         .map(Timestamp::from)
-        .unwrap_or(base)
 }
 
 fn logical_timestamp_at_wall_time(
@@ -14695,9 +16039,12 @@ fn logical_timestamp_at_wall_time(
         .signed_duration_since(clock.wall_started_at.into_datetime())
         .to_std()
         .unwrap_or(Duration::ZERO);
-    let progressed_nanos = ((elapsed.as_nanos() as f64) * time_rate)
+    // The rate is finite and positive, so the scaled span can only leave the nanosecond range at
+    // the far end, where a clock that has run past it pins to the end of the range.
+    let progressed_nanos = (elapsed.as_nanos().approx_into::<f64>() * time_rate)
         .floor()
-        .clamp(0.0, i64::MAX as f64) as i64;
+        .checked_approx_into()
+        .unwrap_or(i64::MAX);
     clock
         .logical_start
         .into_datetime()
@@ -14719,7 +16066,7 @@ fn command_ok_with_state(message: String, already_existed: bool) -> CommandResul
         success: true,
         message,
         diagnostics: Vec::new(),
-        kind: CommandResultKind::Ok as i32,
+        kind: i32::from(CommandResultKind::Ok),
         already_existed,
         ..Default::default()
     }
@@ -14753,12 +16100,12 @@ fn command_batch_result(
             .map(|result| result.diagnostics.clone())
             .unwrap_or_default(),
         kind: if success {
-            CommandResultKind::Ok as i32
+            i32::from(CommandResultKind::Ok)
         } else {
             previous_results
                 .last()
                 .map(|result| result.kind)
-                .unwrap_or(CommandResultKind::Error as i32)
+                .unwrap_or(i32::from(CommandResultKind::Error))
         },
         results: previous_results,
         transaction,
@@ -14788,14 +16135,14 @@ fn quiesce_level_message(level: QuiesceLevel) -> String {
 
 fn model_mutation_success_result(
     existing_results: &[Option<CommandResult>],
-    applied: &[(usize, Identifier, String)],
+    applied: &[AppliedModelMutation],
     classified_level: QuiesceLevel,
     planned_relocations: usize,
 ) -> CommandResult {
     let mut results = existing_results.to_vec();
     let mut first_applied = true;
-    for (index, _, base_message) in applied {
-        let mut message = base_message.clone();
+    for mutation in applied {
+        let mut message = mutation.message.clone();
         if first_applied {
             append_command_output(&mut message, &quiesce_level_message(classified_level));
             append_command_output(
@@ -14804,23 +16151,28 @@ fn model_mutation_success_result(
             );
             first_applied = false;
         }
-        results[*index] = Some(CommandResult {
+        results[mutation.index] = Some(CommandResult {
             success: true,
             message,
             diagnostics: Vec::new(),
-            kind: CommandResultKind::Ok as i32,
+            kind: i32::from(CommandResultKind::Ok),
             ..Default::default()
         });
     }
     let results = results
         .into_iter()
-        .map(|result| result.expect("every mutation statement must produce a command result"))
+        .map(|result| {
+            result.verified(
+                "each statement either filled its own slot or was recorded in applied, which this \
+                 function fills",
+            )
+        })
         .collect::<Vec<_>>();
     CommandResult {
         success: true,
         message: command_results_message(&results),
         diagnostics: Vec::new(),
-        kind: CommandResultKind::Ok as i32,
+        kind: i32::from(CommandResultKind::Ok),
         results,
         ..Default::default()
     }
@@ -14835,36 +16187,66 @@ fn command_error(message: String) -> CommandResult {
             span_end: 0,
         }],
         message,
-        kind: CommandResultKind::Error as i32,
+        kind: i32::from(CommandResultKind::Error),
         ..Default::default()
     }
 }
 
 fn transaction_status(transaction: &ReplicatedTransaction) -> ApiTransactionStatus {
-    let (state, error, failing_step) = match &transaction.state {
-        TransactionState::Open => (ApiTransactionState::Open, String::new(), None),
-        TransactionState::Committing(_) => (ApiTransactionState::Committing, String::new(), None),
+    /// How a transaction ended, as the API reports it. Only a failure carries an error and the
+    /// step it failed on; every other state reports neither.
+    struct ReportedOutcome {
+        state: ApiTransactionState,
+        error: String,
+        failing_step: Option<u64>,
+    }
+
+    impl ReportedOutcome {
+        fn without_error(state: ApiTransactionState) -> Self {
+            Self {
+                state,
+                error: String::new(),
+                failing_step: None,
+            }
+        }
+    }
+
+    let ReportedOutcome {
+        state,
+        error,
+        failing_step,
+    } = match &transaction.state {
+        TransactionState::Open => ReportedOutcome::without_error(ApiTransactionState::Open),
+        TransactionState::Committing(_) => {
+            ReportedOutcome::without_error(ApiTransactionState::Committing)
+        }
         TransactionState::Finished(finished) => match &finished.outcome {
-            TransactionOutcome::Committed => (ApiTransactionState::Committed, String::new(), None),
+            TransactionOutcome::Committed => {
+                ReportedOutcome::without_error(ApiTransactionState::Committed)
+            }
             TransactionOutcome::Failed {
                 failing_step,
                 error,
-            } => (
-                ApiTransactionState::Failed,
-                error.clone(),
-                u64::try_from(failing_step.saturating_add(1)).ok(),
-            ),
-            TransactionOutcome::Reverted => (ApiTransactionState::Reverted, String::new(), None),
-            TransactionOutcome::Expired => (ApiTransactionState::Expired, String::new(), None),
+            } => ReportedOutcome {
+                state: ApiTransactionState::Failed,
+                error: error.clone(),
+                failing_step: failing_step.checked_add(1).map(|step| step.arch_into()),
+            },
+            TransactionOutcome::Reverted => {
+                ReportedOutcome::without_error(ApiTransactionState::Reverted)
+            }
+            TransactionOutcome::Expired => {
+                ReportedOutcome::without_error(ApiTransactionState::Expired)
+            }
         },
     };
     ApiTransactionStatus {
         id: transaction.id.clone(),
         domain: transaction.domain.to_string(),
-        state: state as i32,
-        pending_count: u64::try_from(transaction.pending_statement_count()).unwrap_or(u64::MAX),
-        completed_count: u64::try_from(transaction.completed_statement_count()).unwrap_or(u64::MAX),
-        total_count: u64::try_from(transaction.statement_count).unwrap_or(u64::MAX),
+        state: i32::from(state),
+        pending_count: transaction.pending_statement_count().arch_into(),
+        completed_count: transaction.completed_statement_count().arch_into(),
+        total_count: transaction.statement_count.arch_into(),
         error,
         failing_step,
     }
@@ -14897,6 +16279,11 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
         .iter()
         .filter_map(|step| step.quiesce_level)
         .max();
+    let planned_relocations = transaction
+        .commit_results()
+        .iter()
+        .filter_map(|step| step.planned_relocations)
+        .sum::<usize>();
     let mut message = match transaction.finished_outcome() {
         Some(TransactionOutcome::Committed) => String::new(),
         Some(TransactionOutcome::Failed { error, .. }) => error.clone(),
@@ -14905,6 +16292,12 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
     };
     if let Some(quiesce_level) = quiesce_level {
         append_command_output(&mut message, &quiesce_level_message(quiesce_level));
+    }
+    if planned_relocations > 0 {
+        append_command_output(
+            &mut message,
+            &format!("planned relocations: {planned_relocations}"),
+        );
     }
     let diagnostics = transaction
         .commit_results()
@@ -14929,9 +16322,9 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
         message,
         diagnostics,
         kind: if success {
-            CommandResultKind::Ok as i32
+            i32::from(CommandResultKind::Ok)
         } else {
-            CommandResultKind::Error as i32
+            i32::from(CommandResultKind::Error)
         },
         ..Default::default()
     };
@@ -14959,6 +16352,7 @@ fn transaction_statement_label(statement: &Statement) -> &'static str {
         Statement::CordonNode(_) => "CORDON",
         Statement::UncordonNode(_) => "UNCORDON",
         Statement::DrainNode(_) => "DRAIN",
+        Statement::Relocate(_) => "RELOCATE",
         Statement::LookupQuery(_) => "LOOKUP",
         Statement::ShowCreate(_)
         | Statement::ShowUdfs(_)
@@ -14981,7 +16375,8 @@ fn transaction_statement_label(statement: &Statement) -> &'static str {
         | Statement::DescribeWindowProcessor(_)
         | Statement::DescribeWasmProcessor(_)
         | Statement::DescribeUdf(_)
-        | Statement::DescribePlacement(_) => "DESCRIBE",
+        | Statement::DescribePlacement(_)
+        | Statement::DescribeRelocation(_) => "DESCRIBE",
         _ => "statement",
     }
 }
@@ -15012,7 +16407,7 @@ async fn fetch_resource_archive(
     let temp_archive = tempfile::NamedTempFile::new()
         .map_err(|error| format!("failed to create temporary resource archive: {error}"))?;
     let temp_path = temp_archive.into_temp_path();
-    let mut file = File::create(<TempPath as AsRef<std::path::Path>>::as_ref(&temp_path))
+    let mut file = File::create(&temp_path)
         .await
         .map_err(|error| format!("failed to open temporary resource archive: {error}"))?;
     let mut hasher = Hasher::new();
@@ -15067,7 +16462,7 @@ fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult 
         success: false,
         message: kind.to_string(),
         diagnostics: diagnostics.iter().map(map_diagnostic).collect(),
-        kind: CommandResultKind::Error as i32,
+        kind: i32::from(CommandResultKind::Error),
         ..Default::default()
     }
 }
@@ -15077,8 +16472,8 @@ impl SessionServiceImpl {
         &self,
         already_connected_to_leader: bool,
     ) -> Option<SessionResponse> {
-        let leader = self.consensus.current_leader().await;
-        if leader.as_deref() != Some(self.consensus.local_node_id()) {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             let result = self.not_leader_response("", leader).await;
             return Some(SessionResponse {
                 event: Some(proto::session_response::Event::Result(result)),
@@ -15091,14 +16486,18 @@ impl SessionServiceImpl {
 
         Some(SessionResponse {
             event: Some(proto::session_response::Event::Server(ServerEvent {
-                level: ServerEventLevel::Info as i32,
-                message: format!("connected to leader '{}'", self.consensus.local_node_id()),
+                level: i32::from(ServerEventLevel::Info),
+                message: format!(
+                    "connected to leader '{}'",
+                    self.inner.consensus.local_node_id()
+                ),
             })),
         })
     }
 
     async fn domain_list_response(&self, response_to_request: bool) -> SessionResponse {
         let domains = self
+            .inner
             .consensus
             .current_domains()
             .await
@@ -15119,13 +16518,14 @@ impl SessionServiceImpl {
 
     async fn web_console_cluster_summary_response(&self) -> SessionResponse {
         let running_domains = self
+            .inner
             .consensus
             .current_domains()
             .await
             .into_values()
             .filter(|domain| domain.status == DomainStatus::Running)
             .count();
-        let (nodes, relays) = self.registry.active_graphs().into_iter().fold(
+        let (nodes, relays) = self.inner.registry.active_graphs().into_iter().fold(
             (0_usize, 0_usize),
             |(nodes, relays), (_, graph)| {
                 let counts = graph.dataflow_graph_counts();
@@ -15134,34 +16534,35 @@ impl SessionServiceImpl {
         );
         SessionResponse {
             event: Some(proto::session_response::Event::Cluster(ClusterSummary {
-                running_domains: u64::try_from(running_domains).unwrap_or(u64::MAX),
-                nodes: u64::try_from(nodes).unwrap_or(u64::MAX),
-                relays: u64::try_from(relays).unwrap_or(u64::MAX),
+                running_domains: running_domains.arch_into(),
+                nodes: nodes.arch_into(),
+                relays: relays.arch_into(),
             })),
         }
     }
 
     async fn web_console_domain_snapshot_responses(
         &self,
-        active_domain: Option<&Domain>,
+        active_domain: Option<&DomainName>,
     ) -> Vec<SessionResponse> {
-        let resources = self.consensus.current_resources().await;
-        let domains = self.consensus.current_domains().await;
+        let resources = self.inner.consensus.current_resources().await;
+        let domains = self.inner.consensus.current_domains().await;
         let resource_entities = resources
             .next_version_by_resource
             .iter()
-            .filter(|(domain, _, _)| Some(domain) == active_domain)
-            .map(|(_, identifier, next_version)| DomainEntitySnapshot {
+            .filter(|counter| Some(&counter.domain) == active_domain)
+            .map(|counter| DomainEntitySnapshot {
                 kind: "resource".to_string(),
-                identifier: identifier.as_str().to_string(),
-                detail: if *next_version > 1 {
-                    format!("v{}", next_version - 1)
+                identifier: counter.identifier.as_str().to_string(),
+                detail: if counter.next_version > 1 {
+                    format!("v{}", counter.next_version - 1)
                 } else {
                     "catalog".to_string()
                 },
             })
             .collect::<Vec<_>>();
         let active_graphs = self
+            .inner
             .registry
             .active_graphs()
             .into_iter()
@@ -15209,30 +16610,35 @@ impl SessionServiceImpl {
 
     async fn web_console_domain_snapshot_response(
         &self,
-        domain: Domain,
+        domain: DomainName,
         mut dataflow_graph: DataflowGraph,
         resource_entities: &[DomainEntitySnapshot],
     ) -> Option<SessionResponse> {
-        dataflow_graph.statistics = self.runtime.dataflow_domain_statistics(&domain);
+        dataflow_graph.statistics = self.inner.runtime.dataflow_domain_statistics(&domain);
         for node in &mut dataflow_graph.nodes {
             let Some((kind, identifier)) = dataflow_metric_target(&node.id) else {
                 continue;
             };
-            (node.status, node.status_detail, node.reconnect_wait_millis) = self
+            let health = self
                 .dataflow_node_status_for_graph(&domain, &kind, &identifier)
                 .await;
+            node.status = health.status;
+            node.status_detail = health.detail;
+            node.reconnect_wait_millis = health.reconnect_wait_millis;
             if kind == "RELAY" {
                 node.statistics = self
+                    .inner
                     .runtime
-                    .dataflow_relay_buffer_statistics(&domain, &identifier);
+                    .dataflow_relay_buffer_statistics(&domain, &RelayName::from(&identifier));
                 let existing = node
                     .branches
                     .iter()
                     .map(|branch| branch.branch.clone())
                     .collect::<BTreeSet<_>>();
                 node.branches.extend(
-                    self.runtime
-                        .dataflow_relay_branch_statistics(&domain, &identifier)
+                    self.inner
+                        .runtime
+                        .dataflow_relay_branch_statistics(&domain, &RelayName::from(&identifier))
                         .into_iter()
                         .filter(|branch| !existing.contains(&branch.branch)),
                 );
@@ -15242,8 +16648,9 @@ impl SessionServiceImpl {
             let Some(metric) = edge.metric.as_ref() else {
                 continue;
             };
-            edge.statistics = self.runtime.dataflow_edge_statistics(&domain, metric);
+            edge.statistics = self.inner.runtime.dataflow_edge_statistics(&domain, metric);
             edge.branches = self
+                .inner
                 .runtime
                 .dataflow_edge_branch_statistics(&domain, metric);
         }
@@ -15253,6 +16660,7 @@ impl SessionServiceImpl {
                     domain: domain.as_str().to_string(),
                     dataflow_graph: graph_bytes.into(),
                     entities: self
+                        .inner
                         .registry
                         .active_domain_entities(&domain)
                         .into_iter()
@@ -15276,15 +16684,20 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn not_leader_response(&self, query: &str, leader: Option<String>) -> CommandResult {
-        let leader_node = match leader.as_deref() {
+    async fn not_leader_response(
+        &self,
+        query: &str,
+        leader: Option<ClusterNodeName>,
+    ) -> CommandResult {
+        let leader_node = match leader.as_ref() {
             Some(leader_id) => self
+                .inner
                 .cluster
                 .gossip_state()
                 .await
                 .live_nodes
                 .into_iter()
-                .find(|node| node.node_id == leader_id),
+                .find(|node| node.node_id == *leader_id),
             None => None,
         };
         let leader_grpc_uri = leader_node
@@ -15295,7 +16708,7 @@ impl SessionServiceImpl {
             .map(|node| node.web_console_advertise_addr)
             .unwrap_or_default();
         let diagnostic = leader
-            .as_deref()
+            .as_ref()
             .map(|leader| format!("retry this command on leader '{leader}'"))
             .unwrap_or_else(|| "retry this command on the current leader".to_string());
         CommandResult {
@@ -15306,8 +16719,8 @@ impl SessionServiceImpl {
                 span_start: 0,
                 span_end: u32::try_from(query.len()).unwrap_or(0),
             }],
-            kind: CommandResultKind::NotLeader as i32,
-            leader: leader.unwrap_or_default(),
+            kind: i32::from(CommandResultKind::NotLeader),
+            leader: leader.map_or_else(String::new, |leader| leader.to_string()),
             leader_grpc_uri,
             leader_web_console_uri,
             ..Default::default()
@@ -15315,11 +16728,11 @@ impl SessionServiceImpl {
     }
 }
 
-fn dataflow_metric_target(id: &str) -> Option<(String, Identifier)> {
+fn dataflow_metric_target(id: &str) -> Option<(String, ModelName)> {
     let (kind, identifier) = id.split_once(':')?;
     Some((
         kind.to_ascii_uppercase(),
-        Identifier::parse(identifier).ok()?,
+        ModelName::parse(identifier).ok()?,
     ))
 }
 
@@ -15350,8 +16763,8 @@ fn grpc_client_connect_options(
 
 fn create_registry_error_response(
     query: &str,
-    domain: &Domain,
-    model_id: &Identifier,
+    domain: &DomainName,
+    model_id: &ModelName,
     err: &error_stack::Report<RegistryError>,
 ) -> CommandResult {
     match err.current_context() {
@@ -15370,7 +16783,7 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
@@ -15387,15 +16800,15 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
         RegistryError::MissingReference { reference, .. } => {
-            let span = Identifier::try_from(reference.as_str())
-                .ok()
-                .and_then(|id| find_identifier_span(query, &id))
-                .unwrap_or(0..0);
+            let span = match ModelName::try_from(reference.as_str()) {
+                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
+                Err(_) => 0..0,
+            };
             CommandResult {
                 success: false,
                 message: format!("{err}"),
@@ -15404,15 +16817,15 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
         RegistryError::InvalidReferenceKind { reference, .. } => {
-            let span = Identifier::try_from(reference.as_str())
-                .ok()
-                .and_then(|id| find_identifier_span(query, &id))
-                .unwrap_or(0..0);
+            let span = match ModelName::try_from(reference.as_str()) {
+                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
+                Err(_) => 0..0,
+            };
             CommandResult {
                 success: false,
                 message: format!("{err}"),
@@ -15421,7 +16834,7 @@ fn create_registry_error_response(
                     span_start: u32::try_from(span.start).unwrap_or(0),
                     span_end: u32::try_from(span.end).unwrap_or(0),
                 }],
-                kind: CommandResultKind::Error as i32,
+                kind: i32::from(CommandResultKind::Error),
                 ..Default::default()
             }
         }
@@ -15433,7 +16846,7 @@ fn create_registry_error_response(
                 span_start: 0,
                 span_end: 0,
             }],
-            kind: CommandResultKind::Error as i32,
+            kind: i32::from(CommandResultKind::Error),
             ..Default::default()
         },
     }
@@ -15441,7 +16854,7 @@ fn create_registry_error_response(
 
 fn infer_kind_from_error_target(
     err: &error_stack::Report<RegistryError>,
-    model_id: &Identifier,
+    model_id: &ModelName,
 ) -> Option<&'static str> {
     match err.current_context() {
         RegistryError::AlreadyExists { identifier, .. } if identifier == model_id.as_str() => {
@@ -15459,7 +16872,7 @@ fn map_diagnostic(d: &ParseDiagnostic) -> Diagnostic {
     }
 }
 
-fn find_identifier_span(query: &str, identifier: &Identifier) -> Option<std::ops::Range<usize>> {
+fn find_identifier_span(query: &str, identifier: &ModelName) -> Option<std::ops::Range<usize>> {
     let tokens = lex(query).ok()?;
     tokens.into_iter().find_map(|spanned| match spanned.token {
         Token::Word(Word::KnownWord { raw, .. }) | Token::Word(Word::UnknownWord(raw))
@@ -15484,7 +16897,15 @@ fn current_word_prefix(input: &str, cursor: usize) -> String {
     out
 }
 
-fn completion_context(input: &str, cursor: usize) -> (String, usize, String) {
+/// Completion input split at the cursor: the source the grammar parses with the half-typed word
+/// removed, where that word started, and the word itself for filtering the offers.
+struct CompletionContext {
+    grammar_input: String,
+    grammar_cursor: usize,
+    prefix: String,
+}
+
+fn completion_context(input: &str, cursor: usize) -> CompletionContext {
     let safe_cursor = cursor.min(input.len());
     let start = word_start(input, safe_cursor);
     let prefix = current_word_prefix(input, safe_cursor);
@@ -15493,7 +16914,11 @@ fn completion_context(input: &str, cursor: usize) -> (String, usize, String) {
     grammar_input.push_str(&input[..start]);
     grammar_input.push_str(&input[safe_cursor..]);
 
-    (grammar_input, start, prefix)
+    CompletionContext {
+        grammar_input,
+        grammar_cursor: start,
+        prefix,
+    }
 }
 
 struct VhostTlsMaterials {
@@ -15586,8 +17011,8 @@ async fn load_grpc_tls_server_config() -> Result<ServerTlsConfig, Report<AppErro
 /// domain-owned, so a name only resolves against versions uploaded into the referencing domain.
 fn resolve_resource_id(
     resources: &nervix_models::ResourceVersionStatus,
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ResourceName,
     requested_version: Option<u64>,
 ) -> Result<ResourceId, String> {
     if let Some(version) = requested_version {
@@ -15692,46 +17117,40 @@ fn map_pem_error_to_string(error: PemError) -> String {
 
 fn resource_ref_suggestions(
     resources: &nervix_models::ResourceVersionStatus,
-    domain: &Domain,
+    domain: &DomainName,
     prefix: &str,
 ) -> Vec<String> {
-    resources
-        .next_version_by_resource
-        .iter()
-        .filter_map(|(known_domain, identifier, _)| {
-            if known_domain == domain
-                && (prefix.is_empty() || identifier.as_str().starts_with(prefix))
-            {
-                Some(identifier.to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut suggestions = Vec::new();
+    for counter in &resources.next_version_by_resource {
+        if counter.domain == *domain
+            && (prefix.is_empty() || counter.identifier.as_str().starts_with(prefix))
+        {
+            suggestions.push(counter.identifier.to_string());
+        }
+    }
+    suggestions
 }
 
 fn resource_version_suggestions(
     resources: &nervix_models::ResourceVersionStatus,
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ResourceName,
     prefix: &str,
 ) -> Vec<String> {
-    resources
-        .versions
-        .iter()
-        .filter(|resource| resource.id.domain == *domain && resource.id.identifier == *identifier)
-        .filter_map(|resource| {
-            let version = resource.id.version.to_string();
-            if prefix.is_empty() || version.starts_with(prefix) {
-                Some(version)
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut suggestions = Vec::new();
+    for resource in &resources.versions {
+        if resource.id.domain != *domain || resource.id.identifier != *identifier {
+            continue;
+        }
+        let version = resource.id.version.to_string();
+        if prefix.is_empty() || version.starts_with(prefix) {
+            suggestions.push(version);
+        }
+    }
+    suggestions
 }
 
-fn requested_resource_versions(input: &str, cursor: usize) -> Option<Identifier> {
+fn requested_resource_versions(input: &str, cursor: usize) -> Option<ResourceName> {
     let safe_cursor = cursor.min(input.len());
     let raw_prefix = &input[..safe_cursor];
     let upper = raw_prefix.to_ascii_uppercase();
@@ -15748,7 +17167,7 @@ fn requested_resource_versions(input: &str, cursor: usize) -> Option<Identifier>
     if identifier.is_empty() {
         return None;
     }
-    Identifier::parse(identifier).ok()
+    ResourceName::parse(identifier).ok()
 }
 
 fn word_start(input: &str, cursor: usize) -> usize {
@@ -15810,9 +17229,12 @@ fn decode_hex(input: &str) -> Option<Vec<u8>> {
     let bytes = input.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
-        let high = (bytes[index] as char).to_digit(16)?;
-        let low = (bytes[index + 1] as char).to_digit(16)?;
-        out.push(((high << 4) | low) as u8);
+        let high = char::from(bytes[index]).to_digit(16)?;
+        let low = char::from(bytes[index + 1]).to_digit(16)?;
+        out.push(
+            u8::try_from((high << 4) | low)
+                .verified("both nibbles are hex digits, so the packed byte stays below 256"),
+        );
         index += 2;
     }
     Some(out)
@@ -15824,7 +17246,10 @@ fn decode_verifying_key(input: &str) -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&array).ok()
 }
 
-fn should_initiate_interconnect(local_node_id: &str, peer_node_id: &str) -> bool {
+fn should_initiate_interconnect(
+    local_node_id: &ClusterNodeName,
+    peer_node_id: &ClusterNodeName,
+) -> bool {
     local_node_id < peer_node_id
 }
 
@@ -15902,19 +17327,19 @@ fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> V
     }
 
     let mut lines = Vec::new();
-    for domain in &schedule.domains {
+    for domain in schedule.domains.values() {
         if domain.nodes.is_empty() {
             lines.push(format!("- domain={} nodes=none", domain.domain.as_str()));
             continue;
         }
 
-        for node in &domain.nodes {
+        for node in domain.nodes.values() {
             lines.push(format!(
                 "- domain={} kind={} name={} owner={} replicas={}",
                 domain.domain.as_str(),
                 node.kind.as_str(),
                 node.identifier.as_str(),
-                node.execution_node().unwrap_or("-"),
+                node.execution_node().map_or("-", ClusterNodeName::as_str),
                 format_schedule_status_replicas(node)
             ));
         }
@@ -15927,21 +17352,25 @@ fn format_schedule_status_replicas(node: &ScheduledNode) -> String {
     if replicas.is_empty() {
         "-".to_string()
     } else {
-        replicas.join(",")
+        replicas
+            .iter()
+            .map(|node| node.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
 async fn reconcile_domain_clock_tasks(
     service: &SessionServiceImpl,
     shutdown: &CancellationToken,
-    tasks: &mut HashMap<Domain, (CancellationToken, JoinHandle<()>)>,
+    tasks: &mut HashMap<DomainName, BackgroundTask>,
 ) {
-    let domains = service.consensus.current_domains().await;
+    let domains = service.inner.consensus.current_domains().await;
     let desired = domains
         .iter()
         .filter(|(domain_id, domain)| {
             if let DomainStatus::Running = domain.status {
-                service.domain_clocks.contains_key(*domain_id)
+                service.inner.domain_clocks.contains_key(*domain_id)
             } else {
                 false
             }
@@ -15952,10 +17381,9 @@ async fn reconcile_domain_clock_tasks(
     let existing = tasks.keys().cloned().collect::<Vec<_>>();
     for domain_id in existing {
         if !desired.iter().any(|candidate| candidate == &domain_id)
-            && let Some((token, handle)) = tasks.remove(&domain_id)
+            && let Some(task) = tasks.remove(&domain_id)
         {
-            token.cancel();
-            let _ = handle.await;
+            task.stop().await;
         }
     }
 
@@ -15970,13 +17398,19 @@ async fn reconcile_domain_clock_tasks(
         let handle = tokio::spawn(async move {
             run_domain_clock(task_service, task_domain_id, task_token).await;
         });
-        tasks.insert(domain_id, (token, handle));
+        tasks.insert(
+            domain_id,
+            BackgroundTask {
+                cancel: token,
+                handle,
+            },
+        );
     }
 }
 
 async fn run_domain_clock(
     service: SessionServiceImpl,
-    domain_id: Domain,
+    domain_id: DomainName,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -15984,13 +17418,14 @@ async fn run_domain_clock(
         if shutdown.is_cancelled() {
             break;
         }
-        let Some(domain) = service.consensus.current_domain(&domain_id).await else {
+        let Some(domain) = service.inner.consensus.current_domain(&domain_id).await else {
             break;
         };
         if let DomainStatus::Stopped = domain.status {
             break;
         }
         let Some(mut clock) = service
+            .inner
             .domain_clocks
             .get(&domain_id)
             .map(|state| state.clone())
@@ -16023,11 +17458,22 @@ async fn run_domain_clock(
         }
 
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        let next_logical = add_scaled_duration_to_timestamp(
+        let Some(next_logical) = add_scaled_duration_to_timestamp(
             clock.logical_start,
             period,
-            clock.next_tick_id.saturating_sub(1),
-        );
+            clock
+                .next_tick_id
+                .checked_sub(1)
+                .assured("a domain clock's tick ids start at one and only ever advance"),
+        ) else {
+            warn!(
+                domain = domain_id.as_str(),
+                period = domain.config.period,
+                next_tick_id = clock.next_tick_id,
+                "domain clock has run past the representable timestamp range"
+            );
+            break;
+        };
         let reached_logical =
             logical_timestamp_at_wall_time(&clock, current_timestamp(), time_rate);
 
@@ -16041,9 +17487,12 @@ async fn run_domain_clock(
             .signed_duration_since(reached_logical.into_datetime())
             .to_std()
             .unwrap_or(Duration::ZERO);
-        let wait_nanos = ((remaining_logical.as_nanos() as f64) / time_rate)
+        // As above, only the far end of the range is reachable, and the sleep below caps the
+        // wait at its own polling cadence anyway.
+        let wait_nanos = (remaining_logical.as_nanos().approx_into::<f64>() / time_rate)
             .ceil()
-            .clamp(0.0, u64::MAX as f64) as u64;
+            .checked_approx_into()
+            .unwrap_or(u64::MAX);
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = sleep(Duration::from_nanos(wait_nanos.clamp(1_000_000, 250_000_000))) => {}
@@ -16051,16 +17500,17 @@ async fn run_domain_clock(
     }
 }
 
-async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &Domain) {
+async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &DomainName) {
     loop {
         tokio::task::consume_budget().await;
-        let Some(domain) = service.consensus.current_domain(domain_id).await else {
+        let Some(domain) = service.inner.consensus.current_domain(domain_id).await else {
             break;
         };
         if let DomainStatus::Stopped = domain.status {
             break;
         }
         let Some(mut clock) = service
+            .inner
             .domain_clocks
             .get(domain_id)
             .map(|state| state.clone())
@@ -16093,11 +17543,22 @@ async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &Domain)
         }
 
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        let next_logical = add_scaled_duration_to_timestamp(
+        let Some(next_logical) = add_scaled_duration_to_timestamp(
             clock.logical_start,
             period,
-            clock.next_tick_id.saturating_sub(1),
-        );
+            clock
+                .next_tick_id
+                .checked_sub(1)
+                .assured("a domain clock's tick ids start at one and only ever advance"),
+        ) else {
+            warn!(
+                domain = domain_id.as_str(),
+                period = domain.config.period,
+                next_tick_id = clock.next_tick_id,
+                "domain clock has run past the representable timestamp range"
+            );
+            break;
+        };
         let reached_logical =
             logical_timestamp_at_wall_time(&clock, current_timestamp(), time_rate);
 
@@ -16111,7 +17572,7 @@ async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &Domain)
 
 async fn emit_domain_tick(
     service: &SessionServiceImpl,
-    domain_id: &Domain,
+    domain_id: &DomainName,
     clock: &mut DomainClockRuntimeState,
     logical_timestamp: Timestamp,
     duration_ms: u64,
@@ -16123,13 +17584,17 @@ async fn emit_domain_tick(
         wall_clock,
         duration_ms,
     };
-    clock.next_tick_id = clock.next_tick_id.saturating_add(1);
+    clock.next_tick_id = clock
+        .next_tick_id
+        .checked_add(1)
+        .assured("a domain clock cannot emit 2^64 ticks in the lifetime of a cluster");
     service
+        .inner
         .domain_clocks
         .insert(domain_id.clone(), clock.clone());
     let target_nodes = service.domain_tick_target_nodes(domain_id).await;
     for node_id in target_nodes {
-        if node_id == service.consensus.local_node_id() {
+        if node_id == service.inner.consensus.local_node_id().clone() {
             service.handle_domain_tick(DomainTickEnvelope {
                 domain_id: domain_id.clone(),
                 tick: tick.clone(),
@@ -16148,7 +17613,7 @@ async fn emit_domain_tick(
         {
             warn!(
                 domain = domain_id.as_str(),
-                node = node_id,
+                node = %node_id,
                 error = %error,
                 "failed to deliver domain tick"
             );
@@ -16505,7 +17970,7 @@ impl Application {
             replica_count,
             state_snapshot_interval = ?state_snapshot_interval,
             cluster_id,
-            node_id,
+            %node_id,
             bootstrap = cluster_bootstrap_host.as_deref().unwrap_or(""),
             db_path = db_path.display().to_string(),
             temp_dir = temp_dir.display().to_string(),
@@ -16534,18 +17999,16 @@ impl Application {
                 }
             },
         );
-        let runtime = Arc::new(
-            Runtime::with_persistence_and_temp_dir(
-                Some(db.clone()),
-                state_snapshot_interval,
-                runtime_test_hooks.clone(),
-                temp_dir.clone(),
-            )
-            .map_err(|error| {
-                error!(error = %error, "failed to initialize runtime persistence");
-                Report::new(AppError::OpenRuntimeState)
-            })?,
-        );
+        let runtime = Runtime::with_persistence_and_temp_dir(
+            Some(db.clone()),
+            state_snapshot_interval,
+            runtime_test_hooks.clone(),
+            temp_dir.clone(),
+        )
+        .map_err(|error| {
+            error!(error = %error, "failed to initialize runtime persistence");
+            Report::new(AppError::OpenRuntimeState)
+        })?;
         let mut startup = ApplicationStartup {
             db,
             resource_store,
@@ -16605,7 +18068,7 @@ impl Application {
         let consensus = startup
             .consensus
             .as_ref()
-            .expect("consensus is initialized before cluster startup");
+            .verified("startup assigns this handle before it reaches this point");
         if let Err(error) = startup
             .registry
             .synchronize_cluster_schedule(&consensus.current_schedule().await)
@@ -16646,7 +18109,7 @@ impl Application {
                 return Err(error);
             }
         };
-        startup.interconnect = Some(Arc::new(interconnect));
+        startup.interconnect = Some(interconnect);
 
         let cluster_transport = match cluster::bind_gossip_transport(cluster_listen_addr)
             .await
@@ -16695,8 +18158,10 @@ impl Application {
             consensus,
             interconnect,
         } = startup;
-        let consensus = consensus.expect("consensus is initialized before server startup");
-        let interconnect = interconnect.expect("interconnect is initialized before server startup");
+        let consensus =
+            consensus.verified("startup assigns this handle before it reaches this point");
+        let interconnect =
+            interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
 
@@ -16707,7 +18172,7 @@ impl Application {
         let reconcile_shutdown = shutdown.clone();
         let mut background_tasks = Vec::new();
         if let Some(controller) = memory_pressure_controller {
-            let memory_runtime = runtime.as_ref().clone();
+            let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
             background_tasks.push(tokio::spawn(async move {
                 controller.run(memory_runtime, memory_shutdown).await;
@@ -16732,8 +18197,8 @@ impl Application {
                                     .await
                                 {
                                     warn!(
-                                        from_node_id = request.from_node_id,
-                                        to_node_id = request.to_node_id,
+                                        from_node_id = %request.from_node_id,
+                                        to_node_id = %request.to_node_id,
                                         error = %error,
                                         "test leadership transfer request failed"
                                     );
@@ -16776,7 +18241,7 @@ impl Application {
                 if let Err(err) = consensus_for_reconcile.reconcile_nodes(gossip).await {
                     warn!(error = %err, "raft membership reconciliation failed");
                 }
-                if consensus_for_reconcile.current_leader().await.as_deref()
+                if consensus_for_reconcile.current_leader().await.as_ref()
                     == Some(consensus_for_reconcile.local_node_id())
                 {
                     let committing_domains = consensus_for_reconcile
@@ -16812,7 +18277,7 @@ impl Application {
                         }
                     }
                     if !default_user_resolved {
-                        match Identifier::parse(&default_user) {
+                        match UserName::parse(&default_user) {
                             Ok(default_user_id)
                                 if consensus_for_reconcile
                                     .current_user(&default_user_id)
@@ -16820,7 +18285,7 @@ impl Application {
                                     .is_none() =>
                             {
                                 if let Some(password) = init_default_user_password.clone() {
-                                    match user_credentials(default_user_id, password).await {
+                                    match user_credentials(default_user_id.clone(), password).await {
                                         Ok(user) => {
                                             let user_name = user.name.clone();
                                             if let Err(error) =
@@ -16894,7 +18359,7 @@ impl Application {
                         .iter()
                         .map(|(domain, _)| domain.clone())
                         .collect::<HashSet<_>>();
-                    for domain_schedule in &current_schedule.domains {
+                    for domain_schedule in current_schedule.domains.values() {
                         if active_domains.contains(&domain_schedule.domain)
                             || committing_domains.contains(&domain_schedule.domain)
                         {
@@ -16911,20 +18376,20 @@ impl Application {
                             continue;
                         }
                         for failover_move in &failover_moves {
-                            if let Some(replica) = failover_move.promoted_replica.as_deref() {
+                            if let Some(replica) = failover_move.promoted_replica.as_ref() {
                                 info!(
                                     domain = domain_schedule.domain.as_str(),
                                     node = failover_move.label,
-                                    promoted_replica = replica,
+                                    promoted_replica = %replica,
                                     "failover promoted live replica to primary"
                                 );
                             } else if let Some(fallback_node) =
-                                failover_move.fallback_node.as_deref()
+                                failover_move.fallback_node.as_ref()
                             {
                                 warn!(
                                     domain = domain_schedule.domain.as_str(),
                                     node = failover_move.label,
-                                    fallback_node,
+                                    %fallback_node,
                                     "failover found no live replica; moving scheduled node without \
                                      local replicated state"
                                 );
@@ -16975,20 +18440,20 @@ impl Application {
                                     &schedulable_node_set,
                                 );
                             for failover_move in &failover_moves {
-                                if let Some(replica) = failover_move.promoted_replica.as_deref() {
+                                if let Some(replica) = failover_move.promoted_replica.as_ref() {
                                     info!(
                                         domain = domain.as_str(),
                                         node = failover_move.label,
-                                        promoted_replica = replica,
+                                        promoted_replica = %replica,
                                         "failover promoted live replica to primary"
                                     );
                                 } else if let Some(fallback_node) =
-                                    failover_move.fallback_node.as_deref()
+                                    failover_move.fallback_node.as_ref()
                                 {
                                     warn!(
                                         domain = domain.as_str(),
                                         node = failover_move.label,
-                                        fallback_node,
+                                        %fallback_node,
                                         "failover found no live replica; moving scheduled node \
                                          without local replicated state"
                                     );
@@ -17123,12 +18588,12 @@ impl Application {
         let mut schedule_rx = consensus.subscribe_schedule();
         let consensus_for_schedule = consensus.clone();
         let cluster_for_schedule = cluster.clone();
-        let schedule_local_node_id = consensus.local_node_id().to_string();
+        let schedule_local_node_id = consensus.local_node_id().clone();
         let schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             let initial_state = consensus_for_schedule.current_runtime_state().await;
-            if consensus_for_schedule.current_leader().await.as_deref()
-                != Some(schedule_local_node_id.as_str())
+            if consensus_for_schedule.current_leader().await.as_ref()
+                != Some(&schedule_local_node_id)
                 && let Err(error) =
                     registry_for_schedule.synchronize_cluster_schedule(&initial_state.schedule)
             {
@@ -17156,8 +18621,8 @@ impl Application {
                             break;
                         }
                         let state = consensus_for_schedule.current_runtime_state().await;
-                        if consensus_for_schedule.current_leader().await.as_deref()
-                            != Some(schedule_local_node_id.as_str())
+                        if consensus_for_schedule.current_leader().await.as_ref()
+                            != Some(&schedule_local_node_id)
                             && let Err(error) =
                                 registry_for_schedule.synchronize_cluster_schedule(&state.schedule)
                         {
@@ -17201,37 +18666,39 @@ impl Application {
         }));
         let (events, _) = broadcast::channel(256);
         let service = SessionServiceImpl {
-            cluster: cluster.clone(),
-            consensus: consensus.clone(),
-            registry,
-            resource_store,
-            cluster_api_clients: cluster_api_clients.clone(),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: runtime.clone(),
-            replica_count,
-            #[cfg(feature = "testing")]
-            scheduler_mode,
-            shutdown: shutdown.clone(),
-            events: events.clone(),
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
-            interconnect: interconnect.clone(),
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout,
-            transaction_tombstone_retention,
-            transaction_max_statements,
-            transaction_max_source_bytes,
-            transaction_max_open,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
+            inner: Arc::new(SessionServiceInner {
+                cluster: cluster.clone(),
+                consensus: consensus.clone(),
+                registry,
+                resource_store,
+                cluster_api_clients: cluster_api_clients.clone(),
+                http_tls_server_config: Arc::new(RwLock::new(None)),
+                runtime: runtime.clone(),
+                replica_count,
+                #[cfg(feature = "testing")]
+                scheduler_mode,
+                shutdown: shutdown.clone(),
+                events: events.clone(),
+                subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
+                interconnect: interconnect.clone(),
+                domain_clocks: DashMap::with_hasher(RandomState::new()),
+                domain_clock_reconciliations: DashMap::with_hasher(RandomState::new()),
+                domain_clock_events: Notify::new(),
+                next_cluster_command_correlation_id: AtomicU64::new(1),
+                pending_cluster_commands: DashMap::default(),
+                service_tasks: TaskTracker::new(),
+                configured_basic_auth,
+                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
+                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                transaction_idle_timeout,
+                transaction_tombstone_retention,
+                transaction_max_statements,
+                transaction_max_source_bytes,
+                transaction_max_open,
+                transaction_bindings: DashMap::with_hasher(RandomState::new()),
+                transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+                transaction_commit_execution: AsyncMutex::new(()),
+            }),
         };
 
         let transaction_service = service.clone();
@@ -17241,16 +18708,21 @@ impl Application {
             loop {
                 tokio::task::consume_budget().await;
                 let is_leader = transaction_service
+                    .inner
                     .consensus
                     .current_leader()
                     .await
-                    .as_deref()
-                    == Some(transaction_service.consensus.local_node_id());
+                    .as_ref()
+                    == Some(transaction_service.inner.consensus.local_node_id());
                 if observed_leadership != Some(is_leader) {
-                    transaction_service.transaction_bindings.clear();
-                    transaction_service.domain_clock_reconciliations.clear();
-                    let schedule = transaction_service.consensus.current_schedule().await;
+                    transaction_service.inner.transaction_bindings.clear();
+                    transaction_service
+                        .inner
+                        .domain_clock_reconciliations
+                        .clear();
+                    let schedule = transaction_service.inner.consensus.current_schedule().await;
                     match transaction_service
+                        .inner
                         .registry
                         .synchronize_cluster_schedule(&schedule)
                     {
@@ -17293,12 +18765,12 @@ impl Application {
                     received = runtime_event_rx.recv() => match received {
                         Ok(RuntimeEvent::Error(message)) => {
                             let mut node_ids =
-                                runtime_event_service.cluster.live_node_ids().await;
+                                runtime_event_service.inner.cluster.live_node_ids().await;
                             node_ids.sort();
                             node_ids.dedup();
                             for node_id in node_ids {
                                 tokio::task::consume_budget().await;
-                                if node_id == runtime_event_service.consensus.local_node_id() {
+                                if node_id == runtime_event_service.inner.consensus.local_node_id().clone() {
                                     continue;
                                 }
                                 if let Err(error) = runtime_event_service
@@ -17313,14 +18785,18 @@ impl Application {
                                     .await
                                 {
                                     warn!(
-                                        node_id,
+                                        %node_id,
                                         error,
                                         "failed to fan out runtime error event"
                                     );
                                 }
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        // The peers never learn about the errors this node skipped, so the count
+                        // is logged here to keep the gap attributable to load rather than silence.
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "runtime error fan-out fell behind the event bus");
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -17350,8 +18826,8 @@ impl Application {
         let domain_service = service.clone();
         let domain_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
-            let mut domains_rx = domain_service.consensus.subscribe_domains();
-            let mut tasks: HashMap<Domain, (CancellationToken, JoinHandle<()>)> = HashMap::new();
+            let mut domains_rx = domain_service.inner.consensus.subscribe_domains();
+            let mut tasks: HashMap<DomainName, BackgroundTask> = HashMap::new();
             if let Err(error) = domain_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
@@ -17359,7 +18835,7 @@ impl Application {
             loop {
                 tokio::task::consume_budget().await;
                 reconcile_domain_clock_tasks(&domain_service, &domain_shutdown, &mut tasks).await;
-                let domain_clock_event = domain_service.domain_clock_events.notified();
+                let domain_clock_event = domain_service.inner.domain_clock_events.notified();
                 tokio::select! {
                     _ = domain_shutdown.cancelled() => break,
                     changed = domains_rx.changed() => {
@@ -17374,20 +18850,17 @@ impl Application {
                 }
             }
 
-            for (_, (token, handle)) in tasks {
-                token.cancel();
-                let _ = handle.await;
+            for (_, task) in tasks {
+                task.stop().await;
             }
         }));
 
         let kafka_schedule_service = service.clone();
         let kafka_schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
-            let mut schedule_rx = kafka_schedule_service.consensus.subscribe_schedule();
-            let mut tasks: HashMap<
-                KafkaPartitionWatcherKey,
-                (KafkaPartitionWatcherSpec, CancellationToken, JoinHandle<()>),
-            > = HashMap::new();
+            let mut schedule_rx = kafka_schedule_service.inner.consensus.subscribe_schedule();
+            let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
+                HashMap::new();
 
             loop {
                 tokio::task::consume_budget().await;
@@ -17406,9 +18879,8 @@ impl Application {
                 }
             }
 
-            for (_, (_, cancel, handle)) in tasks {
-                cancel.cancel();
-                let _ = handle.await;
+            for (_, watcher) in tasks {
+                watcher.task.stop().await;
             }
         }));
 
@@ -17483,7 +18955,7 @@ impl Application {
                                 ) {
                                     Ok(placement) => {
                                         service_for_interconnect
-                                            .runtime
+                                            .inner.runtime
                                             .handle_state_sync_request(
                                                 &placement,
                                                 request.after_lsm,
@@ -17514,7 +18986,7 @@ impl Application {
                                 }
                             }
                             Envelope::Control(ControlEnvelope::StateSyncResponse(response)) => {
-                                service_for_interconnect.runtime.handle_state_sync_response(
+                                service_for_interconnect.inner.runtime.handle_state_sync_response(
                                     response.correlation_id,
                                     response.result.map(|snapshot| {
                                         snapshot.map(|snapshot| crate::runtime::PersistedRuntimeStateEntry {
@@ -17535,7 +19007,7 @@ impl Application {
                                         continue;
                                     }
                                 };
-                                service_for_interconnect.runtime.handle_state_replication_ack(
+                                service_for_interconnect.inner.runtime.handle_state_replication_ack(
                                     &message.peer_node_id,
                                     crate::runtime::StateSyncAck {
                                         placement,
@@ -17568,7 +19040,7 @@ impl Application {
                             Envelope::Control(ControlEnvelope::DescribeIngestorRequest(request)) => {
                                 let request_service = service_for_interconnect.clone();
                                 let peer_node_id = message.peer_node_id.clone();
-                                service_for_interconnect.service_tasks.spawn(async move {
+                                service_for_interconnect.inner.service_tasks.spawn(async move {
                                     let result = request_service
                                         .handle_describe_ingestor_request(request.clone())
                                         .await;
@@ -17620,7 +19092,7 @@ impl Application {
                                     .map_err(|error| error.to_string())
                                     .map(|()| {
                                         service_for_interconnect
-                                            .runtime
+                                            .inner.runtime
                                             .force_flush_domain_if_idle(&request.domain);
                                         service_for_interconnect
                                             .local_domain_drain_status(&request.domain)
@@ -17644,24 +19116,19 @@ impl Application {
                                 service_for_interconnect.handle_domain_drain_status_response(response);
                             }
                             Envelope::Control(ControlEnvelope::EntityGateRequest(request)) => {
-                                let affected_entities = request
-                                    .affected_entities
-                                    .iter()
-                                    .map(|entity| crate::registry::RegistryEntity {
-                                        kind: entity.kind,
-                                        identifier: entity.identifier.clone(),
-                                    })
-                                    .collect::<Vec<_>>();
                                 let result = service_for_interconnect
-                                    .runtime
+                                    .inner.runtime
                                     .engage_entity_gate_operation(
                                         request.operation_id,
                                         &request.domain,
                                         &request.relays,
-                                        &affected_entities,
-                                        tokio::time::Instant::now()
-                                            + Duration::from_millis(request.deadline_millis),
-                                        &request.reason,
+                                        &request.affected_entities,
+                                        request.purpose,
+                                        EntityGateLease {
+                                            deadline: tokio::time::Instant::now()
+                                                + Duration::from_millis(request.deadline_millis),
+                                            reason: &request.reason,
+                                        },
                                     )
                                     .await;
                                 if let Err(error) = service_for_interconnect
@@ -17683,24 +19150,18 @@ impl Application {
                                 service_for_interconnect.handle_entity_gate_response(response);
                             }
                             Envelope::Control(ControlEnvelope::EntityDrainStatusRequest(request)) => {
-                                let affected_entities = request
-                                    .affected_entities
-                                    .iter()
-                                    .map(|entity| crate::registry::RegistryEntity {
-                                        kind: entity.kind,
-                                        identifier: entity.identifier.clone(),
-                                    })
-                                    .collect::<Vec<_>>();
                                 let status = service_for_interconnect.local_entity_drain_status(
                                         &request.domain,
                                         &request.relays,
-                                        &affected_entities,
+                                        &request.affected_entities,
+                                        request.purpose,
                                     );
                                 if status.buffered_relay_batches != 0
                                     || status.node_work_items != 0
+                                    || status.outstanding_acks != 0
                                 {
                                     service_for_interconnect
-                                        .runtime
+                                        .inner.runtime
                                         .force_flush_domain_if_idle(&request.domain);
                                 }
                                 let result: Result<EntityDrainStatusEnvelope, String> = Ok(status);
@@ -17724,7 +19185,7 @@ impl Application {
                             }
                             Envelope::Control(ControlEnvelope::EntityGateReleaseRequest(request)) => {
                                 let result = service_for_interconnect
-                                    .runtime
+                                    .inner.runtime
                                     .release_entity_gate_operation(
                                         request.operation_id,
                                         &request.domain,
@@ -17795,16 +19256,17 @@ impl Application {
                             Envelope::Control(ControlEnvelope::LookupRequest(request)) => {
                                 let result =
                                     service_for_interconnect.handle_lookup_request(request.clone()).await;
+                                let result = match result {
+                                    Ok(Some(record)) => record.to_arrow_ipc_bytes().map(Some),
+                                    Ok(None) => Ok(None),
+                                    Err(error) => Err(error),
+                                };
                                 if let Err(error) = service_for_interconnect
                                     .dispatch_interconnect_control(
                                         &message.peer_node_id,
                                         ControlEnvelope::LookupResponse(RemoteLookupResponse {
                                             correlation_id: request.correlation_id,
-                                            result: result.and_then(|record| {
-                                                record
-                                                    .map(|record| record.to_arrow_ipc_bytes())
-                                                    .transpose()
-                                            }),
+                                            result,
                                         }),
                                     )
                                     .await
@@ -17819,7 +19281,7 @@ impl Application {
                                 ControlEnvelope::SubscriptionInterestVisibilityRequest(request),
                             ) => {
                                 let visible = service_for_interconnect
-                                    .cluster
+                                    .inner.cluster
                                     .nodes_with_subscription_interest(
                                         request.domain.as_str(),
                                         request.relay.as_str(),
@@ -17869,11 +19331,13 @@ impl Application {
                     received = cluster_event_rx.recv() => match received {
                         Ok(message) => {
                             let _ = cluster_events.send(ServerEvent {
-                                level: ServerEventLevel::Info as i32,
+                                level: i32::from(ServerEventLevel::Info),
                                 message,
                             });
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "cluster event relay fell behind the event bus");
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -17890,11 +19354,13 @@ impl Application {
                     received = consensus_event_rx.recv() => match received {
                         Ok(message) => {
                             let _ = consensus_events.send(ServerEvent {
-                                level: ServerEventLevel::Info as i32,
+                                level: i32::from(ServerEventLevel::Info),
                                 message,
                             });
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "consensus event relay fell behind the event bus");
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -17911,7 +19377,7 @@ impl Application {
             info!(addr = %addr, "nervix web console TLS server listening");
         }
 
-        let cluster_api_resource_store = service.resource_store.clone();
+        let cluster_api_resource_store = service.inner.resource_store.clone();
         let grpc_service = service.clone();
         let grpc_shutdown = shutdown.clone();
         let api_server = async move {
@@ -17964,20 +19430,20 @@ impl Application {
         };
         let http_server = serve_http(
             runtime.clone(),
-            service.service_tasks.clone(),
+            service.inner.service_tasks.clone(),
             http_listener,
             shutdown.clone(),
         );
         let https_server = serve_https(
             runtime.clone(),
-            service.service_tasks.clone(),
-            service.http_tls_server_config.clone(),
+            service.inner.service_tasks.clone(),
+            service.inner.http_tls_server_config.clone(),
             https_listener,
             shutdown.clone(),
         );
         let observability_server = serve_observability_http(
             consensus.clone(),
-            runtime.as_ref().clone(),
+            runtime.clone(),
             observability_listener,
             shutdown.clone(),
         );
@@ -18045,8 +19511,8 @@ impl Application {
         for task in background_tasks {
             await_background_task_shutdown(task, "application background task").await;
         }
-        service.service_tasks.close();
-        service.service_tasks.wait().await;
+        service.inner.service_tasks.close();
+        service.inner.service_tasks.wait().await;
         runtime.shutdown().await;
         consensus.shutdown().await;
         let cluster_shutdown_result = cluster
@@ -18131,9 +19597,10 @@ mod tests {
     use nervix_models::{
         AckMode, CreateDomain, CreateResource, CreateSchema, CreateStatement, DomainConfig,
         DomainPace, DomainSchedule, DomainState, DomainStatus, KafkaPartitionSchedule, Model,
-        ModelKind, PlacementGroupSchedule, PlacementRuntimeNode, ResourceVersion,
+        ModelKind, NodeRef, PlacementGroupSchedule, ResourceVersion, ResourceVersionCounter,
         ResourceVersionStatus, ScheduledNode, SchemaField, SubscriptionLiteral,
     };
+    use nonzero_ext::nonzero;
     use sorted_vec::SortedVec;
 
     use super::*;
@@ -18166,8 +19633,12 @@ mod tests {
             .expect("valid socket addr")
     }
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::try_from(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn command_transaction_state(result: &CommandResult) -> Option<ApiTransactionState> {
@@ -18180,12 +19651,17 @@ mod tests {
     #[test]
     fn snapshot_relay_header_framing_leaves_raw_snapshot_payload() {
         let header = RaftSnapshotRelayHeader {
-            vote: nervix_consensus::VoteOf::new(7, "node-1".to_string()),
+            vote: nervix_consensus::VoteOf::new(
+                7,
+                ClusterNodeName::parse("node-1").expect("valid name"),
+            ),
             meta: Default::default(),
         };
         let encoded = encode_cbor(&header).expect("snapshot relay header should encode");
         let mut wire = Vec::new();
-        wire.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        let encoded_len = u32::try_from(encoded.len())
+            .assured("the test snapshot header is smaller than u32::MAX bytes");
+        wire.extend_from_slice(&encoded_len.to_be_bytes());
         wire.extend_from_slice(&encoded);
         wire.extend_from_slice(b"snapshot-data");
 
@@ -18200,7 +19676,7 @@ mod tests {
 
     fn string_branch_key(field: &str, value: &str) -> Option<crate::runtime::BranchKey> {
         crate::runtime::BranchKey::from_fields([(
-            identifier(field),
+            named(field),
             runtime_schema::RuntimeValue::String(value.to_string()),
         )])
         .expect("test branch key must be non-empty")
@@ -18212,12 +19688,13 @@ mod tests {
         let (lane, mut payloads) = InterconnectRelayPayloadLane::new();
         let routed = RelayPayload {
             kind: nervix_interconnect::RelayPayloadKind::Routed,
-            domain: Domain::parse("default").expect("valid domain"),
-            relay: identifier("incoming"),
+            domain: DomainName::parse("default").expect("valid domain"),
+            relay: named("incoming"),
             key: None,
             batch_ipc: Vec::new(),
             metadata: Vec::new(),
             acks: Vec::new(),
+            admission: None,
         };
 
         assert!(lane.route(Envelope::RelayPayload(routed)).is_none());
@@ -18240,7 +19717,7 @@ mod tests {
             .observability_listen_addr(listen_addr)
             .web_console_listen_addr(listen_addr)
             .cluster_id("startup-failure-test".to_string())
-            .node_id("node-1".to_string())
+            .node_id(ClusterNodeName::parse("node-1").expect("valid name"))
             .grpc_advertise_addr(listen_addr.into())
             .cluster_listen_addr(listen_addr)
             .cluster_advertise_addr(cluster::HostPort::new("invalid host name", 1))
@@ -18392,7 +19869,61 @@ mod tests {
         );
     }
 
-    async fn test_interconnect(node_id: &str) -> Arc<Transport> {
+    fn test_node_name(id: impl std::fmt::Display) -> ClusterNodeName {
+        ClusterNodeName::parse(&format!("test-node-{id}"))
+            .expect("test node names satisfy the name grammar")
+    }
+
+    /// Builds the service the way `run` does, with test defaults for everything the caller does
+    /// not supply. Every scenario in this module needs the same shape, so they share one builder
+    /// rather than repeating the field list.
+    fn test_session_service(
+        cluster: Arc<cluster::ClusterHandle>,
+        consensus: Arc<ConsensusHandle>,
+        registry: Arc<Registry>,
+        resource_store: Arc<ResourceStore>,
+        interconnect: Transport,
+    ) -> SessionServiceImpl {
+        SessionServiceImpl {
+            inner: Arc::new(SessionServiceInner {
+                cluster,
+                consensus,
+                registry,
+                resource_store,
+                cluster_api_clients: Arc::new(
+                    ClusterApiClients::build().expect("test cluster api clients should build"),
+                ),
+                http_tls_server_config: Arc::new(RwLock::new(None)),
+                runtime: Runtime::new(),
+                replica_count: 0,
+                #[cfg(feature = "testing")]
+                scheduler_mode: SchedulerMode::Sticky,
+                shutdown: CancellationToken::new(),
+                events: broadcast::channel(16).0,
+                subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
+                interconnect,
+                domain_clocks: DashMap::with_hasher(RandomState::new()),
+                domain_clock_reconciliations: DashMap::with_hasher(RandomState::new()),
+                domain_clock_events: Notify::new(),
+                next_cluster_command_correlation_id: AtomicU64::new(1),
+                pending_cluster_commands: DashMap::default(),
+                service_tasks: TaskTracker::new(),
+                configured_basic_auth: None,
+                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
+                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
+                transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
+                transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
+                transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
+                transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+                transaction_bindings: DashMap::with_hasher(RandomState::new()),
+                transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
+                transaction_commit_execution: AsyncMutex::new(()),
+            }),
+        }
+    }
+
+    async fn test_interconnect(node_id: &ClusterNodeName) -> Transport {
         ensure_dev_tls_assets();
         let tls = TlsConfigBundle::from_pem_files(
             "tls/dev/ca.pem",
@@ -18400,7 +19931,7 @@ mod tests {
             "tls/dev/node-key.pem",
         )
         .expect("tls bundle should load");
-        let identity = LocalIdentity::generate(node_id.to_string());
+        let identity = LocalIdentity::generate(node_id.clone());
         let verifier = PeerVerifier::new(|_| None);
         let addr = "127.0.0.1:0"
             .parse()
@@ -18415,46 +19946,46 @@ mod tests {
         )
         .await
         .expect("test transport should bind");
-        Arc::new(transport)
+        transport
     }
 
     fn schema_with_fields(fields: Vec<SchemaField>) -> CreateSchema {
         CreateSchema {
-            name: identifier("events"),
+            name: named("events"),
             fields,
         }
     }
 
     fn scheduled_node(identifier_raw: &str, kind: ModelKind) -> ScheduledNode {
         ScheduledNode {
-            identifier: identifier(identifier_raw),
+            identifier: named(identifier_raw),
             kind,
             config: Box::new(Model::Schema(schema_with_fields(Vec::new()))),
             effective_branching: None,
             effective_branching_schema: None,
             schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
-            primary_node: Some("node-1".to_string()),
-            assigned_nodes: vec!["node-1".to_string()],
+            primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
         }
     }
 
-    fn placement_member(identifier_raw: &str, kind: ModelKind) -> PlacementRuntimeNode {
-        PlacementRuntimeNode::new(kind, identifier(identifier_raw))
+    fn placement_member(identifier_raw: &str, kind: ModelKind) -> NodeRef {
+        NodeRef::new(kind, named::<ModelName>(identifier_raw))
     }
 
     fn placement_group(
-        members: Vec<PlacementRuntimeNode>,
-        primary_node: &str,
+        members: Vec<NodeRef>,
+        primary_node: &ClusterNodeName,
     ) -> PlacementGroupSchedule {
         PlacementGroupSchedule {
             members,
-            primary_node: Some(primary_node.to_string()),
+            primary_node: Some(primary_node.clone()),
         }
     }
 
     async fn create_test_domain(consensus: &ConsensusHandle, raw: &str) {
-        let domain = Domain::parse(raw).expect("valid domain");
+        let domain = DomainName::parse(raw).expect("valid domain");
         let state = DomainState {
             id: domain,
             config: DomainConfig {
@@ -18478,9 +20009,15 @@ mod tests {
         }
     }
 
-    async fn build_test_service(
-        create_default_domain_flag: bool,
-    ) -> (SessionServiceImpl, Arc<Registry>, PathBuf) {
+    /// A session service built on a throwaway database, handed back with the registry that
+    /// service shares and the directory the test must remove when it finishes.
+    struct TestService {
+        service: SessionServiceImpl,
+        registry: Arc<Registry>,
+        path: PathBuf,
+    }
+
+    async fn build_test_service(create_default_domain_flag: bool) -> TestService {
         let path = test_db_path();
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("test db directory should exist");
@@ -18491,17 +20028,30 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(64000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(65000u16.saturating_add(id));
-        let raft_addr = test_addr(49500u16.saturating_add(id));
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
+        let grpc_addr = test_addr(
+            64000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            65000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            49500u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -18524,19 +20074,19 @@ mod tests {
         if create_default_domain_flag {
             create_test_domain(&consensus, "default").await;
         }
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_deref() == Some(expected_leader.as_str()) {
+            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let consensus = Arc::new(consensus);
-        let interconnect = test_interconnect(expected_leader.as_str()).await;
+        let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -18557,75 +20107,61 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
-        (service, registry, path)
+        );
+        TestService {
+            service,
+            registry,
+            path,
+        }
     }
 
     #[tokio::test]
     async fn dropping_cluster_gate_owner_releases_local_durable_hold() {
-        let (service, _registry, path) = build_test_service(false).await;
-        let domain = Domain::parse("default").expect("valid domain");
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        let domain = DomainName::parse("default").expect("valid domain");
         let operation_id = 41;
         service
+            .inner
             .runtime
             .engage_entity_gate_operation(
                 operation_id,
                 &domain,
                 &[],
                 &[],
-                tokio::time::Instant::now() + Duration::from_secs(30),
-                "canceled coordinator test",
+                EntityGatePurpose::ModelAlteration,
+                EntityGateLease {
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+                    reason: "canceled coordinator test",
+                },
             )
             .await
             .expect("local gate hold should engage");
         assert!(
             service
+                .inner
                 .runtime
                 .entity_gate_operation_is_held(operation_id, &domain)
         );
 
         let mut gate = ClusterEntityGate::new(&service, operation_id, &domain);
-        gate.record_attempt(service.consensus.local_node_id().to_string());
+        gate.record_attempt(service.inner.consensus.local_node_id().clone());
         drop(gate);
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while service
+                .inner
                 .runtime
                 .entity_gate_operation_is_held(operation_id, &domain)
             {
@@ -18636,16 +20172,20 @@ mod tests {
         .await
         .expect("dropped coordinator guard should release its local durable hold");
 
-        service.shutdown.cancel();
-        service.service_tasks.close();
-        service.service_tasks.wait().await;
+        service.inner.shutdown.cancel();
+        service.inner.service_tasks.close();
+        service.inner.service_tasks.wait().await;
         let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]
     fn completion_context_preserves_prefix_for_post_filtering() {
         let input = "CREATE SCHE";
-        let (grammar_input, grammar_cursor, prefix) = completion_context(input, input.len());
+        let CompletionContext {
+            grammar_input,
+            grammar_cursor,
+            prefix,
+        } = completion_context(input, input.len());
 
         assert_eq!(grammar_input, "CREATE ");
         assert_eq!(grammar_cursor, "CREATE ".len());
@@ -18655,7 +20195,11 @@ mod tests {
     #[test]
     fn keyword_completion_is_filtered_by_original_prefix() {
         let input = "CREATE SCHE";
-        let (grammar_input, grammar_cursor, prefix) = completion_context(input, input.len());
+        let CompletionContext {
+            grammar_input,
+            grammar_cursor,
+            prefix,
+        } = completion_context(input, input.len());
         let filtered = suggest_client_statement(&grammar_input, grammar_cursor)
             .into_iter()
             .filter(|item| {
@@ -18693,21 +20237,32 @@ mod tests {
     #[test]
     fn drop_node_quorum_error_allows_available_current_quorum() {
         let voters = BTreeSet::from([
-            "node-1".to_string(),
-            "node-2".to_string(),
-            "node-3".to_string(),
+            named::<ClusterNodeName>("node-1"),
+            named::<ClusterNodeName>("node-2"),
+            named::<ClusterNodeName>("node-3"),
         ]);
-        let live_node_ids = BTreeSet::from(["node-1".to_string(), "node-3".to_string()]);
+        let live_node_ids = BTreeSet::from([
+            named::<ClusterNodeName>("node-1"),
+            named::<ClusterNodeName>("node-3"),
+        ]);
 
         assert!(
-            SessionServiceImpl::drop_node_quorum_error("node-2", &voters, &live_node_ids).is_none()
+            SessionServiceImpl::drop_node_quorum_error(
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+                &voters,
+                &live_node_ids
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn drop_node_rebuild_uses_only_schedulable_nodes_for_new_assignments() {
-        let live_voters = vec!["node-live".to_string(), "node-cordoned".to_string()];
-        let schedulable_nodes = vec!["node-live".to_string()];
+        let live_voters = vec![
+            named::<ClusterNodeName>("node-live"),
+            named::<ClusterNodeName>("node-cordoned"),
+        ];
+        let schedulable_nodes = vec![named::<ClusterNodeName>("node-live")];
 
         let (new_assignment_candidates, preservable_nodes) =
             SessionServiceImpl::drop_node_schedule_node_sets(&live_voters, &schedulable_nodes);
@@ -18717,101 +20272,266 @@ mod tests {
     }
 
     #[test]
-    fn move_next_scheduled_node_for_drain_moves_only_one_assigned_node() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
+    fn move_next_scheduled_node_for_drain_moves_only_one_node_in_canonical_order() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
                     ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
                     ..scheduled_node("emit_notifications", ModelKind::Emitter)
                 },
             ],
-            placement_groups: Vec::new(),
-        };
-        let desired = DomainSchedule {
+            Vec::new(),
+        );
+        let desired = DomainSchedule::new(
             domain,
-            nodes: vec![
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                     ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-3".to_string()),
-                    assigned_nodes: vec!["node-3".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-3").expect("valid name")],
                     ..scheduled_node("emit_notifications", ModelKind::Emitter)
                 },
             ],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &BTreeSet::from([
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+                named::<ClusterNodeName>("node-3"),
             ]),
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
             moved,
             Some(DrainMove {
-                label: "ingestor ingest_notifications".to_string(),
+                label: "emitter emit_notifications".to_string(),
                 promoted_replica: None,
-                fallback_node: Some("node-1".to_string()),
+                fallback_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].assigned_nodes, vec!["node-1".to_string()]);
-        assert_eq!(schedule.nodes[1].assigned_nodes, vec!["node-2".to_string()]);
+        assert_eq!(
+            schedule.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-2")]
+        );
+        assert_eq!(
+            schedule.nodes[1].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-3")]
+        );
     }
 
     #[test]
-    fn move_next_scheduled_node_for_drain_prefers_policy_target_over_live_replica() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-2".to_string()),
-                assigned_nodes: vec![
-                    "node-2".to_string(),
-                    "node-3".to_string(),
-                    "node-4".to_string(),
-                ],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
-            placement_groups: Vec::new(),
-        };
-        let desired = DomainSchedule {
+    fn planned_drain_uses_canonical_runtime_node_order() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
+                    ..scheduled_node("zeta", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
+                    ..scheduled_node("alpha", ModelKind::Junction)
+                },
+            ],
+            Vec::new(),
+        );
+        let desired = DomainSchedule::new(
             domain,
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
-            placement_groups: Vec::new(),
-        };
+            vec![
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ..scheduled_node("zeta", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ..scheduled_node("alpha", ModelKind::Junction)
+                },
+            ],
+            Vec::new(),
+        );
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &BTreeSet::from([
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
             ]),
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
+        );
+
+        assert_eq!(
+            moved,
+            Some(DrainMove {
+                label: "junction alpha".to_string(),
+                promoted_replica: None,
+                fallback_node: Some(named::<ClusterNodeName>("node-1")),
+            })
+        );
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-2"))
+        );
+        assert_eq!(
+            schedule.nodes[1].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
+    }
+
+    #[test]
+    fn planned_drain_uses_the_first_member_to_order_placement_groups() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let alpha_members = vec![placement_member("alpha", ModelKind::Junction)];
+        let zeta_members = vec![placement_member("zeta", ModelKind::Junction)];
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
+                    ..scheduled_node("zeta", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
+                    ..scheduled_node("alpha", ModelKind::Junction)
+                },
+            ],
+            vec![
+                placement_group(
+                    zeta_members.clone(),
+                    &ClusterNodeName::parse("node-2").expect("valid name"),
+                ),
+                placement_group(
+                    alpha_members.clone(),
+                    &ClusterNodeName::parse("node-2").expect("valid name"),
+                ),
+            ],
+        );
+        let desired = DomainSchedule::new(
+            domain,
+            vec![
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ..scheduled_node("zeta", ModelKind::Junction)
+                },
+                ScheduledNode {
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                    ..scheduled_node("alpha", ModelKind::Junction)
+                },
+            ],
+            vec![
+                placement_group(
+                    zeta_members,
+                    &ClusterNodeName::parse("node-1").expect("valid name"),
+                ),
+                placement_group(
+                    alpha_members,
+                    &ClusterNodeName::parse("node-1").expect("valid name"),
+                ),
+            ],
+        );
+
+        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
+            &mut schedule,
+            &desired,
+            &ClusterNodeName::parse("node-2").expect("valid name"),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+            ]),
+            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
+        );
+
+        assert_eq!(
+            moved,
+            Some(DrainMove {
+                label: "placement group [alpha]".to_string(),
+                promoted_replica: None,
+                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            })
+        );
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-2"))
+        );
+        assert_eq!(
+            schedule.nodes[1].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
+    }
+
+    #[test]
+    fn planned_drain_prefers_policy_target_and_retains_former_owner_as_first_replica() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                    ClusterNodeName::parse("node-4").expect("valid name"),
+                ],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            Vec::new(),
+        );
+        let desired = DomainSchedule::new(
+            domain,
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            Vec::new(),
+        );
+
+        let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
+            &mut schedule,
+            &desired,
+            &ClusterNodeName::parse("node-2").expect("valid name"),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
@@ -18819,66 +20539,94 @@ mod tests {
             Some(DrainMove {
                 label: "deduplicator dedup_notifications".to_string(),
                 promoted_replica: None,
-                fallback_node: Some("node-1".to_string()),
+                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
         assert_eq!(
             schedule.nodes[0].assigned_nodes,
-            vec!["node-1".to_string(), "node-3".to_string()]
+            vec![
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+                named::<ClusterNodeName>("node-3"),
+            ]
         );
     }
 
     #[test]
     fn drain_require_group_prefers_policy_target_over_common_replica() {
-        let domain = Domain::parse("payments").expect("valid domain");
+        let domain = DomainName::parse("payments").expect("valid domain");
         let members = vec![
             placement_member("corridor_source", ModelKind::Junction),
             placement_member("corridor_sink", ModelKind::Junction),
         ];
-        let mut schedule = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), "node-2")],
-        };
-        let desired = DomainSchedule {
+            vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
+        );
+        let desired = DomainSchedule::new(
             domain,
-            nodes: vec![
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-1").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-1").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, "node-1")],
-        };
+            vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
+        );
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &BTreeSet::from([
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+                named::<ClusterNodeName>("node-3"),
             ]),
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
@@ -18886,49 +20634,63 @@ mod tests {
             Some(DrainMove {
                 label: "placement group [corridor_source, corridor_sink]".to_string(),
                 promoted_replica: None,
-                fallback_node: Some("node-1".to_string()),
+                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             })
         );
         assert!(
             schedule
                 .nodes
-                .iter()
-                .all(|node| node.primary_node.as_deref() == Some("node-1"))
+                .values()
+                .all(|node| node.primary_node.as_ref()
+                    == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
         );
         assert_eq!(
-            schedule.placement_groups[0].primary_node.as_deref(),
-            Some("node-1")
+            schedule.placement_groups[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
         );
+        assert!(schedule.nodes.values().all(|node| {
+            node.assigned_nodes
+                == vec![
+                    named::<ClusterNodeName>("node-1"),
+                    named::<ClusterNodeName>("node-2"),
+                ]
+        }));
     }
 
     #[test]
-    fn move_next_scheduled_node_for_drain_ignores_unavailable_replica() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-2".to_string()),
-                assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+    fn planned_drain_replaces_an_unavailable_replica_with_the_former_owner() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
-            placement_groups: Vec::new(),
-        };
-        let desired = DomainSchedule {
+            Vec::new(),
+        );
+        let desired = DomainSchedule::new(
             domain,
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string()],
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
-            "node-2",
-            &BTreeSet::from(["node-1".to_string(), "node-2".to_string()]),
-            &BTreeSet::from(["node-1".to_string()]),
+            &ClusterNodeName::parse("node-2").expect("valid name"),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+            ]),
+            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
         );
 
         assert_eq!(
@@ -18936,111 +20698,191 @@ mod tests {
             Some(DrainMove {
                 label: "deduplicator dedup_notifications".to_string(),
                 promoted_replica: None,
-                fallback_node: Some("node-1".to_string()),
+                fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             })
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
-        assert_eq!(schedule.nodes[0].assigned_nodes, vec!["node-1".to_string()]);
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
+        assert_eq!(
+            schedule.nodes[0].assigned_nodes,
+            vec![
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2")
+            ]
+        );
+    }
+
+    #[test]
+    fn planned_schedule_move_prefers_the_former_owner_for_the_first_replica_slot() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let current = DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            Vec::new(),
+        );
+        let mut planned = DomainSchedule::new(
+            domain,
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            Vec::new(),
+        );
+
+        prefer_former_owners_as_replicas(
+            Some(&current),
+            &mut planned,
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ],
+        );
+
+        assert_eq!(
+            planned.nodes[0].assigned_nodes,
+            vec![
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2")
+            ]
+        );
     }
 
     #[test]
     fn merge_existing_schedule_data_prefers_policy_target_when_primary_dies() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut next = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string(), "node-4".to_string()],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
-            placement_groups: Vec::new(),
-        };
-        let existing = DomainSchedule {
-            domain,
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-2".to_string()),
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut next = DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 assigned_nodes: vec![
-                    "node-2".to_string(),
-                    "node-3".to_string(),
-                    "node-4".to_string(),
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-4").expect("valid name"),
                 ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
-            placement_groups: Vec::new(),
-        };
-
-        SessionServiceImpl::merge_existing_schedule_data(
-            &mut next,
-            Some(&existing),
-            &["node-1".to_string(), "node-3".to_string()],
+            Vec::new(),
         );
-
-        assert_eq!(next.nodes[0].primary_node.as_deref(), Some("node-1"));
-        assert_eq!(next.nodes[0].assigned_nodes, vec!["node-1".to_string()]);
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_falls_back_to_fresh_assignment_without_live_replica() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut next = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string()],
+        let existing = DomainSchedule::new(
+            domain,
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                    ClusterNodeName::parse("node-4").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
-            placement_groups: Vec::new(),
-        };
-        let existing = DomainSchedule {
-            domain,
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-2".to_string()),
-                assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
-                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
-            }],
-            placement_groups: Vec::new(),
-        };
-
-        SessionServiceImpl::merge_existing_schedule_data(
-            &mut next,
-            Some(&existing),
-            &["node-1".to_string()],
+            Vec::new(),
         );
-
-        assert_eq!(next.nodes[0].primary_node.as_deref(), Some("node-1"));
-        assert_eq!(next.nodes[0].assigned_nodes, vec!["node-1".to_string()]);
-    }
-
-    #[test]
-    fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignment() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let preserved_schedule = KafkaPartitionSchedule::new(2, vec![0, 1], 7);
-        let mut next = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![ScheduledNode {
-                assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
-                ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
-            }],
-            placement_groups: Vec::new(),
-        };
-        let existing = DomainSchedule {
-            domain,
-            nodes: vec![ScheduledNode {
-                effective_branching_schema: None,
-                kafka_partition_schedule: Some(preserved_schedule.clone()),
-                assigned_nodes: vec!["node-1".to_string()],
-                ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
-            }],
-            placement_groups: Vec::new(),
-        };
 
         SessionServiceImpl::merge_existing_schedule_data(
             &mut next,
             Some(&existing),
             &[
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ],
+        );
+
+        assert_eq!(
+            next.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
+        assert_eq!(
+            next.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-1")]
+        );
+    }
+
+    #[test]
+    fn merge_existing_schedule_data_falls_back_to_fresh_assignment_without_live_replica() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut next = DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            Vec::new(),
+        );
+        let existing = DomainSchedule::new(
+            domain,
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
+            }],
+            Vec::new(),
+        );
+
+        SessionServiceImpl::merge_existing_schedule_data(
+            &mut next,
+            Some(&existing),
+            &[ClusterNodeName::parse("node-1").expect("valid name")],
+        );
+
+        assert_eq!(
+            next.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
+        assert_eq!(
+            next.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-1")]
+        );
+    }
+
+    #[test]
+    fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignment() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let preserved_schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![0, 1], 7);
+        let mut next = DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
+            }],
+            Vec::new(),
+        );
+        let existing = DomainSchedule::new(
+            domain,
+            vec![ScheduledNode {
+                effective_branching_schema: None,
+                kafka_partition_schedule: Some(preserved_schedule.clone()),
+                assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
+                ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
+            }],
+            Vec::new(),
+        );
+
+        SessionServiceImpl::merge_existing_schedule_data(
+            &mut next,
+            Some(&existing),
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
             ],
         );
 
@@ -19048,36 +20890,47 @@ mod tests {
             next.nodes[0].kafka_partition_schedule,
             Some(preserved_schedule)
         );
-        assert_eq!(next.nodes[0].assigned_nodes, vec!["node-1".to_string()]);
+        assert_eq!(
+            next.nodes[0].assigned_nodes,
+            vec![named::<ClusterNodeName>("node-1")]
+        );
     }
 
     #[test]
     fn merge_existing_schedule_data_ignores_non_matching_nodes() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut next = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut next = DomainSchedule::new(
+            domain.clone(),
+            vec![
                 scheduled_node("ingest_notifications", ModelKind::Ingestor),
                 scheduled_node("kafka_main", ModelKind::Client),
             ],
-            placement_groups: Vec::new(),
-        };
-        let existing = DomainSchedule {
+            Vec::new(),
+        );
+        let existing = DomainSchedule::new(
             domain,
-            nodes: vec![
+            vec![
                 ScheduledNode {
                     effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(2, vec![0, 1], 3)),
+                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
+                        nonzero!(2u64),
+                        vec![0, 1],
+                        3,
+                    )),
                     ..scheduled_node("other_ingestor", ModelKind::Ingestor)
                 },
                 ScheduledNode {
                     effective_branching_schema: None,
-                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(1, vec![0], 2)),
+                    kafka_partition_schedule: Some(KafkaPartitionSchedule::new(
+                        nonzero!(1u64),
+                        vec![0],
+                        2,
+                    )),
                     ..scheduled_node("ingest_notifications", ModelKind::Client)
                 },
             ],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         SessionServiceImpl::merge_existing_schedule_data(&mut next, Some(&existing), &[]);
 
@@ -19087,304 +20940,381 @@ mod tests {
 
     #[test]
     fn merge_existing_schedule_data_rejects_a_split_require_group() {
-        let domain = Domain::parse("payments").expect("valid domain");
+        let domain = DomainName::parse("payments").expect("valid domain");
         let members = vec![
             placement_member("corridor_source", ModelKind::Junction),
             placement_member("corridor_sink", ModelKind::Junction),
         ];
-        let mut next = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
+        let mut next = DomainSchedule::new(
+            domain.clone(),
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), "node-1")],
-        };
-        let existing = DomainSchedule {
+            vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
+        );
+        let existing = DomainSchedule::new(
             domain,
-            nodes: vec![
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-3".to_string()),
-                    assigned_nodes: vec!["node-3".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-3").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-3").expect("valid name")],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, "node-2")],
-        };
+            vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
+        );
 
         SessionServiceImpl::merge_existing_schedule_data(
             &mut next,
             Some(&existing),
             &[
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
             ],
         );
 
-        assert!(
-            next.nodes
-                .iter()
-                .all(|node| node.primary_node.as_deref() == Some("node-1"))
-        );
+        assert!(next.nodes.values().all(|node| node.primary_node.as_ref()
+            == Some(&ClusterNodeName::parse("node-1").expect("valid name"))));
         assert_eq!(
-            next.placement_groups[0].primary_node.as_deref(),
-            Some("node-1")
+            next.placement_groups[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
         );
     }
 
     #[test]
     fn merge_existing_schedule_data_preserves_an_intact_require_group() {
-        let domain = Domain::parse("payments").expect("valid domain");
+        let domain = DomainName::parse("payments").expect("valid domain");
         let members = vec![
             placement_member("corridor_source", ModelKind::Junction),
             placement_member("corridor_sink", ModelKind::Junction),
         ];
-        let mut next = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
+        let mut next = DomainSchedule::new(
+            domain.clone(),
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), "node-1")],
-        };
-        let existing = DomainSchedule {
+            vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
+        );
+        let existing = DomainSchedule::new(
             domain,
-            nodes: vec![
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, "node-2")],
-        };
+            vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
+        );
 
         SessionServiceImpl::merge_existing_schedule_data(
             &mut next,
             Some(&existing),
-            &["node-1".to_string(), "node-2".to_string()],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
         );
 
-        assert!(
-            next.nodes
-                .iter()
-                .all(|node| node.primary_node.as_deref() == Some("node-2"))
-        );
+        assert!(next.nodes.values().all(|node| node.primary_node.as_ref()
+            == Some(&ClusterNodeName::parse("node-2").expect("valid name"))));
         assert_eq!(
-            next.placement_groups[0].primary_node.as_deref(),
-            Some("node-2")
+            next.placement_groups[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-2"))
         );
     }
 
     #[test]
     fn drain_relocates_a_require_group_as_one_unit() {
-        let domain = Domain::parse("payments").expect("valid domain");
+        let domain = DomainName::parse("payments").expect("valid domain");
         let members = vec![
             placement_member("corridor_source", ModelKind::Junction),
             placement_member("corridor_sink", ModelKind::Junction),
         ];
-        let mut schedule = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-2").expect("valid name")],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members.clone(), "node-2")],
-        };
-        let desired = DomainSchedule {
+            vec![placement_group(
+                members.clone(),
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
+        );
+        let desired = DomainSchedule::new(
             domain,
-            nodes: vec![
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-1".to_string()),
-                    assigned_nodes: vec!["node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                    assigned_nodes: vec![ClusterNodeName::parse("node-1").expect("valid name")],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, "node-1")],
-        };
+            vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-1").expect("valid name"),
+            )],
+        );
 
         let moved = SessionServiceImpl::move_next_scheduled_node_for_drain(
             &mut schedule,
             &desired,
-            "node-2",
+            &ClusterNodeName::parse("node-2").expect("valid name"),
             &BTreeSet::from([
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+                named::<ClusterNodeName>("node-3"),
             ]),
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert!(moved.is_some());
         assert!(
             schedule
                 .nodes
-                .iter()
-                .all(|node| node.primary_node.as_deref() == Some("node-1"))
+                .values()
+                .all(|node| node.primary_node.as_ref()
+                    == Some(&ClusterNodeName::parse("node-1").expect("valid name")))
         );
         assert_eq!(
-            schedule.placement_groups[0].primary_node.as_deref(),
-            Some("node-1")
+            schedule.placement_groups[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
         );
     }
 
     #[test]
     fn failover_relocates_a_require_group_to_one_target() {
-        let domain = Domain::parse("payments").expect("valid domain");
+        let domain = DomainName::parse("payments").expect("valid domain");
         let members = vec![
             placement_member("corridor_source", ModelKind::Junction),
             placement_member("corridor_sink", ModelKind::Junction),
         ];
-        let mut schedule = DomainSchedule {
+        let mut schedule = DomainSchedule::new(
             domain,
-            nodes: vec![
+            vec![
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-3").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_source", ModelKind::Junction)
                 },
                 ScheduledNode {
-                    primary_node: Some("node-2".to_string()),
-                    assigned_nodes: vec!["node-2".to_string(), "node-1".to_string()],
+                    primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                    assigned_nodes: vec![
+                        ClusterNodeName::parse("node-2").expect("valid name"),
+                        ClusterNodeName::parse("node-1").expect("valid name"),
+                    ],
                     ..scheduled_node("corridor_sink", ModelKind::Junction)
                 },
             ],
-            placement_groups: vec![placement_group(members, "node-2")],
-        };
+            vec![placement_group(
+                members,
+                &ClusterNodeName::parse("node-2").expect("valid name"),
+            )],
+        );
 
         let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
             &mut schedule,
             None,
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert!(!moves.is_empty());
         let group_host = schedule.placement_groups[0]
             .primary_node
-            .as_deref()
+            .as_ref()
             .expect("require group must retain a host");
         assert!(
             schedule
                 .nodes
-                .iter()
-                .all(|node| node.primary_node.as_deref() == Some(group_host))
+                .values()
+                .all(|node| node.primary_node.as_ref() == Some(group_host))
         );
     }
 
     #[test]
     fn failover_does_not_promote_a_cordoned_live_replica() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule::new(
             domain,
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-2".to_string()),
-                assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
             &mut schedule,
             None,
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
-            &BTreeSet::from(["node-1".to_string()]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
+            &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
         );
 
         assert!(!moves.is_empty());
-        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-1"))
+        );
     }
 
     #[test]
-    fn failover_prefers_policy_target_over_live_replica() {
-        let domain = Domain::parse("payments").expect("valid domain");
-        let mut schedule = DomainSchedule {
-            domain: domain.clone(),
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-2".to_string()),
-                assigned_nodes: vec!["node-2".to_string(), "node-3".to_string()],
+    fn failover_promotes_live_replica_before_policy_target() {
+        let domain = DomainName::parse("payments").expect("valid domain");
+        let mut schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-2").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
-            placement_groups: Vec::new(),
-        };
-        let desired = DomainSchedule {
+            Vec::new(),
+        );
+        let desired = DomainSchedule::new(
             domain,
-            nodes: vec![ScheduledNode {
-                primary_node: Some("node-1".to_string()),
-                assigned_nodes: vec!["node-1".to_string(), "node-3".to_string()],
+            vec![ScheduledNode {
+                primary_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+                assigned_nodes: vec![
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
                 ..scheduled_node("dedup_notifications", ModelKind::Deduplicator)
             }],
-            placement_groups: Vec::new(),
-        };
+            Vec::new(),
+        );
 
         let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
             &mut schedule,
             Some(&desired),
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
-            &BTreeSet::from(["node-1".to_string(), "node-3".to_string()]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
+            &BTreeSet::from([
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3"),
+            ]),
         );
 
         assert_eq!(
             moves,
             vec![DrainMove {
                 label: "deduplicator dedup_notifications".to_string(),
-                promoted_replica: None,
-                fallback_node: Some("node-1".to_string()),
+                promoted_replica: Some(ClusterNodeName::parse("node-3").expect("valid name")),
+                fallback_node: None,
             }]
         );
-        assert_eq!(schedule.nodes[0].primary_node.as_deref(), Some("node-1"));
+        assert_eq!(
+            schedule.nodes[0].primary_node.as_ref(),
+            Some(&named::<ClusterNodeName>("node-3"))
+        );
+        assert_eq!(
+            schedule.nodes[0].assigned_nodes,
+            vec![
+                named::<ClusterNodeName>("node-3"),
+                named::<ClusterNodeName>("node-1")
+            ]
+        );
     }
 
     #[test]
     fn resource_ref_suggestions_expand_known_resource_names_in_the_active_domain() {
-        let tenant = Domain::parse("tenant").expect("valid domain");
-        let other = Domain::parse("other").expect("valid domain");
+        let tenant = DomainName::parse("tenant").expect("valid domain");
+        let other = DomainName::parse("other").expect("valid domain");
         let resources = ResourceVersionStatus {
             next_version_by_resource: SortedVec::from_unsorted(vec![
-                (tenant.clone(), identifier("fraud_model"), 2),
-                (tenant.clone(), identifier("proto"), 1),
-                (other.clone(), identifier("promo_model"), 1),
+                ResourceVersionCounter {
+                    domain: tenant.clone(),
+                    identifier: named("fraud_model"),
+                    next_version: 2,
+                },
+                ResourceVersionCounter {
+                    domain: tenant.clone(),
+                    identifier: named("proto"),
+                    next_version: 1,
+                },
+                ResourceVersionCounter {
+                    domain: other.clone(),
+                    identifier: named("promo_model"),
+                    next_version: 1,
+                },
             ]),
             ..Default::default()
         };
@@ -19405,42 +21335,42 @@ mod tests {
 
     #[test]
     fn resource_version_suggestions_expand_known_versions() {
-        let tenant = Domain::parse("tenant").expect("valid domain");
-        let other = Domain::parse("other").expect("valid domain");
+        let tenant = DomainName::parse("tenant").expect("valid domain");
+        let other = DomainName::parse("other").expect("valid domain");
         let resources = ResourceVersionStatus {
             versions: SortedVec::from_unsorted(vec![
                 ResourceVersion {
-                    id: nervix_models::ResourceId::new(tenant.clone(), identifier("proto"), 1),
+                    id: nervix_models::ResourceId::new(tenant.clone(), named("proto"), 1),
                     root_checksum: "a".to_string(),
                     manifest_checksum: "a".to_string(),
                     file_count: 1,
                     total_bytes: 1,
                     created_at: Timestamp::from_unix_nanos(1),
-                    created_by_node: "node-1".to_string(),
+                    created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
                 },
                 ResourceVersion {
-                    id: nervix_models::ResourceId::new(tenant.clone(), identifier("proto"), 12),
+                    id: nervix_models::ResourceId::new(tenant.clone(), named("proto"), 12),
                     root_checksum: "b".to_string(),
                     manifest_checksum: "b".to_string(),
                     file_count: 1,
                     total_bytes: 1,
                     created_at: Timestamp::from_unix_nanos(1),
-                    created_by_node: "node-1".to_string(),
+                    created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
                 },
             ]),
             ..Default::default()
         };
 
         assert_eq!(
-            resource_version_suggestions(&resources, &tenant, &identifier("proto"), ""),
+            resource_version_suggestions(&resources, &tenant, &named("proto"), ""),
             vec!["1".to_string(), "12".to_string()]
         );
         assert_eq!(
-            resource_version_suggestions(&resources, &tenant, &identifier("proto"), "1"),
+            resource_version_suggestions(&resources, &tenant, &named("proto"), "1"),
             vec!["1".to_string(), "12".to_string()]
         );
         assert!(
-            resource_version_suggestions(&resources, &other, &identifier("proto"), "").is_empty(),
+            resource_version_suggestions(&resources, &other, &named("proto"), "").is_empty(),
             "another domain must not see this domain's resource versions"
         );
         assert_eq!(
@@ -19448,7 +21378,7 @@ mod tests {
                 "DESCRIBE RESOURCE proto VERSION ",
                 "DESCRIBE RESOURCE proto VERSION ".len()
             ),
-            Some(identifier("proto"))
+            Some(named("proto"))
         );
     }
 
@@ -19510,9 +21440,18 @@ mod tests {
 
     #[test]
     fn interconnect_initiation_uses_strict_node_id_order() {
-        assert!(should_initiate_interconnect("node-1", "node-2"));
-        assert!(!should_initiate_interconnect("node-2", "node-1"));
-        assert!(!should_initiate_interconnect("node-2", "node-2"));
+        assert!(should_initiate_interconnect(
+            &named::<ClusterNodeName>("node-1"),
+            &named::<ClusterNodeName>("node-2")
+        ));
+        assert!(!should_initiate_interconnect(
+            &named::<ClusterNodeName>("node-2"),
+            &named::<ClusterNodeName>("node-1")
+        ));
+        assert!(!should_initiate_interconnect(
+            &named::<ClusterNodeName>("node-2"),
+            &named::<ClusterNodeName>("node-2")
+        ));
     }
 
     #[test]
@@ -19520,7 +21459,7 @@ mod tests {
         assert_eq!(parse_request_domain(""), Err(RequestDomainError::Missing));
         assert_eq!(
             parse_request_domain(" tenant_a "),
-            Ok(Domain::parse("tenant_a").expect("valid domain"))
+            Ok(DomainName::parse("tenant_a").expect("valid domain"))
         );
         assert_eq!(
             parse_request_domain("bad.domain"),
@@ -19698,10 +21637,10 @@ mod tests {
         assert_eq!(response.diagnostics, vec![mapped]);
 
         let query = "CREATE RELAY orders SCHEMA notification UNBRANCHED;";
-        let identifier = identifier("orders");
+        let identifier = named("orders");
         assert_eq!(find_identifier_span(query, &identifier), Some(13..19));
 
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let err = error_stack::Report::new(RegistryError::AlreadyExists {
             domain: "default".to_string(),
             identifier: "orders".to_string(),
@@ -19741,7 +21680,7 @@ mod tests {
 
     #[test]
     fn parse_subscription_literal_enforces_declared_types() {
-        let field = identifier("created_at");
+        let field = named("created_at");
         assert!(matches!(
             parse_subscription_literal(
                 &field,
@@ -19752,14 +21691,14 @@ mod tests {
         ));
         assert!(matches!(
             parse_subscription_literal(
-                &identifier("active"),
+                &named("active"),
                 &ParseAsType::Bool,
                 &SubscriptionLiteral::Bool(true)
             ),
             Ok(runtime_schema::RuntimeValue::Bool(true))
         ));
         let err = parse_subscription_literal(
-            &identifier("user_id"),
+            &named("user_id"),
             &ParseAsType::U32,
             &SubscriptionLiteral::String("42".to_string()),
         )
@@ -19838,15 +21777,15 @@ mod tests {
         );
         let events_rx = events.new_receiver();
         subscriptions.insert(
-            identifier("live_events"),
-            Domain::parse("default").expect("valid domain"),
-            identifier("events"),
+            named("live_events"),
+            DomainName::parse("default").expect("valid domain"),
+            named("events"),
             SessionSubscriptionTaskConfig {
                 filter_map: None,
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
-                runtime: Arc::new(Runtime::default()),
+                runtime: Runtime::default(),
                 materialized_stream_owner_nodes: HashMap::default(),
                 receiver: events_rx,
                 tx,
@@ -19859,14 +21798,14 @@ mod tests {
         assert!(subscriptions.matching_names("missing").is_empty());
 
         let removed = subscriptions
-            .remove(&identifier("live_events"))
+            .remove(&named("live_events"))
             .await
             .expect("subscription should be removed");
         assert_eq!(removed.0.as_str(), "default");
         assert_eq!(removed.1.as_str(), "events");
         assert!(
             subscriptions
-                .remove(&identifier("missing_events"))
+                .remove(&named("missing_events"))
                 .await
                 .is_none()
         );
@@ -19880,15 +21819,15 @@ mod tests {
             std::num::NonZeroUsize::new(4).expect("test relay capacity must be nonzero"),
         );
         subscriptions.insert(
-            identifier("live_events"),
-            Domain::parse("default").expect("valid domain"),
-            identifier("events"),
+            named("live_events"),
+            DomainName::parse("default").expect("valid domain"),
+            named("events"),
             SessionSubscriptionTaskConfig {
                 filter_map: None,
                 sensitivity: nervix_vm::SchemaSensitivity::default(),
                 delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
                 batch_sample_rate: None,
-                runtime: Arc::new(Runtime::default()),
+                runtime: Runtime::default(),
                 materialized_stream_owner_nodes: HashMap::default(),
                 receiver: events.new_receiver(),
                 tx,
@@ -19904,7 +21843,7 @@ mod tests {
         let Some(proto::session_response::Event::Server(event)) = response.event else {
             panic!("expected server error event");
         };
-        assert_eq!(event.level, ServerEventLevel::Error as i32);
+        assert_eq!(event.level, i32::from(ServerEventLevel::Error));
         assert!(
             event
                 .message
@@ -19912,22 +21851,26 @@ mod tests {
         );
         assert!(event.message.contains("recreate the subscription"));
         tokio::task::yield_now().await;
-        assert!(!subscriptions.contains_name(&identifier("live_events")));
+        assert!(!subscriptions.contains_name(&named("live_events")));
 
         let _ = subscriptions
-            .remove(&identifier("live_events"))
+            .remove(&named("live_events"))
             .await
             .expect("closed subscription metadata should remain removable");
     }
 
     #[tokio::test]
     async fn create_domain_if_not_exists_returns_already_existed() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
 
         let first = service
             .create_domain(CreateStatement::new(
                 CreateDomain {
-                    id: Domain::parse("prod").expect("valid domain"),
+                    id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
                         period: "0ms".to_string(),
@@ -19944,7 +21887,7 @@ mod tests {
         let duplicate = service
             .create_domain(CreateStatement::new(
                 CreateDomain {
-                    id: Domain::parse("prod").expect("valid domain"),
+                    id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
                         period: "0ms".to_string(),
@@ -19964,17 +21907,21 @@ mod tests {
 
     #[tokio::test]
     async fn create_resource_if_not_exists_returns_already_existed() {
-        let (service, _registry, path) = build_test_service(true).await;
-        let default = Domain::parse("default").expect("valid domain");
-        create_test_domain(&service.consensus, "other").await;
-        let other = Domain::parse("other").expect("valid domain");
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let default = DomainName::parse("default").expect("valid domain");
+        create_test_domain(&service.inner.consensus, "other").await;
+        let other = DomainName::parse("other").expect("valid domain");
 
         let first = service
             .create_resource(
                 &default,
                 CreateStatement::new(
                     CreateResource {
-                        identifier: identifier("fraud_model"),
+                        identifier: named("fraud_model"),
                     },
                     false,
                 ),
@@ -19988,7 +21935,7 @@ mod tests {
                 &default,
                 CreateStatement::new(
                     CreateResource {
-                        identifier: identifier("fraud_model"),
+                        identifier: named("fraud_model"),
                     },
                     true,
                 ),
@@ -20003,7 +21950,7 @@ mod tests {
                 &other,
                 CreateStatement::new(
                     CreateResource {
-                        identifier: identifier("fraud_model"),
+                        identifier: named("fraud_model"),
                     },
                     false,
                 ),
@@ -20021,7 +21968,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_create_if_not_exists_returns_already_existed_for_models() {
-        let (service, registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20054,9 +22005,9 @@ mod tests {
 
         let schema = registry
             .get(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Schema,
-                &identifier("notification"),
+                named::<ModelName>("notification"),
             )
             .expect("registry get should succeed")
             .expect("schema should exist");
@@ -20072,7 +22023,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_implicit_semicolon_batch() {
-        let (service, registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20094,9 +22049,9 @@ mod tests {
         assert!(
             registry
                 .get(
-                    &Domain::parse("prod").expect("valid domain"),
+                    &DomainName::parse("prod").expect("valid domain"),
                     ModelKind::Schema,
-                    &identifier("notification"),
+                    named::<ModelName>("notification"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
@@ -20109,8 +22064,12 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
-        let (service, registry, path) = build_test_service(false).await;
-        create_test_domain(&service.consensus, "prod").await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        create_test_domain(&service.inner.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20141,9 +22100,9 @@ mod tests {
 
         let schema = registry
             .get(
-                &Domain::parse("prod").expect("valid domain"),
+                &DomainName::parse("prod").expect("valid domain"),
                 ModelKind::Schema,
-                &identifier("notification"),
+                named::<ModelName>("notification"),
             )
             .expect("registry get should succeed");
         assert!(
@@ -20152,9 +22111,9 @@ mod tests {
         );
         let relay = registry
             .get(
-                &Domain::parse("prod").expect("valid domain"),
+                &DomainName::parse("prod").expect("valid domain"),
                 ModelKind::Relay,
-                &identifier("notifications"),
+                named::<ModelName>("notifications"),
             )
             .expect("registry get should succeed");
         assert!(
@@ -20168,7 +22127,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_queues_transaction_across_requests_and_reverts() {
-        let (service, registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20207,9 +22170,9 @@ mod tests {
         assert!(
             registry
                 .get(
-                    &Domain::parse("default").expect("valid domain"),
+                    &DomainName::parse("default").expect("valid domain"),
                     ModelKind::Schema,
-                    &identifier("queued_event"),
+                    named::<ModelName>("queued_event"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
@@ -20239,9 +22202,9 @@ mod tests {
         assert!(
             registry
                 .get(
-                    &Domain::parse("default").expect("valid domain"),
+                    &DomainName::parse("default").expect("valid domain"),
                     ModelKind::Schema,
-                    &identifier("queued_event"),
+                    named::<ModelName>("queued_event"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
@@ -20254,7 +22217,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_begin_inside_begin() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20297,8 +22264,12 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_batch_returns_prior_successes_before_error() {
-        let (service, registry, path) = build_test_service(false).await;
-        create_test_domain(&service.consensus, "prod").await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        create_test_domain(&service.inner.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20325,15 +22296,16 @@ mod tests {
         assert!(
             registry
                 .get(
-                    &Domain::parse("prod").expect("valid domain"),
+                    &DomainName::parse("prod").expect("valid domain"),
                     ModelKind::Schema,
-                    &identifier("duplicated"),
+                    named::<ModelName>("duplicated"),
                 )
                 .expect("registry get should succeed")
                 .is_none(),
             "queue preflight failure must not execute the admitted prefix"
         );
         let transaction = service
+            .inner
             .consensus
             .current_transaction(
                 subscriptions
@@ -20350,7 +22322,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_domain_and_user_creation_inside_a_transaction() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20395,8 +22371,9 @@ mod tests {
 
         assert!(
             service
+                .inner
                 .consensus
-                .current_domain(&Domain::parse("alpha").expect("valid domain"))
+                .current_domain(&DomainName::parse("alpha").expect("valid domain"))
                 .await
                 .is_none(),
             "a rejected CREATE DOMAIN must not reach the control plane"
@@ -20408,7 +22385,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_begin_without_an_existing_domain() {
-        let (service, _registry, path) = build_test_service(false).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20446,8 +22427,12 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_rejects_statements_selecting_another_domain() {
-        let (service, _registry, path) = build_test_service(true).await;
-        create_test_domain(&service.consensus, "other").await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        create_test_domain(&service.inner.consensus, "other").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20487,6 +22472,7 @@ mod tests {
             foreign.message
         );
         let transaction = service
+            .inner
             .consensus
             .current_transaction(
                 subscriptions
@@ -20503,8 +22489,12 @@ mod tests {
 
     #[tokio::test]
     async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
-        let (service, _registry, path) = build_test_service(false).await;
-        create_test_domain(&service.consensus, "attach_results").await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        create_test_domain(&service.inner.consensus, "attach_results").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut owner = SessionSubscriptions::new();
 
@@ -20544,7 +22534,7 @@ mod tests {
         );
         assert_eq!(
             attached.transaction.as_ref().map(|status| status.state),
-            Some(ApiTransactionState::Committed as i32)
+            Some(i32::from(ApiTransactionState::Committed))
         );
         assert!(attached.message.contains("finished with outcome COMMITTED"));
         assert_eq!(attached.results.len(), 1);
@@ -20557,8 +22547,12 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_model_create_batch_is_atomic_on_registry_failure() {
-        let (service, registry, path) = build_test_service(false).await;
-        create_test_domain(&service.consensus, "prod").await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        create_test_domain(&service.inner.consensus, "prod").await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20581,13 +22575,21 @@ mod tests {
             Some(ApiTransactionState::Failed)
         );
 
-        let domain = Domain::parse("prod").expect("valid domain");
+        let domain = DomainName::parse("prod").expect("valid domain");
         let relay = registry
-            .get(&domain, ModelKind::Relay, &identifier("notifications"))
+            .get(
+                &domain,
+                ModelKind::Relay,
+                named::<ModelName>("notifications"),
+            )
             .expect("registry get should succeed");
         assert!(relay.is_none(), "failed model batch must not persist relay");
         let schema = registry
-            .get(&domain, ModelKind::Schema, &identifier("notification"))
+            .get(
+                &domain,
+                ModelKind::Schema,
+                named::<ModelName>("notification"),
+            )
             .expect("registry get should succeed");
         assert!(
             schema.is_none(),
@@ -20600,7 +22602,11 @@ mod tests {
 
     #[tokio::test]
     async fn web_console_command_request_invokes_session_command_processor() {
-        let (service, registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20623,9 +22629,9 @@ mod tests {
         assert!(result.success, "expected command success: {result:?}");
         let schema = registry
             .get(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Schema,
-                &identifier("web_console_event"),
+                named::<ModelName>("web_console_event"),
             )
             .expect("registry get should succeed");
         assert!(schema.is_some());
@@ -20636,7 +22642,11 @@ mod tests {
 
     #[tokio::test]
     async fn web_console_rejects_upload_and_supports_suggest_requests() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20693,8 +22703,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn placement_member_completion_expands_only_eligible_runtime_names() {
-        let (service, _registry, path) = build_test_service(true).await;
+    async fn placement_member_completion_expands_all_schedulable_runtime_names() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let configured = service
@@ -20724,7 +22738,8 @@ mod tests {
             .process_suggest(
                 SuggestRequest {
                     input: input.to_string(),
-                    cursor: u32::try_from(input.len()).expect("test input length fits u32"),
+                    cursor: u32::try_from(input.len())
+                        .assured("the test suggestion input is smaller than u32::MAX bytes"),
                     domain: "default".to_string(),
                 },
                 &subscriptions,
@@ -20741,8 +22756,8 @@ mod tests {
             "{values:?}"
         );
         assert!(values.contains(&"eligible_state".to_string()), "{values:?}");
-        assert!(!values.contains(&"plain_input".to_string()), "{values:?}");
-        assert!(!values.contains(&"plain_output".to_string()), "{values:?}");
+        assert!(values.contains(&"plain_input".to_string()), "{values:?}");
+        assert!(values.contains(&"plain_output".to_string()), "{values:?}");
         assert!(
             !values.contains(&"ref:runtime_node".to_string()),
             "{values:?}"
@@ -20761,7 +22776,8 @@ mod tests {
             .process_suggest(
                 SuggestRequest {
                     input: input.to_string(),
-                    cursor: u32::try_from(input.len()).expect("test input length fits u32"),
+                    cursor: u32::try_from(input.len())
+                        .assured("the test suggestion input is smaller than u32::MAX bytes"),
                     domain: "default".to_string(),
                 },
                 subscriptions,
@@ -20797,7 +22813,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_offers_models_queued_in_the_open_transaction() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20820,7 +22840,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_hides_models_dropped_in_the_open_transaction() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20874,7 +22898,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_keeps_queued_models_out_of_other_sessions() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut writer = SessionSubscriptions::new();
         let mut observer = SessionSubscriptions::new();
@@ -20904,7 +22932,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_drops_queued_models_until_a_detached_transaction_is_attached() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -20927,7 +22959,7 @@ mod tests {
 
         // A leadership change leaves the replicated transaction intact while the leader-local
         // binding is gone, which is what the session observes until it attaches again.
-        service.transaction_bindings.remove(&transaction_id);
+        service.inner.transaction_bindings.remove(&transaction_id);
 
         let detached =
             suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
@@ -20959,7 +22991,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_moves_queued_models_to_the_session_that_takes_the_transaction_over() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut first = SessionSubscriptions::new();
         let mut second = SessionSubscriptions::new();
@@ -21003,7 +23039,11 @@ mod tests {
 
     #[tokio::test]
     async fn placement_member_completion_expands_queued_runtime_names() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -21034,7 +23074,7 @@ mod tests {
         let values =
             suggestion_values(&service, &subscriptions, "CREATE PLACEMENT policy FROM ").await;
         assert!(values.contains(&"queued_state".to_string()), "{values:?}");
-        assert!(!values.contains(&"queued_plain".to_string()), "{values:?}");
+        assert!(values.contains(&"queued_plain".to_string()), "{values:?}");
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
@@ -21042,7 +23082,11 @@ mod tests {
 
     #[tokio::test]
     async fn show_placements_reports_fully_overridden_effective_coverage() {
-        let (service, _registry, path) = build_test_service(true).await;
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let configured = service
@@ -21072,7 +23116,7 @@ mod tests {
         );
 
         let output = service
-            .show_placements(&Domain::parse("default").expect("valid domain"))
+            .show_placements(&DomainName::parse("default").expect("valid domain"))
             .await;
         assert!(output.success, "SHOW PLACEMENTS should succeed: {output:?}");
         assert!(
@@ -21098,17 +23142,30 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(51000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(52000u16.saturating_add(id));
-        let raft_addr = test_addr(53000u16.saturating_add(id));
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
+        let grpc_addr = test_addr(
+            51000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            52000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            53000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -21128,25 +23185,25 @@ mod tests {
             .maybe_initialize()
             .await
             .expect("single-node consensus should initialize");
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_deref() == Some(expected_leader.as_str()) {
+            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(
-            consensus.current_leader().await.as_deref(),
-            Some(expected_leader.as_str()),
+            consensus.current_leader().await.as_ref(),
+            Some(&expected_leader),
             "single-node consensus must report itself as leader before command processing",
         );
         create_test_domain(&consensus, "default").await;
         let consensus = Arc::new(consensus);
-        let interconnect = test_interconnect(expected_leader.as_str()).await;
+        let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -21167,43 +23224,15 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        );
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let commands = [
@@ -21249,17 +23278,17 @@ mod tests {
 
         let deduplicator = registry
             .get(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Deduplicator,
-                &Identifier::parse("passthrough").expect("valid identifier"),
+                ModelName::parse("passthrough").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("deduplicator should exist");
         let emitter = registry
             .get(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Emitter,
-                &Identifier::parse("kafka_forward").expect("valid identifier"),
+                ModelName::parse("kafka_forward").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("emitter should exist");
@@ -21289,17 +23318,30 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(61000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(62000u16.saturating_add(id));
-        let raft_addr = test_addr(63000u16.saturating_add(id));
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
+        let grpc_addr = test_addr(
+            61000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            62000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            63000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -21320,19 +23362,19 @@ mod tests {
             .await
             .expect("single-node consensus should initialize");
         create_test_domain(&consensus, "default").await;
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_deref() == Some(expected_leader.as_str()) {
+            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let consensus = Arc::new(consensus);
-        let interconnect = test_interconnect(expected_leader.as_str()).await;
+        let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -21353,43 +23395,15 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        );
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
@@ -21433,9 +23447,9 @@ mod tests {
 
         let junction = registry
             .get(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Junction,
-                &Identifier::parse("join_streams").expect("valid identifier"),
+                ModelName::parse("join_streams").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("junction should exist");
@@ -21469,17 +23483,30 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let grpc_addr = test_addr(61000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(62000u16.saturating_add(id));
-        let raft_addr = test_addr(63000u16.saturating_add(id));
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
+        let grpc_addr = test_addr(
+            61000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            62000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            63000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -21500,19 +23527,19 @@ mod tests {
             .await
             .expect("single-node consensus should initialize");
         create_test_domain(&consensus, "default").await;
-        let expected_leader = format!("test-node-{id}");
+        let expected_leader = test_node_name(id);
         for _ in 0..50 {
-            if consensus.current_leader().await.as_deref() == Some(expected_leader.as_str()) {
+            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let consensus = Arc::new(consensus);
-        let interconnect = test_interconnect(expected_leader.as_str()).await;
+        let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -21533,43 +23560,15 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
+        let service = test_session_service(
             cluster,
             consensus,
-            registry: registry.clone(),
-            resource_store: Arc::new(
+            registry.clone(),
+            Arc::new(
                 ResourceStore::open(path.join("resources")).expect("resource store should open"),
             ),
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
             interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        );
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
@@ -21609,9 +23608,9 @@ mod tests {
 
         let deduplicator = registry
             .get(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 ModelKind::Deduplicator,
-                &Identifier::parse("dedup_txns").expect("valid identifier"),
+                ModelName::parse("dedup_txns").expect("valid model name"),
             )
             .expect("registry get should succeed")
             .expect("deduplicator should exist");
@@ -21658,18 +23657,31 @@ mod tests {
             Registry::from_database(db.clone(), Some(path.as_path()))
                 .expect("registry should open"),
         );
-        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as u16;
-        let expected_leader = format!("test-node-{id}");
-        let grpc_addr = test_addr(61000u16.saturating_add(id));
-        let cluster_listen_addr = test_addr(62000u16.saturating_add(id));
-        let raft_addr = test_addr(63000u16.saturating_add(id));
+        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+            .verified("this suite reserves far fewer than u16::MAX test identifiers");
+        let expected_leader = test_node_name(id);
+        let grpc_addr = test_addr(
+            61000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let cluster_listen_addr = test_addr(
+            62000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
+        let raft_addr = test_addr(
+            63000u16
+                .checked_add(id)
+                .assured("the test id fits inside the port block this suite reserves"),
+        );
         let interconnect_addr =
             cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
         let mut consensus = ConsensusHandle::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_api_advertise_url: cluster_api_base_url(
                     InternalTransportMode::Http,
                     &cluster::HostPort::from(raft_addr),
@@ -21699,14 +23711,10 @@ mod tests {
             .expect("test resource file should write");
         std::fs::write(source_v1.join("nested").join("beta.txt"), "beta")
             .expect("test resource file should write");
-        let resource_domain = Domain::parse("default").expect("valid domain");
+        let resource_domain = DomainName::parse("default").expect("valid domain");
         let manifest_v1 = resource_store
             .install_from_directory(
-                nervix_models::ResourceId::new(
-                    resource_domain.clone(),
-                    identifier("fraud_model"),
-                    1,
-                ),
+                nervix_models::ResourceId::new(resource_domain.clone(), named("fraud_model"), 1),
                 &source_v1,
                 expected_leader.clone(),
                 Timestamp::from_unix_nanos(77),
@@ -21719,11 +23727,7 @@ mod tests {
             .expect("test resource file should write");
         let manifest_v2 = resource_store
             .install_from_directory(
-                nervix_models::ResourceId::new(
-                    resource_domain.clone(),
-                    identifier("fraud_model"),
-                    2,
-                ),
+                nervix_models::ResourceId::new(resource_domain.clone(), named("fraud_model"), 2),
                 &source_v2,
                 expected_leader.clone(),
                 Timestamp::from_unix_nanos(79),
@@ -21731,7 +23735,7 @@ mod tests {
             .await
             .expect("resource version should install");
         consensus
-            .create_resource_catalog(&resource_domain, &identifier("fraud_model"))
+            .create_resource_catalog(&resource_domain, &named("fraud_model"))
             .await
             .expect("resource catalog should persist");
         consensus
@@ -21746,7 +23750,7 @@ mod tests {
             .put_resource_replica(nervix_models::ResourceNodeStatus {
                 key: nervix_models::ResourceReplicaKey::new(
                     resource_domain.clone(),
-                    identifier("fraud_model"),
+                    named("fraud_model"),
                     1,
                     expected_leader.clone(),
                 ),
@@ -21760,7 +23764,7 @@ mod tests {
             .expect("resource replica should persist");
         consensus
             .put_domain(DomainState {
-                id: Domain::parse("default").expect("valid domain"),
+                id: DomainName::parse("default").expect("valid domain"),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
                     period: "0ms".to_string(),
@@ -21775,17 +23779,17 @@ mod tests {
             .await
             .expect("domain should persist");
         for _ in 0..50 {
-            if consensus.current_leader().await.as_deref() == Some(expected_leader.as_str()) {
+            if consensus.current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let consensus = Arc::new(consensus);
-        let interconnect = test_interconnect(expected_leader.as_str()).await;
+        let interconnect = test_interconnect(&expected_leader).await;
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: format!("test-node-{id}"),
+                node_id: test_node_name(id),
                 cluster_listen_addr,
                 cluster_advertise_addr: cluster_listen_addr.into(),
                 grpc_listen_addr: grpc_addr,
@@ -21806,41 +23810,8 @@ mod tests {
             .await
             .expect("cluster should start"),
         );
-        let service = SessionServiceImpl {
-            cluster,
-            consensus,
-            registry,
-            resource_store,
-            cluster_api_clients: Arc::new(
-                ClusterApiClients::build().expect("test cluster api clients should build"),
-            ),
-            http_tls_server_config: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(Runtime::new()),
-            replica_count: 0,
-            #[cfg(feature = "testing")]
-            scheduler_mode: SchedulerMode::Sticky,
-            shutdown: CancellationToken::new(),
-            events: broadcast::channel(16).0,
-            subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
-            interconnect,
-            domain_clocks: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_reconciliations: Arc::new(DashMap::with_hasher(RandomState::new())),
-            domain_clock_events: Arc::new(Notify::new()),
-            next_cluster_command_correlation_id: Arc::new(AtomicU64::new(1)),
-            pending_cluster_commands: Arc::new(DashMap::default()),
-            service_tasks: TaskTracker::new(),
-            configured_basic_auth: None,
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
-            transaction_bindings: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
-            transaction_commit_execution: Arc::new(AsyncMutex::new(())),
-        };
+        let service =
+            test_session_service(cluster, consensus, registry, resource_store, interconnect);
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 

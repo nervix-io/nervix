@@ -1,5 +1,7 @@
 use std::sync::Arc as StdArc;
 
+use arch_into::ArchInto as _;
+use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
@@ -63,12 +65,15 @@ pub(super) struct RelayRecordBatchReorderFailure {
     pub(super) batch: RelayRecordBatch,
 }
 
-type UnkeyedRelayBatchParts = (
-    Arc<RuntimeRecordBatch>,
-    Vec<RuntimeRecordMetadata>,
-    Vec<Option<BranchKey>>,
-    Vec<AckSet>,
-);
+/// A relay batch taken apart into the Arrow batch and the per-row sidecars that travel with it.
+/// The branch keys come along so a caller that concatenates batches keeps every row's key, which
+/// is why this is not simply the batch plus metadata.
+pub(super) struct UnkeyedRelayBatchParts {
+    pub(super) batch: Arc<RuntimeRecordBatch>,
+    pub(super) metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) keys: Vec<Option<BranchKey>>,
+    pub(super) acks: Vec<AckSet>,
+}
 
 impl RelayRecordBatch {
     pub(super) fn runtime_row(&self, row: usize) -> Result<RuntimeRow, String> {
@@ -260,7 +265,12 @@ impl RelayRecordBatch {
     }
 
     pub(super) fn into_unkeyed_parts(self) -> UnkeyedRelayBatchParts {
-        (self.batch, self.metadata, self.keys, self.acks)
+        UnkeyedRelayBatchParts {
+            batch: self.batch,
+            metadata: self.metadata,
+            keys: self.keys,
+            acks: self.acks,
+        }
     }
 
     pub(super) fn into_reordered(
@@ -403,7 +413,10 @@ impl RelayRecordBatch {
 
         let key = first.key.clone();
         if batches.len() == 1 {
-            return Ok(batches.into_iter().next().expect("single batch must exist"));
+            return Ok(batches
+                .into_iter()
+                .next()
+                .verified("the length was just checked to be one"));
         }
 
         let concatenated = {
@@ -490,7 +503,7 @@ impl RelayRecordBatch {
     }
 
     pub(super) fn message_count(&self) -> u64 {
-        u64::try_from(self.batch.batch().num_rows()).unwrap_or(u64::MAX)
+        self.batch.batch().num_rows().arch_into()
     }
 
     pub(super) fn arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
@@ -535,7 +548,7 @@ fn reorder_owned_values<T>(values: Vec<T>, row_order: &[usize]) -> Vec<T> {
         .map(|row| {
             values[*row]
                 .take()
-                .expect("validated relay batch reorder must contain each row once")
+                .verified("the row order is a permutation, so each row is taken exactly once")
         })
         .collect()
 }
@@ -622,7 +635,10 @@ pub(super) fn build_stream_record_batch_preserving_acks(
 mod tests {
     use std::{cell::Cell, sync::Arc as StdArc};
 
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, SchemaField, Timestamp};
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        CreateSchema, FieldName, ModelName, ParseAsType, SchemaField, SchemaName, Timestamp,
+    };
     use triomphe::Arc;
 
     use super::{RelayMessage, RelayRecordBatch, delivery_observation_from_timestamps};
@@ -635,9 +651,11 @@ mod tests {
 
     fn test_schema() -> Arc<CompiledSchema> {
         Arc::new(compile_schema(&CreateSchema {
-            name: Identifier::parse("relay_batch_test").expect("valid schema name"),
+            name: SchemaName::from(
+                &ModelName::parse("relay_batch_test").expect("valid schema name"),
+            ),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("valid field name"),
+                name: FieldName::parse("value").expect("valid field name"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
@@ -663,10 +681,12 @@ mod tests {
                     row,
                     RuntimeRecordMetadata::from_ingested_at_watermarks(
                         Timestamp::from_unix_nanos(
-                            i64::try_from(row).expect("test row must fit i64"),
+                            i64::try_from(row)
+                                .assured("the test fixture allocates fewer than i64::MAX rows"),
                         ),
                         Timestamp::from_unix_nanos(
-                            i64::try_from(row).expect("test row must fit i64"),
+                            i64::try_from(row)
+                                .assured("the test fixture allocates fewer than i64::MAX rows"),
                         ),
                     ),
                 )

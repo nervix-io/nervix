@@ -5,107 +5,51 @@ use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 
 use crate::semantics::BuiltinLowering;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RegisterType {
-    UInt8,
-    Int8,
-    UInt16,
-    Int16,
-    UInt32,
-    Int32,
-    UInt64,
-    Int64,
-    Float32,
-    Float64,
-    Boolean,
-    Utf8,
-    Datetime,
-    Generic,
-}
+macro_rules! declare_register_types {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
+        pub enum RegisterType {
+            $($Variant,)+
+            Datetime,
+            Generic,
+        }
 
-impl RegisterType {
-    pub fn from_data_type(data_type: &DataType) -> Option<Self> {
-        match data_type {
-            DataType::UInt8 => Some(Self::UInt8),
-            DataType::Int8 => Some(Self::Int8),
-            DataType::UInt16 => Some(Self::UInt16),
-            DataType::Int16 => Some(Self::Int16),
-            DataType::UInt32 => Some(Self::UInt32),
-            DataType::Int32 => Some(Self::Int32),
-            DataType::UInt64 => Some(Self::UInt64),
-            DataType::Int64 => Some(Self::Int64),
-            DataType::Float32 => Some(Self::Float32),
-            DataType::Float64 => Some(Self::Float64),
-            DataType::Boolean => Some(Self::Boolean),
-            DataType::Utf8 => Some(Self::Utf8),
-            DataType::Timestamp(TimeUnit::Nanosecond, Some(tz))
-                if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
-            {
-                Some(Self::Datetime)
+        impl RegisterType {
+            pub fn from_data_type(data_type: &DataType) -> Option<Self> {
+                match data_type {
+                    $($data_type => Some(Self::$Variant),)+
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone))
+                        if timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC" =>
+                    {
+                        Some(Self::Datetime)
+                    }
+                    DataType::List(_) | DataType::FixedSizeList(_, _) => Some(Self::Generic),
+                    _ => None,
+                }
             }
-            DataType::List(_) | DataType::FixedSizeList(_, _) => Some(Self::Generic),
-            _ => None,
-        }
-    }
 
-    pub fn data_type(self) -> DataType {
-        match self {
-            Self::UInt8 => DataType::UInt8,
-            Self::Int8 => DataType::Int8,
-            Self::UInt16 => DataType::UInt16,
-            Self::Int16 => DataType::Int16,
-            Self::UInt32 => DataType::UInt32,
-            Self::Int32 => DataType::Int32,
-            Self::UInt64 => DataType::UInt64,
-            Self::Int64 => DataType::Int64,
-            Self::Float32 => DataType::Float32,
-            Self::Float64 => DataType::Float64,
-            Self::Boolean => DataType::Boolean,
-            Self::Utf8 => DataType::Utf8,
-            Self::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
-            Self::Generic => DataType::Null,
+            pub fn data_type(self) -> DataType {
+                match self {
+                    $(Self::$Variant => $data_type,)+
+                    Self::Datetime => {
+                        DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
+                    }
+                    Self::Generic => DataType::Null,
+                }
+            }
         }
-    }
+    };
 }
 
-impl fmt::Display for RegisterType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UInt8 => write!(f, "UInt8"),
-            Self::Int8 => write!(f, "Int8"),
-            Self::UInt16 => write!(f, "UInt16"),
-            Self::Int16 => write!(f, "Int16"),
-            Self::UInt32 => write!(f, "UInt32"),
-            Self::Int32 => write!(f, "Int32"),
-            Self::UInt64 => write!(f, "UInt64"),
-            Self::Int64 => write!(f, "Int64"),
-            Self::Float32 => write!(f, "Float32"),
-            Self::Float64 => write!(f, "Float64"),
-            Self::Boolean => write!(f, "Boolean"),
-            Self::Utf8 => write!(f, "Utf8"),
-            Self::Datetime => write!(f, "Datetime"),
-            Self::Generic => write!(f, "Generic"),
-        }
-    }
-}
+with_typed_registers!(declare_register_types);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
+#[strum(serialize_all = "lowercase")]
 pub enum RegisterSpace {
     Input,
     Temp,
     Condition,
     Output,
-}
-
-impl fmt::Display for RegisterSpace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Input => write!(f, "input"),
-            Self::Temp => write!(f, "temp"),
-            Self::Condition => write!(f, "condition"),
-            Self::Output => write!(f, "output"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,100 +71,31 @@ impl fmt::Display for RegisterRef {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RegisterLayout {
-    pub uint8: usize,
-    pub int8: usize,
-    pub uint16: usize,
-    pub int16: usize,
-    pub uint32: usize,
-    pub int32: usize,
-    pub uint64: usize,
-    pub int64: usize,
-    pub float32: usize,
-    pub float64: usize,
-    pub boolean: usize,
-    pub utf8: usize,
-    pub datetime: usize,
-    pub generic: usize,
-}
+macro_rules! declare_register_layout {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+        pub struct RegisterLayout {
+            $(pub $field: usize,)+
+            pub datetime: usize,
+            pub generic: usize,
+        }
 
-impl RegisterLayout {
-    pub fn alloc(&mut self, ty: RegisterType) -> usize {
-        match ty {
-            RegisterType::UInt8 => {
-                let index = self.uint8;
-                self.uint8 += 1;
-                index
-            }
-            RegisterType::Int8 => {
-                let index = self.int8;
-                self.int8 += 1;
-                index
-            }
-            RegisterType::UInt16 => {
-                let index = self.uint16;
-                self.uint16 += 1;
-                index
-            }
-            RegisterType::Int16 => {
-                let index = self.int16;
-                self.int16 += 1;
-                index
-            }
-            RegisterType::UInt32 => {
-                let index = self.uint32;
-                self.uint32 += 1;
-                index
-            }
-            RegisterType::Int32 => {
-                let index = self.int32;
-                self.int32 += 1;
-                index
-            }
-            RegisterType::UInt64 => {
-                let index = self.uint64;
-                self.uint64 += 1;
-                index
-            }
-            RegisterType::Int64 => {
-                let index = self.int64;
-                self.int64 += 1;
-                index
-            }
-            RegisterType::Float32 => {
-                let index = self.float32;
-                self.float32 += 1;
-                index
-            }
-            RegisterType::Float64 => {
-                let index = self.float64;
-                self.float64 += 1;
-                index
-            }
-            RegisterType::Boolean => {
-                let index = self.boolean;
-                self.boolean += 1;
-                index
-            }
-            RegisterType::Utf8 => {
-                let index = self.utf8;
-                self.utf8 += 1;
-                index
-            }
-            RegisterType::Datetime => {
-                let index = self.datetime;
-                self.datetime += 1;
-                index
-            }
-            RegisterType::Generic => {
-                let index = self.generic;
-                self.generic += 1;
+        impl RegisterLayout {
+            pub fn alloc(&mut self, ty: RegisterType) -> usize {
+                let slot = match ty {
+                    $(RegisterType::$Variant => &mut self.$field,)+
+                    RegisterType::Datetime => &mut self.datetime,
+                    RegisterType::Generic => &mut self.generic,
+                };
+                let index = *slot;
+                *slot += 1;
                 index
             }
         }
-    }
+    };
 }
+
+with_typed_registers!(declare_register_layout);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RegisterLayouts {

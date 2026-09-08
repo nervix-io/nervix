@@ -5,6 +5,7 @@ use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
+use meticulous::OptionExt as _;
 
 use crate::vm_program::{
     ast::{
@@ -470,7 +471,7 @@ pub fn parse_tokens(
     } else {
         Ok(parsed
             .into_output()
-            .expect("successful parse must contain a program"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

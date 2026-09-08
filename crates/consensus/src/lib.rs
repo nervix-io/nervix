@@ -1,3 +1,13 @@
+//! Raft replication of the control-plane state a Nervix cluster agrees on.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The log store, the state machine over the replicated state, snapshotting, leadership
+//!   observation, and the HTTP network between peers.
+//! - **Depends on.** The vocabulary for the state it replicates, and `fjall` for storage.
+//! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
+//!   and scheduling belong above; this crate agrees on values and hands them back.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Cursor},
@@ -9,10 +19,11 @@ use std::{
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures_util::StreamExt;
+use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterSchedule, Domain, DomainClockState, DomainId, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, Identifier, ResourceNodeStatus, ResourceVersion,
-    ResourceVersionStatus, Statement,
+    ClusterNodeName, ClusterSchedule, DomainClockState, DomainName, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
+    ResourceVersionCounter, ResourceVersionStatus, Statement, UserName,
 };
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
@@ -41,7 +52,7 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, timeout},
 };
-use tracing::info;
+use tracing::{error, info};
 use triomphe::Arc;
 
 mod transaction;
@@ -56,7 +67,7 @@ pub use transaction::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsensusCommand {
     ReplaceDomainSchedule {
-        domain: Domain,
+        domain: DomainName,
         schedule: Option<Box<DomainSchedule>>,
     },
     PutDomainAndSchedule {
@@ -67,29 +78,29 @@ pub enum ConsensusCommand {
         domain: Box<DomainState>,
     },
     StartDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
     },
     StopDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
     },
     PauseDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
     },
     ResumeDomain {
-        domain_id: DomainId,
+        domain_id: DomainName,
     },
     CreateUser {
         user: Box<UserCredentials>,
     },
     CreateResourceCatalog {
-        domain: DomainId,
-        identifier: Identifier,
+        domain: DomainName,
+        identifier: ResourceName,
     },
     AdvanceResourceVersion {
-        domain: DomainId,
-        identifier: Identifier,
+        domain: DomainName,
+        identifier: ResourceName,
     },
     PutResourceVersion {
         resource: Box<ResourceVersion>,
@@ -98,7 +109,7 @@ pub enum ConsensusCommand {
         replica: Box<ResourceNodeStatus>,
     },
     SetNodeCordoned {
-        node_id: String,
+        node_id: ClusterNodeName,
         cordoned: bool,
     },
     OpenTransaction {
@@ -107,20 +118,20 @@ pub enum ConsensusCommand {
     },
     QueueTransactionStatement {
         id: String,
-        owner: Identifier,
-        domain: Domain,
+        owner: UserName,
+        domain: DomainName,
         at: nervix_models::Timestamp,
         statement: Box<TransactionStatement>,
         limits: TransactionQueueLimits,
     },
     TouchTransaction {
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     },
     StartTransactionCommit {
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     },
     AdvanceTransactionCommit {
@@ -138,7 +149,7 @@ pub enum ConsensusCommand {
     },
     RevertTransaction {
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     },
     ExpireTransaction {
@@ -159,7 +170,7 @@ pub enum ConsensusResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserCredentials {
-    pub name: Identifier,
+    pub name: UserName,
     pub password_hash: String,
 }
 
@@ -265,22 +276,23 @@ openraft::declare_raft_types!(
     pub TypeConfig:
         D = ConsensusCommand,
         R = ConsensusResponse,
-        NodeId = String,
+        NodeId = ClusterNodeName,
         Node = BasicNode
 );
 
 pub type NervixRaft = Raft<TypeConfig, StdArc<FjallStore>>;
-pub type NodeId = String;
 pub type Node = BasicNode;
 pub type LogIdOf = LogId<CommittedLeaderIdOf<TypeConfig>>;
 pub type VoteOf = Vote<LeaderIdOf<TypeConfig>>;
-pub type StoredMembershipOf = StoredMembership<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>;
-pub type SnapshotOf = Snapshot<CommittedLeaderIdOf<TypeConfig>, NodeId, Node, Cursor<Vec<u8>>>;
+pub type StoredMembershipOf =
+    StoredMembership<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>;
+pub type SnapshotOf =
+    Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, Cursor<Vec<u8>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotRelayHeader {
     pub vote: VoteOf,
-    pub meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+    pub meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
 }
 
 pub const RAFT_APPEND_ENTRIES_PATH: &str = "/raft/append-entries";
@@ -301,7 +313,7 @@ const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub struct ConsensusSettings {
     pub cluster_name: String,
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     pub cluster_api_advertise_url: String,
     pub cluster_api_http_client: HttpClient,
     pub node_unavailability_timeout: Duration,
@@ -312,7 +324,7 @@ pub struct ConsensusSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
     pub cluster_api_advertise_addr: String,
     pub grpc_advertise_addr: String,
     pub web_console_advertise_addr: String,
@@ -324,7 +336,7 @@ pub struct GossipNode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GossipState {
     pub live_nodes: Vec<GossipNode>,
-    pub dead_node_ids: BTreeSet<String>,
+    pub dead_node_ids: BTreeSet<ClusterNodeName>,
 }
 
 impl GossipState {
@@ -339,7 +351,7 @@ impl GossipState {
 pub struct ConsensusRuntimeState {
     pub revision: u64,
     pub schedule: ClusterSchedule,
-    pub domains: BTreeMap<DomainId, DomainState>,
+    pub domains: BTreeMap<DomainName, DomainState>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,12 +360,12 @@ struct StateMachineData {
     last_membership: StoredMembershipOf,
     runtime_revision: u64,
     schedule: ClusterSchedule,
-    domains: BTreeMap<DomainId, DomainState>,
+    domains: BTreeMap<DomainName, DomainState>,
     #[serde(default)]
-    users: BTreeMap<Identifier, UserCredentials>,
+    users: BTreeMap<UserName, UserCredentials>,
     resources: ResourceVersionStatus,
     #[serde(default)]
-    cordoned_node_ids: BTreeSet<String>,
+    cordoned_node_ids: BTreeSet<ClusterNodeName>,
     transactions: BTreeMap<String, ReplicatedTransaction>,
 }
 
@@ -364,30 +376,20 @@ impl StateMachineData {
         }
     }
 
-    fn replace_domain_schedule(&mut self, domain: &Domain, schedule: Option<&DomainSchedule>) {
+    fn replace_domain_schedule(&mut self, domain: &DomainName, schedule: Option<&DomainSchedule>) {
         let Some(domain_schedule) = schedule else {
-            self.schedule.domains.retain(|item| item.domain != *domain);
+            self.schedule.domains.remove(domain);
             return;
         };
-        if let Some(existing) = self
-            .schedule
+        self.schedule
             .domains
-            .iter_mut()
-            .find(|item| item.domain == *domain)
-        {
-            *existing = domain_schedule.clone();
-        } else {
-            self.schedule.domains.push(domain_schedule.clone());
-            self.schedule
-                .domains
-                .sort_by(|left, right| left.domain.as_str().cmp(right.domain.as_str()));
-        }
+            .insert(domain.clone(), domain_schedule.clone());
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredSnapshotData {
-    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
     data: Vec<u8>,
 }
 
@@ -445,7 +447,7 @@ pub struct ConsensusHandle {
     local_node: GossipNode,
     cluster_api_http_client: HttpClient,
     node_unavailability_timeout: Duration,
-    peer_health: Arc<RwLock<BTreeMap<String, PeerHealth>>>,
+    peer_health: Arc<RwLock<BTreeMap<ClusterNodeName, PeerHealth>>>,
     events: broadcast::Sender<String>,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -511,21 +513,21 @@ impl ConsensusHandle {
                     break;
                 }
                 let metrics = rx.borrow_watched().clone();
-                let transition = (
-                    format!("{:?}", metrics.state),
-                    metrics.current_term,
-                    metrics
-                        .current_leader
-                        .clone()
-                        .unwrap_or_else(|| "(none)".to_string()),
-                );
+                let transition = RaftTransition {
+                    state: format!("{:?}", metrics.state),
+                    term: metrics.current_term,
+                    leader: metrics.current_leader.clone(),
+                };
                 if last_transition.as_ref() != Some(&transition) {
                     let summary = format!(
                         "raft transition: state={} leader={} term={} last_log_index={} \
                          last_applied={}",
-                        transition.0,
-                        transition.2,
-                        transition.1,
+                        transition.state,
+                        transition
+                            .leader
+                            .as_ref()
+                            .map_or("(none)", ClusterNodeName::as_str),
+                        transition.term,
                         metrics.last_log_index.unwrap_or_default(),
                         metrics
                             .last_applied
@@ -567,7 +569,7 @@ impl ConsensusHandle {
         self.store.inner.schedule_tx.subscribe()
     }
 
-    pub fn subscribe_domains(&self) -> watch::Receiver<BTreeMap<DomainId, DomainState>> {
+    pub fn subscribe_domains(&self) -> watch::Receiver<BTreeMap<DomainName, DomainState>> {
         self.store.inner.domain_tx.subscribe()
     }
 
@@ -585,7 +587,7 @@ impl ConsensusHandle {
         self.store.inner.state_machine.read().await.schedule.clone()
     }
 
-    pub async fn current_domains(&self) -> BTreeMap<DomainId, DomainState> {
+    pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
         self.store.inner.state_machine.read().await.domains.clone()
     }
 
@@ -619,7 +621,7 @@ impl ConsensusHandle {
         }
     }
 
-    pub async fn current_domain(&self, domain_id: &DomainId) -> Option<DomainState> {
+    pub async fn current_domain(&self, domain_id: &DomainName) -> Option<DomainState> {
         self.store
             .inner
             .state_machine
@@ -630,11 +632,11 @@ impl ConsensusHandle {
             .cloned()
     }
 
-    pub async fn current_users(&self) -> BTreeMap<Identifier, UserCredentials> {
+    pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
         self.store.inner.state_machine.read().await.users.clone()
     }
 
-    pub async fn current_user(&self, user: &Identifier) -> Option<UserCredentials> {
+    pub async fn current_user(&self, user: &UserName) -> Option<UserCredentials> {
         self.store
             .inner
             .state_machine
@@ -655,7 +657,7 @@ impl ConsensusHandle {
             .clone()
     }
 
-    pub async fn cordoned_node_ids(&self) -> BTreeSet<String> {
+    pub async fn cordoned_node_ids(&self) -> BTreeSet<ClusterNodeName> {
         self.store
             .inner
             .state_machine
@@ -670,11 +672,18 @@ impl ConsensusHandle {
         let handle = self.metrics_task.lock().take();
         if let Some(handle) = handle {
             handle.abort();
-            let _ = handle.await;
+            // The abort makes a cancellation the expected outcome and it says nothing new. A panic
+            // is the opposite: the metrics task died on its own and this join is the last place
+            // that fact exists.
+            if let Err(error) = handle.await
+                && !error.is_cancelled()
+            {
+                error!(%error, "consensus metrics task panicked before shutdown could join it");
+            }
         }
     }
 
-    pub fn local_node_id(&self) -> &str {
+    pub fn local_node_id(&self) -> &ClusterNodeName {
         &self.local_node.node_id
     }
 
@@ -853,13 +862,13 @@ impl ConsensusHandle {
         Ok(())
     }
 
-    pub async fn current_leader(&self) -> Option<String> {
+    pub async fn current_leader(&self) -> Option<ClusterNodeName> {
         self.raft.current_leader().await
     }
 
     pub async fn replace_domain_schedule(
         &self,
-        domain: Domain,
+        domain: DomainName,
         schedule: Option<DomainSchedule>,
     ) -> Result<(), ConsensusError> {
         self.raft
@@ -899,7 +908,7 @@ impl ConsensusHandle {
 
     pub async fn start_domain(
         &self,
-        domain_id: DomainId,
+        domain_id: DomainName,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
     ) -> Result<(), ConsensusError> {
@@ -914,7 +923,7 @@ impl ConsensusHandle {
             .map_err(Self::map_write_error)
     }
 
-    pub async fn stop_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+    pub async fn stop_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::StopDomain { domain_id })
             .await
@@ -922,7 +931,7 @@ impl ConsensusHandle {
             .map_err(Self::map_write_error)
     }
 
-    pub async fn pause_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+    pub async fn pause_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::PauseDomain { domain_id })
             .await
@@ -930,7 +939,7 @@ impl ConsensusHandle {
             .map_err(Self::map_write_error)
     }
 
-    pub async fn resume_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+    pub async fn resume_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::ResumeDomain { domain_id })
             .await
@@ -950,8 +959,8 @@ impl ConsensusHandle {
 
     pub async fn allocate_resource_version(
         &self,
-        domain: &DomainId,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ResourceName,
     ) -> Result<u64, ConsensusError> {
         let resources = self.current_resources().await;
         if !resources.is_declared(domain, identifier) {
@@ -976,8 +985,8 @@ impl ConsensusHandle {
 
     pub async fn create_resource_catalog(
         &self,
-        domain: &DomainId,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ResourceName,
     ) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::CreateResourceCatalog {
@@ -1017,7 +1026,7 @@ impl ConsensusHandle {
 
     pub async fn set_node_cordoned(
         &self,
-        node_id: String,
+        node_id: ClusterNodeName,
         cordoned: bool,
     ) -> Result<(), ConsensusError> {
         self.raft
@@ -1057,8 +1066,8 @@ impl ConsensusHandle {
     pub async fn queue_transaction_statement(
         &self,
         id: String,
-        owner: Identifier,
-        domain: Domain,
+        owner: UserName,
+        domain: DomainName,
         at: nervix_models::Timestamp,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
@@ -1077,7 +1086,7 @@ impl ConsensusHandle {
     pub async fn touch_transaction(
         &self,
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::TouchTransaction { id, owner, at })
@@ -1087,7 +1096,7 @@ impl ConsensusHandle {
     pub async fn start_transaction_commit(
         &self,
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::StartTransactionCommit { id, owner, at })
@@ -1131,7 +1140,7 @@ impl ConsensusHandle {
     pub async fn revert_transaction(
         &self,
         id: String,
-        owner: Identifier,
+        owner: UserName,
         at: nervix_models::Timestamp,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::RevertTransaction { id, owner, at })
@@ -1164,18 +1173,17 @@ impl ConsensusHandle {
     }
 
     async fn ping_peer(&self, target_addr: &str) -> Result<(), ConsensusError> {
-        self.cluster_api_http_client
+        let response = self
+            .cluster_api_http_client
             .get(format!("{target_addr}/raft/ping"))
             .send()
             .await
-            .map_err(|_| ConsensusError::Transport)
-            .and_then(|response| {
-                if response.status().is_success() {
-                    Ok(())
-                } else {
-                    Err(ConsensusError::Transport)
-                }
-            })
+            .map_err(|_| ConsensusError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ConsensusError::Transport)
+        }
     }
 
     pub async fn status_lines(&self) -> Vec<String> {
@@ -1186,7 +1194,7 @@ impl ConsensusHandle {
             "raft.current_leader: {}",
             metrics
                 .current_leader
-                .unwrap_or_else(|| "(none)".to_string())
+                .map_or_else(|| "(none)".to_string(), |leader| leader.to_string())
         ));
         lines.push(format!("raft.current_term: {}", metrics.current_term));
         lines.push(format!("raft.state: {:?}", metrics.state));
@@ -1261,7 +1269,7 @@ impl ConsensusHandle {
         lines
     }
 
-    pub async fn membership_nodes(&self) -> BTreeMap<String, String> {
+    pub async fn membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
         let metrics = self.raft.metrics().borrow_watched().clone();
         metrics
             .membership_config
@@ -1270,15 +1278,15 @@ impl ConsensusHandle {
             .collect()
     }
 
-    pub async fn membership_voter_ids(&self) -> BTreeSet<String> {
+    pub async fn membership_voter_ids(&self) -> BTreeSet<ClusterNodeName> {
         let metrics = self.raft.metrics().borrow_watched().clone();
         metrics.membership_config.membership().voter_ids().collect()
     }
 
     pub async fn live_voter_ids(
         &self,
-        live_node_ids: impl IntoIterator<Item = String>,
-    ) -> Vec<String> {
+        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
         let voters = self.membership_voter_ids().await;
         let mut live_voters = live_node_ids
             .into_iter()
@@ -1291,8 +1299,8 @@ impl ConsensusHandle {
 
     pub async fn schedulable_live_voter_ids(
         &self,
-        live_node_ids: impl IntoIterator<Item = String>,
-    ) -> Vec<String> {
+        live_node_ids: impl IntoIterator<Item = ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
         let cordoned = self.cordoned_node_ids().await;
         self.live_voter_ids(live_node_ids)
             .await
@@ -1301,8 +1309,8 @@ impl ConsensusHandle {
             .collect()
     }
 
-    pub async fn drop_node(&self, node_id: &str) -> Result<(), ConsensusError> {
-        if node_id == self.local_node.node_id {
+    pub async fn drop_node(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
+        if *node_id == self.local_node.node_id {
             return Err(ConsensusError::RemoveLocalLeader(node_id.to_string()));
         }
 
@@ -1368,7 +1376,7 @@ impl ConsensusHandle {
 
     pub async fn transfer_leadership_to(
         &self,
-        target_node_id: String,
+        target_node_id: ClusterNodeName,
     ) -> Result<(), openraft::error::Fatal<TypeConfig>> {
         self.raft.trigger().transfer_leader(target_node_id).await
     }
@@ -1376,7 +1384,7 @@ impl ConsensusHandle {
     pub async fn install_full_snapshot(
         &self,
         vote: VoteOf,
-        meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+        meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
         snapshot: Vec<u8>,
     ) -> Result<SnapshotResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
         self.raft
@@ -1405,7 +1413,7 @@ pub struct NetworkClient {
 impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     type Network = NetworkClient;
 
-    async fn new_client(&mut self, _target: NodeId, node: &Node) -> Self::Network {
+    async fn new_client(&mut self, _target: ClusterNodeName, node: &Node) -> Self::Network {
         Self::Network {
             target: node.addr.clone(),
             http_client: self.http_client.clone(),
@@ -1427,11 +1435,17 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
     ciborium::from_reader(Cursor::new(bytes)).map_err(io_error)
 }
 
-fn encode_stream_frame(bytes: &[u8]) -> Vec<u8> {
+fn encode_stream_frame(bytes: &[u8]) -> Result<Vec<u8>, io::Error> {
+    let encoded_len = u32::try_from(bytes.len()).map_err(|_| {
+        io_error(format!(
+            "stream frame length {} exceeds u32::MAX",
+            bytes.len()
+        ))
+    })?;
     let mut frame = Vec::with_capacity(4 + bytes.len());
-    frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&encoded_len.to_be_bytes());
     frame.extend_from_slice(bytes);
-    frame
+    Ok(frame)
 }
 
 async fn read_response_bytes(
@@ -1531,24 +1545,47 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
             &encode(&header)
                 .map_err(unreachable_err)
                 .map_err(StreamingError::from)?,
-        );
+        )
+        .map_err(unreachable_err)
+        .map_err(StreamingError::from)?;
+        /// How far the snapshot relay body has been written: the framed header until it is sent,
+        /// the encoded snapshot, and the offset the next chunk starts at.
+        struct SnapshotRelayProgress {
+            header: Option<Vec<u8>>,
+            bytes: Vec<u8>,
+            offset: usize,
+            chunk_size: usize,
+        }
+
         let stream = futures_util::stream::unfold(
-            (Some(header), bytes, 0usize, chunk_size),
-            |(header, bytes, offset, chunk_size)| async move {
-                if let Some(header) = header {
+            SnapshotRelayProgress {
+                header: Some(header),
+                bytes,
+                offset: 0,
+                chunk_size,
+            },
+            |progress| async move {
+                if let Some(header) = progress.header {
                     return Some((
                         Ok::<Vec<u8>, io::Error>(header),
-                        (None, bytes, offset, chunk_size),
+                        SnapshotRelayProgress {
+                            header: None,
+                            ..progress
+                        },
                     ));
                 }
-                if offset >= bytes.len() {
+                if progress.offset >= progress.bytes.len() {
                     return None;
                 }
 
-                let end = (offset + chunk_size).min(bytes.len());
+                let end = (progress.offset + progress.chunk_size).min(progress.bytes.len());
+                let chunk = progress.bytes[progress.offset..end].to_vec();
                 Some((
-                    Ok::<Vec<u8>, io::Error>(bytes[offset..end].to_vec()),
-                    (None, bytes, end, chunk_size),
+                    Ok::<Vec<u8>, io::Error>(chunk),
+                    SnapshotRelayProgress {
+                        offset: end,
+                        ..progress
+                    },
                 ))
             },
         );
@@ -1621,7 +1658,7 @@ struct StoreInner {
     state_machine: RwLock<StateMachineData>,
     current_snapshot: RwLock<Option<StoredSnapshotData>>,
     schedule_tx: watch::Sender<ClusterSchedule>,
-    domain_tx: watch::Sender<BTreeMap<DomainId, DomainState>>,
+    domain_tx: watch::Sender<BTreeMap<DomainName, DomainState>>,
     resource_tx: watch::Sender<ResourceVersionStatus>,
     transaction_tx: watch::Sender<BTreeMap<String, ReplicatedTransaction>>,
 }
@@ -1934,7 +1971,7 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
 
     async fn install_snapshot(
         &mut self,
-        meta: &SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, NodeId, Node>,
+        meta: &SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
         snapshot: Cursor<Vec<u8>>,
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
@@ -2065,7 +2102,10 @@ fn apply_consensus_command(
         } => {
             if let Some(domain) = state.domains.get_mut(domain_id) {
                 domain.status = DomainStatus::Running;
-                domain.start_version = domain.start_version.saturating_add(1);
+                domain.start_version = domain
+                    .start_version
+                    .checked_add(1)
+                    .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
                 domain.last_start = start.clone();
                 domain.clock = clock.clone();
                 changes.domains_changed = true;
@@ -2207,10 +2247,10 @@ fn apply_consensus_command(
             if let Some(effect) = effect {
                 if let Err(error) = validate_transaction_step_effect(
                     state,
-                    state
-                        .transactions
-                        .get(id)
-                        .expect("transaction was read from replicated state"),
+                    state.transactions.get(id).verified(
+                        "the branch above resolved this transaction id in the same replicated \
+                         state",
+                    ),
                     *expected_next_statement,
                     *next_statement,
                     result,
@@ -2221,10 +2261,9 @@ fn apply_consensus_command(
                 }
                 apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
             } else if let Err(error) = validate_transaction_step_without_effect(
-                state
-                    .transactions
-                    .get(id)
-                    .expect("transaction was read from replicated state"),
+                state.transactions.get(id).verified(
+                    "the branch above resolved this transaction id in the same replicated state",
+                ),
                 *expected_next_statement,
                 *next_statement,
                 result,
@@ -2516,7 +2555,7 @@ fn validate_transaction_step_effect(
 
 fn apply_transaction_step_effect(
     state: &mut StateMachineData,
-    domain: &DomainId,
+    domain: &DomainName,
     effect: &TransactionStepEffect,
     changes: &mut StateMachineChanges,
 ) {
@@ -2545,7 +2584,10 @@ fn apply_transaction_step_effect(
         } => {
             if let Some(domain) = state.domains.get_mut(domain_id) {
                 domain.status = DomainStatus::Running;
-                domain.start_version = domain.start_version.saturating_add(1);
+                domain.start_version = domain
+                    .start_version
+                    .checked_add(1)
+                    .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
                 domain.last_start = start.clone();
                 domain.clock = clock.clone();
                 changes.domains_changed = true;
@@ -2565,46 +2607,57 @@ fn apply_transaction_step_effect(
     }
 }
 
-fn resource_catalog_slot(
-    resources: &ResourceVersionStatus,
-    domain: &DomainId,
-    identifier: &Identifier,
-) -> Result<usize, usize> {
-    resources
-        .next_version_by_resource
-        .binary_search_by(|(stored_domain, stored_identifier, _)| {
-            stored_domain
-                .cmp(domain)
-                .then_with(|| stored_identifier.cmp(identifier))
-        })
+/// The raft state a node last reported, compared as a whole so a repeated metrics update that
+/// changes nothing is not logged again.
+#[derive(PartialEq, Eq)]
+struct RaftTransition {
+    state: String,
+    term: u64,
+    leader: Option<ClusterNodeName>,
 }
 
 fn ensure_resource_catalog(
     resources: &mut ResourceVersionStatus,
-    domain: &DomainId,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ResourceName,
 ) {
-    if let Err(index) = resource_catalog_slot(resources, domain, identifier) {
-        resources
-            .next_version_by_resource
-            .mutate_vec(|entries| entries.insert(index, (domain.clone(), identifier.clone(), 1)));
+    if let Err(index) = resources.resource_slot(domain, identifier) {
+        resources.next_version_by_resource.mutate_vec(|entries| {
+            entries.insert(
+                index,
+                ResourceVersionCounter {
+                    domain: domain.clone(),
+                    identifier: identifier.clone(),
+                    next_version: 1,
+                },
+            );
+        });
     }
 }
 
 fn advance_resource_version(
     resources: &mut ResourceVersionStatus,
-    domain: &DomainId,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ResourceName,
 ) {
-    match resource_catalog_slot(resources, domain, identifier) {
+    match resources.resource_slot(domain, identifier) {
         Ok(index) => {
             resources.next_version_by_resource.mutate_vec(|entries| {
-                entries[index].2 = entries[index].2.saturating_add(1);
+                entries[index].next_version = entries[index].next_version.checked_add(1).assured(
+                    "a resource cannot be replaced 2^64 times in the lifetime of a cluster",
+                );
             });
         }
         Err(index) => {
             resources.next_version_by_resource.mutate_vec(|entries| {
-                entries.insert(index, (domain.clone(), identifier.clone(), 2))
+                entries.insert(
+                    index,
+                    ResourceVersionCounter {
+                        domain: domain.clone(),
+                        identifier: identifier.clone(),
+                        next_version: 2,
+                    },
+                );
             });
         }
     }
@@ -2677,11 +2730,14 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 mod tests {
     use std::{io::Cursor, ops::RangeInclusive, sync::Arc as StdArc};
 
+    use arch_into::ArchInto as _;
     use fjall::Database;
+    use meticulous::OptionExt as _;
     use nervix_models::{
-        Domain, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
-        ResourceReplicaKey, ResourceVersion, ResourceVersionStatus, Statement,
+        DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
+        DomainStatus, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
+        ResourceReplicaKey, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
+        Statement,
     };
     use openraft::{
         SnapshotMeta,
@@ -2702,10 +2758,13 @@ mod tests {
         TypeConfig, UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame,
         io_error, load_value, read_key, write_key,
     };
-    use crate::{ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits, VoteOf};
+    use crate::{
+        ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
+        UserName, VoteOf,
+    };
 
-    fn domain(raw: &str) -> Domain {
-        Domain::try_from(raw).expect("valid domain")
+    fn domain(raw: &str) -> DomainName {
+        DomainName::try_from(raw).expect("valid domain")
     }
 
     #[test]
@@ -2713,7 +2772,7 @@ mod tests {
         let state = GossipState {
             live_nodes: vec![
                 GossipNode {
-                    node_id: "node-2".to_string(),
+                    node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                     cluster_api_advertise_addr: "http://node-2".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
@@ -2722,7 +2781,7 @@ mod tests {
                     interconnect_public_key: String::new(),
                 },
                 GossipNode {
-                    node_id: "node-3".to_string(),
+                    node_id: ClusterNodeName::parse("node-3").expect("valid name"),
                     cluster_api_advertise_addr: "http://node-3".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
@@ -2731,7 +2790,9 @@ mod tests {
                     interconnect_public_key: String::new(),
                 },
             ],
-            dead_node_ids: ["node-3".to_string()].into_iter().collect(),
+            dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
+                .into_iter()
+                .collect(),
         };
 
         assert_eq!(
@@ -2744,11 +2805,7 @@ mod tests {
     }
 
     fn domain_schedule(raw: &str) -> DomainSchedule {
-        DomainSchedule {
-            domain: domain(raw),
-            nodes: Vec::new(),
-            placement_groups: Vec::new(),
-        }
+        DomainSchedule::new(domain(raw), Vec::new(), Vec::new())
     }
 
     fn running_domain_state(raw: &str) -> DomainState {
@@ -2771,7 +2828,7 @@ mod tests {
         ResourceVersion {
             id: ResourceId::new(
                 domain(domain_id),
-                Identifier::parse(identifier).expect("valid identifier"),
+                ResourceName::parse(identifier).expect("valid resource name"),
                 version,
             ),
             root_checksum: format!("root-{version}"),
@@ -2779,7 +2836,7 @@ mod tests {
             file_count: 2,
             total_bytes: 128,
             created_at: nervix_models::Timestamp::from_unix_nanos(42),
-            created_by_node: "node-1".to_string(),
+            created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
         }
     }
 
@@ -2791,7 +2848,10 @@ mod tests {
     }
 
     fn committed_leader(term: u64) -> CommittedLeaderIdOf<TypeConfig> {
-        <LeaderIdOf<TypeConfig> as RaftLeaderIdExt>::new_committed(term, "node-1".to_string())
+        <LeaderIdOf<TypeConfig> as RaftLeaderIdExt>::new_committed(
+            term,
+            ClusterNodeName::parse("node-1").expect("valid name"),
+        )
     }
 
     fn blank_log_entries(term: u64, indexes: RangeInclusive<u64>) -> Vec<EntryOf<TypeConfig>> {
@@ -2847,7 +2907,7 @@ mod tests {
     #[test]
     fn snapshot_relay_header_roundtrips_in_length_delimited_cbor_frame() {
         let header = SnapshotRelayHeader {
-            vote: VoteOf::new(7, "node-1".to_string()),
+            vote: VoteOf::new(7, ClusterNodeName::parse("node-1").expect("valid name")),
             meta: SnapshotMeta {
                 last_log_id: None,
                 last_membership: StoredMembershipOf::default(),
@@ -2855,12 +2915,13 @@ mod tests {
         };
 
         let payload = encode(&header).expect("snapshot relay header should encode");
-        let frame = encode_stream_frame(&payload);
+        let frame = encode_stream_frame(&payload).expect("snapshot relay frame should encode");
         let length = u32::from_be_bytes(
             frame[..4]
                 .try_into()
                 .expect("snapshot relay frame has a length prefix"),
-        ) as usize;
+        )
+        .arch_into();
         assert_eq!(length, payload.len());
         let decoded: SnapshotRelayHeader =
             decode(&frame[4..]).expect("snapshot relay header should decode");
@@ -2877,9 +2938,7 @@ mod tests {
     #[test]
     fn apply_consensus_command_replaces_sorts_and_clears_schedule() {
         let mut state = StateMachineData {
-            schedule: ClusterSchedule {
-                domains: vec![domain_schedule("zeta")],
-            },
+            schedule: ClusterSchedule::from_iter([domain_schedule("zeta")]),
             ..Default::default()
         };
 
@@ -2894,8 +2953,8 @@ mod tests {
             state
                 .schedule
                 .domains
-                .iter()
-                .map(|item| item.domain.as_str())
+                .keys()
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["alpha", "zeta"]
         );
@@ -2920,8 +2979,8 @@ mod tests {
             state
                 .schedule
                 .domains
-                .iter()
-                .map(|item| item.domain.as_str())
+                .keys()
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["alpha"]
         );
@@ -2962,7 +3021,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::CreateUser {
                 user: Box::new(UserCredentials {
-                    name: Identifier::parse("app_user").expect("valid identifier"),
+                    name: UserName::parse("app_user").expect("valid user name"),
                     password_hash: "argon2-hash".to_string(),
                 }),
             },
@@ -2983,7 +3042,7 @@ mod tests {
 
     #[test]
     fn transaction_step_effect_and_progress_are_applied_once() {
-        let owner = Identifier::parse("app_user").expect("valid owner");
+        let owner = UserName::parse("app_user").expect("valid owner");
         let domain_id = domain("tenant");
         let mut stopped = running_domain_state("tenant");
         stopped.status = DomainStatus::Stopped;
@@ -3020,7 +3079,10 @@ mod tests {
                     owner: owner.clone(),
                     domain: domain_id.clone(),
                     at: nervix_models::Timestamp::from_unix_nanos(
-                        i64::try_from(at).unwrap_or_default().saturating_add(2),
+                        i64::try_from(at)
+                            .unwrap_or_default()
+                            .checked_add(2)
+                            .assured("the test clock counts from zero"),
                     ),
                     statement: Box::new(TransactionStatement {
                         source: "statement".to_string(),
@@ -3051,6 +3113,7 @@ mod tests {
                 first_statement: 0,
                 statement_count: 1,
                 quiesce_level: None,
+                planned_relocations: None,
                 result: TransactionCommandResult {
                     success: true,
                     message: "started".to_string(),
@@ -3101,6 +3164,7 @@ mod tests {
                     first_statement: 1,
                     statement_count: 1,
                     quiesce_level: None,
+                    planned_relocations: None,
                     result: TransactionCommandResult {
                         success: false,
                         message: "validation failed".to_string(),
@@ -3167,7 +3231,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::AdvanceResourceVersion {
                 domain: domain("tenant"),
-                identifier: Identifier::parse("fraud_model").expect("valid identifier"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
             },
         );
         assert_eq!(
@@ -3177,16 +3241,16 @@ mod tests {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec![(
-                domain("tenant"),
-                Identifier::parse("fraud_model").expect("valid identifier"),
-                2
-            )]
+            vec![ResourceVersionCounter {
+                domain: domain("tenant"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
+                next_version: 2,
+            }]
         );
         assert!(
             !state.resources.is_declared(
                 &domain("other"),
-                &Identifier::parse("fraud_model").expect("valid identifier")
+                &ResourceName::parse("fraud_model").expect("valid resource name")
             ),
             "a resource declared in one domain must not appear in another"
         );
@@ -3206,14 +3270,14 @@ mod tests {
         let replica = ResourceNodeStatus {
             key: ResourceReplicaKey::new(
                 domain("tenant"),
-                Identifier::parse("fraud_model").expect("valid identifier"),
+                ResourceName::parse("fraud_model").expect("valid resource name"),
                 1,
-                "node-2",
+                ClusterNodeName::parse("node-2").expect("valid name"),
             ),
             state: ResourceNodeState::Ready,
             root_checksum: Some("root-1".to_string()),
             last_verified_at: Some(nervix_models::Timestamp::from_unix_nanos(77)),
-            source_node_id: Some("node-1".to_string()),
+            source_node_id: Some(ClusterNodeName::parse("node-1").expect("valid name")),
             error: None,
         };
         apply_consensus_command(
@@ -3235,7 +3299,7 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::SetNodeCordoned {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                 cordoned: true,
             },
         );
@@ -3244,7 +3308,7 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::SetNodeCordoned {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
                 cordoned: false,
             },
         );
@@ -3254,7 +3318,7 @@ mod tests {
     #[test]
     fn apply_consensus_command_tracks_users_without_overwriting_existing_password_hash() {
         let mut state = StateMachineData::default();
-        let name = Identifier::parse("app_user").expect("valid identifier");
+        let name = UserName::parse("app_user").expect("valid user name");
 
         apply_consensus_command(
             &mut state,
@@ -3290,9 +3354,7 @@ mod tests {
         let schedule_keyspace = db
             .keyspace("raft_schedule", fjall::KeyspaceCreateOptions::default)
             .expect("schedule keyspace");
-        let schedule = ClusterSchedule {
-            domains: vec![domain_schedule("tenant")],
-        };
+        let schedule = ClusterSchedule::from_iter([domain_schedule("tenant")]);
         write_key(&schedule_keyspace, KEY_CLUSTER_SCHEDULE, &schedule).expect("write schedule");
 
         let store = FjallStore::from_database(db).expect("store should open");
@@ -3304,8 +3366,8 @@ mod tests {
                 .await
                 .schedule
                 .domains
-                .iter()
-                .map(|item| item.domain.as_str())
+                .keys()
+                .map(DomainName::as_str)
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
@@ -3313,7 +3375,10 @@ mod tests {
 
         store
             .inner
-            .write_vote(&VoteOf::new(7, "node-1".to_string()))
+            .write_vote(&VoteOf::new(
+                7,
+                ClusterNodeName::parse("node-1").expect("valid name"),
+            ))
             .await
             .expect("vote should persist");
         assert!(store.has_raft_state().await);
@@ -3343,7 +3408,7 @@ mod tests {
     async fn log_reader_returns_the_requested_range_in_index_order() {
         let mut store =
             StdArc::new(FjallStore::from_database(temp_database()).expect("store should open"));
-        let vote = VoteOf::new(4, "node-1".to_string());
+        let vote = VoteOf::new(4, ClusterNodeName::parse("node-1").expect("valid name"));
         RaftLogStorage::<TypeConfig>::save_vote(&mut store, &vote)
             .await
             .expect("vote should save");
@@ -3401,7 +3466,7 @@ mod tests {
         );
         assert!(read_log_indexes(&mut reader).await.is_empty());
 
-        let vote = VoteOf::new(2, "node-1".to_string());
+        let vote = VoteOf::new(2, ClusterNodeName::parse("node-1").expect("valid name"));
         RaftLogStorage::<TypeConfig>::save_vote(&mut store, &vote)
             .await
             .expect("vote should save");
@@ -3439,9 +3504,7 @@ mod tests {
     async fn snapshot_build_and_install_roundtrip_preserves_state() {
         let tenant = domain("tenant");
         let state = StateMachineData {
-            schedule: ClusterSchedule {
-                domains: vec![domain_schedule("tenant")],
-            },
+            schedule: ClusterSchedule::from_iter([domain_schedule("tenant")]),
             domains: [(tenant, running_domain_state("tenant"))]
                 .into_iter()
                 .collect(),

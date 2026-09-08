@@ -1,14 +1,15 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{ModelKind, ShowCreate};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref, correlator_ref,
-        deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref, ingestor_ref,
-        into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, placement_ref,
-        reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref,
-        vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
+        LexedInput, ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref,
+        correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref,
+        ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref,
+        placement_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggest_from, tok,
+        udf_ref, vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
         wire_json_schema_ref,
     },
 };
@@ -20,7 +21,7 @@ pub fn show_create_parser<'src>()
             .ignore_then(schema_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Schema,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Wire)
             .ignore_then(kw(Identifier::Json))
@@ -28,7 +29,7 @@ pub fn show_create_parser<'src>()
             .ignore_then(wire_json_schema_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::WireJsonSchema,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Wire)
             .ignore_then(kw(Identifier::Cbor))
@@ -36,7 +37,7 @@ pub fn show_create_parser<'src>()
             .ignore_then(wire_cbor_schema_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::WireCborSchema,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Wire)
             .ignore_then(kw(Identifier::Avro))
@@ -44,115 +45,115 @@ pub fn show_create_parser<'src>()
             .ignore_then(wire_avro_schema_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::WireAvroSchema,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Codec)
             .ignore_then(codec_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Codec,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Client)
             .ignore_then(client_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Client,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Vhost)
             .ignore_then(vhost_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Vhost,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Endpoint)
             .ignore_then(endpoint_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Endpoint,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Generator)
             .ignore_then(generator_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Generator,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Ingestor)
             .ignore_then(ingestor_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Ingestor,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Reingestor)
             .ignore_then(reingestor_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Reingestor,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Reorderer)
             .ignore_then(reorderer_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Reorderer,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Inferencer)
             .ignore_then(inferencer_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Inferencer,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Relay)
             .ignore_then(relay_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Relay,
-                name,
+                name: name.into(),
             }),
         kw_phrase2(Identifier::Hash, Identifier::Map)
             .ignore_then(lookup_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Lookup,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Junction)
             .ignore_then(junction_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Junction,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Deduplicator)
             .ignore_then(deduplicator_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Deduplicator,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Correlator)
             .ignore_then(correlator_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Correlator,
-                name,
+                name: name.into(),
             }),
         kw_phrase2(Identifier::Window, Identifier::Processor)
             .ignore_then(window_processor_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::WindowProcessor,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Emitter)
             .ignore_then(emitter_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Emitter,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Placement)
             .ignore_then(placement_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Placement,
-                name,
+                name: name.into(),
             }),
         kw(Identifier::Udf)
             .ignore_then(udf_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Udf,
-                name,
+                name: name.into(),
             }),
     );
 
@@ -169,12 +170,16 @@ pub fn parse_show_create_tokens(tokens: &[Token]) -> Result<ShowCreate, Vec<Pars
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_show_create(input: &str) -> Result<ShowCreate, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_show_create_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

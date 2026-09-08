@@ -1,31 +1,67 @@
+use std::num::NonZeroU64;
+
 use async_nats::Client as NatsClient;
+use nervix_models::DomainName;
 
 use super::super::*;
 
 pub(in crate::runtime) struct NatsIngestor;
 
+/// The headers of one borrowed NATS message, each value visited under its own name.
+struct NatsMessageHeaders<'a>(&'a async_nats::Message);
+
+impl IngestMessageHeaders for NatsMessageHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        let Some(headers) = self.0.headers.as_ref() else {
+            return;
+        };
+        for (name, values) in headers.iter() {
+            for value in values {
+                visit(name.as_ref(), value.as_str());
+            }
+        }
+    }
+}
+
 impl NatsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientNats,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
             });
         }
 
-        let (subject, queue_group, instances) = match &ingestor.source {
+        /// The parts of a NATS ingest source this task drives, taken from the model once so the
+        /// rest of startup reads named values rather than re-matching the source.
+        struct NatsSource {
+            subject: nervix_models::SubjectName,
+            queue_group: nervix_models::QueueGroupName,
+            instances: NonZeroU64,
+        }
+
+        let NatsSource {
+            subject,
+            queue_group,
+            instances,
+        } = match &ingestor.source {
             IngestSource::Nats {
                 subject,
                 queue_group,
                 instances,
                 ..
-            } => (subject.clone(), queue_group.clone(), *instances),
+            } => NatsSource {
+                subject: subject.clone(),
+                queue_group: queue_group.clone(),
+                instances: *instances,
+            },
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
@@ -54,11 +90,13 @@ impl NatsIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled NATS ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
-        for instance_idx in 0..instances {
+        let mut tasks = Vec::with_capacity(instances.get().arch_into());
+        for instance_idx in 0..instances.get() {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let task_runtime = runtime.clone();
             let task_domain = domain.clone();
@@ -66,7 +104,7 @@ impl NatsIngestor {
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_subject = subject.clone();
             let task_queue_group = queue_group.clone();
-            let task_events = runtime.events.clone();
+            let task_events = runtime.events().clone();
             let task_config = resolved_client.entries.clone();
             let task_client_mounts = resolved_client.mounts.clone();
             let task_output_routes = output_routes.clone();
@@ -97,7 +135,7 @@ impl NatsIngestor {
                     {
                         break;
                     }
-                    if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                    if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {
@@ -205,13 +243,13 @@ impl NatsIngestor {
                                 })
                                 .await
                             {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to dispatch buffered nats payload for ingestor '{}' \
                                      in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                             continue;
                         }
@@ -255,12 +293,12 @@ impl NatsIngestor {
                                     )
                                     .await
                                 {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                 }
                             }
                             message = subscriber.next() => {
@@ -271,7 +309,9 @@ impl NatsIngestor {
                                         backoff.reset();
                                         let key = message.subject.to_string();
                                         let payload = message.payload.as_ref();
-                                        let headers = Self::headers_from_message(&message);
+                                        let headers = RetainedIngestHeaders::capture(
+                                            &NatsMessageHeaders(&message),
+                                        );
 
                                         trace!(
                                             domain = task_domain.as_str(),
@@ -305,12 +345,12 @@ impl NatsIngestor {
                                                 })
                                                 .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                task_events.report_error(format!(
                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                     task_ingestor.as_str(),
                                                     task_domain.as_str(),
                                                     error
-                                                )));
+                                                ));
                                             }
                                                 if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                     && let Err(error) = task_runtime
@@ -322,14 +362,14 @@ impl NatsIngestor {
                                                         )
                                                         .await
                                                 {
-                                                    let _ = task_events.send(RuntimeEvent::Error(
+                                                    task_events.report_error(
                                                         format!(
                                                             "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                                             task_ingestor.as_str(),
                                                             task_domain.as_str(),
                                                             error
                                                         ),
-                                                    ));
+                                                    );
                                                 }
                                         }
                                     }
@@ -374,7 +414,7 @@ impl NatsIngestor {
             tasks.push(task);
         }
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -417,22 +457,5 @@ impl NatsIngestor {
             .connect(addr)
             .await
             .map_err(|source| source.to_string())
-    }
-
-    fn headers_from_message(message: &async_nats::Message) -> IngestHeaders {
-        message
-            .headers
-            .as_ref()
-            .map(|headers| {
-                headers
-                    .iter()
-                    .flat_map(|(name, values)| {
-                        values
-                            .iter()
-                            .map(|value| (name.to_string(), value.to_string()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 }

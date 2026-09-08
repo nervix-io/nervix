@@ -1,5 +1,6 @@
 [package]
 build = "build.rs"
+description = "Generated Protobuf and gRPC types for the Nervix session and cluster APIs"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-proto"
@@ -18,4 +19,5 @@ prost = { workspace = true }
 tonic = { workspace = true, optional = true }
 
 [build-dependencies]
+meticulous = { workspace = true }
 tonic-build = { workspace = true }

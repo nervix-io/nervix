@@ -1,13 +1,15 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{AlterGenerator, AlterGeneratorOperation, CreateGenerator, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, alter_generator_route_body, alter_op_separator,
-        branch_selection, completion_context, duration_lit, flushed_explicit_processor_outputs,
-        generator_name, generator_ref, if_not_exists_clause, into_parse_error, kw, kw_phrase3,
-        lex_input, relay_ref, suggest_from, suggestions_from_errors, tok,
+        LexedInput, ParseError, ParseFromSourceError, alter_generator_route_body,
+        alter_op_separator, branch_selection, completion_context, duration_lit,
+        flushed_explicit_processor_outputs, generator_name, generator_ref, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase3, lex_input, relay_ref, suggest_from,
+        suggestions_from_errors, tok,
     },
 };
 
@@ -111,7 +113,7 @@ pub fn parse_create_generator_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -124,20 +126,28 @@ pub fn parse_alter_generator_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_generator(
     input: &str,
 ) -> Result<CreateStatement<CreateGenerator>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_generator_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_generator(input: &str) -> Result<AlterGenerator, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_generator_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -148,7 +158,7 @@ pub fn suggest_create_generator(input: &str, cursor: usize) -> Vec<String> {
 
 pub fn suggest_alter_generator(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let (_, _, tokens) = match lex_input(&source) {
+    let LexedInput { tokens, .. } = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

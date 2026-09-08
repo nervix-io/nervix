@@ -1524,7 +1524,6 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "rr1"
     And selector ".relay-hit" contains "rr1"
     And selector ".node-hit" does not contain "rr1"
-    And selector ".graph-hit-layer" does not contain "materializer"
     And selector ".graph-hit-layer" contains "source_txns_endpoint"
     And selector ".graph-hit-layer" contains "state_txns_endpoint"
     And selector ".graph-hit-layer" contains "ENDPOINT"

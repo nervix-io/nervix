@@ -1,6 +1,8 @@
 use std::path::Path;
 
 use ahash::{HashMap, HashMapExt};
+use arch_into::ArchInto as _;
+use meticulous::OptionExt as _;
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, InferencerTensorSchema,
@@ -410,7 +412,11 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
     }
 
     fn batch_shape(&self, slice_shape: &[usize], batch_size: usize) -> Result<Vec<usize>, String> {
-        let expected_slice_rank = self.dimensions.len().saturating_sub(1);
+        let expected_slice_rank = self
+            .dimensions
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| "batched tensor schema has no dimensions".to_string())?;
         if slice_shape.len() != expected_slice_rank {
             return Err(format!(
                 "tensor slice rank {} does not match declared rank {}",
@@ -424,7 +430,9 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             if let InferencerTensorDimension::Batch = dimension {
                 shape.push(batch_size);
             } else {
-                shape.push(*slice_dimensions.next().expect("slice rank was validated"));
+                shape.push(*slice_dimensions.next().verified(
+                    "the rank check above rejected a slice shape with too few dimensions",
+                ));
             }
         }
         self.validate_concrete_shape(&shape, batch_size, true)?;
@@ -465,7 +473,9 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         }
         for (actual, declared) in shape.iter().zip(dimensions) {
             match declared {
-                InferencerTensorDimension::Fixed(expected) if *actual != *expected as usize => {
+                InferencerTensorDimension::Fixed(expected)
+                    if *actual != expected.get().arch_into() =>
+                {
                     return Err(format!(
                         "tensor shape {shape:?} has dimension {actual}, expected {expected}"
                     ));
@@ -518,7 +528,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
                 "batched tensor slice contains {actual} values, expected {expected_slice_len}"
             ));
         }
-        let mut joined = Vec::with_capacity(expected_slice_len.saturating_mul(slices.len()));
+        let joined_len = expected_slice_len
+            .checked_mul(slices.len())
+            .ok_or_else(|| "batched tensor joined element count overflowed".to_string())?;
+        let mut joined = Vec::with_capacity(joined_len);
         for outer_index in 0..outer {
             for slice in slices {
                 let start = outer_index * inner;
@@ -540,7 +553,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             .ok_or_else(|| "batched tensor schema has no BATCH axis".to_string())?;
         let outer = shape[..batch_axis].iter().product::<usize>();
         let inner = shape[batch_axis + 1..].iter().product::<usize>();
-        let expected = outer.saturating_mul(batch_size).saturating_mul(inner);
+        let expected = outer
+            .checked_mul(batch_size)
+            .and_then(|count| count.checked_mul(inner))
+            .ok_or_else(|| "batched tensor output element count overflowed".to_string())?;
         if values.len() != expected {
             return Err(format!(
                 "batched output contains {} values, expected {}",
@@ -548,7 +564,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
                 expected
             ));
         }
-        let mut slices = vec![Vec::with_capacity(outer.saturating_mul(inner)); batch_size];
+        let slice_len = outer
+            .checked_mul(inner)
+            .ok_or_else(|| "batched tensor slice element count overflowed".to_string())?;
+        let mut slices = vec![Vec::with_capacity(slice_len); batch_size];
         for outer_index in 0..outer {
             for (batch_index, slice) in slices.iter_mut().enumerate() {
                 let start = (outer_index * batch_size + batch_index) * inner;
@@ -577,9 +596,9 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         }
         let (values, size) = match (dimension, value) {
             (InferencerTensorDimension::Fixed(expected), RuntimeValue::Array(values))
-                if values.len() == *expected as usize =>
+                if values.len() == expected.get().arch_into() =>
             {
-                (values, *expected as usize)
+                (values, expected.get().arch_into())
             }
             (InferencerTensorDimension::Fixed(expected), RuntimeValue::Array(values)) => {
                 return Err(format!(
@@ -633,7 +652,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         let mut shape = Vec::new();
         for dimension in dimensions {
             match dimension {
-                InferencerTensorDimension::Fixed(size) => shape.push(*size as usize),
+                InferencerTensorDimension::Fixed(size) => shape.push(size.get().arch_into()),
                 InferencerTensorDimension::Dynamic => {
                     return Err(
                         "cannot infer an inner DYNAMIC axis from an empty outer vector".to_string(),
@@ -672,7 +691,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             return Err("tensor value has fewer axes than its schema".to_string());
         };
         if let InferencerTensorDimension::Fixed(expected) = dimension
-            && size != *expected as usize
+            && size != expected.get().arch_into()
         {
             return Err(format!(
                 "tensor axis has length {size}, expected {expected}"
@@ -715,6 +734,7 @@ mod tests {
         InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
         InferencerTensorSchema,
     };
+    use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
     use super::{RuntimeTensorSchema, RuntimeTensorSlice};
@@ -726,8 +746,8 @@ mod tests {
             representation: InferencerTensorRepresentation::Dense,
             element_type: InferencerTensorElementType::F32,
             dimensions: vec![
-                InferencerTensorDimension::Fixed(2),
-                InferencerTensorDimension::Fixed(3),
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
             ],
         };
         let value = RuntimeValue::Array(vec![
@@ -782,9 +802,9 @@ mod tests {
             representation: InferencerTensorRepresentation::Dense,
             element_type: InferencerTensorElementType::F32,
             dimensions: vec![
-                InferencerTensorDimension::Fixed(2),
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
                 InferencerTensorDimension::Batch,
-                InferencerTensorDimension::Fixed(3),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
             ],
         };
         let slices = vec![

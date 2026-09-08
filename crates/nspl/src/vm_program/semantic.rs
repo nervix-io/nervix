@@ -1,5 +1,6 @@
 use ahash_compile_time::{HashSet, HashSetExt};
 use arrow_schema::{DataType, Schema, TimeUnit};
+use meticulous::OptionExt as _;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator as ModelBinaryOperator,
     CaseBranch as ModelCaseBranch, Expression as ModelExpression, FieldReference, FieldScope,
@@ -40,12 +41,12 @@ pub fn lower_transforming_route(
             initialized.insert(inherited.field.clone());
             let input = ModelExpression::Field(FieldReference::scoped(
                 FieldScope::Input,
-                nervix_models::Identifier::parse(&inherited.field)
+                nervix_models::FieldName::parse(&inherited.field)
                     .map_err(|error| error.to_string())?,
             ));
             let value = if inherited.leak_sensitive {
                 ModelExpression::Call {
-                    function: nervix_models::Identifier::parse("leak_sensitive")
+                    function: nervix_models::BuiltinFunctionName::parse("leak_sensitive")
                         .map_err(|error| error.to_string())?,
                     arguments: vec![input],
                 }
@@ -55,7 +56,7 @@ pub fn lower_transforming_route(
             normalized.assignments.push(Assignment {
                 target: AssignmentTarget {
                     scope: AssignmentTargetScope::Output,
-                    field: nervix_models::Identifier::parse(&inherited.field)
+                    field: nervix_models::FieldName::parse(&inherited.field)
                         .map_err(|error| error.to_string())?,
                 },
                 value,
@@ -661,7 +662,10 @@ pub fn lower_route_construction(
     let operation_count = construction.assignments.len()
         + usize::from(construction.where_clause.is_some())
         + construction.invocations.len();
-    let span: Span = (0..operation_count.saturating_add(1)).into();
+    let span: Span = (0..operation_count
+        .checked_add(1)
+        .assured("the operations counted here belong to one construction held in memory"))
+        .into();
     let set = construction
         .assignments
         .iter()

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use arch_into::ArchInto as _;
 use async_nats::Client as NatsClient;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
@@ -21,17 +22,22 @@ use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
+use meticulous::ResultExt as _;
+use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
+use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
+
+/// Cucumber node ids are fixed strings from the feature files, so they always parse.
+pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
+    ClusterNodeName::parse(raw).expect("cucumber node ids are valid cluster node names")
+}
 #[cfg(feature = "testing")]
 use nervix_server::SchedulerMode;
 use nervix_server::{
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::{
-        DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks,
-        SchedulePublicationFaultInjector,
-    },
+    runtime::{DEFAULT_TEMP_DIR, RuntimeTestHooks},
 };
 use parking_lot::Mutex;
 use proto::{
@@ -320,7 +326,7 @@ fn observability_metric_has_value(
         }
         matching_lines.push(line.to_string());
         if let Some(value) = parse_prometheus_sample_value(line)
-            && (value - expected_value as f64).abs() < f64::EPSILON
+            && (value - expected_value.approx_into::<f64>()).abs() < f64::EPSILON
         {
             return true;
         }
@@ -498,7 +504,7 @@ impl Cluster {
             let node_id = format!("node-{index}");
             let spec = NodeSpec::new(&root_dir, &node_id, index == 1)?;
             runtime_test_hooks
-                .set_syslog_ingestor_bind_ip(node_id.clone(), spec.syslog_ingestor_host);
+                .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
                 NodeHandle::new(spec, runtime_test_hooks.clone(), config.clone()),
@@ -655,7 +661,7 @@ impl Cluster {
         let mut spec = NodeSpec::new(&self._root_dir, node_id, false)?;
         spec.bootstrap_host = Some(bootstrap_host);
         self.runtime_test_hooks
-            .set_syslog_ingestor_bind_ip(node_id.to_string(), spec.syslog_ingestor_host);
+            .set_syslog_ingestor_bind_ip(node_name(node_id), spec.syslog_ingestor_host);
         self.nodes.insert(
             node_id.to_string(),
             NodeHandle::new(spec, self.runtime_test_hooks.clone(), config),
@@ -696,6 +702,17 @@ impl Cluster {
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         handle.stop().await
+    }
+
+    /// Signals a node to exit without waiting for the process. Scenarios that observe a
+    /// transient reaction to owner loss must start observing while the node is still on its way
+    /// down, because the leader reacts as soon as it sees the node go.
+    pub(crate) fn begin_stopping_node(&mut self, node_id: &str) {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.request_stop();
     }
 
     pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
@@ -1097,6 +1114,16 @@ impl Cluster {
         headers: &[(&str, &str)],
     ) -> io::Result<()> {
         publish_kafka_with_headers(&self.dependencies, topic, payload, headers).await
+    }
+
+    pub(crate) async fn publish_kafka_partition_with_headers(
+        &self,
+        topic: &str,
+        partition: i32,
+        payload: &str,
+        headers: &[(&str, &str)],
+    ) -> io::Result<()> {
+        publish_kafka_record(&self.dependencies, topic, Some(partition), payload, headers).await
     }
 
     pub(crate) async fn publish_kafka_burst(
@@ -1644,7 +1671,9 @@ impl Cluster {
                 && leader_status.raft_state.as_deref() == Some("Leader")
             {
                 if stable_leader.as_deref() == Some(leader_id.as_str()) {
-                    stable_count = stable_count.saturating_add(1);
+                    stable_count = stable_count
+                        .checked_add(1)
+                        .expect("a leader is polled a bounded number of times");
                 } else {
                     stable_leader = Some(leader_id.clone());
                     stable_count = 1;
@@ -1724,7 +1753,7 @@ impl Cluster {
 
     pub(crate) fn transfer_leadership(&self, from_node_id: &str, to_node_id: &str) {
         self.runtime_test_hooks
-            .request_leadership_transfer(from_node_id.to_string(), to_node_id.to_string());
+            .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
     }
     async fn wait_until<F>(&self, node_id: &str, predicate: F) -> io::Result<()>
     where
@@ -1770,14 +1799,14 @@ impl Drop for Cluster {
     }
 }
 
+/// One node in a test cluster. The fault injectors are reached through `runtime_test_hooks`
+/// rather than copied in beside it, so arming a fault and the node that observes it can never
+/// drift apart.
 #[derive(Debug)]
 struct NodeHandle {
     spec: NodeSpec,
     runtime_test_hooks: RuntimeTestHooks,
     config: TestClusterConfig,
-    emitter_faults: Arc<EmitterFaultInjector>,
-    ingestor_faults: Arc<IngestorFaultInjector>,
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
     shutdown: Option<CancellationToken>,
@@ -1789,16 +1818,10 @@ impl NodeHandle {
         runtime_test_hooks: RuntimeTestHooks,
         config: TestClusterConfig,
     ) -> Self {
-        let emitter_faults = runtime_test_hooks.emitter_faults.clone();
-        let ingestor_faults = runtime_test_hooks.ingestor_faults.clone();
-        let schedule_publication_faults = runtime_test_hooks.schedule_publication_faults.clone();
         Self {
             spec,
             runtime_test_hooks,
             config,
-            emitter_faults,
-            ingestor_faults,
-            schedule_publication_faults,
             failure: Arc::new(Mutex::new(None)),
             task: None,
             shutdown: None,
@@ -1829,7 +1852,7 @@ impl NodeHandle {
             .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
             .cluster_id("cucumber".to_string())
-            .node_id(self.spec.node_id.clone())
+            .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
             .cluster_listen_addr(parse_addr(&self.spec.cluster_addr())?)
@@ -1992,27 +2015,36 @@ impl NodeHandle {
     }
 
     fn fail_emitter(&self, emitter: &str) {
-        self.emitter_faults.fail_emitter(emitter);
+        self.runtime_test_hooks.emitter_faults.fail_emitter(emitter);
     }
 
     fn stall_emitter(&self, emitter: &str) {
-        self.emitter_faults.stall_emitter(emitter);
+        self.runtime_test_hooks
+            .emitter_faults
+            .stall_emitter(emitter);
     }
 
     fn clear_emitter_fault(&self, emitter: &str) {
-        self.emitter_faults.clear_emitter(emitter);
+        self.runtime_test_hooks
+            .emitter_faults
+            .clear_emitter(emitter);
     }
 
     fn fail_ingestor(&self, ingestor: &str) {
-        self.ingestor_faults.fail_ingestor(ingestor);
+        self.runtime_test_hooks
+            .ingestor_faults
+            .fail_ingestor(ingestor);
     }
 
     fn clear_ingestor_fault(&self, ingestor: &str) {
-        self.ingestor_faults.clear_ingestor(ingestor);
+        self.runtime_test_hooks
+            .ingestor_faults
+            .clear_ingestor(ingestor);
     }
 
     fn fail_next_schedule_publication(&self, domain: &str) {
-        self.schedule_publication_faults
+        self.runtime_test_hooks
+            .schedule_publication_faults
             .fail_next_publication(domain);
     }
 }
@@ -2783,7 +2815,7 @@ impl RawTestSession {
                         Some(proto::SessionResponse {
                             event: Some(Event::Server(event)),
                         }) => {
-                            if event.level == ServerEventLevel::Error as i32 {
+                            if event.level == i32::from(ServerEventLevel::Error) {
                                 return Ok(Some(TestServerEvent {
                                     level: event.level,
                                     message: event.message,
@@ -3199,7 +3231,7 @@ async fn rabbitmq_queue_consumer_count(
         )
         .await
         .map_err(io::Error::other)?;
-    Ok(declared.consumer_count() as usize)
+    Ok(declared.consumer_count().arch_into())
 }
 
 async fn publish_redis(
@@ -3546,18 +3578,15 @@ fn kafka_topic_partition_count(
     let metadata = consumer
         .fetch_metadata(Some(topic), Duration::from_secs(5))
         .map_err(io::Error::other)?;
-    Ok(metadata
-        .topics()
-        .iter()
-        .find(|entry| entry.name() == topic)
-        .and_then(|entry| {
-            let partitions = entry.partitions().len();
-            if partitions == 0 {
-                None
-            } else {
-                Some(partitions)
-            }
-        }))
+    let Some(entry) = metadata.topics().iter().find(|entry| entry.name() == topic) else {
+        return Ok(None);
+    };
+    let partitions = entry.partitions().len();
+    if partitions == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(partitions))
+    }
 }
 
 async fn wait_for_kafka_topic_partitions(
@@ -3631,7 +3660,8 @@ async fn ensure_kafka_topic_partitions(
     }
 
     let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
-    let expected = usize::try_from(partitions).expect("partition count must fit usize");
+    let expected = usize::try_from(partitions)
+        .verified("the partition count was checked to be positive above");
     if current > expected {
         return Err(io::Error::other(format!(
             "kafka topic '{topic}' already has {current} partitions, cannot shrink to {expected}"
@@ -3729,18 +3759,17 @@ fn kafka_consumer_group_next_offset(
     let committed = consumer
         .committed_offsets(partitions, Duration::from_secs(1))
         .map_err(io::Error::other)?;
-    let offset = committed
-        .find_partition(topic, partition)
-        .map(|element| element.offset())
-        .and_then(|offset| match offset {
-            Offset::Offset(offset) => Some(offset),
-            Offset::Beginning
-            | Offset::End
-            | Offset::Stored
-            | Offset::Invalid
-            | Offset::OffsetTail(_) => None,
-        });
-    Ok(offset)
+    let Some(element) = committed.find_partition(topic, partition) else {
+        return Ok(None);
+    };
+    match element.offset() {
+        Offset::Offset(offset) => Ok(Some(offset)),
+        Offset::Beginning
+        | Offset::End
+        | Offset::Stored
+        | Offset::Invalid
+        | Offset::OffsetTail(_) => Ok(None),
+    }
 }
 
 async fn ensure_sqs_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
@@ -4062,18 +4091,20 @@ async fn observe_kafka(
                     let headers = message
                         .headers()
                         .map(|headers| {
-                            (0..headers.count())
-                                .filter_map(|index| {
-                                    let header = headers.try_get(index)?;
-                                    Some((
-                                        header.key.to_string(),
-                                        header
-                                            .value
-                                            .map(|value| String::from_utf8_lossy(value).to_string())
-                                            .unwrap_or_default(),
-                                    ))
-                                })
-                                .collect::<Vec<_>>()
+                            let mut values = Vec::new();
+                            for index in 0..headers.count() {
+                                let Some(header) = headers.try_get(index) else {
+                                    continue;
+                                };
+                                values.push((
+                                    header.key.to_string(),
+                                    header
+                                        .value
+                                        .map(|value| String::from_utf8_lossy(value).to_string())
+                                        .unwrap_or_default(),
+                                ));
+                            }
+                            values
                         })
                         .unwrap_or_default();
                     let _ = payload_tx.send(BrokerMessage { payload, headers }).await;

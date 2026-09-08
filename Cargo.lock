@@ -300,6 +300,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arch-into"
+version = "0.0.1-alpha.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db255be40781ef316d9bb174b0c4be5d44c1051940d5836ea6431899ffcb4ea8"
+dependencies = [
+ "const_panic",
+ "paste",
+]
+
+[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2439,6 +2449,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "const_panic"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9603f79528ece8163c496f8932121cb36cfe46259e9c907bb3d8205139d7caa3"
+dependencies = [
+ "typewit",
 ]
 
 [[package]]
@@ -6077,6 +6096,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "meticulous"
+version = "0.2.0-pre.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "254bd2d996bb84a4b86f8585267402233e8905735b1c1a5964523747641b2b50"
+
+[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6395,13 +6420,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
+name = "nervix-approx-into"
+version = "0.1.0-dev"
+
+[[package]]
 name = "nervix-benchmark"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "arch-into",
  "clap",
  "humantime",
+ "meticulous",
+ "nervix-approx-into",
  "nervix-client-core",
+ "nervix-models",
  "nervix-nspl",
  "nervix-test-environment",
  "ordered-float 4.6.0",
@@ -6424,12 +6457,14 @@ dependencies = [
 name = "nervix-cli"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "ariadne 0.5.1",
  "byte-unit",
  "clap",
  "clap_complete",
  "error-stack",
  "nervix-client-core",
+ "nervix-models",
  "nervix-nspl",
  "reedline",
  "rpassword",
@@ -6442,13 +6477,16 @@ dependencies = [
 name = "nervix-client-core"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-tar",
  "base64 0.22.1",
+ "meticulous",
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",
  "prost 0.13.5",
  "rustls",
+ "strum 0.26.3",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
@@ -6461,9 +6499,11 @@ dependencies = [
 name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "ciborium",
  "fjall",
  "futures-util",
+ "meticulous",
  "nervix-models",
  "openraft",
  "parking_lot",
@@ -6471,6 +6511,7 @@ dependencies = [
  "serde",
  "sorted-vec",
  "storekey",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6495,6 +6536,7 @@ version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
  "intrusive-collections",
+ "meticulous",
  "triomphe",
 ]
 
@@ -6503,14 +6545,17 @@ name = "nervix-interconnect"
 version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
+ "arch-into",
  "dashmap 6.2.1",
  "ed25519-dalek",
  "futures-util",
+ "meticulous",
  "nervix-models",
  "rand_core 0.6.4",
  "rkyv 0.8.18",
  "rustls",
  "rustls-pki-types",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6527,6 +6572,9 @@ dependencies = [
  "blake3",
  "chrono",
  "error-stack",
+ "indexmap 2.14.1",
+ "meticulous",
+ "nonzero_ext",
  "rkyv 0.8.18",
  "serde",
  "serde_json",
@@ -6546,8 +6594,13 @@ dependencies = [
  "bolero",
  "chumsky",
  "clap",
+ "error-stack",
  "humantime",
+ "meticulous",
+ "nervix-approx-into",
  "nervix-models",
+ "nonzero_ext",
+ "rstest",
  "rustyline",
  "serde",
  "serde_json",
@@ -6564,6 +6617,7 @@ dependencies = [
  "ariadne 0.5.1",
  "clap",
  "ignore",
+ "meticulous",
  "nervix-models",
  "nervix-nspl",
  "tempfile",
@@ -6574,6 +6628,7 @@ dependencies = [
 name = "nervix-proto"
 version = "0.1.0-dev"
 dependencies = [
+ "meticulous",
  "prost 0.13.5",
  "tonic 0.13.1",
  "tonic-build",
@@ -6584,12 +6639,15 @@ name = "nervix-roto"
 version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
+ "arch-into",
  "arrow-arith",
  "arrow-array",
  "arrow-cast",
  "arrow-schema",
  "arrow-select",
  "fastrand",
+ "meticulous",
+ "nervix-approx-into",
  "nervix-models",
  "nervix-nspl",
  "nervix-vm",
@@ -6610,6 +6668,7 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "arc-swap",
+ "arch-into",
  "argon2",
  "arrow-arith",
  "arrow-array",
@@ -6661,9 +6720,11 @@ dependencies = [
  "jaq-std",
  "lapin",
  "loom",
+ "meticulous",
  "mongodb",
  "multer",
  "mysql_async",
+ "nervix-approx-into",
  "nervix-client-core",
  "nervix-consensus",
  "nervix-dataflow-graph",
@@ -6676,6 +6737,7 @@ dependencies = [
  "nervix-test-environment",
  "nervix-vm",
  "nervix-wasm",
+ "nonzero_ext",
  "opendal 0.56.0",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -6700,6 +6762,7 @@ dependencies = [
  "redis",
  "reqwest 0.13.4",
  "rkyv 0.8.18",
+ "rstest",
  "rumqttc-next",
  "rustls",
  "rustls-native-certs",
@@ -6710,6 +6773,7 @@ dependencies = [
  "simd-json",
  "sorted-vec",
  "storekey",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.20",
  "tikv-jemalloc-ctl",
@@ -6741,8 +6805,10 @@ dependencies = [
 name = "nervix-test-environment"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "blake3",
  "clap",
+ "meticulous",
  "reqwest 0.13.4",
  "serde_json",
  "tempfile",
@@ -6755,6 +6821,7 @@ name = "nervix-vm"
 version = "0.1.0-dev"
 dependencies = [
  "ahash 0.8.12",
+ "arch-into",
  "arrow-arith",
  "arrow-array",
  "arrow-buffer",
@@ -6766,9 +6833,13 @@ dependencies = [
  "chrono",
  "criterion",
  "md5",
+ "meticulous",
+ "nervix-approx-into",
  "nervix-models",
  "nervix-nspl",
  "regex",
+ "rstest",
+ "strum 0.26.3",
  "thiserror 2.0.20",
  "tokio",
  "triomphe",
@@ -6779,13 +6850,16 @@ dependencies = [
 name = "nervix-wasm"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
  "bytes",
  "flatbuffers",
+ "meticulous",
  "nervix-models",
  "nervix-wasm-protocol",
+ "nonzero_ext",
  "parking_lot",
  "thiserror 2.0.20",
  "tokio",
@@ -6799,6 +6873,7 @@ version = "0.1.0-dev"
 dependencies = [
  "flatbuffers",
  "flatc-rust",
+ "meticulous",
  "thiserror 2.0.20",
 ]
 
@@ -6809,6 +6884,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "meticulous",
  "nervix-wasm-protocol",
  "thiserror 2.0.20",
 ]
@@ -6824,6 +6900,8 @@ dependencies = [
  "gloo-net 0.7.0",
  "js-sys",
  "leptos",
+ "meticulous",
+ "nervix-approx-into",
  "nervix-dataflow-graph",
  "nervix-models",
  "nervix-nspl",
@@ -9205,6 +9283,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "relative-path"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
 name = "rend"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9563,6 +9647,35 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rstest"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5a3193c063baaa2a95a33f03035c8a72b83d97a54916055ba22d35ed3839d49"
+dependencies = [
+ "futures-timer",
+ "futures-util",
+ "rstest_macros",
+]
+
+[[package]]
+name = "rstest_macros"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c845311f0ff7951c5506121a9ad75aec44d083c31583b2ea5a30bcb0b0abba0"
+dependencies = [
+ "cfg-if",
+ "glob",
+ "proc-macro-crate 3.5.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "relative-path",
+ "rustc_version",
+ "syn 2.0.119",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -11851,6 +11964,12 @@ dependencies = [
  "quote",
  "syn 3.0.4",
 ]
+
+[[package]]
+name = "typewit"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "214ca0b2191785cbc06209b9ca1861e048e39b5ba33574b3cedd58363d5bb5f6"
 
 [[package]]
 name = "ubyte"

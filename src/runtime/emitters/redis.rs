@@ -2,6 +2,7 @@ use ::redis::{
     AsyncCommands, Client as RedisClient, ClientTlsConfig, ErrorKind as RedisErrorKind,
     ServerErrorKind, TlsCertificates as RedisTlsCertificates,
 };
+use nervix_models::ChannelName;
 
 use super::*;
 
@@ -76,7 +77,7 @@ impl RedisEmitter {
 
     pub(in crate::runtime) async fn publish_records(
         &mut self,
-        channel: &Identifier,
+        channel: &ChannelName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -95,9 +96,9 @@ impl RedisEmitter {
             )
             .await;
             match published {
-                Ok(_) => outcome.deliver((record.batch_index, record.row_index)),
+                Ok(_) => outcome.deliver(record.position()),
                 Err(error) if Self::is_record_failure(&error) => outcome.reject(
-                    (record.batch_index, record.row_index),
+                    record.position(),
                     format!("Redis rejected emitted record: {error}"),
                 ),
                 Err(error) => {

@@ -1,9 +1,11 @@
 use std::str::FromStr;
 
 use ahash::HashMap;
+use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use meticulous::OptionExt as _;
 pub(crate) use nervix_interconnect::RuntimeStateKind;
-use nervix_models::{Domain, Identifier, ModelKind};
+use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName, NodeRef};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 
@@ -11,12 +13,44 @@ use super::BranchKey;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
-    pub(crate) domain: Domain,
+    pub(crate) domain: DomainName,
     pub(crate) state: RuntimeStateKind,
     pub(crate) kind: ModelKind,
-    pub(crate) identifier: Identifier,
+    pub(crate) identifier: ModelName,
     pub(crate) schema_fingerprint: [u8; 32],
     pub(crate) branch_key: Option<BranchKey>,
+}
+
+/// Which cluster nodes currently own and replicate one runtime state. Ownership moves while the
+/// state itself lives on, so a replicated state keeps its roles as rebindable configuration rather
+/// than as a construction-time constant.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StateReplicationRoles {
+    pub(crate) primary_node: Option<ClusterNodeName>,
+    pub(crate) replica_nodes: Vec<ClusterNodeName>,
+    pub(crate) required_replica_acks: usize,
+}
+
+impl StateReplicationRoles {
+    pub(crate) fn new(
+        primary_node: Option<ClusterNodeName>,
+        replica_nodes: Vec<ClusterNodeName>,
+        required_replica_acks: usize,
+    ) -> Self {
+        Self {
+            primary_node,
+            replica_nodes,
+            required_replica_acks,
+        }
+    }
+
+    pub(crate) fn owned_by(primary_node: Option<ClusterNodeName>) -> Self {
+        Self {
+            primary_node,
+            replica_nodes: Vec::new(),
+            required_replica_acks: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -56,7 +90,7 @@ impl RuntimeStatePlacement {
         let mut key = Vec::new();
         key.extend_from_slice(self.domain.as_str().as_bytes());
         key.push(0);
-        key.push(self.state as u8);
+        key.push(u8::from(self.state));
         key.push(0);
         key.extend_from_slice(self.kind.as_str().as_bytes());
         key.push(0);
@@ -109,7 +143,7 @@ impl RuntimeStatePlacement {
         self.branch_key
             .as_ref()
             .map(BranchKey::as_str)
-            .expect("concrete runtime state must carry a branch key")
+            .verified("concrete state is only built for a branch that has a key")
     }
 }
 
@@ -183,7 +217,7 @@ impl RuntimeStateStore {
         }))
     }
 
-    pub fn purge_domain(&self, domain: &Domain) -> Result<(), RuntimePersistenceError> {
+    pub fn purge_domain(&self, domain: &DomainName) -> Result<(), RuntimePersistenceError> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
         let latest_keys = self
@@ -222,14 +256,15 @@ impl RuntimeStateStore {
 
     pub fn purge_entity(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         state: RuntimeStateKind,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<(), RuntimePersistenceError> {
+        let identifier = identifier.into();
         let mut prefix = domain.as_str().as_bytes().to_vec();
         prefix.push(0);
-        prefix.push(state as u8);
+        prefix.push(u8::from(state));
         prefix.push(0);
         prefix.extend_from_slice(kind.as_str().as_bytes());
         prefix.push(0);
@@ -276,42 +311,34 @@ impl RuntimeStateStore {
 
     pub fn purge_stale_schema_fingerprints(
         &self,
-        domain: &Domain,
-        current: &HashMap<(ModelKind, Identifier), [u8; 32]>,
-    ) -> Result<(), RuntimePersistenceError> {
+        domain: &DomainName,
+        current: &HashMap<NodeRef, [u8; 32]>,
+    ) -> Result<(), Report<RuntimePersistenceError>> {
         let mut domain_prefix = domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
-        let stale_latest_keys = self
-            .latest
-            .prefix(domain_prefix)
-            .map(|item| {
-                item.key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)
-            })
-            .filter_map(|item| match item {
-                Ok(key) => match stored_placement_schema(&key) {
-                    Ok((state, kind, identifier, fingerprint)) => {
-                        let expected =
-                            current
-                                .get(&(kind, identifier))
-                                .copied()
-                                .map(|fingerprint| {
-                                    if let RuntimeStateKind::BranchAggregated
-                                    | RuntimeStateKind::KafkaOffset = state
-                                    {
-                                        [0; 32]
-                                    } else {
-                                        fingerprint
-                                    }
-                                });
-                        (expected != Some(fingerprint)).then_some(Ok(key))
-                    }
-                    Err(error) => Some(Err(error)),
-                },
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut stale_latest_keys = Vec::new();
+        for item in self.latest.prefix(domain_prefix) {
+            let key = item
+                .key()
+                .map(|key| key.as_ref().to_vec())
+                .map_err(|_| RuntimePersistenceError::ReadValue)?;
+            let stored = stored_placement_schema(&key)?;
+            let mut expected = current
+                .get(&NodeRef {
+                    kind: stored.kind,
+                    identifier: stored.identifier,
+                })
+                .copied();
+            if expected.is_some()
+                && let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset =
+                    stored.state
+            {
+                expected = Some([0; 32]);
+            }
+            if expected != Some(stored.schema_fingerprint) {
+                stale_latest_keys.push(key);
+            }
+        }
         if stale_latest_keys.is_empty() {
             return Ok(());
         }
@@ -341,76 +368,89 @@ impl RuntimeStateStore {
         }
         batch
             .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)
+            .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))
     }
+}
+
+/// The placement a stored runtime-state key encodes: which kind of state it is, which model owns
+/// it, and the schema fingerprint the state was written under.
+struct StoredPlacementSchema {
+    state: RuntimeStateKind,
+    kind: ModelKind,
+    identifier: ModelName,
+    schema_fingerprint: [u8; 32],
 }
 
 fn stored_placement_schema(
     key: &[u8],
-) -> Result<(RuntimeStateKind, ModelKind, Identifier, [u8; 32]), RuntimePersistenceError> {
+) -> Result<StoredPlacementSchema, Report<RuntimePersistenceError>> {
     let domain_end = key.iter().position(|byte| *byte == 0).ok_or_else(|| {
         RuntimePersistenceError::DecodeState(
             "runtime state key has no domain separator".to_string(),
         )
     })?;
-    let state_offset = domain_end.saturating_add(1);
+    let state_offset = domain_end
+        .checked_add(1)
+        .verified("the separator position is an index into this key");
     let state = key
         .get(state_offset)
-        .and_then(|state| match state {
-            0 => Some(RuntimeStateKind::BranchAggregated),
-            1 => Some(RuntimeStateKind::Correlator),
-            2 => Some(RuntimeStateKind::Deduplicator),
-            3 => Some(RuntimeStateKind::KafkaOffset),
-            4 => Some(RuntimeStateKind::MaterializedRelay),
-            5 => Some(RuntimeStateKind::WasmProcessor),
-            6 => Some(RuntimeStateKind::WindowProcessor),
-            7 => Some(RuntimeStateKind::BranchLru),
-            _ => None,
-        })
+        .copied()
+        .and_then(RuntimeStateKind::from_repr)
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has an invalid state kind".to_string(),
             )
         })?;
-    let kind_start = state_offset.saturating_add(2);
-    let kind_end = key[kind_start..]
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|offset| kind_start.saturating_add(offset))
+    let kind_start = state_offset
+        .checked_add(2)
+        .verified("the state-kind byte position is an index into this key");
+    let kind_end = key
+        .get(kind_start..)
+        .and_then(|rest| rest.iter().position(|byte| *byte == 0))
+        .and_then(|offset| kind_start.checked_add(offset))
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has no model-kind separator".to_string(),
             )
         })?;
-    let kind = std::str::from_utf8(&key[kind_start..kind_end])
-        .ok()
-        .and_then(|kind| ModelKind::from_str(kind).ok())
-        .ok_or_else(|| {
-            RuntimePersistenceError::DecodeState(
-                "runtime state key has an invalid model kind".to_string(),
-            )
-        })?;
-    let identifier_start = kind_end.saturating_add(1);
-    let identifier_end = key[identifier_start..]
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|offset| identifier_start.saturating_add(offset))
+    let kind = std::str::from_utf8(&key[kind_start..kind_end]).map_err(|_| {
+        RuntimePersistenceError::DecodeState(
+            "runtime state key has an invalid model kind".to_string(),
+        )
+    })?;
+    let kind = ModelKind::from_str(kind).map_err(|_| {
+        RuntimePersistenceError::DecodeState(
+            "runtime state key has an invalid model kind".to_string(),
+        )
+    })?;
+    let identifier_start = kind_end
+        .checked_add(1)
+        .verified("the model-kind separator position is an index into this key");
+    let identifier_end = key
+        .get(identifier_start..)
+        .and_then(|rest| rest.iter().position(|byte| *byte == 0))
+        .and_then(|offset| identifier_start.checked_add(offset))
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has no identifier separator".to_string(),
             )
         })?;
-    let identifier = std::str::from_utf8(&key[identifier_start..identifier_end])
-        .ok()
-        .and_then(|identifier| Identifier::parse(identifier).ok())
-        .ok_or_else(|| {
-            RuntimePersistenceError::DecodeState(
-                "runtime state key has an invalid identifier".to_string(),
-            )
-        })?;
-    let fingerprint_start = identifier_end.saturating_add(1);
-    let fingerprint = key
-        .get(fingerprint_start..fingerprint_start.saturating_add(32))
+    let identifier = std::str::from_utf8(&key[identifier_start..identifier_end]).map_err(|_| {
+        RuntimePersistenceError::DecodeState(
+            "runtime state key has an invalid identifier".to_string(),
+        )
+    })?;
+    let identifier = ModelName::parse(identifier).map_err(|_| {
+        RuntimePersistenceError::DecodeState(
+            "runtime state key has an invalid identifier".to_string(),
+        )
+    })?;
+    let fingerprint_start = identifier_end
+        .checked_add(1)
+        .verified("the identifier separator position is an index into this key");
+    let fingerprint = fingerprint_start
+        .checked_add(32)
+        .and_then(|fingerprint_end| key.get(fingerprint_start..fingerprint_end))
         .ok_or_else(|| {
             RuntimePersistenceError::DecodeState(
                 "runtime state key has a truncated schema fingerprint".to_string(),
@@ -418,5 +458,34 @@ fn stored_placement_schema(
         })?;
     let mut schema_fingerprint = [0; 32];
     schema_fingerprint.copy_from_slice(fingerprint);
-    Ok((state, kind, identifier, schema_fingerprint))
+    Ok(StoredPlacementSchema {
+        state,
+        kind,
+        identifier,
+        schema_fingerprint,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stored key is bytes read back from the database, so decoding one that ends inside the
+    /// state-kind prefix must report a decode error rather than index past the key.
+    #[test]
+    fn truncated_state_key_reports_a_decode_error() {
+        let mut key = b"acme".to_vec();
+        key.push(0);
+        key.push(u8::from(RuntimeStateKind::Deduplicator));
+
+        let error = stored_placement_schema(&key)
+            .err()
+            .expect("a key that ends inside the state-kind prefix must not decode");
+
+        assert!(
+            matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
+                if message.contains("model-kind separator")),
+            "unexpected error for a truncated state key: {error:?}"
+        );
+    }
 }

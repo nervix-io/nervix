@@ -1,7 +1,23 @@
+//! The Models and the vocabulary every other layer speaks.
+//!
+//! Layer: vocabulary.
+//!
+//! - **Owns.** Every NSPL Model, the validated name types, `Timestamp`, branch and node references,
+//!   structured message errors, and the canonical NSPL rendering of a Model.
+//! - **Depends on.** Serialization and primitive crates.
+//! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
+//!   no registry state, no Arrow array and no Tokio type belongs here.
+//!
+//! This crate breaks its own contract. It also carries replicated control-plane state —
+//! `ClusterSchedule`, `DomainState`, `ResourceVersionStatus` and their neighbours — which belongs to
+//! consensus, and the interconnect's wire values in `remote`, which belong to the transport.
+//! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
+
 mod canonical;
 mod expression;
 mod message_error;
 mod names;
+mod node_ref;
 mod quiesce;
 mod remote;
 mod resource;
@@ -24,7 +40,16 @@ pub use expression::{
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };
-pub use names::{Domain, Identifier, NameError};
+pub use names::{
+    BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
+    CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, DotPolicy,
+    EmitterName, EndpointName, FieldName, GeneratorName, InferencerName, IngestorName,
+    JunctionName, LookupName, ModelName, NameError, PlacementName, PulsarSubscriptionName,
+    QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName,
+    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+};
+pub use node_ref::{DomainNodeRef, NodeRef};
 pub use quiesce::{
     DynamicModelUpdate, ModelChangeAspect, ModelChangeAspects, QuiesceLevel, StatePurge,
 };
@@ -34,7 +59,7 @@ pub use remote::{
 };
 pub use resource::{
     ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceVersion,
-    ResourceVersionKey, ResourceVersionStatus,
+    ResourceVersionCounter, ResourceVersionKey, ResourceVersionStatus,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
@@ -60,18 +85,18 @@ pub use statement::{
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
     CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
     CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
-    CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateResource,
-    CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, DeleteSubscription, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainClockState, DomainConfig, DomainId, DomainPace, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode,
-    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-    ErrorPolicies, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog,
-    IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSignalingProtocol,
+    CreateStatement, CreateSubscription, CreateUser, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, DeleteSubscription, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor,
+    DomainClockState, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
+    DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink, EmitterAckWindow,
+    EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, GcsConfigEntry,
+    GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
+    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
     InferencerTensorSchemaError, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
@@ -81,13 +106,14 @@ pub use statement::{
     MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping,
     NatsConfigEntry, NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric,
     OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputFlushPolicy,
-    PlacementGroupSchedule, PlacementPolicy, PlacementRuntimeNode, PostgresConfigEntry,
-    PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, S3ConfigEntry, ScheduledNode, SentryConfigEntry,
-    ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
-    ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    PlacementGroupSchedule, PlacementPolicy, PostgresConfigEntry, PostgresConflictAction,
+    PostgresValueMapping, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, Relocation,
+    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, RetryPolicy, S3ConfigEntry, ScheduledNode, ScheduledNodes,
+    SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
     StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
     SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UploadResource, VhostTlsResource,

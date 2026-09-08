@@ -96,6 +96,62 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
   schema, branch, error, or sensitivity rules.
 
+## System Layers and Migration
+
+### Layer order
+
+Nervix is layered. Innermost first, and each layer may name only the layers inside it:
+
+1. **Primitives.** Self-contained data structures and conversions that name nothing in Nervix.
+   They sit beneath the vocabulary and are reusable outside it.
+2. **Vocabulary.** Models, names, timestamps, branch keys, and node references: the words every
+   other layer speaks.
+3. **Language.** NSPL lexing, parsing, completion, and lowering into Models. The parser is an edge
+   dependency only. It is named by the language crate itself, the formatter, the client tools, and
+   the session adapter; every other layer consumes Models.
+4. **Engines and infrastructure.** The expression VM and its frontend, the UDF and WASM hosts, wire
+   codecs, consensus, the interconnect, gossip, the state store, and the resource store. An engine
+   is driven by its caller and decides nothing about the graph.
+5. **Decisions.** Registry validation, placement, scheduling, and planning. A decision is a
+   synchronous pure function from typed inputs to a typed outcome, with no Tokio types, locks, or
+   shared maps in its signature, and it is unit-tested directly from those inputs.
+6. **Data plane.** Per-node execution: relays, branch-local processor tasks, connectors,
+   materialized state, and acknowledgement tracking. It applies decisions and executes plans.
+7. **Control plane.** Transactions, domain lifecycle, applying schedules, observation,
+   subscriptions, resources, and cluster coordination.
+8. **Edges.** The session service, HTTP endpoints, the cluster API, metric exposition, the web
+   console, and the client tools.
+
+Dependencies point inward only. Test and benchmark harnesses sit outside the order, may name any
+layer, and are never named by product code.
+
+One representation per stage: text becomes a Model, a Model becomes a validated node, a validated
+node becomes an execution plan, and an execution plan becomes running tasks. Each stage converts
+once at its boundary and hands the next stage a type that already carries the guarantees the
+previous stage is responsible for. The data plane executes plans and never reads a `Model`.
+
+Identities are typed once and shared. A second key type for an identity that already has one is a
+duplicate to remove, not a local convenience.
+
+### Boundaries
+
+Every crate and every layer module opens with an ownership contract in its `//!` documentation:
+the layer it belongs to, then three lines naming what it **owns**, what it may **depend on**, and
+what it **must not know**. A reviewer decides whether a change belongs in that crate or module by
+reading those three lines and nothing else.
+
+The contract states the target, not the present. Where the code contradicts its own contract, the
+header names the contradiction and the layer it violates; it never softens the contract to match
+the code. A contract rewritten to describe today's imports has stopped saying anything.
+
+### Migration discipline
+
+Architecture debt is counted and only decreases. `just ratchet` owns the counts and the checked-in
+baseline; see [Repository commands and documentation](#repository-commands-and-documentation).
+
+Mechanical moves and behavior changes never share a commit. A move-only commit is verified by the
+build and the existing tests, and nothing in it changes behavior.
+
 ## Language and Model Invariants
 
 ### Structured semantics
@@ -255,6 +311,32 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   belong at `debug` or `trace`.
 - Hot-path logs and structured errors must not expose sensitive payload values.
 
+## Failure Handling and Panics
+
+- Use `meticulous`'s `ResultExt` and `OptionExt` instead of bare `unwrap` and `expect`, and pick the
+  method that states why the failure cannot happen: `assured` for a guarantee that holds by
+  construction or by target platform, `verified` for a condition already checked earlier in the same
+  code, `todo` for a path that is not implemented yet.
+- The reason is part of the call. Write the actual guarantee, not a restatement of the operation:
+  `verified("the has_errors branch above already returned")`, not `verified("parse must succeed")`.
+- Import the traits anonymously with `use meticulous::{OptionExt as _, ResultExt as _};` so they
+  never collide with the `ResultExt` that `error-stack` brings into the same module.
+- A site with no guarantee is a defect, not a renamed `unwrap`. Give it a typed error and propagate
+  it, or make the invariant hold in the type. Never invent a guarantee to retire a panic site.
+- A build script is the exception that stays a panic: a failed code generation is a real build
+  failure, so it panics with its cause rather than claiming a guarantee it does not have.
+- Prefer checked arithmetic and handle the overflow case explicitly. `saturating_*` and
+  `wrapping_*` are correct only where saturation or wrapping is the meaning of the computation
+  itself, such as a clamped backpressure budget, a bounded retry delay, or a hash mixer, and the
+  site says which. They are never a way to avoid deciding what overflow means.
+- Everywhere else compute with `checked_*` and classify the overflow exactly as any other panic
+  site is classified: an operand bound that holds by construction takes `assured` or `verified`
+  with the bound as its reason, and an overflow that a caller, a payload, or a configured limit can
+  actually reach is a typed error.
+- Bare `+`, `-`, and `*` wrap silently in release builds, so they are checked arithmetic in debug
+  only. Sizes, offsets, counters, capacities, and timestamps derived from untrusted or unbounded
+  values use the checked form and say what bounds them.
+
 ## Engineering Conventions
 
 - Keep Rust modules organized around coherent ownership boundaries, not broad technical categories.
@@ -272,18 +354,50 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   total complexity or isolates a real boundary.
 - Model internal special cases with typed variants or internal-only structures, never magic or
   reserved user-visible identifiers that can collide with user-defined names.
+- Avoid tuples beyond a trivial local pair, nested tuples, and tuples whose shape is whatever the
+  construction site happened to produce. Returns of three or more elements, map keys and values,
+  accumulators threaded through iterator chains, and channel payloads carrying several unrelated
+  values are named structs with named fields, declared inside the function when their use does not
+  leave that scope and at module level when it crosses functions. A type alias for a tuple is not
+  a name for its elements; declare the struct instead.
 - Use semantic typed errors. Domain error enums use `thiserror`, contextual propagation uses
   `error-stack`, and `anyhow` is limited to boundaries where callers cannot make semantic choices.
   Do not introduce `String` as a domain error type.
 - Prefer deriving declarative enum string conversions and metadata with `strum`, including
-  `AsRefStr`, `EnumString`, and `EnumProperty`, over manual match-based helpers.
+  `AsRefStr`, `EnumString`, `EnumProperty`, and `FromRepr`, over manual match-based helpers.
+- Convert values through `From`, `Into`, `TryFrom`, and `TryInto`. A total conversion is `From` or
+  `Into`; a fallible one is `TryFrom` or `TryInto` and classifies its failure exactly as any other
+  panic site is classified. Two crates cover the pairs the standard library cannot express:
+  `arch-into` for pointer width, and `nervix-approx-into` for integer and floating point, where
+  `approx_into` says the conversion rounds to the nearest representable value and
+  `try_approx_into` says a float has no integer value unless it is finite and in range.
+- `as` is denied workspace-wide by `clippy::as_conversions`, so a cast has to be the operation
+  itself rather than a conversion written the short way: `cast_unsigned` for a two's complement
+  reinterpretation, `addr` for a pointer's address, and a typed binding or an annotated collection
+  for an unsizing coercion. The rounding and truncating casts live inside `nervix-approx-into`,
+  each behind an `#[expect(clippy::as_conversions, reason = "...")]` that states which operation it
+  is. Generated code that casts is admitted the same way, through a `reason`-carrying `#[expect]`
+  applied by its build script.
 - When sorted vectors or arrays are an invariant, use `sorted-vec`'s `SortedVec` or `SortedSet`
   instead of a plain `Vec` with manual sorting and deduplication.
+- Do not scan a `Vec` to look a value up. Treat "`n` is small" as a claim that needs proof at the
+  call site and has to keep holding as domains, graphs, and clusters grow. Key the data instead:
+  `BTreeMap` for small keys where ordered comparison costs less than hashing, `HashMap` otherwise.
+  Sequence types are for data that is genuinely a sequence. Where a collection must keep its order
+  and still resolve by key, use `IndexMap` or a sorted sequence with a binary search rather than
+  scanning it, and never keep a map and a parallel order sequence in sync by hand. Any scan that
+  survives must state the bound that makes it correct.
 - Prefer synchronous locks from `parking_lot` over `std::sync` lock types.
 - Prefer `DashMap` over `Arc<Mutex<HashMap<...>>>` for shared concurrent maps.
 - `triomphe::Arc` is the default shared-ownership type for Nervix-owned state. Use
   `std::sync::Arc` only when weak references or an external API require it. In modules that need
   both, import the standard type as `StdArc` and confine it to that boundary.
+- Do not take shared ownership one field at a time. Values that are shared together and live
+  together belong in one named struct behind a single `Arc`, and the cloneable type is a thin
+  handle over it. A type that accumulates independent `Arc` fields is a missing struct: every
+  clone of it pays one refcount per field, and on a hot path that cost is repeated per batch. A
+  field keeps an `Arc` of its own only when a second owner outlives the handle's borrow, and the
+  field says who that owner is. Never wrap a handle that is already one `Arc` in another `Arc`.
 - In `if` conditions, prefer `if let` or `if let` chains over `matches!` when they express the same
   logic cleanly. Use `matches!` when an `if let` form would be unclear or outside an `if`
   condition.
@@ -368,6 +482,15 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   detailed syntax, semantic explanations, rationale, examples, and tuning guidance belong in
   `docs/src` and should be read from there rather than restated in the skill.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
+- Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
+  casts outside imports and qualified paths, bare `unwrap` and `expect`, `saturating_*` and
+  `wrapping_*` calls outside the time API,
+  `Result<_, String>`, signatures returning a Nervix error without `Report`, node identities
+  carried as `String`, struct fields gated on `cfg(feature = "testing")`, parser references outside
+  the language edges, and `Model` references in the data plane, and CI fails when a count is above
+  `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run
+  `just ratchet --update` and commit the baseline in the same change; `just ratchet --show <count>`
+  lists the sites behind one count.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
   benchmarks, cache troubleshooting, or retries.
@@ -395,7 +518,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   state the explicit user-approved reason.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js`.
+  current `type-enum` in `./commitlint.config.js`. Put the title and description together in one
+  fenced code block. Keep the title and each description paragraph on a single unwrapped line; do
+  not insert manual line breaks within them because Git and GitHub handle display wrapping.
 - When the user requests follow-up changes, regenerate both so the final response contains an
   updated title and description that reflect the complete resulting change instead of a stale
   earlier proposal.

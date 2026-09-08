@@ -1,11 +1,13 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{CreateEndpoint, CreateStatement, EndpointType};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, endpoint_name, if_not_exists_clause, into_parse_error,
-        kw, lex_input, signaling_protocol_clause, string_lit, suggest_from, tok, vhost_ref,
+        LexedInput, ParseError, ParseFromSourceError, endpoint_name, if_not_exists_clause,
+        into_parse_error, kw, lex_input, signaling_protocol_clause, string_lit, suggest_from, tok,
+        vhost_ref,
     },
 };
 
@@ -88,14 +90,18 @@ pub fn parse_create_endpoint_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_endpoint(
     input: &str,
 ) -> Result<CreateStatement<CreateEndpoint>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_endpoint_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -151,7 +157,7 @@ mod tests {
             parsed
                 .signaling_protocol
                 .as_ref()
-                .map(nervix_models::Identifier::as_str),
+                .map(nervix_models::SignalingProtocolName::as_str),
             Some("binance_style")
         );
     }

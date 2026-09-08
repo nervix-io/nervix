@@ -1,3 +1,15 @@
+//! The Roto host for user-defined functions, injected into the expression VM.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Compiling a `CREATE UDF` definition, the watchdog that bounds a call, and the
+//!   `FunctionInjector` that returns results to the VM as typed Arrow arrays.
+//! - **Depends on.** The VM and the vocabulary.
+//! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
+//!
+//! This crate breaks its own contract: it names `nervix_nspl::vm_program` for spans and function
+//! names, inheriting the VM's dependency on the language layer.
+
 use std::{
     cell::RefCell,
     fmt,
@@ -7,6 +19,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt};
+use arch_into::ArchInto as _;
 use arrow_arith::boolean;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Datum, FixedSizeListArray, Float32Array, Float64Array,
@@ -19,6 +32,8 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, TimeUnit};
 use arrow_select::{nullif::nullif, zip::zip};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto;
 use nervix_models::{CreateUdf, ParseAsType, Timestamp};
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
@@ -203,7 +218,7 @@ fn call_timestamp() -> Timestamp {
 }
 
 fn column_arg(args: Val<UdfArgs>, index: u64, expected: &DataType) -> Column {
-    let Some(column) = args.0.0.get(index as usize) else {
+    let Some(column) = args.0.0.get(index.arch_into()) else {
         fatal(format!(
             "generated UDF bridge requested missing argument {index}"
         ));
@@ -220,7 +235,7 @@ fn column_arg(args: Val<UdfArgs>, index: u64, expected: &DataType) -> Column {
 }
 
 fn untyped_column_arg(args: Val<UdfArgs>, index: u64) -> Column {
-    let Some(column) = args.0.0.get(index as usize) else {
+    let Some(column) = args.0.0.get(index.arch_into()) else {
         fatal(format!(
             "generated UDF bridge requested missing argument {index}"
         ));
@@ -234,7 +249,7 @@ fn primitive<T: ArrowPrimitiveType>(column: &Column) -> &arrow_array::PrimitiveA
         .0
         .as_any()
         .downcast_ref::<arrow_array::PrimitiveArray<T>>()
-        .expect("column type is validated at the generated bridge")
+        .verified("the bridge builds this column wrapper only around the matching Arrow array")
 }
 
 fn numeric_binary<T>(
@@ -262,18 +277,21 @@ where
         .zip(right.iter())
         .enumerate()
         .map(|(row, values)| match values {
-            (Some(left), Some(right)) => calculate(left, right).or_else(|| {
-                let (code, detail) = if operation == "div" {
-                    (
-                        ErrorCode::DivisionByZero,
-                        "division by zero or signed overflow",
-                    )
-                } else {
-                    (ErrorCode::Overflow, "numeric overflow")
-                };
-                side_error(row, code, operation, detail);
-                None
-            }),
+            (Some(left), Some(right)) => match calculate(left, right) {
+                Some(value) => Some(value),
+                None => {
+                    let (code, detail) = if operation == "div" {
+                        (
+                            ErrorCode::DivisionByZero,
+                            "division by zero or signed overflow",
+                        )
+                    } else {
+                        (ErrorCode::Overflow, "numeric overflow")
+                    };
+                    side_error(row, code, operation, detail);
+                    None
+                }
+            },
             _ => None,
         })
         .collect::<arrow_array::PrimitiveArray<T>>();
@@ -296,8 +314,10 @@ where
         .iter()
         .enumerate()
         .map(|(row, value)| {
-            value.and_then(|left| {
-                calculate(left, right).or_else(|| {
+            let left = value?;
+            match calculate(left, right) {
+                Some(value) => Some(value),
+                None => {
                     let (code, detail) = if operation == "div" {
                         (
                             ErrorCode::DivisionByZero,
@@ -308,8 +328,8 @@ where
                     };
                     side_error(row, code, operation, detail);
                     None
-                })
-            })
+                }
+            }
         })
         .collect::<arrow_array::PrimitiveArray<T>>();
     Column(StdArc::new(output))
@@ -362,7 +382,7 @@ macro_rules! integer_column_library {
     ($wrapper:ident, $arrow:ty, $scalar:ty) => {
         library! {
             impl Val<$wrapper> {
-                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len() as u64 }
+                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len().arch_into() }
                 fn add(value: Val<$wrapper>, other: Val<$wrapper>) -> Val<$wrapper> {
                     Val($wrapper(numeric_binary::<$arrow>(&value.0.0, &other.0.0, "add", <$scalar>::checked_add)))
                 }
@@ -420,7 +440,7 @@ macro_rules! float_column_library {
     ($wrapper:ident, $arrow:ty, $scalar:ty) => {
         library! {
             impl Val<$wrapper> {
-                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len() as u64 }
+                fn len(value: Val<$wrapper>) -> u64 { value.0.0.0.len().arch_into() }
                 fn add(value: Val<$wrapper>, other: Val<$wrapper>) -> Val<$wrapper> {
                     Val($wrapper(numeric_binary::<$arrow>(&value.0.0, &other.0.0, "add", |a, b| Some(a + b))))
                 }
@@ -573,7 +593,7 @@ fn base_library() -> impl roto::Registerable {
         impl Val<ColumnBuilderFactory> {
             fn bool(capacity: u64) -> Val<BoolColumnBuilder> {
                 Val(BoolColumnBuilder(Arc::new(Mutex::new(Vec::with_capacity(
-                    usize::try_from(capacity).unwrap_or(row_count()).min(row_count())
+                    capacity.arch_into().min(row_count())
                 )))))
             }
         }
@@ -598,9 +618,9 @@ fn base_library() -> impl roto::Registerable {
 fn bool_library() -> impl roto::Registerable {
     library! {
         impl Val<BoolColumn> {
-            fn len(value: Val<BoolColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<BoolColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn not(value: Val<BoolColumn>) -> Val<BoolColumn> {
-                let input = value.0.0.0.as_any().downcast_ref::<BooleanArray>().expect("validated BoolColumn");
+                let input = value.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 match boolean::not(input) {
                     Ok(output) => Val(BoolColumn(Column(StdArc::new(output)))),
                     Err(error) => {
@@ -610,8 +630,8 @@ fn bool_library() -> impl roto::Registerable {
                 }
             }
             fn and(value: Val<BoolColumn>, other: Val<BoolColumn>) -> Val<BoolColumn> {
-                let left = value.0.0.0.as_any().downcast_ref::<BooleanArray>().expect("validated BoolColumn");
-                let right = other.0.0.0.as_any().downcast_ref::<BooleanArray>().expect("validated BoolColumn");
+                let left = value.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
+                let right = other.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 match boolean::and(left, right) {
                     Ok(output) => Val(BoolColumn(Column(StdArc::new(output)))),
                     Err(error) => {
@@ -621,8 +641,8 @@ fn bool_library() -> impl roto::Registerable {
                 }
             }
             fn or(value: Val<BoolColumn>, other: Val<BoolColumn>) -> Val<BoolColumn> {
-                let left = value.0.0.0.as_any().downcast_ref::<BooleanArray>().expect("validated BoolColumn");
-                let right = other.0.0.0.as_any().downcast_ref::<BooleanArray>().expect("validated BoolColumn");
+                let left = value.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
+                let right = other.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 match boolean::or(left, right) {
                     Ok(output) => Val(BoolColumn(Column(StdArc::new(output)))),
                     Err(error) => {
@@ -632,10 +652,12 @@ fn bool_library() -> impl roto::Registerable {
                 }
             }
             fn select(value: Val<BoolColumn>, truthy: Val<StringColumn>, falsy: Val<StringColumn>) -> Val<StringColumn> {
-                let mask = value.0.0.0.as_any().downcast_ref::<BooleanArray>().expect("validated BoolColumn");
+                let mask = value.0.0.0.as_any().downcast_ref::<BooleanArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 let truthy = truthy.0.0.0.as_ref();
                 let falsy = falsy.0.0.0.as_ref();
-                match zip(mask, &truthy as &dyn Datum, &falsy as &dyn Datum) {
+                let truthy_datum: &dyn Datum = &truthy;
+                let falsy_datum: &dyn Datum = &falsy;
+                match zip(mask, truthy_datum, falsy_datum) {
                     Ok(output) => Val(StringColumn(Column(output))),
                     Err(error) => {
                         fatal(format!("select failed: {error}"));
@@ -647,7 +669,7 @@ fn bool_library() -> impl roto::Registerable {
 
         fn reject_where_s(condition: Val<BoolColumn>, message: RotoString) {
             let condition = condition.0.0.0.as_any().downcast_ref::<BooleanArray>()
-                .expect("validated BoolColumn");
+                .verified("the bridge builds this column wrapper only around the matching Arrow array");
             for (row, reject) in condition.iter().enumerate() {
                 if reject == Some(true) {
                     side_error(row, ErrorCode::InvalidArgument, "reject_where", message.as_ref());
@@ -662,21 +684,21 @@ fn string_library() -> impl roto::Registerable {
         #[clone] type StringWhen = Val<StringWhen>;
 
         impl Val<StringColumn> {
-            fn len(value: Val<StringColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<StringColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn trim(value: Val<StringColumn>) -> Val<StringColumn> {
-                let input = value.0.0.0.as_any().downcast_ref::<StringArray>().expect("validated StringColumn");
+                let input = value.0.0.0.as_any().downcast_ref::<StringArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 Val(StringColumn(Column(StdArc::new(StringArray::from_iter(
                     input.iter().map(|value| value.map(str::trim))
                 )))))
             }
             fn contains_s(value: Val<StringColumn>, needle: RotoString) -> Val<BoolColumn> {
-                let input = value.0.0.0.as_any().downcast_ref::<StringArray>().expect("validated StringColumn");
+                let input = value.0.0.0.as_any().downcast_ref::<StringArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 Val(BoolColumn(Column(StdArc::new(BooleanArray::from_iter(
                     input.iter().map(|value| value.map(|value| value.contains(needle.as_ref())))
                 )))))
             }
             fn regexp_replace(value: Val<StringColumn>, pattern: RotoString, replacement: RotoString) -> Val<StringColumn> {
-                let input = value.0.0.0.as_any().downcast_ref::<StringArray>().expect("validated StringColumn");
+                let input = value.0.0.0.as_any().downcast_ref::<StringArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 let regex = match Regex::new(pattern.as_ref()) {
                     Ok(regex) => regex,
                     Err(error) => {
@@ -690,18 +712,16 @@ fn string_library() -> impl roto::Registerable {
             }
             fn get(value: Val<StringColumn>, index: u64) -> Option<RotoString> {
                 let input = value.0.0.0.as_any().downcast_ref::<StringArray>()
-                    .expect("validated StringColumn");
-                let Ok(index) = usize::try_from(index) else {
-                    return None;
-                };
+                    .verified("the bridge builds this column wrapper only around the matching Arrow array");
+                let index = index.arch_into();
                 (index < input.len() && input.is_valid(index))
                     .then(|| RotoString::new(input.value(index)))
             }
         }
 
         fn coalesce(left: Val<StringColumn>, right: Val<StringColumn>) -> Val<StringColumn> {
-            let left = left.0.0.0.as_any().downcast_ref::<StringArray>().expect("validated StringColumn");
-            let right = right.0.0.0.as_any().downcast_ref::<StringArray>().expect("validated StringColumn");
+            let left = left.0.0.0.as_any().downcast_ref::<StringArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
+            let right = right.0.0.0.as_any().downcast_ref::<StringArray>().verified("the bridge builds this column wrapper only around the matching Arrow array");
             if left.len() != right.len() {
                 fatal(format!("coalesce received columns with {} and {} rows", left.len(), right.len()));
                 return Val(StringColumn(Column(new_null_array(&DataType::Utf8, left.len()))));
@@ -727,7 +747,7 @@ fn string_library() -> impl roto::Registerable {
                 });
                 let conditions = chain.0.arms.iter().map(|(condition, value)| {
                     let condition = condition.0.0.as_any().downcast_ref::<BooleanArray>()
-                        .expect("validated BoolColumn");
+                        .verified("the bridge builds this column wrapper only around the matching Arrow array");
                     if condition.len() != expected_rows {
                         fatal(format!(
                             "when chain received columns with {expected_rows} and {} rows",
@@ -753,9 +773,9 @@ fn cast_library() -> impl roto::Registerable {
     library! {
         impl Val<I64Column> {
             fn cast_f64(value: Val<I64Column>) -> Val<F64Column> {
-                let input = value.0.0.0.as_any().downcast_ref::<Int64Array>().expect("validated I64Column");
+                let input = value.0.0.0.as_any().downcast_ref::<Int64Array>().verified("the bridge builds this column wrapper only around the matching Arrow array");
                 Val(F64Column(Column(StdArc::new(Float64Array::from_iter(
-                    input.iter().map(|value| value.map(|value| value as f64))
+                    input.iter().map(|value| value.map(ApproxInto::approx_into))
                 )))))
             }
         }
@@ -765,22 +785,26 @@ fn cast_library() -> impl roto::Registerable {
 fn list_library() -> impl roto::Registerable {
     library! {
         impl Val<VecStringColumn> {
-            fn len(value: Val<VecStringColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<VecStringColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn contains_s(value: Val<VecStringColumn>, needle: RotoString) -> Val<BoolColumn> {
                 let column = &value.0.0.0;
                 let output = match column.data_type() {
                     DataType::List(_) => {
                         let lists = column.as_any().downcast_ref::<ListArray>()
-                            .expect("validated VecStringColumn");
+                            .verified("the bridge builds this column wrapper only around the matching Arrow array");
                         let values = lists.values().as_any().downcast_ref::<StringArray>()
-                            .expect("validated VecStringColumn leaf");
+                            .verified("the bridge builds this column wrapper only around the matching Arrow array");
                         BooleanArray::from_iter((0..lists.len()).map(|row| {
                             if lists.is_null(row) {
                                 return None;
                             }
                             let offsets = lists.value_offsets();
-                            let start = offsets[row] as usize;
-                            let end = offsets[row + 1] as usize;
+                            let start = usize::try_from(offsets[row]).assured(
+                                "Arrow ListArray offsets are non-negative",
+                            );
+                            let end = usize::try_from(offsets[row + 1]).assured(
+                                "Arrow ListArray offsets are non-negative",
+                            );
                             Some((start..end).any(|index| {
                                 values.is_valid(index) && values.value(index) == needle.as_ref()
                             }))
@@ -788,10 +812,11 @@ fn list_library() -> impl roto::Registerable {
                     }
                     DataType::FixedSizeList(_, size) => {
                         let lists = column.as_any().downcast_ref::<FixedSizeListArray>()
-                            .expect("validated VecStringColumn");
+                            .verified("the bridge builds this column wrapper only around the matching Arrow array");
                         let values = lists.values().as_any().downcast_ref::<StringArray>()
-                            .expect("validated VecStringColumn leaf");
-                        let size = *size as usize;
+                            .verified("the bridge builds this column wrapper only around the matching Arrow array");
+                        let size = usize::try_from(*size)
+                            .assured("Arrow FixedSizeListArray sizes are non-negative");
                         BooleanArray::from_iter((0..lists.len()).map(|row| {
                             if lists.is_null(row) {
                                 return None;
@@ -816,10 +841,10 @@ fn list_library() -> impl roto::Registerable {
 fn datetime_library() -> impl roto::Registerable {
     library! {
         impl Val<DatetimeColumn> {
-            fn len(value: Val<DatetimeColumn>) -> u64 { value.0.0.0.len() as u64 }
+            fn len(value: Val<DatetimeColumn>) -> u64 { value.0.0.0.len().arch_into() }
             fn lt_s(value: Val<DatetimeColumn>, other: Val<Timestamp>) -> Val<BoolColumn> {
                 let input = value.0.0.0.as_any().downcast_ref::<TimestampNanosecondArray>()
-                    .expect("validated DatetimeColumn");
+                    .verified("the bridge builds this column wrapper only around the matching Arrow array");
                 let other = other.0.unix_nanos();
                 Val(BoolColumn(Column(StdArc::new(BooleanArray::from_iter(
                     input.iter().map(|value| value.map(|value| value < other))
@@ -848,12 +873,24 @@ fn deterministic_runtime() -> Result<Runtime<NoCtx>, UdfError> {
     }
     runtime
         .add(float_column_library!(F32Column, Float32Type, f32))
-        .and_then(|_| runtime.add(float_column_library!(F64Column, Float64Type, f64)))
-        .and_then(|_| runtime.add(bool_library()))
-        .and_then(|_| runtime.add(string_library()))
-        .and_then(|_| runtime.add(cast_library()))
-        .and_then(|_| runtime.add(list_library()))
-        .and_then(|_| runtime.add(datetime_library()))
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(float_column_library!(F64Column, Float64Type, f64))
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(bool_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(string_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(cast_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(list_library())
+        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+    runtime
+        .add(datetime_library())
         .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
     Ok(runtime)
 }
@@ -995,10 +1032,9 @@ impl CompiledUdf {
             self.entry.call(Val(UdfArgs(argument_arrays))).0.0.0
         }));
         let state = CALL_STATE.with(|state| {
-            state
-                .borrow_mut()
-                .take()
-                .expect("call state was installed before Roto execution")
+            state.borrow_mut().take().verified(
+                "the caller installs the call state before entering the guest and takes it here",
+            )
         });
         let output = call.map_err(|panic| RuntimeError::InjectedFunctionFailed {
             function: self.model.name.to_string(),
@@ -1251,7 +1287,9 @@ fn compile_udf(model: CreateUdf, watchdog: Duration) -> Result<CompiledUdf, UdfE
 fn contains_call(source: &str, function: &str) -> bool {
     let pattern = format!(r"\b{}\s*\(", regex::escape(function));
     Regex::new(&pattern)
-        .expect("generated call pattern is valid")
+        .assured(
+            "the pattern is built here from regex::escape output, which is always a valid pattern",
+        )
         .is_match(source)
 }
 
@@ -1371,7 +1409,10 @@ pub fn arrow_data_type(ty: &ParseAsType) -> DataType {
         ParseAsType::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
         ParseAsType::Array { element, len } => DataType::FixedSizeList(
             StdArc::new(Field::new("item", arrow_data_type(element), false)),
-            i32::try_from(*len).expect("validated ARRAY length fits Arrow"),
+            i32::try_from(len.get()).verified(
+                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
+                 list",
+            ),
         ),
         ParseAsType::Vec { element } => DataType::List(StdArc::new(Field::new(
             "item",
@@ -1424,16 +1465,16 @@ fn typed_array_from_ref(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{Identifier, UdfArgument, UdfLanguage, UdfReturn};
+    use nervix_models::{FieldName, UdfArgument, UdfLanguage, UdfName, UdfReturn};
 
     use super::*;
 
     fn add_one_model() -> CreateUdf {
         CreateUdf::new(
-            Identifier::parse("add_one").expect("valid identifier"),
+            UdfName::parse("add_one").expect("valid udf name"),
             UdfLanguage::Roto0_11,
             vec![UdfArgument {
-                name: Identifier::parse("value").expect("valid identifier"),
+                name: FieldName::parse("value").expect("valid field name"),
                 ty: ParseAsType::I64,
                 optional: false,
             }],
@@ -1446,22 +1487,29 @@ mod tests {
         )
     }
 
+    /// One declared argument of a test UDF, before its name is parsed into a `FieldName`.
+    struct TestArgument {
+        name: &'static str,
+        ty: ParseAsType,
+        optional: bool,
+    }
+
     fn model(
         name: &str,
-        arguments: impl IntoIterator<Item = (&'static str, ParseAsType, bool)>,
+        arguments: impl IntoIterator<Item = TestArgument>,
         returns: ParseAsType,
         volatile: bool,
         code: &str,
     ) -> CreateUdf {
         CreateUdf::new(
-            Identifier::parse(name).expect("valid identifier"),
+            UdfName::parse(name).expect("valid udf name"),
             UdfLanguage::Roto0_11,
             arguments
                 .into_iter()
-                .map(|(name, ty, optional)| UdfArgument {
-                    name: Identifier::parse(name).expect("valid identifier"),
-                    ty,
-                    optional,
+                .map(|argument| UdfArgument {
+                    name: FieldName::parse(argument.name).expect("valid field name"),
+                    ty: argument.ty,
+                    optional: argument.optional,
                 })
                 .collect(),
             UdfReturn {
@@ -1578,8 +1626,16 @@ test increments_by_one {
             model(
                 "display_name",
                 [
-                    ("nick", ParseAsType::String, true),
-                    ("email", ParseAsType::String, false),
+                    TestArgument {
+                        name: "nick",
+                        ty: ParseAsType::String,
+                        optional: true,
+                    },
+                    TestArgument {
+                        name: "email",
+                        ty: ParseAsType::String,
+                        optional: false,
+                    },
                 ],
                 ParseAsType::String,
                 false,
@@ -1589,7 +1645,11 @@ test increments_by_one {
             ),
             model(
                 "risk_band",
-                [("score", ParseAsType::F64, false)],
+                [TestArgument {
+                    name: "score",
+                    ty: ParseAsType::F64,
+                    optional: false,
+                }],
                 ParseAsType::String,
                 false,
                 r#"fn risk_band(score: F64Column) -> StringColumn {
@@ -1602,8 +1662,16 @@ test increments_by_one {
             model(
                 "unit_price",
                 [
-                    ("total", ParseAsType::F64, false),
-                    ("qty", ParseAsType::I64, false),
+                    TestArgument {
+                        name: "total",
+                        ty: ParseAsType::F64,
+                        optional: false,
+                    },
+                    TestArgument {
+                        name: "qty",
+                        ty: ParseAsType::I64,
+                        optional: false,
+                    },
                 ],
                 ParseAsType::F64,
                 false,
@@ -1614,7 +1682,11 @@ test increments_by_one {
             ),
             model(
                 "minmax_norm",
-                [("x", ParseAsType::F64, false)],
+                [TestArgument {
+                    name: "x",
+                    ty: ParseAsType::F64,
+                    optional: false,
+                }],
                 ParseAsType::F64,
                 false,
                 r#"fn minmax_norm(x: F64Column) -> F64Column {
@@ -1635,13 +1707,13 @@ test increments_by_one {
             ),
             model(
                 "has_pii_tag",
-                [(
-                    "tags",
-                    ParseAsType::Vec {
+                [TestArgument {
+                    name: "tags",
+                    ty: ParseAsType::Vec {
                         element: Box::new(ParseAsType::String),
                     },
-                    false,
-                )],
+                    optional: false,
+                }],
                 ParseAsType::Bool,
                 false,
                 r#"fn has_pii_tag(tags: VecStringColumn) -> BoolColumn {
@@ -1650,7 +1722,11 @@ test increments_by_one {
             ),
             model(
                 "sample_flag",
-                [("rate", ParseAsType::F64, false)],
+                [TestArgument {
+                    name: "rate",
+                    ty: ParseAsType::F64,
+                    optional: false,
+                }],
                 ParseAsType::Bool,
                 true,
                 r#"fn sample_flag(rate: F64Column) -> BoolColumn {
@@ -1659,7 +1735,11 @@ test increments_by_one {
             ),
             model(
                 "is_expired",
-                [("expires", ParseAsType::Datetime, false)],
+                [TestArgument {
+                    name: "expires",
+                    ty: ParseAsType::Datetime,
+                    optional: false,
+                }],
                 ParseAsType::Bool,
                 true,
                 r#"fn is_expired(expires: DatetimeColumn) -> BoolColumn {

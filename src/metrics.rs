@@ -1,3 +1,18 @@
+//! Every series a node records into, and the registry they are exported through.
+//!
+//! Layer: engines and infrastructure, with an edge inside it.
+//!
+//! - **Owns.** The counters, gauges and histograms a node records, their per-domain and
+//!   per-branch aggregation, the snapshot branch-aggregated state replicates, and the Prometheus
+//!   registry and encoder that expose them.
+//! - **Depends on.** The vocabulary for the names it labels with, and the dataflow-graph
+//!   description for the statistics it fills in.
+//! - **Must not know.** How the values it records were produced. It is handed observations and
+//!   never reaches back into the runtime for more.
+//!
+//! This module breaks its own contract: recording is infrastructure the data plane calls inward,
+//! but the Prometheus exposition beside it is an edge. The two separate when the crate does.
+
 use std::{
     cmp::Ordering,
     collections::VecDeque,
@@ -5,10 +20,16 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use arch_into::ArchInto as _;
 use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
-use nervix_models::{Domain, Identifier, ModelKind, Timestamp};
+use nervix_models::{
+    BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
+    Timestamp,
+};
 use parking_lot::Mutex;
 use prometheus::{
     Encoder, Gauge, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
@@ -17,6 +38,7 @@ use prometheus::{
     proto::MetricFamily,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 use triomphe::Arc;
 
@@ -68,8 +90,8 @@ const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
-const ONE_MINUTE_SECONDS: f64 = 60.0;
-const FIFTEEN_MINUTES_SECONDS: f64 = 15.0 * 60.0;
+const ONE_MINUTE: Duration = Duration::from_secs(60);
+const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
 const RATE_DECAY_TAU_FRACTION: f64 = 20.0;
 const WALL_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
 const WALL_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
@@ -84,7 +106,7 @@ struct MetricKey {
     domain: String,
     target_kind: String,
     target: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
     relay: String,
     peer_kind: String,
     peer: String,
@@ -94,9 +116,9 @@ struct MetricKey {
 
 impl MetricKey {
     fn relay(
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         metric: &'static str,
     ) -> Self {
@@ -104,7 +126,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: "RELAY".to_string(),
             target: relay.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.cloned(),
             relay: relay.as_str().to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -114,11 +136,11 @@ impl MetricKey {
     }
 
     fn node(
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        physical_node_id: Option<&str>,
-        relay: &Identifier,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
+        relay: &RelayName,
         direction: &'static str,
         metric: &'static str,
     ) -> Self {
@@ -126,7 +148,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.cloned(),
             relay: relay.as_str().to_string(),
             peer_kind: "RELAY".to_string(),
             peer: relay.as_str().to_string(),
@@ -136,10 +158,10 @@ impl MetricKey {
     }
 
     fn node_without_stream(
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        physical_node_id: Option<&str>,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         metric: &'static str,
     ) -> Self {
@@ -147,7 +169,7 @@ impl MetricKey {
             domain: domain.as_str().to_string(),
             target_kind: kind.as_str().to_ascii_uppercase(),
             target: node.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.cloned(),
             relay: "-".to_string(),
             peer_kind: String::new(),
             peer: String::new(),
@@ -156,7 +178,7 @@ impl MetricKey {
         }
     }
 
-    fn matches_dataflow_metric_ref(&self, domain: &Domain, metric: &DataflowMetricRef) -> bool {
+    fn matches_dataflow_metric_ref(&self, domain: &DomainName, metric: &DataflowMetricRef) -> bool {
         self.domain == domain.as_str()
             && self.target_kind.eq_ignore_ascii_case(&metric.target_kind)
             && self.target == metric.target
@@ -166,6 +188,12 @@ impl MetricKey {
 
     fn is_relay_buffer_len(&self) -> bool {
         self.metric == RELAY_BUFFER_LEN
+    }
+
+    fn belongs_to_relay(&self, domain: &DomainName, relay: &RelayName) -> bool {
+        self.domain == domain.as_str()
+            && self.target_kind == "RELAY"
+            && self.target == relay.as_str()
     }
 }
 
@@ -231,7 +259,10 @@ impl WallEma {
         if elapsed_seconds <= 0.0 {
             return;
         }
-        self.observe_sample(delta as f64 / elapsed_seconds, elapsed_seconds);
+        self.observe_sample(
+            delta.approx_into::<f64>() / elapsed_seconds,
+            elapsed_seconds,
+        );
     }
 
     fn observe_sample(&mut self, sample: f64, elapsed_seconds: f64) {
@@ -293,11 +324,17 @@ impl DomainEma {
         let Some(elapsed_nanos) = now.checked_sub(last_at) else {
             return;
         };
-        if elapsed_nanos <= 0 {
+        let Ok(elapsed_nanos) = u64::try_from(elapsed_nanos) else {
+            return;
+        };
+        let elapsed_seconds = Duration::from_nanos(elapsed_nanos).as_secs_f64();
+        if elapsed_seconds <= 0.0 {
             return;
         }
-        let elapsed_seconds = elapsed_nanos as f64 / 1_000_000_000.0;
-        self.observe_sample(delta as f64 / elapsed_seconds, elapsed_seconds);
+        self.observe_sample(
+            delta.approx_into::<f64>() / elapsed_seconds,
+            elapsed_seconds,
+        );
     }
 
     fn observe_sample(&mut self, sample: f64, elapsed_seconds: f64) {
@@ -314,10 +351,10 @@ impl DomainEma {
         let last_at = self.last_at_nanos?;
         let now = now?.unix_nanos();
         let elapsed_nanos = now.checked_sub(last_at)?;
-        if elapsed_nanos < 0 {
+        let Ok(elapsed_nanos) = u64::try_from(elapsed_nanos) else {
             return Some(value);
-        }
-        let elapsed_seconds = elapsed_nanos as f64 / 1_000_000_000.0;
+        };
+        let elapsed_seconds = Duration::from_nanos(elapsed_nanos).as_secs_f64();
         Some(value * decay_factor(elapsed_seconds, self.tau_seconds))
     }
 
@@ -348,10 +385,10 @@ struct RollingRates {
 impl RollingRates {
     fn new() -> Self {
         Self {
-            wall_1m: WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS)),
-            wall_15m: WallEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS)),
-            domain_1m: DomainEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS)),
-            domain_15m: DomainEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS)),
+            wall_1m: WallEma::new(rate_decay_tau_seconds(ONE_MINUTE)),
+            wall_15m: WallEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES)),
+            domain_1m: DomainEma::new(rate_decay_tau_seconds(ONE_MINUTE)),
+            domain_15m: DomainEma::new(rate_decay_tau_seconds(FIFTEEN_MINUTES)),
         }
     }
 
@@ -363,20 +400,20 @@ impl RollingRates {
             wall_1m: WallEma::from_snapshot(
                 &snapshot.wall_1m,
                 series_started_at,
-                rate_decay_tau_seconds(ONE_MINUTE_SECONDS),
+                rate_decay_tau_seconds(ONE_MINUTE),
             ),
             wall_15m: WallEma::from_snapshot(
                 &snapshot.wall_15m,
                 series_started_at,
-                rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS),
+                rate_decay_tau_seconds(FIFTEEN_MINUTES),
             ),
             domain_1m: DomainEma::from_snapshot(
                 &snapshot.domain_1m,
-                rate_decay_tau_seconds(ONE_MINUTE_SECONDS),
+                rate_decay_tau_seconds(ONE_MINUTE),
             ),
             domain_15m: DomainEma::from_snapshot(
                 &snapshot.domain_15m,
-                rate_decay_tau_seconds(FIFTEEN_MINUTES_SECONDS),
+                rate_decay_tau_seconds(FIFTEEN_MINUTES),
             ),
         }
     }
@@ -461,14 +498,22 @@ impl HistogramConfig {
             .filter(|bucket| bucket.is_finite() && *bucket > 0.0)
             .fold(1.0, f64::max);
         Self {
-            highest_trackable_value: scaled_histogram_value(highest_bucket).max(2),
+            highest_trackable_value: scaled_histogram_value(highest_bucket)
+                .assured(
+                    "the fold above starts at 1.0 and keeps only finite positive buckets, and \
+                     every bucket ladder in this module ends far below the u64 range",
+                )
+                .max(2),
             significant_figures: HDR_HISTOGRAM_SIGFIG,
         }
     }
 
     fn new_histogram(self) -> HdrHistogram<u64> {
         HdrHistogram::<u64>::new_with_max(self.highest_trackable_value, self.significant_figures)
-            .expect("valid internal histogram configuration")
+            .assured(
+                "for_buckets raises the maximum to at least 2 and HDR_HISTOGRAM_SIGFIG is within \
+                 the 0..=5 hdrhistogram accepts",
+            )
     }
 }
 
@@ -524,8 +569,17 @@ impl TimeRollingHistogram {
             .buckets
             .iter_mut()
             .find(|bucket| bucket.start_at_nanos == current_start)
+            && let Some(scaled) = scaled_histogram_value(value)
         {
-            let _ = bucket.histogram.record(scaled_histogram_value(value));
+            // The configured maximum is the top of this metric's bucket ladder, so an
+            // observation above it belongs in the top bucket exactly as one past the last
+            // explicit boundary does. Clamping here is what puts it there; letting `record`
+            // reject it instead would drop the sample and pull every percentile below the truth,
+            // which is the one outcome a latency histogram must not produce.
+            bucket
+                .histogram
+                .record(scaled.min(bucket.histogram.high()))
+                .assured("the value was just clamped to the histogram's own maximum");
         }
     }
 
@@ -538,7 +592,9 @@ impl TimeRollingHistogram {
         for bucket in self.buckets.iter().filter(|bucket| {
             bucket.start_at_nanos >= oldest_start && bucket.start_at_nanos <= current_start
         }) {
-            let _ = merged.add(&bucket.histogram);
+            merged
+                .add(&bucket.histogram)
+                .assured("merged was built from the same self.config as every bucket it holds");
         }
         HistogramPercentileSummary::from_histogram(&merged)
     }
@@ -560,7 +616,10 @@ impl TimeRollingHistogram {
                 .iter_mut()
                 .find(|existing| existing.start_at_nanos == bucket.start_at_nanos)
             {
-                let _ = existing.histogram.add(&bucket.histogram);
+                existing.histogram.add(&bucket.histogram).assured(
+                    "both ladders come from internal_buckets_for_metric, and aggregation only \
+                     merges series whose aggregate key carries the same metric",
+                );
             } else {
                 self.buckets.push_back(bucket.clone());
             }
@@ -704,23 +763,11 @@ struct RollingHistograms {
 impl RollingHistograms {
     fn new(buckets: &'static [f64]) -> Self {
         Self {
-            wall_1m: WallRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                WALL_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
-            wall_15m: WallRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
-                WALL_HISTOGRAM_15M_STEP,
-                buckets,
-            ),
-            domain_1m: DomainRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                DOMAIN_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
+            wall_1m: WallRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
+            wall_15m: WallRollingHistogram::new(FIFTEEN_MINUTES, WALL_HISTOGRAM_15M_STEP, buckets),
+            domain_1m: DomainRollingHistogram::new(ONE_MINUTE, DOMAIN_HISTOGRAM_1M_STEP, buckets),
             domain_15m: DomainRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 DOMAIN_HISTOGRAM_15M_STEP,
                 buckets,
             ),
@@ -738,25 +785,25 @@ impl RollingHistograms {
         Self {
             wall_1m: WallRollingHistogram::from_snapshot(
                 &snapshot.wall_1m,
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
+                ONE_MINUTE,
                 WALL_HISTOGRAM_1M_STEP,
                 buckets,
             ),
             wall_15m: WallRollingHistogram::from_snapshot(
                 &snapshot.wall_15m,
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 WALL_HISTOGRAM_15M_STEP,
                 buckets,
             ),
             domain_1m: DomainRollingHistogram::from_snapshot(
                 &snapshot.domain_1m,
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
+                ONE_MINUTE,
                 DOMAIN_HISTOGRAM_1M_STEP,
                 buckets,
             ),
             domain_15m: DomainRollingHistogram::from_snapshot(
                 &snapshot.domain_15m,
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 DOMAIN_HISTOGRAM_15M_STEP,
                 buckets,
             ),
@@ -803,23 +850,11 @@ struct AggregatedRollingHistograms {
 impl AggregatedRollingHistograms {
     fn new(buckets: &'static [f64]) -> Self {
         Self {
-            wall_1m: TimeRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                WALL_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
-            wall_15m: TimeRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
-                WALL_HISTOGRAM_15M_STEP,
-                buckets,
-            ),
-            domain_1m: TimeRollingHistogram::new(
-                Duration::from_secs(ONE_MINUTE_SECONDS as u64),
-                DOMAIN_HISTOGRAM_1M_STEP,
-                buckets,
-            ),
+            wall_1m: TimeRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
+            wall_15m: TimeRollingHistogram::new(FIFTEEN_MINUTES, WALL_HISTOGRAM_15M_STEP, buckets),
+            domain_1m: TimeRollingHistogram::new(ONE_MINUTE, DOMAIN_HISTOGRAM_1M_STEP, buckets),
             domain_15m: TimeRollingHistogram::new(
-                Duration::from_secs(FIFTEEN_MINUTES_SECONDS as u64),
+                FIFTEEN_MINUTES,
                 DOMAIN_HISTOGRAM_15M_STEP,
                 buckets,
             ),
@@ -1114,7 +1149,10 @@ struct AggregatedCounterSummary {
 
 impl AggregatedCounterSummary {
     fn add(&mut self, summary: CounterSummary) {
-        self.value = self.value.saturating_add(summary.value);
+        self.value = self
+            .value
+            .checked_add(summary.value)
+            .assured("both totals count events this cluster already observed");
         self.wall_rate_per_sec += summary.wall_rate_per_sec;
         self.domain_rate_per_sec =
             add_optional_metric(self.domain_rate_per_sec, summary.domain_rate_per_sec);
@@ -1137,36 +1175,37 @@ impl AggregatedCounterSummary {
     }
 }
 
+/// The handle a runtime, an ingestor quiesce control, or a branch task keeps to record
+/// measurements. Every series lives together for as long as the node does, so the handle is one
+/// `Arc` over all of them and cloning it costs a single refcount.
 #[derive(Debug, Clone)]
 pub struct RuntimeMetrics {
-    counters: Arc<DashMap<MetricKey, Arc<CounterSeries>>>,
-    histograms: Arc<DashMap<MetricKey, Arc<HistogramSeries>>>,
-    branch_counters: Arc<DashMap<BranchMetricKey, Arc<CounterSeries>>>,
-    branch_histograms: Arc<DashMap<BranchMetricKey, Arc<HistogramSeries>>>,
-    branch_instance_references: Arc<DashMap<BranchInstanceMetricKey, BranchInstanceReferences>>,
-    prometheus: Arc<PrometheusMetrics>,
+    series: Arc<MetricSeries>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Every series one node records into, plus the Prometheus registry they are exported through.
+#[derive(Debug)]
+struct MetricSeries {
+    counters: DashMap<MetricKey, Arc<CounterSeries>>,
+    histograms: DashMap<MetricKey, Arc<HistogramSeries>>,
+    branch_counters: DashMap<BranchMetricKey, Arc<CounterSeries>>,
+    branch_histograms: DashMap<BranchMetricKey, Arc<HistogramSeries>>,
+    branch_instance_references: DashMap<BranchInstanceMetricKey, BranchInstanceReferences>,
+    prometheus: PrometheusMetrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumIter)]
+#[strum(serialize_all = "lowercase")]
 pub(crate) enum BranchEvictionReason {
     Lru,
     Ttl,
-}
-
-impl AsRef<str> for BranchEvictionReason {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::Lru => "lru",
-            Self::Ttl => "ttl",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BranchInstanceMetricKey {
     domain: String,
     branch: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
     concrete_key: String,
 }
 
@@ -1197,7 +1236,7 @@ struct PrometheusMetrics {
 pub(crate) struct IngestorQuiesceMetricLabels {
     domain: String,
     ingestor: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
 }
 
 impl IngestorQuiesceMetricLabels {
@@ -1205,7 +1244,7 @@ impl IngestorQuiesceMetricLabels {
         [
             self.domain.as_str(),
             self.ingestor.as_str(),
-            self.physical_node_id.as_str(),
+            physical_node_label(self.physical_node_id.as_ref()),
         ]
     }
 }
@@ -1230,12 +1269,14 @@ struct JemallocMetricsCollector {
 impl Default for RuntimeMetrics {
     fn default() -> Self {
         Self {
-            counters: Arc::new(DashMap::new()),
-            histograms: Arc::new(DashMap::new()),
-            branch_counters: Arc::new(DashMap::new()),
-            branch_histograms: Arc::new(DashMap::new()),
-            branch_instance_references: Arc::new(DashMap::new()),
-            prometheus: Arc::new(PrometheusMetrics::new()),
+            series: Arc::new(MetricSeries {
+                counters: DashMap::new(),
+                histograms: DashMap::new(),
+                branch_counters: DashMap::new(),
+                branch_histograms: DashMap::new(),
+                branch_instance_references: DashMap::new(),
+                prometheus: PrometheusMetrics::new(),
+            }),
         }
     }
 }
@@ -1251,7 +1292,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             PROMETHEUS_LABELS,
         )
-        .expect("valid messages_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let batches_total = IntCounterVec::new(
             Opts::new(
                 BATCHES_TOTAL,
@@ -1260,7 +1304,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             PROMETHEUS_LABELS,
         )
-        .expect("valid batches_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let bytes_total = IntCounterVec::new(
             Opts::new(
                 BYTES_TOTAL,
@@ -1269,7 +1316,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             PROMETHEUS_LABELS,
         )
-        .expect("valid bytes_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let messages_per_batch = HistogramVec::new(
             HistogramOpts::new(
                 MESSAGES_PER_BATCH,
@@ -1279,7 +1329,10 @@ impl PrometheusMetrics {
             .buckets(MESSAGE_BATCH_BUCKETS.to_vec()),
             PROMETHEUS_LABELS,
         )
-        .expect("valid messages_per_batch prometheus histogram");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let delivery_latency_seconds = HistogramVec::new(
             HistogramOpts::new(
                 DELIVERY_LATENCY_SECONDS,
@@ -1289,7 +1342,10 @@ impl PrometheusMetrics {
             .buckets(LATENCY_BUCKETS.to_vec()),
             PROMETHEUS_LABELS,
         )
-        .expect("valid delivery_latency_seconds prometheus histogram");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let relay_buffer_len = HistogramVec::new(
             HistogramOpts::new(
                 RELAY_BUFFER_LEN,
@@ -1299,7 +1355,10 @@ impl PrometheusMetrics {
             .buckets(RELAY_BUFFER_LEN_BUCKETS.to_vec()),
             PROMETHEUS_LABELS,
         )
-        .expect("valid relay_buffer_len prometheus histogram");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let branch_instances = IntGaugeVec::new(
             Opts::new(
                 BRANCH_INSTANCES,
@@ -1308,7 +1367,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             BRANCH_PROMETHEUS_LABELS,
         )
-        .expect("valid branch_instances prometheus gauge");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let branch_evictions_total = IntCounterVec::new(
             Opts::new(
                 BRANCH_EVICTIONS_TOTAL,
@@ -1317,7 +1379,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             BRANCH_EVICTION_PROMETHEUS_LABELS,
         )
-        .expect("valid branch_evictions_total prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_buffered_records = IntGaugeVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_BUFFERED_RECORDS,
@@ -1326,7 +1391,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce buffered records prometheus gauge");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_buffered_bytes = IntGaugeVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_BUFFERED_BYTES,
@@ -1335,7 +1403,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce buffered bytes prometheus gauge");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_dropped_total = IntCounterVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_DROPPED_TOTAL,
@@ -1344,7 +1415,10 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce dropped prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_quiesce_rejected_total = IntCounterVec::new(
             Opts::new(
                 INGESTOR_QUIESCE_REJECTED_TOTAL,
@@ -1353,47 +1427,80 @@ impl PrometheusMetrics {
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
         )
-        .expect("valid ingestor quiesce rejected prometheus counter");
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
 
-        registry
-            .register(Box::new(messages_total.clone()))
-            .expect("messages_total registered once");
-        registry
-            .register(Box::new(batches_total.clone()))
-            .expect("batches_total registered once");
-        registry
-            .register(Box::new(bytes_total.clone()))
-            .expect("bytes_total registered once");
+        registry.register(Box::new(messages_total.clone())).assured(
+            "this registry is built here and each metric is registered once under a distinct name",
+        );
+        registry.register(Box::new(batches_total.clone())).assured(
+            "this registry is built here and each metric is registered once under a distinct name",
+        );
+        registry.register(Box::new(bytes_total.clone())).assured(
+            "this registry is built here and each metric is registered once under a distinct name",
+        );
         registry
             .register(Box::new(messages_per_batch.clone()))
-            .expect("messages_per_batch registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(delivery_latency_seconds.clone()))
-            .expect("delivery_latency_seconds registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(relay_buffer_len.clone()))
-            .expect("relay_buffer_len registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(branch_instances.clone()))
-            .expect("branch_instances registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(branch_evictions_total.clone()))
-            .expect("branch_evictions_total registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_buffered_records.clone()))
-            .expect("ingestor_quiesce_buffered_records registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_buffered_bytes.clone()))
-            .expect("ingestor_quiesce_buffered_bytes registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_dropped_total.clone()))
-            .expect("ingestor_quiesce_dropped_total registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(ingestor_quiesce_rejected_total.clone()))
-            .expect("ingestor_quiesce_rejected_total registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(JemallocMetricsCollector::new()))
-            .expect("jemalloc metrics registered once");
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
 
         Self {
             registry,
@@ -1469,6 +1576,36 @@ impl PrometheusMetrics {
         }
     }
 
+    /// Withdraw one label set from the Prometheus registry.
+    ///
+    /// Removal reports an error when the label set was never registered, which happens whenever an
+    /// entity is torn down before it produced its first observation of that metric. There is
+    /// nothing to withdraw and nothing to report, so each removal below discards that outcome.
+    fn remove(&self, key: &MetricKey) {
+        let labels = prometheus_label_values(key);
+        match key.metric {
+            MESSAGES_TOTAL => {
+                let _ = self.messages_total.remove_label_values(&labels);
+            }
+            BATCHES_TOTAL => {
+                let _ = self.batches_total.remove_label_values(&labels);
+            }
+            BYTES_TOTAL => {
+                let _ = self.bytes_total.remove_label_values(&labels);
+            }
+            MESSAGES_PER_BATCH => {
+                let _ = self.messages_per_batch.remove_label_values(&labels);
+            }
+            DELIVERY_LATENCY_SECONDS => {
+                let _ = self.delivery_latency_seconds.remove_label_values(&labels);
+            }
+            RELAY_BUFFER_LEN => {
+                let _ = self.relay_buffer_len.remove_label_values(&labels);
+            }
+            _ => {}
+        }
+    }
+
     fn text(&self) -> String {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
@@ -1515,13 +1652,20 @@ impl JemallocMetricsCollector {
         );
 
         Self {
-            epoch: epoch::mib().expect("jemalloc epoch mib available"),
-            active: stats::active::mib().expect("jemalloc active stats mib available"),
-            allocated: stats::allocated::mib().expect("jemalloc allocated stats mib available"),
-            mapped: stats::mapped::mib().expect("jemalloc mapped stats mib available"),
-            metadata: stats::metadata::mib().expect("jemalloc metadata stats mib available"),
-            resident: stats::resident::mib().expect("jemalloc resident stats mib available"),
-            retained: stats::retained::mib().expect("jemalloc retained stats mib available"),
+            epoch: epoch::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            active: stats::active::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            allocated: stats::allocated::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            mapped: stats::mapped::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            metadata: stats::metadata::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            resident: stats::resident::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
+            retained: stats::retained::mib()
+                .assured("the statically linked tikv-jemalloc build exposes this control key"),
             active_gauge,
             allocated_gauge,
             mapped_gauge,
@@ -1539,30 +1683,44 @@ impl Collector for JemallocMetricsCollector {
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
-        self.epoch.advance().expect("jemalloc epoch can advance");
-        self.active_gauge
-            .set(self.active.read().expect("jemalloc active stats readable") as f64);
+        self.epoch
+            .advance()
+            .verified("this MIB was resolved when the collector was built");
+        self.active_gauge.set(
+            self.active
+                .read()
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
+        );
         self.allocated_gauge.set(
             self.allocated
                 .read()
-                .expect("jemalloc allocated stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
-        self.mapped_gauge
-            .set(self.mapped.read().expect("jemalloc mapped stats readable") as f64);
+        self.mapped_gauge.set(
+            self.mapped
+                .read()
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
+        );
         self.metadata_gauge.set(
             self.metadata
                 .read()
-                .expect("jemalloc metadata stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
         self.resident_gauge.set(
             self.resident
                 .read()
-                .expect("jemalloc resident stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
         self.retained_gauge.set(
             self.retained
                 .read()
-                .expect("jemalloc retained stats readable") as f64,
+                .verified("this MIB was resolved when the collector was built")
+                .approx_into(),
         );
 
         let mut metric_families = Vec::with_capacity(self.descs.len());
@@ -1582,7 +1740,10 @@ fn jemalloc_gauge(name: &str, help: &str, descs: &mut Vec<Desc>) -> Gauge {
             .namespace("nervix")
             .subsystem(JEMALLOC_SUBSYSTEM),
     )
-    .expect("valid jemalloc prometheus gauge");
+    .assured(
+        "the metric name, help text and label names are constants that satisfy Prometheus naming \
+         rules",
+    );
     descs.extend(gauge.desc().into_iter().cloned());
     gauge
 }
@@ -1598,7 +1759,7 @@ struct MetricSnapshotKey {
     domain: String,
     target_kind: String,
     target: String,
-    physical_node_id: String,
+    physical_node_id: Option<ClusterNodeName>,
     relay: String,
     peer_kind: String,
     peer: String,
@@ -1633,11 +1794,11 @@ struct MetricHistogramSnapshot {
 
 #[derive(Debug, Clone, Copy)]
 pub struct NodeBatchObservation<'a> {
-    pub domain: &'a Domain,
+    pub domain: &'a DomainName,
     pub kind: ModelKind,
-    pub node: &'a Identifier,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub node: &'a ModelName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub messages: u64,
     pub bytes: u64,
     pub domain_timestamp: Option<Timestamp>,
@@ -1645,10 +1806,10 @@ pub struct NodeBatchObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct NodeWithoutRelayObservation<'a> {
-    pub domain: &'a Domain,
+    pub domain: &'a DomainName,
     pub kind: ModelKind,
-    pub node: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub node: &'a ModelName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub messages: u64,
     pub bytes: u64,
     pub domain_timestamp: Option<Timestamp>,
@@ -1656,9 +1817,9 @@ pub struct NodeWithoutRelayObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RelayBatchObservation<'a> {
-    pub domain: &'a Domain,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub domain: &'a DomainName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub messages: u64,
     pub bytes: u64,
     pub domain_timestamp: Option<Timestamp>,
@@ -1666,9 +1827,9 @@ pub struct RelayBatchObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RelayBufferObservation<'a> {
-    pub domain: &'a Domain,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub domain: &'a DomainName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub direction: &'static str,
     pub len: usize,
     pub capacity: usize,
@@ -1676,11 +1837,11 @@ pub struct RelayBufferObservation<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct NodeLatencyObservation<'a> {
-    pub domain: &'a Domain,
+    pub domain: &'a DomainName,
     pub kind: ModelKind,
-    pub node: &'a Identifier,
-    pub relay: &'a Identifier,
-    pub physical_node_id: Option<&'a str>,
+    pub node: &'a ModelName,
+    pub relay: &'a RelayName,
+    pub physical_node_id: Option<&'a ClusterNodeName>,
     pub seconds: f64,
     pub domain_timestamp: Option<Timestamp>,
 }
@@ -1688,28 +1849,32 @@ pub struct NodeLatencyObservation<'a> {
 impl RuntimeMetrics {
     pub(crate) fn register_ingestor_quiesce(
         &self,
-        domain: &Domain,
-        ingestor: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) -> IngestorQuiesceMetricLabels {
         let labels = IngestorQuiesceMetricLabels {
             domain: domain.as_str().to_string(),
             ingestor: ingestor.as_str().to_string(),
-            physical_node_id: physical_node_id.unwrap_or("-").to_string(),
+            physical_node_id: physical_node_id.cloned(),
         };
         let values = labels.values();
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_records
             .with_label_values(&values)
             .set(0);
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_bytes
             .with_label_values(&values)
             .set(0);
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_dropped_total
             .with_label_values(&values);
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_rejected_total
             .with_label_values(&values);
         labels
@@ -1722,14 +1887,20 @@ impl RuntimeMetrics {
         bytes: usize,
     ) {
         let values = labels.values();
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_records
             .with_label_values(&values)
-            .set(i64::try_from(records).unwrap_or(i64::MAX));
-        self.prometheus
+            .set(i64::try_from(records).assured(
+                "buffered records occupy memory and cannot exceed the allocator's isize limit",
+            ));
+        self.series
+            .prometheus
             .ingestor_quiesce_buffered_bytes
             .with_label_values(&values)
-            .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+            .set(i64::try_from(bytes).assured(
+                "buffered bytes occupy memory and cannot exceed the allocator's isize limit",
+            ));
     }
 
     pub(crate) fn increment_ingestor_quiesce_dropped(
@@ -1737,7 +1908,8 @@ impl RuntimeMetrics {
         labels: &IngestorQuiesceMetricLabels,
         count: u64,
     ) {
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_dropped_total
             .with_label_values(&labels.values())
             .inc_by(count);
@@ -1748,7 +1920,8 @@ impl RuntimeMetrics {
         labels: &IngestorQuiesceMetricLabels,
         count: u64,
     ) {
-        self.prometheus
+        self.series
+            .prometheus
             .ingestor_quiesce_rejected_total
             .with_label_values(&labels.values())
             .inc_by(count);
@@ -1756,44 +1929,50 @@ impl RuntimeMetrics {
 
     pub(crate) fn register_branch(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
-        self.prometheus.branch_instances.with_label_values(&[
+        let physical_node = physical_node_label(physical_node_id);
+        self.series.prometheus.branch_instances.with_label_values(&[
             domain.as_str(),
             branch.as_str(),
-            physical_node_id,
+            physical_node,
         ]);
-        for reason in [BranchEvictionReason::Lru, BranchEvictionReason::Ttl] {
-            self.prometheus.branch_evictions_total.with_label_values(&[
-                domain.as_str(),
-                branch.as_str(),
-                physical_node_id,
-                reason.as_ref(),
-            ]);
+        for reason in BranchEvictionReason::iter() {
+            self.series
+                .prometheus
+                .branch_evictions_total
+                .with_label_values(&[
+                    domain.as_str(),
+                    branch.as_str(),
+                    physical_node,
+                    reason.as_ref(),
+                ]);
         }
     }
 
     pub(crate) fn observe_branch_instance_created(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
+        let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
-            physical_node_id: physical_node_id.to_string(),
+            physical_node_id: physical_node_id.cloned(),
             concrete_key: concrete_key.to_string(),
         };
-        match self.branch_instance_references.entry(metric_key) {
+        match self.series.branch_instance_references.entry(metric_key) {
             Entry::Occupied(mut entry) => {
                 let references = entry.get_mut();
-                references.count = references.count.saturating_add(1);
+                references.count = references
+                    .count
+                    .checked_add(1)
+                    .assured("the references counted here are branch instances held in memory");
                 references.eviction_reason = None;
             }
             Entry::Vacant(entry) => {
@@ -1801,9 +1980,10 @@ impl RuntimeMetrics {
                     count: 1,
                     eviction_reason: None,
                 });
-                self.prometheus
+                self.series
+                    .prometheus
                     .branch_instances
-                    .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                    .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
                     .inc();
             }
         }
@@ -1811,49 +1991,51 @@ impl RuntimeMetrics {
 
     pub(crate) fn observe_branch_instance_removed(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
         reason: BranchEvictionReason,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
+        let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
-            physical_node_id: physical_node_id.to_string(),
+            physical_node_id: physical_node_id.cloned(),
             concrete_key: concrete_key.to_string(),
         };
-        let (removed_key, record_eviction) = match self.branch_instance_references.entry(metric_key)
-        {
-            Entry::Occupied(mut entry) if entry.get().count > 1 => {
-                let references = entry.get_mut();
-                references.count -= 1;
-                let record_eviction = references.eviction_reason.is_none();
-                if record_eviction {
-                    references.eviction_reason = Some(reason);
+        let (removed_key, record_eviction) =
+            match self.series.branch_instance_references.entry(metric_key) {
+                Entry::Occupied(mut entry) if entry.get().count > 1 => {
+                    let references = entry.get_mut();
+                    references.count -= 1;
+                    let record_eviction = references.eviction_reason.is_none();
+                    if record_eviction {
+                        references.eviction_reason = Some(reason);
+                    }
+                    (false, record_eviction)
                 }
-                (false, record_eviction)
-            }
-            Entry::Occupied(entry) => {
-                let references = entry.remove();
-                (true, references.eviction_reason.is_none())
-            }
-            Entry::Vacant(_) => return,
-        };
+                Entry::Occupied(entry) => {
+                    let references = entry.remove();
+                    (true, references.eviction_reason.is_none())
+                }
+                Entry::Vacant(_) => return,
+            };
         if removed_key {
-            self.prometheus
+            self.series
+                .prometheus
                 .branch_instances
-                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
                 .dec();
         }
         if record_eviction {
-            self.prometheus
+            self.series
+                .prometheus
                 .branch_evictions_total
                 .with_label_values(&[
                     domain.as_str(),
                     branch.as_str(),
-                    physical_node_id,
+                    physical_node,
                     reason.as_ref(),
                 ])
                 .inc();
@@ -1862,19 +2044,19 @@ impl RuntimeMetrics {
 
     pub(crate) fn observe_branch_instance_detached(
         &self,
-        domain: &Domain,
-        branch: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
         concrete_key: &str,
     ) {
-        let physical_node_id = physical_node_id.unwrap_or("-");
+        let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
-            physical_node_id: physical_node_id.to_string(),
+            physical_node_id: physical_node_id.cloned(),
             concrete_key: concrete_key.to_string(),
         };
-        let removed_key = match self.branch_instance_references.entry(metric_key) {
+        let removed_key = match self.series.branch_instance_references.entry(metric_key) {
             Entry::Occupied(mut entry) if entry.get().count > 1 => {
                 entry.get_mut().count -= 1;
                 false
@@ -1886,19 +2068,20 @@ impl RuntimeMetrics {
             Entry::Vacant(_) => return,
         };
         if removed_key {
-            self.prometheus
+            self.series
+                .prometheus
                 .branch_instances
-                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
                 .dec();
         }
     }
 
     pub fn register_global_node(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        physical_node_id: Option<&str>,
+        node: &ModelName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) {
         self.register_counter(MetricKey::node_without_stream(
             domain,
@@ -1920,9 +2103,9 @@ impl RuntimeMetrics {
 
     pub fn register_global_stream(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
     ) {
         self.register_counter(MetricKey::relay(
             domain,
@@ -1933,11 +2116,42 @@ impl RuntimeMetrics {
         ));
     }
 
+    pub(crate) fn remove_relay(&self, domain: &DomainName, relay: &RelayName) {
+        let counter_keys = self
+            .series
+            .counters
+            .iter()
+            .filter(|entry| entry.key().belongs_to_relay(domain, relay))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in counter_keys {
+            self.series.counters.remove(&key);
+            self.series.prometheus.remove(&key);
+        }
+        let histogram_keys = self
+            .series
+            .histograms
+            .iter()
+            .filter(|entry| entry.key().belongs_to_relay(domain, relay))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in histogram_keys {
+            self.series.histograms.remove(&key);
+            self.series.prometheus.remove(&key);
+        }
+        self.series
+            .branch_counters
+            .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
+        self.series
+            .branch_histograms
+            .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
+    }
+
     pub fn observe_global_stream_received(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        domain: &DomainName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         messages: u64,
         bytes: u64,
         domain_timestamp: Option<Timestamp>,
@@ -2061,11 +2275,11 @@ impl RuntimeMetrics {
 
     pub fn observe_global_delivery_latency(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        node: &Identifier,
-        relay: &Identifier,
-        physical_node_id: Option<&str>,
+        node: &ModelName,
+        relay: &RelayName,
+        physical_node_id: Option<&ClusterNodeName>,
         seconds: f64,
     ) {
         let key = MetricKey::node(
@@ -2078,7 +2292,7 @@ impl RuntimeMetrics {
             DELIVERY_LATENCY_SECONDS,
         );
         self.observe_histogram(key.clone(), seconds, None);
-        self.prometheus.observe_histogram(&key, seconds);
+        self.series.prometheus.observe_histogram(&key, seconds);
     }
 
     pub fn observe_global_delivery_latency_at_domain_time(
@@ -2099,7 +2313,9 @@ impl RuntimeMetrics {
             observation.seconds,
             observation.domain_timestamp,
         );
-        self.prometheus.observe_histogram(&key, observation.seconds);
+        self.series
+            .prometheus
+            .observe_histogram(&key, observation.seconds);
     }
 
     pub fn observe_branch_stream_received(
@@ -2197,12 +2413,13 @@ impl RuntimeMetrics {
         );
         self.observe_histogram_with_capacity(
             key.clone(),
-            observation.len as f64,
+            observation.len.approx_into(),
             Some(observation.capacity),
             None,
         );
-        self.prometheus
-            .observe_histogram(&key, observation.len as f64);
+        self.series
+            .prometheus
+            .observe_histogram(&key, observation.len.approx_into());
     }
 
     pub fn observe_branch_relay_buffer_len(
@@ -2219,25 +2436,26 @@ impl RuntimeMetrics {
                 observation.direction,
                 RELAY_BUFFER_LEN,
             ),
-            observation.len as f64,
+            observation.len.approx_into(),
             Some(observation.capacity),
             None,
         );
     }
 
     pub fn prometheus_text(&self) -> String {
-        self.prometheus.text()
+        self.series.prometheus.text()
     }
 
     pub fn snapshot_global_target(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
     ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
+            .series
             .counters
             .iter()
             .filter(|entry| {
@@ -2247,6 +2465,7 @@ impl RuntimeMetrics {
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.key.cmp(&right.key));
         let mut histograms = self
+            .series
             .histograms
             .iter()
             .filter(|entry| {
@@ -2264,13 +2483,14 @@ impl RuntimeMetrics {
     pub fn snapshot_branch_target(
         &self,
         branch_key: &str,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
     ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
+            .series
             .branch_counters
             .iter()
             .filter(|entry| {
@@ -2287,6 +2507,7 @@ impl RuntimeMetrics {
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.key.cmp(&right.key));
         let mut histograms = self
+            .series
             .branch_histograms
             .iter()
             .filter(|entry| {
@@ -2310,14 +2531,15 @@ impl RuntimeMetrics {
 
     pub fn apply_global_target_snapshot(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
         snapshot: RuntimeMetricsSnapshot,
     ) {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let counter_keys = self
+            .series
             .counters
             .iter()
             .filter(|entry| {
@@ -2326,9 +2548,10 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in counter_keys {
-            self.counters.remove(&key);
+            self.series.counters.remove(&key);
         }
         let histogram_keys = self
+            .series
             .histograms
             .iter()
             .filter(|entry| {
@@ -2337,40 +2560,43 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in histogram_keys {
-            self.histograms.remove(&key);
+            self.series.histograms.remove(&key);
         }
 
         for counter in snapshot.counters {
             let Ok(key) = MetricKey::try_from(counter.key.clone()) else {
                 continue;
             };
-            self.counters
+            self.series
+                .counters
                 .insert(key, Arc::new(CounterSeries::from_snapshot(&counter)));
         }
         for histogram in snapshot.histograms {
             let Ok(key) = MetricKey::try_from(histogram.key.clone()) else {
                 continue;
             };
-            self.histograms
+            self.series
+                .histograms
                 .insert(key, Arc::new(HistogramSeries::from_snapshot(&histogram)));
         }
     }
 
     pub fn has_global_target_measurements(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
+        target: impl Into<ModelName>,
     ) -> bool {
+        let target = target.into();
         let target_kind = kind.as_str().to_ascii_uppercase();
-        self.counters.iter().any(|entry| {
+        self.series.counters.iter().any(|entry| {
             let key = entry.key();
             key.domain == domain.as_str()
                 && key.target_kind == target_kind
                 && key.target == target.as_str()
                 && key.relay != "-"
                 && entry.value().value.load(AtomicOrdering::Relaxed) > 0
-        }) || self.histograms.iter().any(|entry| {
+        }) || self.series.histograms.iter().any(|entry| {
             let key = entry.key();
             key.domain == domain.as_str()
                 && key.target_kind == target_kind
@@ -2384,16 +2610,18 @@ impl RuntimeMetrics {
             let Ok(key) = MetricKey::try_from(counter.key.clone()) else {
                 continue;
             };
-            self.counters.remove(&key);
-            self.counters
+            self.series.counters.remove(&key);
+            self.series
+                .counters
                 .insert(key, Arc::new(CounterSeries::from_snapshot(&counter)));
         }
         for histogram in snapshot.histograms {
             let Ok(key) = MetricKey::try_from(histogram.key.clone()) else {
                 continue;
             };
-            self.histograms.remove(&key);
-            self.histograms
+            self.series.histograms.remove(&key);
+            self.series
+                .histograms
                 .insert(key, Arc::new(HistogramSeries::from_snapshot(&histogram)));
         }
     }
@@ -2401,14 +2629,15 @@ impl RuntimeMetrics {
     pub fn apply_branch_target_snapshot(
         &self,
         branch_key: &str,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        target: &Identifier,
-        physical_node_id: &str,
+        target: &ModelName,
+        physical_node_id: &ClusterNodeName,
         snapshot: RuntimeMetricsSnapshot,
     ) {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let counter_keys = self
+            .series
             .branch_counters
             .iter()
             .filter(|entry| {
@@ -2424,9 +2653,10 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in counter_keys {
-            self.branch_counters.remove(&key);
+            self.series.branch_counters.remove(&key);
         }
         let histogram_keys = self
+            .series
             .branch_histograms
             .iter()
             .filter(|entry| {
@@ -2442,14 +2672,14 @@ impl RuntimeMetrics {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in histogram_keys {
-            self.branch_histograms.remove(&key);
+            self.series.branch_histograms.remove(&key);
         }
 
         for counter in snapshot.counters {
             let Ok(key) = MetricKey::try_from(counter.key.clone()) else {
                 continue;
             };
-            self.branch_counters.insert(
+            self.series.branch_counters.insert(
                 BranchMetricKey {
                     branch_key: branch_key.to_string(),
                     key,
@@ -2461,7 +2691,7 @@ impl RuntimeMetrics {
             let Ok(key) = MetricKey::try_from(histogram.key.clone()) else {
                 continue;
             };
-            self.branch_histograms.insert(
+            self.series.branch_histograms.insert(
                 BranchMetricKey {
                     branch_key: branch_key.to_string(),
                     key,
@@ -2473,12 +2703,14 @@ impl RuntimeMetrics {
 
     pub fn describe_global_target(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        target: &Identifier,
+        target: impl Into<ModelName>,
     ) -> Vec<String> {
+        let target = target.into();
         let mut lines = Vec::new();
         let mut counters = self
+            .series
             .counters
             .iter()
             .filter(|entry| {
@@ -2490,6 +2722,7 @@ impl RuntimeMetrics {
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.0.cmp(&right.0));
         let mut histograms = self
+            .series
             .histograms
             .iter()
             .filter(|entry| {
@@ -2575,7 +2808,7 @@ impl RuntimeMetrics {
         lines
     }
 
-    pub fn describe_domain_statistics(&self, domain: &Domain) -> Vec<String> {
+    pub fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {
         let mut input_output =
             self.aggregate_domain_counters(domain, DomainMetricScope::InputOutput);
         let mut processed = self.aggregate_domain_counters(domain, DomainMetricScope::Processed);
@@ -2622,15 +2855,15 @@ impl RuntimeMetrics {
         lines
     }
 
-    pub fn dataflow_domain_statistics(&self, domain: &Domain) -> DataflowStatistics {
+    pub fn dataflow_domain_statistics(&self, domain: &DomainName) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| key.domain == domain.as_str())
     }
 
     pub fn dataflow_node_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        target: &Identifier,
+        target: &ModelName,
     ) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| {
             key.domain == domain.as_str()
@@ -2641,7 +2874,7 @@ impl RuntimeMetrics {
 
     pub fn dataflow_edge_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         metric: &DataflowMetricRef,
     ) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| {
@@ -2651,8 +2884,8 @@ impl RuntimeMetrics {
 
     pub fn dataflow_relay_buffer_statistics(
         &self,
-        domain: &Domain,
-        relay: &Identifier,
+        domain: &DomainName,
+        relay: &RelayName,
     ) -> DataflowStatistics {
         self.dataflow_statistics_for_global_keys(|key| {
             key.domain == domain.as_str()
@@ -2664,12 +2897,12 @@ impl RuntimeMetrics {
 
     pub fn dataflow_branch_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: &str,
-        target: &Identifier,
+        target: &ModelName,
     ) -> Vec<DataflowBranchStatistics> {
         let mut branches = Vec::<(String, DataflowStatistics)>::new();
-        for entry in self.branch_counters.iter() {
+        for entry in self.series.branch_counters.iter() {
             let branch_key = entry.key();
             if branch_key.key.domain != domain.as_str()
                 || branch_key.key.target_kind != kind
@@ -2691,7 +2924,7 @@ impl RuntimeMetrics {
                 branches.push((branch_key.branch_key.clone(), statistics));
             }
         }
-        for entry in self.branch_histograms.iter() {
+        for entry in self.series.branch_histograms.iter() {
             let branch_key = entry.key();
             if branch_key.key.domain != domain.as_str()
                 || branch_key.key.target_kind != kind
@@ -2722,11 +2955,11 @@ impl RuntimeMetrics {
 
     pub fn dataflow_edge_branch_statistics(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         metric: &DataflowMetricRef,
     ) -> Vec<DataflowBranchStatistics> {
         let mut branches = Vec::<(String, DataflowStatistics)>::new();
-        for entry in self.branch_counters.iter() {
+        for entry in self.series.branch_counters.iter() {
             let branch_key = entry.key();
             if !branch_key.key.matches_dataflow_metric_ref(domain, metric) {
                 continue;
@@ -2745,7 +2978,7 @@ impl RuntimeMetrics {
                 branches.push((branch_key.branch_key.clone(), statistics));
             }
         }
-        for entry in self.branch_histograms.iter() {
+        for entry in self.series.branch_histograms.iter() {
             let branch_key = entry.key();
             if !branch_key.key.matches_dataflow_metric_ref(domain, metric) {
                 continue;
@@ -2776,7 +3009,7 @@ impl RuntimeMetrics {
         include: impl Fn(&MetricKey) -> bool,
     ) -> DataflowStatistics {
         let mut statistics = DataflowStatistics::default();
-        for entry in self.counters.iter() {
+        for entry in self.series.counters.iter() {
             if !include(entry.key()) {
                 continue;
             }
@@ -2786,7 +3019,7 @@ impl RuntimeMetrics {
                 add_dataflow_statistics(&mut statistics, counter_statistics);
             }
         }
-        for entry in self.histograms.iter() {
+        for entry in self.series.histograms.iter() {
             if !include(entry.key()) {
                 continue;
             }
@@ -2801,11 +3034,11 @@ impl RuntimeMetrics {
 
     fn aggregate_domain_counters(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         scope: DomainMetricScope,
     ) -> Vec<(MetricKey, AggregatedCounterSummary)> {
         let mut counters = Vec::<(MetricKey, AggregatedCounterSummary)>::new();
-        for entry in self.counters.iter() {
+        for entry in self.series.counters.iter() {
             let key = entry.key();
             if key.domain != domain.as_str() || !scope.includes_target_kind(&key.target_kind) {
                 continue;
@@ -2837,11 +3070,11 @@ impl RuntimeMetrics {
 
     fn aggregate_domain_histograms(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         scope: DomainMetricScope,
     ) -> Vec<(MetricKey, HistogramSummary)> {
         let mut histograms = Vec::<(MetricKey, AggregatedRollingHistograms)>::new();
-        for entry in self.histograms.iter() {
+        for entry in self.series.histograms.iter() {
             let key = entry.key();
             if key.domain != domain.as_str() || !scope.includes_target_kind(&key.target_kind) {
                 continue;
@@ -2894,9 +3127,10 @@ impl RuntimeMetrics {
             domain_timestamp,
         );
         let batch_key = with_metric(&messages_key, MESSAGES_PER_BATCH);
-        self.observe_histogram(batch_key.clone(), messages as f64, domain_timestamp);
-        self.prometheus
-            .observe_histogram(&batch_key, messages as f64);
+        self.observe_histogram(batch_key.clone(), messages.approx_into(), domain_timestamp);
+        self.series
+            .prometheus
+            .observe_histogram(&batch_key, messages.approx_into());
     }
 
     fn observe_branch_batch(
@@ -2923,24 +3157,25 @@ impl RuntimeMetrics {
         self.observe_branch_histogram(
             branch_key,
             with_metric(&messages_key, MESSAGES_PER_BATCH),
-            messages as f64,
+            messages.approx_into(),
             domain_timestamp,
         );
     }
 
     fn increment(&self, key: MetricKey, value: u64, domain_timestamp: Option<Timestamp>) {
         self.register_counter(key.clone());
-        if let Some(series) = self.counters.get(&key) {
+        if let Some(series) = self.series.counters.get(&key) {
             series.increment(value, domain_timestamp);
         }
-        self.prometheus.increment_counter(&key, value);
+        self.series.prometheus.increment_counter(&key, value);
     }
 
     fn register_counter(&self, key: MetricKey) {
-        self.counters
+        self.series
+            .counters
             .entry(key.clone())
             .or_insert_with(|| Arc::new(CounterSeries::default()));
-        self.prometheus.register_counter(&key);
+        self.series.prometheus.register_counter(&key);
     }
 
     fn observe_histogram(&self, key: MetricKey, value: f64, domain_timestamp: Option<Timestamp>) {
@@ -2955,12 +3190,13 @@ impl RuntimeMetrics {
         domain_timestamp: Option<Timestamp>,
     ) {
         let buckets = internal_buckets_for_metric(key.metric);
-        self.histograms
+        self.series
+            .histograms
             .entry(key)
             .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
             .observe_with_capacity(
                 value,
-                capacity.map(|capacity| u64::try_from(capacity).unwrap_or(u64::MAX)),
+                capacity.map(|capacity| capacity.arch_into()),
                 domain_timestamp,
             );
     }
@@ -2976,10 +3212,11 @@ impl RuntimeMetrics {
             branch_key: branch_key.to_string(),
             key,
         };
-        self.branch_counters
+        self.series
+            .branch_counters
             .entry(key.clone())
             .or_insert_with(|| Arc::new(CounterSeries::default()));
-        if let Some(series) = self.branch_counters.get(&key) {
+        if let Some(series) = self.series.branch_counters.get(&key) {
             series.increment(value, domain_timestamp);
         }
     }
@@ -3003,7 +3240,8 @@ impl RuntimeMetrics {
         domain_timestamp: Option<Timestamp>,
     ) {
         let buckets = internal_buckets_for_metric(key.metric);
-        self.branch_histograms
+        self.series
+            .branch_histograms
             .entry(BranchMetricKey {
                 branch_key: branch_key.to_string(),
                 key,
@@ -3011,7 +3249,7 @@ impl RuntimeMetrics {
             .or_insert_with(|| Arc::new(HistogramSeries::new(buckets)))
             .observe_with_capacity(
                 value,
-                capacity.map(|capacity| u64::try_from(capacity).unwrap_or(u64::MAX)),
+                capacity.map(|capacity| capacity.arch_into()),
                 domain_timestamp,
             );
     }
@@ -3116,15 +3354,15 @@ fn with_metric(key: &MetricKey, metric: &'static str) -> MetricKey {
 
 fn key_matches_target(
     key: &MetricKey,
-    domain: &Domain,
+    domain: &DomainName,
     target_kind: &str,
-    target: &Identifier,
-    physical_node_id: &str,
+    target: &ModelName,
+    physical_node_id: &ClusterNodeName,
 ) -> bool {
     key.domain == domain.as_str()
         && key.target_kind == target_kind
         && key.target == target.as_str()
-        && key.physical_node_id == physical_node_id
+        && key.physical_node_id.as_ref() == Some(physical_node_id)
 }
 
 fn metric_name_to_static(metric: &str) -> Option<&'static str> {
@@ -3195,7 +3433,7 @@ fn wall_rate(value: u64, started_at: Instant) -> f64 {
     if elapsed <= 0.0 {
         0.0
     } else {
-        value as f64 / elapsed
+        value.approx_into::<f64>() / elapsed
     }
 }
 
@@ -3275,10 +3513,11 @@ fn domain_rate(value: u64, started_at_nanos: &AtomicI64, last_at_nanos: &AtomicI
         return None;
     }
     let elapsed_nanos = last_at_nanos.checked_sub(started_at_nanos)?;
-    if elapsed_nanos <= 0 {
+    let elapsed = Duration::from_nanos(u64::try_from(elapsed_nanos).ok()?).as_secs_f64();
+    if elapsed <= 0.0 {
         return None;
     }
-    Some(value as f64 / ((elapsed_nanos as f64) / 1_000_000_000.0))
+    Some(value.approx_into::<f64>() / elapsed)
 }
 
 fn decay_factor(elapsed_seconds: f64, tau_seconds: f64) -> f64 {
@@ -3292,16 +3531,24 @@ fn time_decay_alpha(elapsed_seconds: f64, tau_seconds: f64) -> f64 {
     1.0 - decay_factor(elapsed_seconds, tau_seconds)
 }
 
-fn rate_decay_tau_seconds(window_seconds: f64) -> f64 {
-    window_seconds / RATE_DECAY_TAU_FRACTION
+fn rate_decay_tau_seconds(window: Duration) -> f64 {
+    window.as_secs_f64() / RATE_DECAY_TAU_FRACTION
 }
 
-fn scaled_histogram_value(value: f64) -> u64 {
-    (value * HISTOGRAM_VALUE_SCALE).round().max(0.0) as u64
+/// Scales a sample into the fixed-point unit the HDR histograms record in.
+///
+/// Returns `None` for a sample that has no such unit: a non-finite observation, or one whose
+/// scaled magnitude leaves the `u64` range. Neither belongs in a histogram, so the caller drops
+/// it rather than recording a saturated stand-in.
+fn scaled_histogram_value(value: f64) -> Option<u64> {
+    (value * HISTOGRAM_VALUE_SCALE)
+        .round()
+        .max(0.0)
+        .checked_approx_into()
 }
 
 fn unscale_histogram_value(value: u64) -> f64 {
-    value as f64 / HISTOGRAM_VALUE_SCALE
+    value.approx_into::<f64>() / HISTOGRAM_VALUE_SCALE
 }
 
 fn hdr_histogram_to_snapshot(histogram: &HdrHistogram<u64>) -> Vec<HdrRecordedValueSnapshot> {
@@ -3320,7 +3567,12 @@ fn hdr_histogram_from_snapshot(
 ) -> HdrHistogram<u64> {
     let mut histogram = config.new_histogram();
     for value in snapshot {
-        let _ = histogram.record_n(value.value, value.count);
+        // Clamped for the same reason as `TimeRollingHistogram::record`: a snapshot written when
+        // the ladder reached further still describes observations that belong in this histogram's
+        // top bucket, and dropping them would silently lower the restored percentiles.
+        histogram
+            .record_n(value.value.min(config.highest_trackable_value), value.count)
+            .assured("the value was just clamped to the histogram's own maximum");
     }
     histogram
 }
@@ -3337,7 +3589,10 @@ fn oldest_bucket_start(current_start: i64, window: Duration, step: Duration) -> 
 }
 
 fn duration_nanos_i64(duration: Duration) -> i64 {
-    i64::try_from(duration.as_nanos()).expect("metric duration fits into i64 nanoseconds")
+    i64::try_from(duration.as_nanos()).assured(
+        "every caller passes a rolling-window constant of minutes, far inside the i64 nanosecond \
+         range",
+    )
 }
 
 fn format_counter_metric_line(prefix: &str, key: &MetricKey, summary: &CounterSummary) -> String {
@@ -3348,7 +3603,7 @@ fn format_counter_metric_line(prefix: &str, key: &MetricKey, summary: &CounterSu
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
-        empty_as_dash(&key.physical_node_id),
+        physical_node_label(key.physical_node_id.as_ref()),
         summary.value,
         format_number(summary.wall_rate_per_sec),
         format_optional(summary.domain_rate_per_sec),
@@ -3411,9 +3666,20 @@ fn add_dataflow_statistics(target: &mut DataflowStatistics, source: DataflowStat
     target.messages_per_second += source.messages_per_second;
     target.bytes_per_second += source.bytes_per_second;
     target.batches_per_second += source.batches_per_second;
-    target.messages_total = target.messages_total.saturating_add(source.messages_total);
-    target.bytes_total = target.bytes_total.saturating_add(source.bytes_total);
-    target.batches_total = target.batches_total.saturating_add(source.batches_total);
+    const OBSERVED_TOTALS: &str = "both totals count dataflow this cluster already observed";
+
+    target.messages_total = target
+        .messages_total
+        .checked_add(source.messages_total)
+        .assured(OBSERVED_TOTALS);
+    target.bytes_total = target
+        .bytes_total
+        .checked_add(source.bytes_total)
+        .assured(OBSERVED_TOTALS);
+    target.batches_total = target
+        .batches_total
+        .checked_add(source.batches_total)
+        .assured(OBSERVED_TOTALS);
     target.relay_buffer_capacity =
         max_optional_u64(target.relay_buffer_capacity, source.relay_buffer_capacity);
     target.relay_buffer_len_p50 =
@@ -3436,7 +3702,7 @@ fn format_aggregated_counter_metric_line(
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
-        empty_as_dash(&key.physical_node_id),
+        physical_node_label(key.physical_node_id.as_ref()),
         summary.value,
         format_number(summary.wall_rate_per_sec),
         format_optional(summary.domain_rate_per_sec),
@@ -3463,7 +3729,7 @@ fn format_histogram_metric_line(
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
-        empty_as_dash(&key.physical_node_id),
+        physical_node_label(key.physical_node_id.as_ref()),
         capacity,
         format_histogram_optional(summary.rolling_histograms.wall_1m.p50),
         format_histogram_optional(summary.rolling_histograms.wall_1m.p90),
@@ -3521,7 +3787,7 @@ fn prometheus_label_values(key: &MetricKey) -> [&str; 8] {
         key.domain.as_str(),
         key.target_kind.as_str(),
         key.target.as_str(),
-        key.physical_node_id.as_str(),
+        physical_node_label(key.physical_node_id.as_ref()),
         key.direction.as_str(),
         empty_as_dash(&key.relay),
         empty_as_dash(&key.peer_kind),
@@ -3531,6 +3797,13 @@ fn prometheus_label_values(key: &MetricKey) -> [&str; 8] {
 
 fn empty_as_dash(value: &str) -> &str {
     if value.is_empty() { "-" } else { value }
+}
+
+/// How the owning cluster node is spelled as a label value. A metric observed on a node that owns
+/// nothing placed still carries the label, and it uses the same `-` absent marker as the other
+/// optional labels.
+fn physical_node_label(physical_node_id: Option<&ClusterNodeName>) -> &str {
+    physical_node_id.map_or("-", ClusterNodeName::as_str)
 }
 
 fn format_optional(value: Option<f64>) -> String {
@@ -3622,16 +3895,16 @@ mod tests {
     #[test]
     fn local_summary_reports_rates_and_percentiles() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("input").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("input").expect("valid identifier");
 
         metrics.observe_global_node_received(NodeBatchObservation {
             domain: &domain,
             kind: ModelKind::Deduplicator,
             node: &node,
             relay: &relay,
-            physical_node_id: Some("node-1"),
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             messages: 3,
             bytes: 128,
             domain_timestamp: Some(Timestamp::from_unix_nanos(1_000_000_000)),
@@ -3641,7 +3914,7 @@ mod tests {
             ModelKind::Deduplicator,
             &node,
             &relay,
-            Some("node-1"),
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             0.25,
         );
 
@@ -3667,16 +3940,16 @@ mod tests {
     #[test]
     fn dataflow_statistics_include_domain_node_and_branch_counters() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("input").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("input").expect("valid identifier");
 
         metrics.observe_global_node_received(NodeBatchObservation {
             domain: &domain,
             kind: ModelKind::Deduplicator,
             node: &node,
             relay: &relay,
-            physical_node_id: Some("node-1"),
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             messages: 3,
             bytes: 128,
             domain_timestamp: None,
@@ -3688,7 +3961,7 @@ mod tests {
                 kind: ModelKind::Deduplicator,
                 node: &node,
                 relay: &relay,
-                physical_node_id: Some("node-1"),
+                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 messages: 2,
                 bytes: 64,
                 domain_timestamp: None,
@@ -3726,14 +3999,14 @@ mod tests {
     #[test]
     fn client_to_ingestor_edge_statistics_do_not_create_batches() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let ingestor = Identifier::parse("ing").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let ingestor = IngestorName::parse("ing").expect("valid identifier");
 
         metrics.observe_global_node_without_stream_received(NodeWithoutRelayObservation {
             domain: &domain,
             kind: ModelKind::Ingestor,
-            node: &ingestor,
-            physical_node_id: Some("node-1"),
+            node: &ModelName::from(&ingestor),
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             messages: 2,
             bytes: 34,
             domain_timestamp: None,
@@ -3743,8 +4016,8 @@ mod tests {
             NodeWithoutRelayObservation {
                 domain: &domain,
                 kind: ModelKind::Ingestor,
-                node: &ingestor,
-                physical_node_id: Some("node-1"),
+                node: &ModelName::from(&ingestor),
+                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 messages: 2,
                 bytes: 34,
                 domain_timestamp: None,
@@ -3778,7 +4051,8 @@ mod tests {
         assert!(
             messages
                 .distinct_values()
-                .saturating_mul(std::mem::size_of::<u64>())
+                .checked_mul(std::mem::size_of::<u64>())
+                .assured("a histogram's distinct value count is bounded by its configured buckets")
                 <= MAX_INTERNAL_BUCKET_BYTES,
             "messages_per_batch histogram count storage is too large: {} values",
             messages.distinct_values()
@@ -3788,7 +4062,8 @@ mod tests {
         assert!(
             relay_buffer
                 .distinct_values()
-                .saturating_mul(std::mem::size_of::<u64>())
+                .checked_mul(std::mem::size_of::<u64>())
+                .assured("a histogram's distinct value count is bounded by its configured buckets")
                 <= MAX_INTERNAL_BUCKET_BYTES,
             "relay_buffer_len histogram count storage is too large: {} values",
             relay_buffer.distinct_values()
@@ -3798,9 +4073,9 @@ mod tests {
     #[test]
     fn messages_per_batch_percentiles_follow_observed_values_not_bucket_boundaries() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         for _ in 0..100 {
             metrics.observe_global_node_received(NodeBatchObservation {
@@ -3808,7 +4083,7 @@ mod tests {
                 kind: ModelKind::Deduplicator,
                 node: &node,
                 relay: &relay,
-                physical_node_id: Some("node-1"),
+                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 messages: 2,
                 bytes: 64,
                 domain_timestamp: None,
@@ -3819,7 +4094,7 @@ mod tests {
             kind: ModelKind::Deduplicator,
             node: &node,
             relay: &relay,
-            physical_node_id: Some("node-1"),
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             messages: 500,
             bytes: 64,
             domain_timestamp: None,
@@ -3853,18 +4128,25 @@ mod tests {
     #[test]
     fn relay_buffer_len_reports_capacity_and_dataflow_statistics() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         metrics.observe_global_relay_buffer_len(RelayBufferObservation {
             domain: &domain,
             relay: &relay,
-            physical_node_id: Some("node-1"),
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             direction: "concrete",
             len: 2,
             capacity: 3,
         });
-        metrics.observe_global_stream_received(&domain, &relay, Some("node-1"), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
         let rendered = metrics.describe_global_target(&domain, "RELAY", &relay);
         let line = rendered
@@ -3934,16 +4216,42 @@ mod tests {
     }
 
     #[test]
+    fn an_observation_past_the_bucket_ladder_lands_in_the_top_bucket() {
+        // LATENCY_BUCKETS tops out at 30 seconds. A request slower than that is exactly the
+        // observation a latency percentile exists to expose, so it has to be counted at the
+        // maximum rather than dropped for being out of range.
+        let mut histogram = TimeRollingHistogram::new(
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            LATENCY_BUCKETS,
+        );
+        for _ in 0..90 {
+            histogram.observe_at(0.001, 0);
+        }
+        for _ in 0..10 {
+            histogram.observe_at(3_600.0, 0);
+        }
+
+        let summary = histogram.summary_at(1_000_000_000);
+        assert_histogram_percentile_near(summary.p50, 0.001);
+        assert!(
+            summary.p99.is_some_and(|p99| p99 >= 30.0),
+            "the slowest observation must reach the top bucket, got {:?}",
+            summary.p99
+        );
+    }
+
+    #[test]
     fn describe_renders_expired_one_minute_histogram_percentiles_as_absent() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("events").expect("valid identifier");
         let key = MetricKey::node(
             &domain,
             ModelKind::Deduplicator,
             &node,
-            Some("node-1"),
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             &relay,
             "received",
             MESSAGES_PER_BATCH,
@@ -3956,7 +4264,7 @@ mod tests {
             rolling.wall_1m.inner.observe_at(10.0, old);
             rolling.wall_15m.inner.observe_at(10.0, old);
         }
-        metrics.histograms.insert(key, Arc::new(histogram));
+        metrics.series.histograms.insert(key, Arc::new(histogram));
 
         let rendered = metrics.describe_global_target(&domain, "DEDUPLICATOR", &node);
         let line = rendered
@@ -3971,7 +4279,7 @@ mod tests {
 
     #[test]
     fn wall_ema_rate_decays_when_no_new_samples_arrive() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS));
+        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
         let now = Instant::now();
         let last = now
             .checked_sub(std::time::Duration::from_secs(5 * 60))
@@ -3987,7 +4295,7 @@ mod tests {
 
     #[test]
     fn one_minute_rate_ema_is_nearly_zero_after_one_minute_without_activity() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS));
+        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
         let now = Instant::now();
         let last = now
             .checked_sub(std::time::Duration::from_secs(60))
@@ -4006,7 +4314,7 @@ mod tests {
 
     #[test]
     fn one_minute_rate_ema_reacts_to_short_rate_changes() {
-        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE_SECONDS));
+        let mut ema = WallEma::new(rate_decay_tau_seconds(ONE_MINUTE));
 
         ema.value = Some(10.0);
         ema.observe_sample(100.0, 5.0);
@@ -4031,7 +4339,7 @@ mod tests {
         let restored = WallEma::from_snapshot(
             &snapshot,
             Instant::now(),
-            rate_decay_tau_seconds(ONE_MINUTE_SECONDS),
+            rate_decay_tau_seconds(ONE_MINUTE),
         );
         let decayed = restored
             .value_at(Instant::now())
@@ -4048,7 +4356,9 @@ mod tests {
         let five_minutes = 5_i64 * 60 * 1_000_000_000;
         let old = now_wall - five_minutes;
         let mut histogram = HistogramConfig::for_buckets(MESSAGE_BATCH_BUCKETS).new_histogram();
-        let _ = histogram.record(scaled_histogram_value(10.0));
+        let _ = histogram.record(
+            scaled_histogram_value(10.0).expect("ten seconds has a scaled histogram value"),
+        );
         let snapshot = WallRollingHistogramSnapshot {
             buckets: vec![RollingHistogramBucketSnapshot {
                 start_at_nanos: bucket_start(old, WALL_HISTOGRAM_1M_STEP),
@@ -4058,7 +4368,7 @@ mod tests {
 
         let restored = WallRollingHistogram::from_snapshot(
             &snapshot,
-            Duration::from_secs(ONE_MINUTE_SECONDS as u64),
+            ONE_MINUTE,
             WALL_HISTOGRAM_1M_STEP,
             MESSAGE_BATCH_BUCKETS,
         );
@@ -4071,10 +4381,17 @@ mod tests {
     #[test]
     fn prometheus_export_uses_shared_labels_and_raw_counts() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
-        metrics.observe_global_stream_received(&domain, &relay, Some("node-1"), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
         let rendered = metrics.prometheus_text();
         assert!(rendered.contains("nervix_messages_total"));
@@ -4086,10 +4403,76 @@ mod tests {
     }
 
     #[test]
+    fn relinquishing_relay_ownership_removes_its_local_metrics() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
+        metrics.observe_branch_stream_received(
+            r#"{"tenant":"acme"}"#,
+            RelayBatchObservation {
+                domain: &domain,
+                relay: &relay,
+                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+                messages: 2,
+                bytes: 64,
+                domain_timestamp: None,
+            },
+        );
+        metrics.observe_global_relay_buffer_len(RelayBufferObservation {
+            domain: &domain,
+            relay: &relay,
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            direction: "concrete",
+            len: 1,
+            capacity: 2,
+        });
+
+        metrics.remove_relay(&domain, &relay);
+
+        assert!(
+            metrics
+                .series
+                .counters
+                .iter()
+                .all(|entry| entry.key().target != relay.as_str())
+        );
+        assert!(
+            metrics
+                .series
+                .histograms
+                .iter()
+                .all(|entry| entry.key().target != relay.as_str())
+        );
+        assert!(
+            metrics
+                .series
+                .branch_counters
+                .iter()
+                .all(|entry| entry.key().key.target != relay.as_str())
+        );
+        assert!(
+            metrics
+                .series
+                .branch_histograms
+                .iter()
+                .all(|entry| entry.key().key.target != relay.as_str())
+        );
+        assert!(!metrics.prometheus_text().contains("target=\"events\""));
+    }
+
+    #[test]
     fn branch_lifecycle_metrics_count_concrete_keys_once_per_node() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let branch = Identifier::parse("by_tenant").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let branch = BranchName::parse("by_tenant").expect("valid identifier");
         let concrete_key = r#"{"tenant":"acme"}"#;
         let has_sample = |rendered: &str, metric: &str, label_fragments: &[&str], value: u64| {
             let expected_suffix = format!(" {value}");
@@ -4102,9 +4485,23 @@ mod tests {
             })
         };
 
-        metrics.register_branch(&domain, &branch, Some("node-1"));
-        metrics.observe_branch_instance_created(&domain, &branch, Some("node-1"), concrete_key);
-        metrics.observe_branch_instance_created(&domain, &branch, Some("node-1"), concrete_key);
+        metrics.register_branch(
+            &domain,
+            &branch,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+        );
+        metrics.observe_branch_instance_created(
+            &domain,
+            &branch,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            concrete_key,
+        );
+        metrics.observe_branch_instance_created(
+            &domain,
+            &branch,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            concrete_key,
+        );
 
         let rendered = metrics.prometheus_text();
         assert!(has_sample(
@@ -4122,7 +4519,7 @@ mod tests {
         metrics.observe_branch_instance_removed(
             &domain,
             &branch,
-            Some("node-1"),
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             concrete_key,
             BranchEvictionReason::Lru,
         );
@@ -4152,7 +4549,7 @@ mod tests {
         metrics.observe_branch_instance_removed(
             &domain,
             &branch,
-            Some("node-1"),
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             concrete_key,
             BranchEvictionReason::Ttl,
         );
@@ -4206,16 +4603,16 @@ mod tests {
     #[test]
     fn prometheus_histograms_are_not_internal_snapshot_storage() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let node = Identifier::parse("dedupe").expect("valid identifier");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         metrics.observe_global_node_received(NodeBatchObservation {
             domain: &domain,
             kind: ModelKind::Deduplicator,
             node: &node,
             relay: &relay,
-            physical_node_id: Some("node-1"),
+            physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             messages: 3,
             bytes: 96,
             domain_timestamp: None,
@@ -4225,8 +4622,12 @@ mod tests {
         assert!(prometheus.contains("nervix_messages_per_batch_bucket"));
         assert!(prometheus.contains("nervix_messages_per_batch_count"));
 
-        let snapshot =
-            metrics.snapshot_global_target(&domain, ModelKind::Deduplicator, &node, "node-1");
+        let snapshot = metrics.snapshot_global_target(
+            &domain,
+            ModelKind::Deduplicator,
+            &node,
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        );
         let histogram = snapshot
             .histograms
             .iter()
@@ -4242,7 +4643,7 @@ mod tests {
             &domain,
             ModelKind::Deduplicator,
             &node,
-            "node-1",
+            &ClusterNodeName::parse("node-1").expect("valid name"),
             snapshot,
         );
         assert!(
@@ -4261,15 +4662,15 @@ mod tests {
     #[test]
     fn prometheus_export_uses_global_metrics_only() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
 
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
             RelayBatchObservation {
                 domain: &domain,
                 relay: &relay,
-                physical_node_id: Some("node-1"),
+                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 messages: 9,
                 bytes: 128,
                 domain_timestamp: None,
@@ -4284,22 +4685,34 @@ mod tests {
     #[test]
     fn global_snapshot_uses_global_metrics_only() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
             RelayBatchObservation {
                 domain: &domain,
                 relay: &relay,
-                physical_node_id: Some("node-1"),
+                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 messages: 9,
                 bytes: 128,
                 domain_timestamp: None,
             },
         );
-        metrics.observe_global_stream_received(&domain, &relay, Some("node-1"), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
-        let snapshot = metrics.snapshot_global_target(&domain, ModelKind::Relay, &relay, "node-1");
+        let snapshot = metrics.snapshot_global_target(
+            &domain,
+            ModelKind::Relay,
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        );
         assert_eq!(snapshot.counters.len(), 3);
         assert!(
             snapshot
@@ -4313,27 +4726,34 @@ mod tests {
     #[test]
     fn branch_snapshot_roundtrips_separately_from_global_metrics() {
         let metrics = RuntimeMetrics::default();
-        let domain = Domain::parse("main").expect("valid domain");
-        let relay = Identifier::parse("events").expect("valid identifier");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
         metrics.observe_branch_stream_received(
             r#"{"tenant":"acme"}"#,
             RelayBatchObservation {
                 domain: &domain,
                 relay: &relay,
-                physical_node_id: Some("node-1"),
+                physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 messages: 9,
                 bytes: 128,
                 domain_timestamp: None,
             },
         );
-        metrics.observe_global_stream_received(&domain, &relay, Some("node-1"), 2, 64, None);
+        metrics.observe_global_stream_received(
+            &domain,
+            &relay,
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            2,
+            64,
+            None,
+        );
 
         let snapshot = metrics.snapshot_branch_target(
             r#"{"tenant":"acme"}"#,
             &domain,
             ModelKind::Relay,
-            &relay,
-            "node-1",
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert_eq!(snapshot.counters.len(), 3);
         assert!(
@@ -4348,8 +4768,8 @@ mod tests {
             r#"{"tenant":"acme"}"#,
             &domain,
             ModelKind::Relay,
-            &relay,
-            "node-1",
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
             snapshot,
         );
         assert!(!has_graph_prometheus_samples(&restored.prometheus_text()));
@@ -4357,8 +4777,8 @@ mod tests {
             r#"{"tenant":"acme"}"#,
             &domain,
             ModelKind::Relay,
-            &relay,
-            "node-1",
+            &ModelName::from(&relay),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert!(
             restored_branch

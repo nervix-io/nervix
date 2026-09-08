@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CreateSignalingProtocol, CreateStatement, SignalingProtobufConfig, SignalingProtocolOnConnect,
     SignalingStep, SignalingWaitStep, SignalingWireFormat,
@@ -7,9 +8,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, config_entries_block, duration_lit, if_not_exists_clause,
-        into_parse_error, kw, lex_input, resource_ref, signaling_protocol_name, string_lit,
-        suggest_from, tok, u64_value,
+        LexedInput, ParseError, ParseFromSourceError, config_entries_block, duration_lit,
+        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref,
+        signaling_protocol_name, string_lit, suggest_from, tok, u64_value,
     },
 };
 
@@ -209,14 +210,18 @@ pub fn parse_create_signaling_protocol_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_signaling_protocol(
     input: &str,
 ) -> Result<CreateStatement<CreateSignalingProtocol>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_signaling_protocol_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -434,7 +439,7 @@ mod tests {
         assert_eq!(
             parsed.format,
             SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                resource: nervix_models::Identifier::parse("proto_bundle")
+                resource: nervix_models::ResourceName::parse("proto_bundle")
                     .expect("valid identifier"),
                 resource_version: Some(2),
                 config: vec![

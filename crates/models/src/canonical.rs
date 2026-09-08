@@ -1,4 +1,9 @@
-use std::fmt::{Display, Formatter};
+use std::{
+    fmt::{Display, Formatter},
+    num::NonZeroU64,
+};
+
+use meticulous::OptionExt as _;
 
 use crate::{
     AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
@@ -6,36 +11,31 @@ use crate::{
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AvroType, BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping,
+    ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreateMaterializer, CreatePlacement, CreateReingestor,
-    CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint,
-    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-    Expression, FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog,
-    Identifier, InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
-    IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind,
-    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
-    OtelConfigEntry, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
-    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup,
-    SqsIngestMode, Statement, SubscriptionLiteral, UnaryOperator, WebsocketsConfigEntry,
-    WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqConfigEntry,
-    ZeroMqIngestMode,
+    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
+    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint, EmitSink,
+    EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, Expression, FieldName, FieldScope,
+    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
+    JsonType, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelName,
+    MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PulsarIngestMode, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
+    RelayName, ResourceName, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
+    SubscriptionLiteral, TopicName, UnaryOperator, WebsocketsIngestMode, WindowBound,
+    WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -102,9 +102,9 @@ impl Clause {
             Self::Aligned { head, items } => {
                 // Continuations line up under the first item, one indentation past the keyword.
                 let continuation = " ".repeat(indent + head.len() + 1);
-                let last = items.len().saturating_sub(1);
+                let last = items.len().checked_sub(1);
                 for (index, item) in items.iter().enumerate() {
-                    let comma = if index == last { "" } else { "," };
+                    let comma = if Some(index) == last { "" } else { "," };
                     let prefix = if index == 0 {
                         format!("{pad}{head} ")
                     } else {
@@ -382,7 +382,7 @@ fn route_construction_clauses(
                 "INHERIT ALL EXCEPT {}",
                 fields
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(FieldName::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -508,7 +508,6 @@ fn output_branch_to_nspl(branching: &OutputBranch) -> Result<String, CanonicalNs
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalNsplError {
     UnrepresentableFloat { value: String },
-    DerivedModel { kind: ModelKind },
     InvalidCodec { reason: String },
 }
 
@@ -518,11 +517,6 @@ impl Display for CanonicalNsplError {
             Self::UnrepresentableFloat { value } => {
                 write!(f, "cannot represent non-finite float in NSPL: {value}")
             }
-            Self::DerivedModel { kind } => write!(
-                f,
-                "{} is derived from its owning statement and has no NSPL form",
-                kind.keyword_phrase()
-            ),
             Self::InvalidCodec { reason } => write!(f, "invalid codec: {reason}"),
         }
     }
@@ -543,8 +537,8 @@ impl AlterPlacement {
                 AlterPlacementOperation::DropRank => "DROP RANK".to_string(),
                 AlterPlacementOperation::SetMembers { from, to } => format!(
                     "SET FROM {} TO {}",
-                    identifier_list(from),
-                    identifier_list(to)
+                    model_name_list(from),
+                    model_name_list(to)
                 ),
                 AlterPlacementOperation::RenameTo { name } => {
                     format!("RENAME TO {}", name.as_str())
@@ -559,10 +553,10 @@ impl AlterPlacement {
     }
 }
 
-fn identifier_list(names: &[Identifier]) -> String {
+fn model_name_list(names: &[ModelName]) -> String {
     names
         .iter()
-        .map(Identifier::as_str)
+        .map(ModelName::as_str)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -580,9 +574,10 @@ impl Statement {
                 if !create.if_not_exists {
                     return Ok(rendered);
                 }
-                let rest = rendered
-                    .strip_prefix("CREATE ")
-                    .expect("every model renders as a CREATE statement");
+                let rest = rendered.strip_prefix("CREATE ").verified(
+                    "this branch renders a create statement, whose rendering starts with the \
+                     CREATE keyword",
+                );
                 Ok(format!("CREATE IF NOT EXISTS {rest}"))
             }
             Self::CreateDomain(create) => {
@@ -676,6 +671,11 @@ impl Statement {
             Self::CordonNode(node) => Ok(format!("CORDON NODE {};", node.node_id)),
             Self::UncordonNode(node) => Ok(format!("UNCORDON NODE {};", node.node_id)),
             Self::DrainNode(node) => Ok(format!("DRAIN NODE {};", node.node_id)),
+            Self::Relocate(relocation) => Ok(format!("RELOCATE {};", relocation.to_nspl_clauses())),
+            Self::DescribeRelocation(relocation) => Ok(format!(
+                "DESCRIBE RELOCATION {};",
+                relocation.to_nspl_clauses()
+            )),
             Self::DescribeRelay(describe) => {
                 let bindings = if describe.bindings.is_empty() {
                     String::new()
@@ -826,7 +826,6 @@ impl Model {
             Self::Ingestor(ingestor) => ingestor.to_canonical_nspl(),
             Self::Reingestor(reingestor) => reingestor.to_canonical_nspl(),
             Self::Relay(relay) => relay.to_canonical_nspl(),
-            Self::Materializer(materializer) => materializer.to_canonical_nspl(),
             Self::Lookup(lookup) => lookup.to_canonical_nspl(),
             Self::Junction(junction) => junction.to_canonical_nspl(),
             Self::Deduplicator(deduplicator) => deduplicator.to_canonical_nspl(),
@@ -847,12 +846,12 @@ impl CreatePlacement {
             self.name.as_str(),
             self.from
                 .iter()
-                .map(Identifier::as_str)
+                .map(ModelName::as_str)
                 .collect::<Vec<_>>()
                 .join(", "),
             self.to
                 .iter()
-                .map(Identifier::as_str)
+                .map(ModelName::as_str)
                 .collect::<Vec<_>>()
                 .join(", "),
             self.policy,
@@ -1093,268 +1092,56 @@ pub fn alter_avro_wire_schema_to_canonical_nspl(
     alter_wire_schema_to_nspl("AVRO", alter)
 }
 
-impl CreateClientKafka {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(kafka_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
+macro_rules! impl_standard_client_canonical_nspl {
+    ($($Client:ident => $type_label:literal,)+) => {
+        $(
+            impl $Client {
+                pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+                    let config = self
+                        .config
+                        .iter()
+                        .map(ClientConfigEntry::to_canonical_nspl)
+                        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                        .join(", ");
 
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE KAFKA{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
+                    Ok(clause_statement(
+                        format!("CREATE CLIENT {}", self.name.as_str()),
+                        vec![
+                            Clause::line(format!(
+                                "TYPE {}{}",
+                                $type_label,
+                                client_mount_clause(self.mount.as_ref()),
+                            )),
+                            Clause::braced("CONFIG", split_config_entries(&config)),
+                        ],
+                    ))
+                }
+            }
+        )+
+    };
 }
 
-impl CreateClientHttp {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(http_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE HTTP{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientSentry {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(sentry_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE SENTRY{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientOtel {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(otel_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE OTEL{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientPulsar {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(pulsar_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE PULSAR{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientMqtt {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(mqtt_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE MQTT{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientNats {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(nats_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE NATS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientPrometheus {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(prometheus_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE PROMETHEUS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientRabbitMq {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(rabbitmq_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE RABBITMQ{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientRedis {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(redis_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE REDIS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientZeroMq {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(zeromq_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE ZEROMQ{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientSqs {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(sqs_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE SQS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
+impl_standard_client_canonical_nspl! {
+    CreateClientKafka => "KAFKA",
+    CreateClientPulsar => "PULSAR",
+    CreateClientHttp => "HTTP",
+    CreateClientSentry => "SENTRY",
+    CreateClientOtel => "OTEL",
+    CreateClientPrometheus => "PROMETHEUS",
+    CreateClientMqtt => "MQTT",
+    CreateClientNats => "NATS",
+    CreateClientRabbitMq => "RABBITMQ",
+    CreateClientRedis => "REDIS",
+    CreateClientZeroMq => "ZEROMQ",
+    CreateClientSqs => "SQS",
+    CreateClientGcs => "GCS",
+    CreateClientAzureBlob => "AZURE_BLOB",
+    CreateClientIcebergRest => "ICEBERG_REST",
+    CreateClientSyslog => "SYSLOG",
+    CreateClientClickHouse => "CLICKHOUSE",
+    CreateClientPostgres => "POSTGRES",
+    CreateClientMySql => "MYSQL",
+    CreateClientMongoDb => "MONGODB",
 }
 
 impl CreateClientS3 {
@@ -1362,7 +1149,7 @@ impl CreateClientS3 {
         let config = self
             .config
             .iter()
-            .map(s3_entry_to_nspl)
+            .map(ClientConfigEntry::to_canonical_nspl)
             .collect::<Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
 
@@ -1375,78 +1162,12 @@ impl CreateClientS3 {
     }
 }
 
-impl CreateClientGcs {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(gcs_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE GCS{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientAzureBlob {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(azure_blob_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE AZURE_BLOB{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientIcebergRest {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(kafka_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE ICEBERG_REST{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
 impl CreateClientWebsockets {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let config = self
             .config
             .iter()
-            .map(websockets_entry_to_nspl)
+            .map(ClientConfigEntry::to_canonical_nspl)
             .collect::<Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
 
@@ -1464,123 +1185,13 @@ impl CreateClientWebsockets {
     }
 }
 
-impl CreateClientSyslog {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(kafka_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE SYSLOG{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientClickHouse {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(clickhouse_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE CLICKHOUSE{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientPostgres {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(postgres_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE POSTGRES{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientMySql {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(mysql_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE MYSQL{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-impl CreateClientMongoDb {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(mongodb_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE MONGODB{}",
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
-            ],
-        ))
-    }
-}
-
-fn client_mount_clause(mount: Option<&Identifier>) -> String {
+fn client_mount_clause(mount: Option<&ResourceName>) -> String {
     mount
         .map(|mount| format!(" MOUNT {}", mount.as_str()))
         .unwrap_or_default()
 }
 
-fn signaling_protocol_clause(signaling_protocol: Option<&Identifier>) -> String {
+fn signaling_protocol_clause(signaling_protocol: Option<&SignalingProtocolName>) -> String {
     signaling_protocol
         .map(|protocol| format!(" WITH SIGNALING PROTOCOL {}", protocol.as_str()))
         .unwrap_or_default()
@@ -1615,7 +1226,7 @@ impl CreateEndpoint {
             self.name.as_str(),
             self.on_vhost.as_str(),
             string_literal(&self.path),
-            endpoint_type_to_nspl(self.endpoint_type),
+            self.endpoint_type.as_ref(),
             signaling_protocol_clause(self.signaling_protocol.as_ref())
         ))
     }
@@ -1668,7 +1279,7 @@ impl SignalingWireFormat {
         let protobuf_config = config
             .config
             .iter()
-            .map(kafka_entry_to_nspl)
+            .map(ClientConfigEntry::to_canonical_nspl)
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
         Ok(format!(
@@ -1773,7 +1384,7 @@ impl CreateCodec {
                     let protobuf_config = config
                         .config
                         .iter()
-                        .map(kafka_entry_to_nspl)
+                        .map(ClientConfigEntry::to_canonical_nspl)
                         .collect::<Result<Vec<_>, _>>()?
                         .join(", ");
                     (
@@ -1804,9 +1415,10 @@ impl CreateCodec {
         // The wire description may itself carry a CONFIG map, which becomes a block of its own.
         match wire.split_once(" CONFIG {") {
             Some((before, rest)) => {
-                let (entries, after) = rest
-                    .rsplit_once('}')
-                    .expect("a rendered CONFIG map is closed");
+                let (entries, after) = rest.rsplit_once('}').verified(
+                    "the split above found an opening CONFIG brace, which this renderer always \
+                     closes",
+                );
                 clauses.push(Clause::line(format!("FROM {before}")));
                 clauses.push(Clause::braced("CONFIG", split_config_entries(entries)));
                 if !after.trim().is_empty() {
@@ -1995,20 +1607,6 @@ impl CreateRelay {
         }
         rendered.push(';');
         Ok(rendered)
-    }
-}
-
-impl CreateMaterializer {
-    /// Materializers have no surface syntax and cannot be rendered.
-    ///
-    /// A materializer is derived by the registry from a relay that declares materialized state; the
-    /// owning `CREATE RELAY ... WITH MATERIALIZED STATE` statement is what users write and what
-    /// renders. There is nothing valid to emit here, so rendering reports the derived kind rather
-    /// than inventing text that would not parse.
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        Err(CanonicalNsplError::DerivedModel {
-            kind: ModelKind::Materializer,
-        })
     }
 }
 
@@ -2497,7 +2095,7 @@ fn inference_output_schema_items(
 }
 
 fn from_relay_to_nspl(
-    relay: &Identifier,
+    relay: &RelayName,
     from_where: &[ProcessorInputWhere],
 ) -> Result<String, CanonicalNsplError> {
     let where_suffix = from_where
@@ -3025,26 +2623,12 @@ fn optional_suffix(optional: bool) -> &'static str {
     if optional { " OPTIONAL" } else { "" }
 }
 
-fn kafka_entry_to_nspl(entry: &KafkaConfigEntry) -> Result<String, CanonicalNsplError> {
-    let key = string_literal(&entry.key);
-    let value = string_literal(&entry.value);
-    Ok(format!("{key} = {value}"))
-}
-
-fn http_entry_to_nspl(entry: &HttpConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn sentry_entry_to_nspl(entry: &SentryConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn otel_entry_to_nspl(entry: &OtelConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn pulsar_entry_to_nspl(entry: &PulsarConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
+impl ClientConfigEntry {
+    fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let key = string_literal(&self.key);
+        let value = string_literal(&self.value);
+        Ok(format!("{key} = {value}"))
+    }
 }
 
 pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
@@ -3092,7 +2676,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             client.as_str(),
             topic.as_str(),
             kafka_offset_mode_to_nspl(offset_mode),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3112,7 +2696,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             client.as_str(),
             topic.as_str(),
             subscription.as_str(),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3127,7 +2711,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             mode,
             quiesce,
         } => {
-            let instances = if *instances > 1 {
+            let instances = if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {instances}")
             } else {
                 String::new()
@@ -3167,7 +2751,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "RABBITMQ {} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             queue.as_str(),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3219,7 +2803,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "SQS {} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             queue.as_str(),
-            if *instances > 1 {
+            if *instances > NonZeroU64::MIN {
                 format!(" INSTANCES {}", instances)
             } else {
                 String::new()
@@ -3336,7 +2920,7 @@ fn mqtt_delivery_to_nspl(session: MqttSession, qos: MqttQos) -> String {
 }
 
 fn mqtt_topic_to_nspl(topic: &str) -> String {
-    if Identifier::parse(topic).is_ok() {
+    if TopicName::parse(topic).is_ok() {
         topic.to_string()
     } else {
         string_literal(topic)
@@ -3463,94 +3047,39 @@ impl EmitterPublishingMode {
     }
 }
 
-fn endpoint_type_to_nspl(endpoint_type: EndpointType) -> &'static str {
-    match endpoint_type {
-        EndpointType::Websockets => "WEBSOCKETS",
-        EndpointType::Http => "HTTP",
-    }
-}
-
-fn rabbitmq_entry_to_nspl(entry: &RabbitMqConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn redis_entry_to_nspl(entry: &RedisConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn mqtt_entry_to_nspl(entry: &MqttConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn nats_entry_to_nspl(entry: &NatsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn prometheus_entry_to_nspl(entry: &PrometheusConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn zeromq_entry_to_nspl(entry: &ZeroMqConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn sqs_entry_to_nspl(entry: &SqsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn s3_entry_to_nspl(entry: &S3ConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn gcs_entry_to_nspl(entry: &GcsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn azure_blob_entry_to_nspl(entry: &AzureBlobConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn websockets_entry_to_nspl(entry: &WebsocketsConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn clickhouse_entry_to_nspl(entry: &ClickHouseConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn postgres_entry_to_nspl(entry: &PostgresConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn mysql_entry_to_nspl(entry: &MySqlConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
-fn mongodb_entry_to_nspl(entry: &MongoDbConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
 /// Splits a sink into the text that names it and the clauses that configure it.
 ///
 /// Only sinks carrying a `VALUES` map have clauses of their own; the rest name themselves fully on
 /// one line. Splitting here is what keeps a wide column mapping from becoming one enormous line.
 fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), CanonicalNsplError> {
-    let (head, values, mut trailing) = match sink {
+    /// A sink that carries a `VALUES` map, split into the text naming it, that map, and the
+    /// clauses written after the map.
+    struct MappedSink<'sink> {
+        head: String,
+        values: &'sink [ClickHouseValueMapping],
+        trailing: Vec<Clause>,
+    }
+
+    let MappedSink {
+        head,
+        values,
+        mut trailing,
+    } = match sink {
         EmitSink::ClickHouse {
             client,
             table,
             values,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "CLICKHOUSE {} INSERT TO TABLE {}",
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            vec![Clause::line(format!("WITH MAX BATCH {max_batch}"))],
-        ),
+            trailing: vec![Clause::line(format!("WITH MAX BATCH {max_batch}"))],
+        },
         EmitSink::Postgres {
             client,
             table,
@@ -3558,18 +3087,18 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             conflict_action,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "POSTGRES {} INSERT TO TABLE {}",
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            conflict_and_batch_clauses(
+            trailing: conflict_and_batch_clauses(
                 postgres_conflict_action_to_nspl(conflict_action),
                 *max_batch,
             ),
-        ),
+        },
         EmitSink::MySql {
             client,
             table,
@@ -3577,15 +3106,18 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             conflict_action,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "MYSQL {} INSERT TO TABLE {}",
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            conflict_and_batch_clauses(mysql_conflict_action_to_nspl(conflict_action), *max_batch),
-        ),
+            trailing: conflict_and_batch_clauses(
+                mysql_conflict_action_to_nspl(conflict_action),
+                *max_batch,
+            ),
+        },
         EmitSink::MongoDb {
             client,
             collection,
@@ -3593,18 +3125,18 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             conflict_action,
             max_batch,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "MONGODB {} INSERT TO COLLECTION {}",
                 client.as_str(),
                 collection.as_str()
             ),
             values,
-            conflict_and_batch_clauses(
+            trailing: conflict_and_batch_clauses(
                 mongodb_conflict_action_to_nspl(conflict_action),
                 *max_batch,
             ),
-        ),
+        },
         EmitSink::Iceberg {
             backend,
             client,
@@ -3613,21 +3145,21 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             location,
             catalog,
             ..
-        } => (
-            format!(
+        } => MappedSink {
+            head: format!(
                 "ICEBERG ON {} {} TABLE {}",
                 backend.as_ref(),
                 client.as_str(),
                 table.as_str()
             ),
             values,
-            vec![
+            trailing: vec![
                 Clause::line(format!("LOCATION {}", string_literal(location))),
                 Clause::line(match catalog {
                     IcebergCatalog::Rest { client } => format!("CATALOG {}", client.as_str()),
                 }),
             ],
-        ),
+        },
         other => return Ok((emit_sink_to_nspl(other)?, Vec::new())),
     };
 
@@ -3637,7 +3169,7 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
 }
 
 /// The `ON CONFLICT` and `WITH MAX BATCH` clauses the row-insert sinks share.
-fn conflict_and_batch_clauses(conflict_action: String, max_batch: u64) -> Vec<Clause> {
+fn conflict_and_batch_clauses(conflict_action: String, max_batch: NonZeroU64) -> Vec<Clause> {
     let mut clauses = Vec::new();
     if !conflict_action.trim().is_empty() {
         clauses.push(Clause::line(conflict_action.trim().to_string()));
@@ -3682,7 +3214,7 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             queue,
             fifo_group,
         } => {
-            let queue = if Identifier::try_from(queue.as_str()).is_ok() {
+            let queue = if QueueName::parse(queue.as_str()).is_ok() {
                 queue.clone()
             } else {
                 string_literal(queue)
@@ -3990,7 +3522,8 @@ fn float_literal(value: f64) -> Result<String, CanonicalNsplError> {
 /// Byte sizes elsewhere in NSPL keep the author's spelling, but WASM memory limits are stored as a
 /// count, so `64MiB` would otherwise come back as `67108864B`. Only exact multiples take a prefix,
 /// which keeps the rendering total, deterministic, and lossless.
-fn byte_size_literal(bytes: u64) -> String {
+fn byte_size_literal(bytes: NonZeroU64) -> String {
+    let bytes = bytes.get();
     const UNITS: [(u64, &str); 4] = [
         (1 << 40, "TiB"),
         (1 << 30, "GiB"),
@@ -4043,56 +3576,22 @@ fn string_literal(value: &str) -> String {
 }
 
 trait NativeTypeToNspl {
-    fn to_nspl_keyword(&self) -> &'static str;
+    fn to_nspl_keyword(&self) -> String;
 }
 
-impl NativeTypeToNspl for JsonType {
-    fn to_nspl_keyword(&self) -> &'static str {
-        match self {
-            Self::String => "STRING",
-            Self::Number => "NUMBER",
-            Self::Integer => "INTEGER",
-            Self::Object => "OBJECT",
-            Self::Array => "ARRAY",
-            Self::Boolean => "BOOLEAN",
-            Self::Null => "NULL",
-            Self::U8 => "U8",
-            Self::I8 => "I8",
-            Self::U16 => "U16",
-            Self::I16 => "I16",
-            Self::U32 => "U32",
-            Self::I32 => "I32",
-            Self::U64 => "U64",
-            Self::I64 => "I64",
-            Self::Datetime => "DATETIME",
-            Self::F32 => "F32",
-            Self::F64 => "F64",
-        }
-    }
-}
-
-impl NativeTypeToNspl for AvroType {
-    fn to_nspl_keyword(&self) -> &'static str {
-        match self {
-            Self::Null => "NULL",
-            Self::Boolean => "BOOLEAN",
-            Self::Int => "INT",
-            Self::Long => "LONG",
-            Self::Float => "FLOAT",
-            Self::Double => "DOUBLE",
-            Self::Bytes => "BYTES",
-            Self::String => "STRING",
-            Self::Record => "RECORD",
-            Self::Enum => "ENUM",
-            Self::Array => "ARRAY",
-            Self::Map => "MAP",
-            Self::Fixed => "FIXED",
-        }
+impl<T> NativeTypeToNspl for T
+where
+    T: AsRef<str>,
+{
+    fn to_nspl_keyword(&self) -> String {
+        self.as_ref().to_ascii_uppercase()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use crate::{
         AckMode, AvroType, BinaryOperator, BranchSelection, CodecEncoding, CodecEncodingRule,
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
@@ -4104,21 +3603,25 @@ mod tests {
         CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
         CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor,
         CreateWireSchema, EmitSink, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-        ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier,
-        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal,
-        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
-        ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresValueMapping,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
-        SchemaField, SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, IngestSource,
+        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy,
+        Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
+        PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
+        SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
         SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
         WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
         expression_to_nspl,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::try_from(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn retry_policy() -> RetryPolicy {
@@ -4136,7 +3639,7 @@ mod tests {
 
     fn flushed_output(relay: &str, construction: Option<RouteConstruction>) -> ProcessorOutput {
         let mut output = ProcessorOutput::with_flush_policy(
-            identifier(relay),
+            named(relay),
             "100ms".to_string(),
             Some("1MiB".to_string()),
         );
@@ -4145,11 +3648,11 @@ mod tests {
     }
 
     fn bare_field(name: &str) -> Expression {
-        Expression::Field(crate::FieldReference::bare(identifier(name)))
+        Expression::Field(crate::FieldReference::bare(named(name)))
     }
 
     fn scoped_field(scope: FieldScope, name: &str) -> Expression {
-        Expression::Field(crate::FieldReference::scoped(scope, identifier(name)))
+        Expression::Field(crate::FieldReference::scoped(scope, named(name)))
     }
 
     fn string_value(value: &str) -> Expression {
@@ -4158,7 +3661,7 @@ mod tests {
 
     fn call(name: &str, arguments: Vec<Expression>) -> Expression {
         Expression::Call {
-            function: identifier(name),
+            function: named(name),
             arguments,
         }
     }
@@ -4181,7 +3684,7 @@ mod tests {
     fn route_set(field: &str, value: Expression) -> RouteConstruction {
         RouteConstruction {
             assignments: vec![crate::Assignment {
-                target: crate::AssignmentTarget::bare(identifier(field)),
+                target: crate::AssignmentTarget::bare(named(field)),
                 value,
             }],
             ..RouteConstruction::default()
@@ -4197,7 +3700,7 @@ mod tests {
     }
 
     fn processor_branched_by(schema: &str) -> BranchSelection {
-        BranchSelection::branched_by(identifier(&format!("by_{schema}")))
+        BranchSelection::branched_by(named(&format!("by_{schema}")))
     }
 
     fn config_entry(key: &str, value: &str) -> KafkaConfigEntry {
@@ -4210,16 +3713,16 @@ mod tests {
     #[test]
     fn renders_wire_schema_canonical() {
         let schema = WireSchemaDefinition::Avro(CreateWireSchema {
-            name: identifier("latency"),
+            name: named("latency"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("p99"),
+                    name: named("p99"),
                     ty: AvroType::Double,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: AvroType::String,
                     optional: false,
                 },
@@ -4236,16 +3739,16 @@ mod tests {
     #[test]
     fn renders_internal_schema_canonical() {
         let schema = CreateSchema {
-            name: identifier("latency"),
+            name: named("latency"),
             fields: vec![
                 SchemaField {
-                    name: identifier("p99"),
+                    name: named("p99"),
                     ty: ParseAsType::F64,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: identifier("created_at"),
+                    name: named("created_at"),
                     ty: ParseAsType::Datetime,
                     optional: false,
                     sensitive: false,
@@ -4263,13 +3766,13 @@ mod tests {
     #[test]
     fn renders_multidimensional_internal_arrays_canonical() {
         let schema = CreateSchema {
-            name: identifier("tensors"),
+            name: named("tensors"),
             fields: vec![SchemaField {
-                name: identifier("matrix"),
+                name: named("matrix"),
                 ty: ParseAsType::Array {
-                    len: 2,
+                    len: nonzero!(2u32),
                     element: Box::new(ParseAsType::Array {
-                        len: 3,
+                        len: nonzero!(3u32),
                         element: Box::new(ParseAsType::F32),
                     }),
                 },
@@ -4287,7 +3790,7 @@ mod tests {
     #[test]
     fn renders_transport_values_as_string_literals() {
         let model = CreateClientKafka {
-            name: identifier("kafka_main"),
+            name: named("kafka_main"),
             mount: None,
             config: vec![
                 config_entry("bootstrap.servers", "host1:9092"),
@@ -4306,7 +3809,7 @@ mod tests {
     #[test]
     fn renders_config_values_that_mix_quote_styles() {
         let model = CreateClientKafka {
-            name: identifier("k"),
+            name: named("k"),
             mount: None,
             config: vec![KafkaConfigEntry {
                 key: "quoted".to_string(),
@@ -4334,16 +3837,16 @@ mod tests {
     #[test]
     fn renders_json_wire_schema_canonical() {
         let schema = WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("payload"),
+            name: named("payload"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
-                    name: identifier("items"),
+                    name: named("items"),
                     ty: JsonType::Array,
                     optional: false,
                 },
                 WireSchemaField {
-                    name: identifier("active"),
+                    name: named("active"),
                     ty: JsonType::Boolean,
                     optional: false,
                 },
@@ -4359,10 +3862,10 @@ mod tests {
     #[test]
     fn renders_loose_cbor_wire_schema_canonical() {
         let schema = WireSchemaDefinition::Cbor(CreateWireSchema {
-            name: identifier("payload"),
+            name: named("payload"),
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
-                name: identifier("active"),
+                name: named("active"),
                 ty: JsonType::Boolean,
                 optional: false,
             }],
@@ -4377,19 +3880,19 @@ mod tests {
     #[test]
     fn renders_optional_schema_fields_canonical() {
         let internal = CreateSchema {
-            name: identifier("latency"),
+            name: named("latency"),
             fields: vec![SchemaField {
-                name: identifier("p99"),
+                name: named("p99"),
                 ty: ParseAsType::F64,
                 optional: true,
                 sensitive: false,
             }],
         };
         let wire = WireSchemaDefinition::Json(CreateWireSchema {
-            name: identifier("payload"),
+            name: named("payload"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: identifier("active"),
+                name: named("active"),
                 ty: JsonType::Boolean,
                 optional: true,
             }],
@@ -4410,7 +3913,7 @@ mod tests {
         let expectations = [
             (
                 CreateClientHttp {
-                    name: identifier("http_main"),
+                    name: named("http_main"),
                     mount: None,
                     config: vec![HttpConfigEntry {
                         key: "base_url".to_string(),
@@ -4423,7 +3926,7 @@ mod tests {
             ),
             (
                 CreateClientSentry {
-                    name: identifier("sentry_main"),
+                    name: named("sentry_main"),
                     mount: None,
                     config: vec![SentryConfigEntry {
                         key: "dsn".to_string(),
@@ -4436,7 +3939,7 @@ mod tests {
             ),
             (
                 CreateClientMqtt {
-                    name: identifier("mqtt_main"),
+                    name: named("mqtt_main"),
                     mount: None,
                     config: vec![config_entry("host", "mqtt.internal")],
                 }
@@ -4446,7 +3949,7 @@ mod tests {
             ),
             (
                 CreateClientNats {
-                    name: identifier("nats_main"),
+                    name: named("nats_main"),
                     mount: None,
                     config: vec![config_entry("servers", "nats://localhost:4222")],
                 }
@@ -4456,7 +3959,7 @@ mod tests {
             ),
             (
                 CreateClientPrometheus {
-                    name: identifier("prom_main"),
+                    name: named("prom_main"),
                     mount: None,
                     config: vec![PrometheusConfigEntry {
                         key: "url".to_string(),
@@ -4469,7 +3972,7 @@ mod tests {
             ),
             (
                 CreateClientRabbitMq {
-                    name: identifier("rmq_main"),
+                    name: named("rmq_main"),
                     mount: None,
                     config: vec![config_entry("uri", "amqp://guest:guest@localhost:5672")],
                 }
@@ -4479,7 +3982,7 @@ mod tests {
             ),
             (
                 CreateClientRedis {
-                    name: identifier("redis_main"),
+                    name: named("redis_main"),
                     mount: None,
                     config: vec![config_entry("url", "redis://localhost:6379")],
                 }
@@ -4489,7 +3992,7 @@ mod tests {
             ),
             (
                 CreateClientZeroMq {
-                    name: identifier("zmq_main"),
+                    name: named("zmq_main"),
                     mount: None,
                     config: vec![config_entry("bind", "tcp://*:5555")],
                 }
@@ -4499,8 +4002,8 @@ mod tests {
             ),
             (
                 CreateClientSyslog {
-                    name: identifier("syslog_main"),
-                    mount: Some(identifier("syslog_tls")),
+                    name: named("syslog_main"),
+                    mount: Some(named("syslog_tls")),
                     config: vec![
                         config_entry("protocol", "tls"),
                         config_entry("addr", "logs.example.com:6514"),
@@ -4513,7 +4016,7 @@ mod tests {
             ),
             (
                 CreateClientSqs {
-                    name: identifier("sqs_main"),
+                    name: named("sqs_main"),
                     mount: None,
                     config: vec![config_entry("region", "us-east-1")],
                 }
@@ -4523,7 +4026,7 @@ mod tests {
             ),
             (
                 CreateClientWebsockets {
-                    name: identifier("ws_main"),
+                    name: named("ws_main"),
                     mount: None,
                     signaling_protocol: None,
                     config: vec![config_entry("url", "wss://example.com/socket")],
@@ -4534,9 +4037,9 @@ mod tests {
             ),
             (
                 CreateClientWebsockets {
-                    name: identifier("ws_main"),
+                    name: named("ws_main"),
                     mount: None,
-                    signaling_protocol: Some(identifier("binance_ws")),
+                    signaling_protocol: Some(named("binance_ws")),
                     config: vec![config_entry("url", "wss://example.com/socket")],
                 }
                 .to_canonical_nspl()
@@ -4553,7 +4056,7 @@ mod tests {
     #[test]
     fn renders_other_model_kinds_canonical() {
         let vhost = CreateVhost {
-            name: identifier("public"),
+            name: named("public"),
             hostnames: vec!["example.com".to_string(), "api.example.com".to_string()],
             tls: None,
         };
@@ -4563,10 +4066,10 @@ mod tests {
         );
 
         let tls_vhost = CreateVhost {
-            name: identifier("secure"),
+            name: named("secure"),
             hostnames: vec!["secure.example.com".to_string()],
             tls: Some(crate::VhostTlsResource {
-                resource: identifier("certs"),
+                resource: named("certs"),
                 version: Some(7),
             }),
         };
@@ -4576,8 +4079,8 @@ mod tests {
         );
 
         let endpoint = CreateEndpoint {
-            name: identifier("orders_http"),
-            on_vhost: identifier("public"),
+            name: named("orders_http"),
+            on_vhost: named("public"),
             path: "/orders".to_string(),
             endpoint_type: EndpointType::Http,
             signaling_protocol: None,
@@ -4587,11 +4090,11 @@ mod tests {
             "CREATE ENDPOINT orders_http ON public PATH '/orders' TYPE HTTP;"
         );
         let websocket_endpoint = CreateEndpoint {
-            name: identifier("orders_ws"),
-            on_vhost: identifier("public"),
+            name: named("orders_ws"),
+            on_vhost: named("public"),
             path: "/ws".to_string(),
             endpoint_type: EndpointType::Websockets,
-            signaling_protocol: Some(identifier("binance_ws")),
+            signaling_protocol: Some(named("binance_ws")),
         };
         assert_eq!(
             websocket_endpoint.to_canonical_nspl().expect("must render"),
@@ -4600,7 +4103,7 @@ mod tests {
         );
 
         let signaling_protocol = CreateSignalingProtocol {
-            name: identifier("binance_ws"),
+            name: named("binance_ws"),
             format: SignalingWireFormat::Json,
             on_connect: crate::SignalingProtocolOnConnect {
                 accept_data: false,
@@ -4620,9 +4123,9 @@ mod tests {
         );
 
         let protobuf_signaling_protocol = CreateSignalingProtocol {
-            name: identifier("orders_ws"),
+            name: named("orders_ws"),
             format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: Some(2),
                 config: vec![crate::ClientConfigEntry {
                     key: "file".to_string(),
@@ -4660,10 +4163,10 @@ mod tests {
         );
 
         let codec = CreateCodec {
-            name: identifier("orders_codec"),
+            name: named("orders_codec"),
             wire_format: CodecWireFormat::Json,
-            wire_schema: Some(identifier("orders_wire")),
-            schema: identifier("orders"),
+            wire_schema: Some(named("orders_wire")),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4672,10 +4175,10 @@ mod tests {
         );
 
         let syslog_codec = CreateCodec {
-            name: identifier("syslog_codec"),
+            name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             wire_schema: None,
-            schema: identifier("syslog_event"),
+            schema: named("syslog_event"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4684,12 +4187,12 @@ mod tests {
         );
 
         let codec_with_encoding = CreateCodec {
-            name: identifier("orders_codec"),
+            name: named("orders_codec"),
             wire_format: CodecWireFormat::Json,
-            wire_schema: Some(identifier("orders_wire")),
-            schema: identifier("orders"),
+            wire_schema: Some(named("orders_wire")),
+            schema: named("orders"),
             encoding_rules: vec![CodecEncodingRule {
-                field: identifier("created_at"),
+                field: named("created_at"),
                 encoding: CodecEncoding::Rfc3339,
             }],
         };
@@ -4701,7 +4204,7 @@ mod tests {
         );
 
         let codec_with_jaq = CreateCodec {
-            name: identifier("orders_codec"),
+            name: named("orders_codec"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
                 transformations: CodecJaqTransformations {
@@ -4710,7 +4213,7 @@ mod tests {
                 },
             },
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4720,7 +4223,7 @@ mod tests {
         );
 
         let ingestion_codec = CreateCodec {
-            name: identifier("orders_ingestion"),
+            name: named("orders_ingestion"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
                 transformations: CodecJaqTransformations {
@@ -4729,7 +4232,7 @@ mod tests {
                 },
             },
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4739,7 +4242,7 @@ mod tests {
         );
 
         let cbor_codec = CreateCodec {
-            name: identifier("orders_cbor"),
+            name: named("orders_cbor"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Cbor,
                 transformations: CodecJaqTransformations {
@@ -4748,7 +4251,7 @@ mod tests {
                 },
             },
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4758,9 +4261,9 @@ mod tests {
         );
 
         let protobuf_codec = CreateCodec {
-            name: identifier("orders_proto"),
+            name: named("orders_proto"),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: Some(3),
                 config: vec![crate::ClientConfigEntry {
                     key: "file".to_string(),
@@ -4773,7 +4276,7 @@ mod tests {
                 },
             }),
             wire_schema: None,
-            schema: identifier("orders"),
+            schema: named("orders"),
             encoding_rules: Vec::new(),
         };
         assert_eq!(
@@ -4785,10 +4288,10 @@ mod tests {
         );
 
         let relay = CreateRelay {
-            name: identifier("orders_stream"),
-            schema: identifier("orders"),
-            buffer: 1,
-            branching: RelayBranching::branched_by(identifier("by_orders")),
+            name: named("orders_stream"),
+            schema: named("orders"),
+            buffer: nonzero!(1usize),
+            branching: RelayBranching::branched_by(named("by_orders")),
             materialized_state: None,
         };
         assert_eq!(
@@ -4797,9 +4300,9 @@ mod tests {
         );
 
         let relay = CreateRelay {
-            name: identifier("orders_stream"),
-            schema: identifier("orders"),
-            buffer: 1,
+            name: named("orders_stream"),
+            schema: named("orders"),
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
@@ -4809,12 +4312,9 @@ mod tests {
         );
 
         let junction = CreateJunction {
-            name: identifier("orders_junction"),
-            from: ProcessorInputs::new(
-                vec![identifier("orders_a"), identifier("orders_b")],
-                Vec::new(),
-            )
-            .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
+            name: named("orders_junction"),
+            from: ProcessorInputs::new(vec![named("orders_a"), named("orders_b")], Vec::new())
+                .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
             output_routes: flushed_outputs("orders_all"),
             branched_by: processor_branched_by("tenant_branch"),
             mode: AckMode::Attached,
@@ -4829,8 +4329,8 @@ mod tests {
         );
 
         let deduplicator = CreateDeduplicator {
-            name: identifier("orders_dedup"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("orders_dedup"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: flushed_outputs("orders_out"),
             branched_by: processor_branched_by("tenant_branch"),
             deduplicate_on: vec![scoped_field(FieldScope::Input, "transaction_id")],
@@ -4847,22 +4347,19 @@ mod tests {
         );
 
         let correlator = CreateCorrelator {
-            name: identifier("orders_correlator"),
+            name: named("orders_correlator"),
             left: ProcessorInputs::new(
-                vec![identifier("orders_left"), identifier("orders_left_archive")],
+                vec![named("orders_left"), named("orders_left_archive")],
                 Vec::new(),
             )
             .with_collect_policy("10ms".to_string(), None),
-            right: ProcessorInputs::single(identifier("orders_right"))
+            right: ProcessorInputs::single(named("orders_right"))
                 .with_collect_policy("20ms".to_string(), Some("1MiB".to_string())),
             output_routes: ProcessorOutputs::new(vec![flushed_output(
                 "orders_matched",
                 Some(route_set(
                     "id",
-                    Expression::Field(crate::FieldReference::scoped(
-                        FieldScope::Left,
-                        identifier("id"),
-                    )),
+                    Expression::Field(crate::FieldReference::scoped(FieldScope::Left, named("id"))),
                 )),
             )]),
             branched_by: processor_branched_by("tenant_branch"),
@@ -4891,14 +4388,14 @@ mod tests {
         );
 
         let window_processor = CreateWindowProcessor {
-            name: identifier("latency_window"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("latency_window"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
-                relay: identifier("orders_p99"),
+                relay: named("orders_p99"),
                 construction: route_set(
                     "latency_p99",
                     Expression::Call {
-                        function: identifier("percentile_linear_histogram"),
+                        function: named("percentile_linear_histogram"),
                         arguments: vec![
                             scoped_field(FieldScope::Input, "latency"),
                             Expression::Literal(Literal::I64(99)),
@@ -4936,8 +4433,8 @@ mod tests {
         );
 
         let reingestor = CreateReingestor {
-            name: identifier("orders_repartition"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("orders_repartition"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: flushed_outputs("orders_out").with_branch(OutputBranch::Unbranched),
             mode: AckMode::Attached,
             filter_where: None,
@@ -4949,8 +4446,8 @@ mod tests {
         );
 
         let route_reingestor = CreateReingestor {
-            name: identifier("orders_splitter"),
-            from: ProcessorInputs::single(identifier("orders_in")),
+            name: named("orders_splitter"),
+            from: ProcessorInputs::single(named("orders_in")),
             output_routes: ProcessorOutputs::new(vec![
                 flushed_output(
                     "orders_errors",
@@ -4990,55 +4487,55 @@ mod tests {
         let sinks = [
             (
                 EmitSink::Kafka {
-                    client: identifier("kafka_main"),
-                    topic: identifier("orders"),
+                    client: named("kafka_main"),
+                    topic: named("orders"),
                 },
                 "KAFKA kafka_main TOPIC orders",
             ),
             (
                 EmitSink::Pulsar {
-                    client: identifier("pulsar_main"),
-                    topic: identifier("orders"),
+                    client: named("pulsar_main"),
+                    topic: named("orders"),
                 },
                 "PULSAR pulsar_main TOPIC orders",
             ),
             (
                 EmitSink::RabbitMq {
-                    client: identifier("rmq_main"),
-                    queue: identifier("orders_q"),
+                    client: named("rmq_main"),
+                    queue: named("orders_q"),
                 },
                 "RABBITMQ rmq_main QUEUE orders_q",
             ),
             (
                 EmitSink::Redis {
-                    client: identifier("redis_main"),
-                    channel: identifier("orders_ch"),
+                    client: named("redis_main"),
+                    channel: named("orders_ch"),
                 },
                 "REDIS PUBSUB redis_main CHANNEL orders_ch",
             ),
             (
                 EmitSink::Mqtt {
-                    client: identifier("mqtt_main"),
-                    topic: identifier("orders_topic"),
+                    client: named("mqtt_main"),
+                    topic: named("orders_topic"),
                 },
                 "MQTT mqtt_main TOPIC orders_topic",
             ),
             (
                 EmitSink::Nats {
-                    client: identifier("nats_main"),
-                    subject: identifier("orders_subject"),
+                    client: named("nats_main"),
+                    subject: named("orders_subject"),
                 },
                 "NATS nats_main SUBJECT orders_subject",
             ),
             (
                 EmitSink::ZeroMq {
-                    client: identifier("zmq_main"),
+                    client: named("zmq_main"),
                 },
                 "ZEROMQ zmq_main",
             ),
             (
                 EmitSink::Sqs {
-                    client: identifier("sqs_main"),
+                    client: named("sqs_main"),
                     queue: "orders_queue".to_string(),
                     fifo_group: None,
                 },
@@ -5046,13 +4543,13 @@ mod tests {
             ),
             (
                 EmitSink::Sentry {
-                    client: identifier("sentry_main"),
+                    client: named("sentry_main"),
                 },
                 "SENTRY sentry_main",
             ),
             (
                 EmitSink::Syslog {
-                    client: identifier("syslog_main"),
+                    client: named("syslog_main"),
                 },
                 "SYSLOG syslog_main",
             ),
@@ -5073,10 +4570,10 @@ mod tests {
             };
             let rendered_mode = publishing_mode.to_canonical_nspl();
             let emitter = CreateEmitter {
-                name: identifier("emit_orders"),
-                from: ProcessorInputs::single(identifier("orders_stream"))
+                name: named("emit_orders"),
+                from: ProcessorInputs::single(named("orders_stream"))
                     .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
-                encode_using_codec: Some(identifier("orders_codec")),
+                encode_using_codec: Some(named("orders_codec")),
                 sink: Box::new(sink),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
@@ -5102,12 +4599,12 @@ mod tests {
     #[test]
     fn renders_postgres_conflict_action_canonical() {
         let emitter = CreateEmitter {
-            name: identifier("emit_notifications"),
-            from: ProcessorInputs::single(identifier("notifications")),
+            name: named("emit_notifications"),
+            from: ProcessorInputs::single(named("notifications")),
             encode_using_codec: None,
             sink: Box::new(EmitSink::Postgres {
-                client: identifier("postgres_main"),
-                table: identifier("notification_rows"),
+                client: named("postgres_main"),
+                table: named("notification_rows"),
                 values: vec![
                     PostgresValueMapping {
                         column: "postgres_user_id".to_string(),
@@ -5121,7 +4618,7 @@ mod tests {
                 conflict_action: PostgresConflictAction::DoUpdate {
                     target: vec!["postgres_user_id".to_string()],
                 },
-                max_batch: 500,
+                max_batch: nonzero!(500u64),
                 flush_each: "10s".to_string(),
             }),
             flush_each: "10s".to_string(),
@@ -5143,12 +4640,12 @@ mod tests {
     #[test]
     fn renders_mysql_conflict_action_canonical() {
         let emitter = CreateEmitter {
-            name: identifier("emit_notifications"),
-            from: ProcessorInputs::single(identifier("notifications")),
+            name: named("emit_notifications"),
+            from: ProcessorInputs::single(named("notifications")),
             encode_using_codec: None,
             sink: Box::new(EmitSink::MySql {
-                client: identifier("mysql_main"),
-                table: identifier("notification_rows"),
+                client: named("mysql_main"),
+                table: named("notification_rows"),
                 values: vec![
                     MySqlValueMapping {
                         column: "mysql_user_id".to_string(),
@@ -5160,7 +4657,7 @@ mod tests {
                     },
                 ],
                 conflict_action: MySqlConflictAction::DoNothing,
-                max_batch: 500,
+                max_batch: nonzero!(500u64),
                 flush_each: "10s".to_string(),
             }),
             flush_each: "10s".to_string(),
@@ -5187,12 +4684,12 @@ mod tests {
     #[test]
     fn renders_mongodb_conflict_action_canonical() {
         let emitter = CreateEmitter {
-            name: identifier("emit_notifications"),
-            from: ProcessorInputs::single(identifier("notifications")),
+            name: named("emit_notifications"),
+            from: ProcessorInputs::single(named("notifications")),
             encode_using_codec: None,
             sink: Box::new(EmitSink::MongoDb {
-                client: identifier("mongodb_main"),
-                collection: identifier("notification_rows"),
+                client: named("mongodb_main"),
+                collection: named("notification_rows"),
                 values: vec![
                     MongoDbValueMapping {
                         column: "mongodb_user_id".to_string(),
@@ -5206,7 +4703,7 @@ mod tests {
                 conflict_action: MongoDbConflictAction::DoUpdate {
                     target: vec!["mongodb_user_id".to_string()],
                 },
-                max_batch: 500,
+                max_batch: nonzero!(500u64),
                 flush_each: "10s".to_string(),
             }),
             flush_each: "10s".to_string(),
@@ -5239,12 +4736,12 @@ mod tests {
         let expectations = [
             (
                 CreateIngestor {
-                    name: identifier("http_ingestor"),
+                    name: named("http_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Http {
-                        client: identifier("http_main"),
+                        client: named("http_main"),
                         every: "30s".to_string(),
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     },
@@ -5260,17 +4757,17 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("kafka_ingestor"),
+                    name: named("kafka_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
-                        client: identifier("kafka_main"),
-                        topic: identifier("orders_topic"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(identifier("orders_group")),
-                        instances: 3,
+                        client: named("kafka_main"),
+                        topic: named("orders_topic"),
+                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
+                        instances: nonzero!(3u64),
                         mode: KafkaIngestMode::AckParallel {
-                            max: 8,
+                            max: nonzero!(8u64),
                             batch_timeout: "100ms".to_string(),
                             timeout: "5s".to_string(),
                             retry_policy: retry.clone(),
@@ -5291,14 +4788,14 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("mqtt_ingestor"),
+                    name: named("mqtt_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Mqtt {
-                        client: identifier("mqtt_main"),
+                        client: named("mqtt_main"),
                         topic: "orders_topic".to_string(),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: MqttIngestMode::NoAckSequential {
                             session: MqttSession::Clean,
                             qos: MqttQos::AtMostOnce,
@@ -5318,15 +4815,15 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("nats_ingestor"),
+                    name: named("nats_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Nats {
-                        client: identifier("nats_main"),
-                        subject: identifier("orders_subject"),
-                        queue_group: identifier("orders_workers"),
-                        instances: 2,
+                        client: named("nats_main"),
+                        subject: named("orders_subject"),
+                        queue_group: named("orders_workers"),
+                        instances: nonzero!(2u64),
                         mode: NatsIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     },
@@ -5343,14 +4840,14 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("rabbit_ingestor"),
+                    name: named("rabbit_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::RabbitMq {
-                        client: identifier("rmq_main"),
-                        queue: identifier("orders_q"),
-                        instances: 2,
+                        client: named("rmq_main"),
+                        queue: named("orders_q"),
+                        instances: nonzero!(2u64),
                         mode: RabbitMqIngestMode::AckSequential {
                             timeout: "10s".to_string(),
                             retry_policy: retry.clone(),
@@ -5371,13 +4868,13 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("redis_ingestor"),
+                    name: named("redis_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::RedisPubSub {
-                        client: identifier("redis_main"),
-                        channel: identifier("orders_channel"),
+                        client: named("redis_main"),
+                        channel: named("orders_channel"),
                         mode: RedisPubSubIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     },
@@ -5394,12 +4891,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("prom_ingestor"),
+                    name: named("prom_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Prometheus {
-                        client: identifier("prom_main"),
+                        client: named("prom_main"),
                         query: "sum(rate(http_requests_total[5m]))".to_string(),
                         every: "15s".to_string(),
                         quiesce: crate::IngestQuiesceMode::Suspend,
@@ -5417,12 +4914,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("zmq_ingestor"),
+                    name: named("zmq_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
-                        client: identifier("zmq_main"),
+                        client: named("zmq_main"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     },
@@ -5439,14 +4936,14 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("sqs_ingestor"),
+                    name: named("sqs_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Sqs {
-                        client: identifier("sqs_main"),
-                        queue: identifier("orders_queue"),
-                        instances: 1,
+                        client: named("sqs_main"),
+                        queue: named("orders_queue"),
+                        instances: nonzero!(1u64),
                         mode: SqsIngestMode::AckSequential {
                             timeout: "20s".to_string(),
                             retry_policy: retry.clone(),
@@ -5466,12 +4963,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("endpoint_ingestor"),
+                    name: named("endpoint_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Endpoint {
-                        endpoint: identifier("orders_endpoint"),
+                        endpoint: named("orders_endpoint"),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
@@ -5490,12 +4987,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("ws_ingestor"),
+                    name: named("ws_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
+                    decode_using_codec: named("orders_codec"),
                     timestamp_source: None,
                     source: IngestSource::Websockets {
-                        client: identifier("ws_main"),
+                        client: named("ws_main"),
                         mode: WebsocketsIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     },
@@ -5512,12 +5009,12 @@ mod tests {
             ),
             (
                 CreateIngestor {
-                    name: identifier("syslog_ingestor"),
+                    name: named("syslog_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("syslog_codec"),
+                    decode_using_codec: named("syslog_codec"),
                     timestamp_source: None,
                     source: IngestSource::Syslog {
-                        client: identifier("syslog_main"),
+                        client: named("syslog_main"),
                         quiesce: crate::IngestQuiesceMode::Buffer {
                             max_size: "1MiB".to_string(),
                             overflow: crate::IngestQuiesceOverflow::DropOldest,
@@ -5543,7 +5040,7 @@ mod tests {
     #[test]
     fn model_dispatches_to_variant_specific_canonicalization() {
         let model = Model::ClientKafka(CreateClientKafka {
-            name: identifier("kafka_main"),
+            name: named("kafka_main"),
             mount: None,
             config: vec![config_entry("bootstrap.servers", "localhost:9092")],
         });
@@ -5558,11 +5055,11 @@ mod tests {
     #[test]
     fn placement_canonicalization_preserves_member_order_policy_and_rank() {
         let placement = CreatePlacement::new(
-            identifier("latency_path"),
-            vec![identifier("ingest"), identifier("enrich")],
-            vec![identifier("score")],
+            named("latency_path"),
+            vec![named("ingest"), named("enrich")],
+            vec![named("score")],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         )
         .expect("placement must be valid");
 
@@ -5575,9 +5072,9 @@ mod tests {
     #[test]
     fn unranked_neutral_placement_canonicalization_omits_rank() {
         let placement = CreatePlacement::new(
-            identifier("ordinary"),
-            vec![identifier("ingest")],
-            vec![identifier("emit")],
+            named("ordinary"),
+            vec![named("ingest")],
+            vec![named("emit")],
             PlacementPolicy::Neutral,
             None,
         )
@@ -5591,18 +5088,20 @@ mod tests {
 
     #[test]
     fn byte_sizes_take_the_largest_prefix_that_divides_exactly() {
-        assert_eq!(super::byte_size_literal(67_108_864), "64MiB");
-        assert_eq!(super::byte_size_literal(1 << 10), "1KiB");
-        assert_eq!(super::byte_size_literal(1 << 30), "1GiB");
-        assert_eq!(super::byte_size_literal(1 << 40), "1TiB");
+        assert_eq!(super::byte_size_literal(nonzero!(67_108_864u64)), "64MiB");
+        assert_eq!(super::byte_size_literal(nonzero!(1_024u64)), "1KiB");
+        assert_eq!(super::byte_size_literal(nonzero!(1_073_741_824u64)), "1GiB");
+        assert_eq!(
+            super::byte_size_literal(nonzero!(1_099_511_627_776u64)),
+            "1TiB"
+        );
     }
 
     #[test]
     fn byte_sizes_that_divide_no_prefix_exactly_stay_counts() {
-        assert_eq!(super::byte_size_literal(0), "0B");
-        assert_eq!(super::byte_size_literal(1), "1B");
-        assert_eq!(super::byte_size_literal(100_000), "100000B");
-        assert_eq!(super::byte_size_literal((1 << 20) + 1), "1048577B");
+        assert_eq!(super::byte_size_literal(nonzero!(1u64)), "1B");
+        assert_eq!(super::byte_size_literal(nonzero!(100_000u64)), "100000B");
+        assert_eq!(super::byte_size_literal(nonzero!(1_048_577u64)), "1048577B");
     }
 
     #[test]
@@ -5630,10 +5129,10 @@ mod tests {
                     value\n}\n"
             .to_string();
         let udf = CreateUdf::new(
-            identifier("redact"),
+            named("redact"),
             UdfLanguage::Roto0_11,
             vec![UdfArgument {
-                name: identifier("value"),
+                name: named("value"),
                 ty: ParseAsType::String,
                 optional: true,
             }],

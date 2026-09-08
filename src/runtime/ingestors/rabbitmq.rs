@@ -1,23 +1,47 @@
+use std::{borrow::Cow, num::NonZeroU64};
+
 use lapin::{
     Connection, ConnectionProperties,
     options::{BasicAckOptions, BasicConsumeOptions, BasicQosOptions},
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_models::DomainName;
 
 use super::super::*;
 
 pub(in crate::runtime) struct RabbitMqIngestor;
 
+/// The AMQP headers of one borrowed delivery.
+///
+/// Appending reads them out of the delivery properties, so a delivery without headers
+/// costs nothing and a value only allocates when its AMQP type is not already a string.
+struct RabbitMqDeliveryHeaders<'a>(&'a lapin::message::Delivery);
+
+impl IngestMessageHeaders for RabbitMqDeliveryHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        let Some(headers) = self.0.properties.headers().as_ref() else {
+            return;
+        };
+        for (name, value) in headers {
+            visit(
+                name.as_str(),
+                RabbitMqIngestor::header_value(value).as_ref(),
+            );
+        }
+    }
+}
+
 impl RabbitMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientRabbitMq,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -31,13 +55,29 @@ impl RabbitMqIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
                 reason,
             })?;
-        let (queue, instances, ack_mode) = match &ingestor.source {
+        /// The parts of a RabbitMQ ingest source this task drives, taken from the model once so
+        /// the rest of startup reads named values rather than re-matching the source.
+        struct RabbitMqSource {
+            queue: nervix_models::QueueName,
+            instances: NonZeroU64,
+            ack_mode: RabbitMqIngestMode,
+        }
+
+        let RabbitMqSource {
+            queue,
+            instances,
+            ack_mode,
+        } = match &ingestor.source {
             IngestSource::RabbitMq {
                 queue,
                 instances,
                 mode,
                 ..
-            } => (queue.clone(), *instances, mode.clone()),
+            } => RabbitMqSource {
+                queue: queue.clone(),
+                instances: *instances,
+                ack_mode: mode.clone(),
+            },
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
@@ -57,7 +97,9 @@ impl RabbitMqIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled RabbitMQ ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let ack_timeout = match &ack_mode {
             RabbitMqIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?
@@ -65,9 +107,9 @@ impl RabbitMqIngestor {
         };
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks = Vec::with_capacity(instances.get().arch_into());
 
-        for instance_idx in 0..instances {
+        for instance_idx in 0..instances.get() {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let task_runtime = runtime.clone();
             let task_domain = domain.clone();
@@ -76,7 +118,7 @@ impl RabbitMqIngestor {
                 internal_processor_error_policies(ingestor.general_error_policy.clone());
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_queue = queue.clone();
-            let task_events = runtime.events.clone();
+            let task_events = runtime.events().clone();
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
@@ -105,7 +147,7 @@ impl RabbitMqIngestor {
                     {
                         break;
                     }
-                    if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                    if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {
@@ -223,7 +265,7 @@ impl RabbitMqIngestor {
                                 match delivery {
                                     Some(Ok(delivery)) => {
                                         let key = delivery.routing_key.as_str().to_string();
-                                        let headers = Self::headers_from_delivery(&delivery);
+                                        let headers = RabbitMqDeliveryHeaders(&delivery);
                                         let payload = delivery.data.as_slice();
 
                                         trace!(
@@ -248,8 +290,11 @@ impl RabbitMqIngestor {
                                                         let metadata = [IngestMetadataRow::Headers {
                                                             headers: &headers,
                                                         }];
-                                                        let (acks, completion) =
-                                                            task_runtime.tracked_ack_root(&task_domain);
+                                                        let (acks, completion) = task_runtime
+                                                            .tracked_ingestor_ack_root(
+                                                                &task_domain,
+                                                                &task_ingestor,
+                                                            );
                                                         let dispatch_result = task_runtime
                                                             .dispatch_ingested_records(IngestGroupDispatch {
                                                                 collector: &mut collector,
@@ -277,18 +322,20 @@ impl RabbitMqIngestor {
                                                                 &mut collector,
                                                             )
                                                             .await;
-                                                        let dispatched = dispatch_result
+                                                        let dispatched = match dispatch_result
                                                             .and(flush_result)
-                                                            .map(|()| true)
-                                                            .unwrap_or_else(|error| {
-                                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                        {
+                                                            Ok(()) => true,
+                                                            Err(error) => {
+                                                                task_events.report_error(format!(
                                                                     "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                                     task_ingestor.as_str(),
                                                                     task_domain.as_str(),
                                                                     error
-                                                                )));
+                                                                ));
                                                                 false
-                                                            });
+                                                            }
+                                                        };
                                                         if dispatched {
                                                             acks.ack_success();
                                                             match Runtime::await_ack_completion(
@@ -298,28 +345,28 @@ impl RabbitMqIngestor {
                                                             ).await {
                                                                 Some(AckOutcome::Ack) => {
                                                                     if let Err(error) = delivery.ack(BasicAckOptions::default()).await {
-                                                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                        task_events.report_error(format!(
                                                                             "failed to acknowledge rabbitmq message for ingestor '{}' in domain '{}': {}",
                                                                             task_ingestor.as_str(),
                                                                             task_domain.as_str(),
                                                                             error
-                                                                        )));
+                                                                        ));
                                                                     }
                                                                 }
                                                                 Some(AckOutcome::NoAck(error)) => {
-                                                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                                    task_events.report_error(format!(
                                                                         "rabbitmq ack chain failed for ingestor '{}' in domain '{}': {}",
                                                                         task_ingestor.as_str(),
                                                                         task_domain.as_str(),
                                                                         error
-                                                                    )));
+                                                                    ));
                                                                 }
                                                                 None => break,
                                                             }
                                                         } else {
                                                             task_runtime.handle_general_error_for_acks(
                                                                 &task_domain,
-                                                                "ingestor",
+                                                                ModelKind::Ingestor,
                                                                 &task_ingestor,
                                                                 &task_error_policies,
                                                                 std::iter::once(&acks),
@@ -330,12 +377,12 @@ impl RabbitMqIngestor {
                                                 }
                                             }
                                             Err(error) => {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                task_events.report_error(format!(
                                                     "failed to decode message for ingestor '{}' in domain '{}': {}",
                                                     task_ingestor.as_str(),
                                                     task_domain.as_str(),
                                                     error
-                                                )));
+                                                ));
                                                 warn!(
                                                     domain = task_domain.as_str(),
                                                     ingestor = task_ingestor.as_str(),
@@ -352,12 +399,12 @@ impl RabbitMqIngestor {
                                             &task_ingestor,
                                             format!("rabbitmq receive failed: {error}"),
                                         );
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "failed to receive rabbitmq message for ingestor '{}' in domain '{}': {}",
                                             task_ingestor.as_str(),
                                             task_domain.as_str(),
                                             error
-                                        )));
+                                        ));
                                         warn!(
                                             domain = task_domain.as_str(),
                                             ingestor = task_ingestor.as_str(),
@@ -403,7 +450,7 @@ impl RabbitMqIngestor {
             tasks.push(task);
         }
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -449,56 +496,41 @@ impl RabbitMqIngestor {
         }
     }
 
-    fn headers_from_delivery(delivery: &lapin::message::Delivery) -> IngestHeaders {
-        delivery
-            .properties
-            .headers()
-            .as_ref()
-            .map(|headers| {
-                headers
-                    .into_iter()
-                    .map(|(name, value)| {
-                        (
-                            name.as_str().to_string(),
-                            Self::header_value_to_string(value),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn header_value_to_string(value: &AMQPValue) -> String {
+    fn header_value(value: &AMQPValue) -> Cow<'_, str> {
         match value {
-            AMQPValue::Boolean(value) => value.to_string(),
-            AMQPValue::ShortShortInt(value) => value.to_string(),
-            AMQPValue::ShortShortUInt(value) => value.to_string(),
-            AMQPValue::ShortInt(value) => value.to_string(),
-            AMQPValue::ShortUInt(value) => value.to_string(),
-            AMQPValue::LongInt(value) => value.to_string(),
-            AMQPValue::LongUInt(value) => value.to_string(),
-            AMQPValue::LongLongInt(value) => value.to_string(),
-            AMQPValue::Float(value) => value.to_string(),
-            AMQPValue::Double(value) => value.to_string(),
-            AMQPValue::DecimalValue(value) => format!("{}:{}", value.scale, value.value),
-            AMQPValue::ShortString(value) => value.as_str().to_string(),
-            AMQPValue::LongString(value) => value.to_string(),
-            AMQPValue::FieldArray(value) => value
-                .as_slice()
-                .iter()
-                .map(Self::header_value_to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            AMQPValue::FieldTable(value) => value
-                .into_iter()
-                .map(|(name, value)| {
-                    format!("{}={}", name.as_str(), Self::header_value_to_string(value))
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-            AMQPValue::Timestamp(value) => value.to_string(),
-            AMQPValue::ByteArray(value) => String::from_utf8_lossy(value.as_slice()).to_string(),
-            AMQPValue::Void => String::new(),
+            AMQPValue::Boolean(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortShortInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortShortUInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ShortUInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::LongInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::LongUInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::LongLongInt(value) => Cow::Owned(value.to_string()),
+            AMQPValue::Float(value) => Cow::Owned(value.to_string()),
+            AMQPValue::Double(value) => Cow::Owned(value.to_string()),
+            AMQPValue::DecimalValue(value) => {
+                Cow::Owned(format!("{}:{}", value.scale, value.value))
+            }
+            AMQPValue::ShortString(value) => Cow::Borrowed(value.as_str()),
+            AMQPValue::LongString(value) => String::from_utf8_lossy(value.as_bytes()),
+            AMQPValue::FieldArray(value) => Cow::Owned(
+                value
+                    .as_slice()
+                    .iter()
+                    .map(|value| Self::header_value(value).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            AMQPValue::FieldTable(value) => Cow::Owned(
+                value
+                    .into_iter()
+                    .map(|(name, value)| format!("{}={}", name.as_str(), Self::header_value(value)))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            AMQPValue::Timestamp(value) => Cow::Owned(value.to_string()),
+            AMQPValue::ByteArray(value) => String::from_utf8_lossy(value.as_slice()),
+            AMQPValue::Void => Cow::Borrowed(""),
         }
     }
 }

@@ -1,4 +1,5 @@
 [package]
+description = "The Nervix expression VM: compiles expression programs to IR and executes them over Arrow batches"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-vm"
@@ -9,6 +10,7 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true }
+arch-into = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
@@ -19,9 +21,12 @@ arrow-select = { workspace = true }
 arrow-string = { workspace = true }
 chrono = { workspace = true }
 md5 = { workspace = true }
+meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 regex = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 triomphe = { workspace = true }
@@ -29,6 +34,7 @@ uuid = { workspace = true, features = ["v4", "v7"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
+rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[bench]]

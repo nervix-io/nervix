@@ -1,10 +1,13 @@
 use std::sync::Arc as StdArc;
 
+use arch_into::ArchInto as _;
 use arrow_array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, StringArray, types::Int64Type,
+    BooleanArray, Float64Array, Int64Array, ListArray, StringArray, types::Int64Type,
 };
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use meticulous::ResultExt as _;
+use nervix_approx_into::ApproxInto as _;
 use nervix_nspl::vm_program::parse_program;
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, TypedArray, TypedBatch,
@@ -15,6 +18,10 @@ use triomphe::Arc;
 /// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
 /// amortization curve below it and the cost of the blocking hop above it.
 const SWEEP_ROW_COUNTS: [usize; 6] = [64, 256, 1_024, 4_096, 16_384, 65_536];
+
+fn benchmark_row_i64(row: usize) -> i64 {
+    i64::try_from(row).assured("benchmark row counts are fixed below i64::MAX")
+}
 
 fn arithmetic_schema() -> StdArc<Schema> {
     StdArc::new(Schema::new(vec![
@@ -40,9 +47,12 @@ fn arithmetic_output_schema() -> StdArc<Schema> {
 }
 
 fn arithmetic_batch(row_count: usize) -> TypedBatch {
-    let left = Int64Array::from_iter((0..row_count).map(|row| Some((row % 97) as i64 + 1)));
-    let right = Int64Array::from_iter((0..row_count).map(|row| Some((row % 13) as i64 + 3)));
-    let divisor = Int64Array::from_iter((0..row_count).map(|row| Some((row % 7) as i64 + 1)));
+    let left =
+        Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row % 97) + 1)));
+    let right =
+        Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row % 13) + 3)));
+    let divisor =
+        Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row % 7) + 1)));
     let keep = BooleanArray::from_iter((0..row_count).map(|row| Some(row % 3 != 0)));
 
     TypedBatch::try_new(
@@ -96,13 +106,13 @@ fn nullable_cast_output_schema() -> StdArc<Schema> {
 
 fn float_batch(row_count: usize) -> TypedBatch {
     let left = Float64Array::from_iter(
-        (0..row_count).map(|row| (row % 17 != 0).then_some((row % 97) as f64 + 1.25)),
+        (0..row_count).map(|row| (row % 17 != 0).then_some((row % 97).approx_into::<f64>() + 1.25)),
     );
     let right = Float64Array::from_iter(
-        (0..row_count).map(|row| (row % 19 != 0).then_some((row % 13) as f64 + 0.5)),
+        (0..row_count).map(|row| (row % 19 != 0).then_some((row % 13).approx_into::<f64>() + 0.5)),
     );
     let divisor = Float64Array::from_iter(
-        (0..row_count).map(|row| (row % 23 != 0).then_some((row % 7) as f64 + 1.0)),
+        (0..row_count).map(|row| (row % 23 != 0).then_some((row % 7).approx_into::<f64>() + 1.0)),
     );
 
     TypedBatch::try_new(
@@ -166,7 +176,7 @@ fn string_batch(row_count: usize) -> TypedBatch {
     let needle = StringArray::from_iter((0..row_count).map(|_| Some("-")));
     let prefix = StringArray::from_iter((0..row_count).map(|_| Some("prefix-")));
     let suffix = StringArray::from_iter((0..row_count).map(|_| Some("-suffix")));
-    let number = Int64Array::from_iter((0..row_count).map(|row| Some(row as i64)));
+    let number = Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row))));
     let numeric_text = StringArray::from_iter((0..row_count).map(|row| Some(row.to_string())));
 
     TypedBatch::try_new(
@@ -216,19 +226,19 @@ fn list_batch(row_count: usize) -> TypedBatch {
     let values = ListArray::from_iter_primitive::<Int64Type, _, _>((0..row_count).map(|row| {
         (row % 7 != 0).then(|| {
             vec![
-                Some(row as i64),
-                Some(row as i64 + 1),
-                (row % 5 != 0).then_some(row as i64 + 2),
-                Some(row as i64 + 3),
+                Some(benchmark_row_i64(row)),
+                Some(benchmark_row_i64(row) + 1),
+                (row % 5 != 0).then_some(benchmark_row_i64(row) + 2),
+                Some(benchmark_row_i64(row) + 3),
             ]
         })
     }));
-    let index = Int64Array::from_iter((0..row_count).map(|row| Some((row % 5) as i64)));
+    let index = Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row % 5))));
 
     TypedBatch::try_new(
         list_schema(),
         vec![
-            TypedArray::Generic(StdArc::new(values) as ArrayRef),
+            TypedArray::Generic(StdArc::new(values)),
             TypedArray::Int64(index),
         ],
     )
@@ -288,8 +298,9 @@ fn long_tail_batch(row_count: usize) -> TypedBatch {
     let width = Int64Array::from_iter((0..row_count).map(|_| Some(32)));
     let start = Int64Array::from_iter((0..row_count).map(|_| Some(3)));
     let length = Int64Array::from_iter((0..row_count).map(|_| Some(12)));
-    let integer = Int64Array::from_iter((0..row_count).map(|row| Some(row as i64 + 1)));
-    let numeric = Float64Array::from_iter((0..row_count).map(|row| Some((row % 100) as f64)));
+    let integer = Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row) + 1)));
+    let numeric =
+        Float64Array::from_iter((0..row_count).map(|row| Some((row % 100).approx_into::<f64>())));
 
     TypedBatch::try_new(
         long_tail_schema(),
@@ -534,7 +545,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("execute_program_batch_size");
     for rows in SWEEP_ROW_COUNTS {
-        group.throughput(Throughput::Elements(rows as u64));
+        group.throughput(Throughput::Elements(rows.arch_into()));
 
         let batch = arithmetic_batch(rows);
         group.bench_with_input(

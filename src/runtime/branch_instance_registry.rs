@@ -1,6 +1,7 @@
-use std::{hash::Hash, time::Duration};
+use std::{hash::Hash, num::NonZeroUsize, time::Duration};
 
 use indexmap::IndexMap;
+use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
@@ -102,13 +103,17 @@ where
                 let entry = self
                     .entries
                     .get_index_mut(index)
-                    .expect("index from get_index_of must be valid")
+                    .verified("the index was just returned by get_index_of on this same map")
                     .1;
                 entry.last_ingestion = now;
                 entry.state.clone()
             };
             self.bump_version();
-            let last_index = self.entries.len().saturating_sub(1);
+            let last_index = self
+                .entries
+                .len()
+                .checked_sub(1)
+                .verified("the entry looked up above is still in the map");
             if index != last_index {
                 self.entries.move_index(index, last_index);
             }
@@ -158,7 +163,7 @@ where
             let (_, entry) = self
                 .entries
                 .shift_remove_index(0)
-                .expect("front entry must be removable");
+                .verified("the loop above observed a front entry in this same map");
             expired.push((key, entry.state));
         }
         if !expired.is_empty() {
@@ -167,13 +172,13 @@ where
         expired
     }
 
-    pub(super) fn evict_lru_to_capacity(&mut self, max_entries: usize) -> Vec<(K, Arc<V>)> {
+    pub(super) fn evict_lru_to_capacity(&mut self, max_entries: NonZeroUsize) -> Vec<(K, Arc<V>)> {
         let mut evicted = Vec::new();
-        while self.entries.len() > max_entries {
+        while self.entries.len() > max_entries.get() {
             let (key, entry) = self
                 .entries
                 .shift_remove_index(0)
-                .expect("front entry must be removable while over capacity");
+                .verified("the loop above observed a front entry in this same map");
             evicted.push((key, entry.state));
         }
         if !evicted.is_empty() {
@@ -202,7 +207,10 @@ where
     }
 
     fn bump_version(&mut self) {
-        self.version = self.version.saturating_add(1);
+        self.version = self
+            .version
+            .checked_add(1)
+            .assured("a registry cannot record 2^64 branch instance changes");
     }
 }
 
@@ -218,10 +226,12 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
+        num::NonZeroUsize,
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
 
+    use meticulous::OptionExt as _;
     use nervix_models::Timestamp;
     use triomphe::Arc;
 
@@ -246,7 +256,12 @@ mod tests {
     }
 
     fn timestamp(seconds: i64, nanos: u32) -> Timestamp {
-        Timestamp::from_unix_nanos(seconds.saturating_mul(1_000_000_000) + i64::from(nanos))
+        Timestamp::from_unix_nanos(
+            seconds
+                .checked_mul(1_000_000_000)
+                .and_then(|nanos_part| nanos_part.checked_add(i64::from(nanos)))
+                .assured("the test timestamps are small second counts"),
+        )
     }
 
     #[test]
@@ -298,7 +313,7 @@ mod tests {
         registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
         registry.get_or_create_with("initech".to_string(), timestamp(3, 0), |_| 3);
 
-        let evicted = registry.evict_lru_to_capacity(1);
+        let evicted = registry.evict_lru_to_capacity(NonZeroUsize::MIN);
 
         assert_eq!(
             evicted
@@ -318,7 +333,7 @@ mod tests {
         registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
         registry.get_or_create_with("acme".to_string(), timestamp(3, 0), |_| 1);
 
-        let evicted = registry.evict_lru_to_capacity(1);
+        let evicted = registry.evict_lru_to_capacity(NonZeroUsize::MIN);
 
         assert_eq!(
             evicted

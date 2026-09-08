@@ -1,13 +1,25 @@
+//! A client session against a Nervix server.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** Connecting to the session service, TLS selection, submitting statements, transaction
+//!   state, completion suggestions, subscription streams and resource upload.
+//! - **Depends on.** The proto wire types, the language layer — an edge may name the parser, and
+//!   this one does so for client-side parsing and completion — and the vocabulary.
+//! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
+//!   it learns arrives over the session API.
+
 use std::{
     collections::VecDeque,
-    fmt,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use meticulous::OptionExt as _;
 pub use nervix_models::SubscriptionDeliveryBehavior;
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
@@ -121,7 +133,8 @@ pub struct SubscriptionEvent {
     pub payload: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerEventLevel {
     Unspecified,
     Info,
@@ -333,7 +346,7 @@ impl Client {
         let (domain_tx, domain_rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let known_servers = current_server.iter().cloned().collect();
-        let request_tx = start_session(
+        let session = start_session(
             channel,
             connect_options.basic_authorization(),
             pending.clone(),
@@ -347,11 +360,11 @@ impl Client {
             current_server: Mutex::new(current_server),
             known_servers: Mutex::new(known_servers),
             grpc_connector: GrpcConnector::new(connect_options),
-            request_tx: Mutex::new(request_tx.0),
+            request_tx: Mutex::new(session.request_tx),
             pending,
             command_lock: Mutex::new(()),
             transaction: Mutex::new(None),
-            response_task: Mutex::new(Some(request_tx.1)),
+            response_task: Mutex::new(Some(session.response_task)),
             subscription_tx,
             subscription_rx: Mutex::new(subscription_rx),
             server_tx,
@@ -587,7 +600,7 @@ impl Client {
             let parsed = statements
                 .into_iter()
                 .next()
-                .expect("non-empty parsed statements must contain one statement");
+                .verified("the empty and multi-statement cases above already returned");
             let source = parsed.source(query).to_string();
             return self
                 .execute_client_statement(parsed.statement, &source)
@@ -746,6 +759,10 @@ impl Client {
             let progress_callback = on_progress.clone();
             tokio::spawn(async move {
                 let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+                // A build that fails or panics drops its end of the pipe, so the loop below sees
+                // a short archive and the server rejects the upload. The failure is reported by
+                // `upload_resource` rather than here, which is why neither this result nor the
+                // join below is turned into a second report.
                 let build_task = tokio::spawn(async move {
                     let _ = relay_upload_archive(&request_directory, writer).await;
                 });
@@ -770,7 +787,7 @@ impl Client {
                     if read == 0 {
                         break;
                     }
-                    progress_callback(u64::try_from(read).unwrap_or(0));
+                    progress_callback(read.arch_into());
                     if tx
                         .send(proto::UploadResourceRequest {
                             event: Some(proto::upload_resource_request::Event::Chunk(
@@ -851,7 +868,10 @@ impl Client {
 
     async fn reconnect(&self, server: &str) -> Result<(), ClientError> {
         let channel = self.inner.grpc_connector.connect(server).await?;
-        let (request_tx, response_task) = start_session(
+        let StartedSession {
+            request_tx,
+            response_task,
+        } = start_session(
             channel,
             self.inner.grpc_connector.options.basic_authorization(),
             self.inner.pending.clone(),
@@ -917,7 +937,7 @@ async fn start_session(
     subscription_tx: mpsc::Sender<SubscriptionEvent>,
     server_tx: mpsc::Sender<ServerEvent>,
     domain_tx: mpsc::Sender<Vec<DomainInfo>>,
-) -> Result<(mpsc::Sender<SessionRequest>, JoinHandle<()>), ClientError> {
+) -> Result<StartedSession, ClientError> {
     let mut client = SessionServiceClient::new(channel);
     let (request_tx, request_rx) = mpsc::channel(32);
     let mut response = client
@@ -991,7 +1011,16 @@ async fn start_session(
         }
         clear_pending_responses(&pending).await;
     });
-    Ok((request_tx, response_task))
+    Ok(StartedSession {
+        request_tx,
+        response_task,
+    })
+}
+
+/// A live session: the channel commands are written to, and the task draining its responses.
+struct StartedSession {
+    request_tx: mpsc::Sender<SessionRequest>,
+    response_task: JoinHandle<()>,
 }
 
 fn request_with_auth<T>(
@@ -1372,18 +1401,6 @@ impl CommandOutcomeKind {
     }
 }
 
-impl fmt::Display for ServerEventLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::Unspecified => "UNSPECIFIED",
-            Self::Info => "INFO",
-            Self::Warn => "WARN",
-            Self::Error => "ERROR",
-        };
-        f.write_str(label)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1514,7 +1531,7 @@ mod tests {
                 span_start: 3,
                 span_end: 7,
             }],
-            kind: proto::CommandResultKind::NotLeader as i32,
+            kind: i32::from(proto::CommandResultKind::NotLeader),
             leader: "node-2".to_string(),
             leader_grpc_uri: "http://127.0.0.1:47393".to_string(),
             already_existed: true,
@@ -1523,7 +1540,7 @@ mod tests {
             transaction: Some(proto::TransactionStatus {
                 id: "tx-1".to_string(),
                 domain: "tenant".to_string(),
-                state: proto::TransactionState::Open as i32,
+                state: i32::from(proto::TransactionState::Open),
                 pending_count: 2,
                 completed_count: 0,
                 total_count: 2,
@@ -1565,7 +1582,7 @@ mod tests {
         assert_eq!(subscription.payload, "{\"id\":42}");
 
         let server = ServerEvent::from(proto::ServerEvent {
-            level: proto::ServerEventLevel::Warn as i32,
+            level: i32::from(proto::ServerEventLevel::Warn),
             message: "watch out".to_string(),
         });
         assert_eq!(

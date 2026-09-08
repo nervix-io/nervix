@@ -1,7 +1,15 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use ahash::{HashMap, RandomState};
+#[cfg(test)]
+use arch_into::ArchInto as _;
 use dashmap::DashMap;
+#[cfg(test)]
+use meticulous::OptionExt as _;
+use nervix_models::ClusterNodeName;
 #[cfg(test)]
 use nervix_models::KafkaPartitionSchedule;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -9,7 +17,12 @@ use tokio::sync::Notify;
 
 #[cfg(test)]
 use super::KafkaDomainOffsetDescribe;
-use super::{PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement};
+#[cfg(test)]
+use super::observability::kafka_domain_offset_describe_from_schedule;
+use super::{
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    StateReplicationRoles, lsm_sequence::LsmSequence,
+};
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaOffsetEntrySnapshot {
@@ -27,7 +40,7 @@ struct KafkaPartitionAssignmentSnapshot {
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaTopicSchedulingSnapshot {
     topic: String,
-    instances: u64,
+    instances: NonZeroU64,
     rebalance_epoch: u64,
     observed_partitions: Vec<i32>,
     assignments: Vec<KafkaPartitionAssignmentSnapshot>,
@@ -39,14 +52,23 @@ struct KafkaOffsetSnapshot {
     schedules: Vec<KafkaTopicSchedulingSnapshot>,
 }
 
-type KafkaOffsetSnapshotState = (
-    HashMap<(String, i32), i64>,
-    HashMap<String, KafkaTopicSchedulingState>,
-);
+/// One partition of one topic, which is what a Kafka offset is recorded against.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(in crate::runtime) struct KafkaTopicPartition {
+    pub(in crate::runtime) topic: String,
+    pub(in crate::runtime) partition: i32,
+}
+
+/// A decoded Kafka offset snapshot: where each assigned partition resumes, and the partition
+/// schedule each topic was last rebalanced onto.
+struct KafkaOffsetSnapshotState {
+    offsets: HashMap<KafkaTopicPartition, i64>,
+    schedules: HashMap<String, KafkaTopicSchedulingState>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KafkaTopicSchedulingState {
-    instances: u64,
+    instances: NonZeroU64,
     rebalance_epoch: u64,
     observed_partitions: Vec<i32>,
     assignments: HashMap<i32, u64>,
@@ -55,12 +77,10 @@ struct KafkaTopicSchedulingState {
 #[derive(Debug)]
 pub(super) struct ReplicatedKafkaOffsetState {
     pub(super) placement: RuntimeStatePlacement,
-    pub(super) required_replica_acks: usize,
-    pub(super) primary_node: Option<String>,
-    pub(super) replica_nodes: Vec<String>,
-    offsets: parking_lot::Mutex<HashMap<(String, i32), i64>>,
+    roles: parking_lot::RwLock<StateReplicationRoles>,
+    offsets: parking_lot::Mutex<HashMap<KafkaTopicPartition, i64>>,
     schedules: parking_lot::Mutex<HashMap<String, KafkaTopicSchedulingState>>,
-    pub(super) current_lsm: AtomicU64,
+    pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
     pub(super) replica_progress: DashMap<String, u64, RandomState>,
@@ -68,21 +88,17 @@ pub(super) struct ReplicatedKafkaOffsetState {
 }
 
 impl ReplicatedKafkaOffsetState {
-    fn snapshot_components(
-        &self,
-    ) -> (
-        HashMap<(String, i32), i64>,
-        HashMap<String, KafkaTopicSchedulingState>,
-    ) {
-        let offsets = self.offsets.lock().clone();
-        let schedules = self.schedules.lock().clone();
-        (offsets, schedules)
+    fn snapshot_components(&self) -> KafkaOffsetSnapshotState {
+        KafkaOffsetSnapshotState {
+            offsets: self.offsets.lock().clone(),
+            schedules: self.schedules.lock().clone(),
+        }
     }
 
     pub(super) fn new(
         placement: RuntimeStatePlacement,
-        primary_node: Option<String>,
-        replica_nodes: Vec<String>,
+        primary_node: Option<ClusterNodeName>,
+        replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -93,16 +109,20 @@ impl ReplicatedKafkaOffsetState {
         if let Some(initial) = initial {
             current_lsm = initial.lsm;
             last_persisted_lsm = initial.lsm;
-            (offsets, schedules) = decode_kafka_offset_snapshot(&initial.payload)?;
+            let decoded = decode_kafka_offset_snapshot(&initial.payload)?;
+            offsets = decoded.offsets;
+            schedules = decoded.schedules;
         }
         Ok(Self {
             placement,
-            required_replica_acks,
-            primary_node,
-            replica_nodes,
+            roles: parking_lot::RwLock::new(StateReplicationRoles::new(
+                primary_node,
+                replica_nodes,
+                required_replica_acks,
+            )),
             offsets: parking_lot::Mutex::new(offsets),
             schedules: parking_lot::Mutex::new(schedules),
-            current_lsm: AtomicU64::new(current_lsm),
+            current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
             replica_progress: DashMap::default(),
@@ -113,20 +133,20 @@ impl ReplicatedKafkaOffsetState {
     pub(super) fn next_offset(&self, topic: &str, partition: i32) -> Option<i64> {
         self.offsets
             .lock()
-            .get(&(topic.to_string(), partition))
+            .get(&KafkaTopicPartition {
+                topic: topic.to_string(),
+                partition,
+            })
             .copied()
     }
 
     pub(super) fn replace_offsets(
         &self,
-        offsets: HashMap<(String, i32), i64>,
+        offsets: HashMap<KafkaTopicPartition, i64>,
     ) -> Result<(u64, Vec<u8>), RuntimePersistenceError> {
         *self.offsets.lock() = offsets.clone();
         let schedules = self.schedules.lock().clone();
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         Ok((lsm, encode_kafka_offset_snapshot(&offsets, &schedules)?))
     }
@@ -138,14 +158,17 @@ impl ReplicatedKafkaOffsetState {
         next_offset: i64,
     ) -> Result<(u64, Vec<u8>), RuntimePersistenceError> {
         let mut offsets = self.offsets.lock();
-        offsets.insert((topic.to_string(), partition), next_offset);
+        offsets.insert(
+            KafkaTopicPartition {
+                topic: topic.to_string(),
+                partition,
+            },
+            next_offset,
+        );
         let snapshot = offsets.clone();
         drop(offsets);
         let schedules = self.schedules.lock().clone();
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         Ok((lsm, encode_kafka_offset_snapshot(&snapshot, &schedules)?))
     }
@@ -154,7 +177,7 @@ impl ReplicatedKafkaOffsetState {
     pub(super) fn update_partition_schedule(
         &self,
         topic: &str,
-        instances: u64,
+        instances: NonZeroU64,
         observed_partitions: Vec<i32>,
     ) -> Result<Option<(u64, Vec<u8>)>, RuntimePersistenceError> {
         let next_schedule = {
@@ -173,9 +196,10 @@ impl ReplicatedKafkaOffsetState {
                     .iter()
                     .enumerate()
                     .flat_map(|(instance_idx, partitions)| {
-                        partitions.iter().copied().map(move |partition| {
-                            (partition, u64::try_from(instance_idx).unwrap_or_default())
-                        })
+                        partitions
+                            .iter()
+                            .copied()
+                            .map(move |partition| (partition, instance_idx.arch_into()))
                     })
                     .collect(),
             }
@@ -189,7 +213,10 @@ impl ReplicatedKafkaOffsetState {
                     && existing.assignments == next_schedule.assignments => {}
             Some(existing) => {
                 let mut next_schedule = next_schedule;
-                next_schedule.rebalance_epoch = existing.rebalance_epoch.saturating_add(1);
+                next_schedule.rebalance_epoch = existing
+                    .rebalance_epoch
+                    .checked_add(1)
+                    .assured("an ingestor cannot observe 2^64 partition rebalances");
                 schedules.insert(topic.to_string(), next_schedule);
                 updated = true;
             }
@@ -204,10 +231,7 @@ impl ReplicatedKafkaOffsetState {
             return Ok(None);
         }
         let offsets = self.offsets.lock().clone();
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         Ok(Some((
             lsm,
@@ -218,7 +242,7 @@ impl ReplicatedKafkaOffsetState {
     #[cfg(test)]
     pub(super) fn describe_topic(&self, topic: &str) -> Option<KafkaDomainOffsetDescribe> {
         let schedule = self.schedules.lock().get(topic).cloned()?;
-        Some(super::kafka_domain_offset_describe_from_schedule(
+        Some(kafka_domain_offset_describe_from_schedule(
             topic,
             schedule.instances,
             &KafkaPartitionSchedule::new(
@@ -234,10 +258,10 @@ impl ReplicatedKafkaOffsetState {
         lsm: u64,
         payload: &[u8],
     ) -> Result<(), RuntimePersistenceError> {
-        let (offsets, schedules) = decode_kafka_offset_snapshot(payload)?;
-        *self.offsets.lock() = offsets;
-        *self.schedules.lock() = schedules;
-        self.current_lsm.store(lsm, Ordering::SeqCst);
+        let decoded = decode_kafka_offset_snapshot(payload)?;
+        *self.offsets.lock() = decoded.offsets;
+        *self.schedules.lock() = decoded.schedules;
+        self.current_lsm.adopt(lsm);
         self.dirty.store(true, Ordering::SeqCst);
         self.replication_notify.notify_waiters();
         Ok(())
@@ -246,21 +270,35 @@ impl ReplicatedKafkaOffsetState {
     pub(super) fn latest_snapshot(
         &self,
     ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
-        let (offsets, schedules) = self.snapshot_components();
+        let components = self.snapshot_components();
         Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.load(Ordering::SeqCst),
+            lsm: self.current_lsm.current(),
             schema_fingerprint: self.placement.schema_fingerprint,
-            payload: encode_kafka_offset_snapshot(&offsets, &schedules)?,
+            payload: encode_kafka_offset_snapshot(&components.offsets, &components.schedules)?,
         })
     }
 
-    pub(super) fn mark_replica_progress(&self, node_id: &str, lsm: u64) {
+    pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
+        self.roles.read().primary_node.clone()
+    }
+
+    pub(super) fn required_replica_acks(&self) -> usize {
+        self.roles.read().required_replica_acks
+    }
+
+    pub(super) fn rebind_roles(&self, roles: StateReplicationRoles) {
+        *self.roles.write() = roles;
+    }
+
+    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
         self.replica_progress.insert(node_id.to_string(), lsm);
         self.replication_notify.notify_waiters();
     }
 
     pub(super) fn replica_quorum_satisfied(&self, lsm: u64) -> bool {
-        self.replica_nodes
+        let roles = self.roles.read();
+        roles
+            .replica_nodes
             .iter()
             .filter(|node_id| {
                 self.replica_progress
@@ -268,23 +306,21 @@ impl ReplicatedKafkaOffsetState {
                     .is_some_and(|observed| *observed >= lsm)
             })
             .count()
-            >= self.required_replica_acks
+            >= roles.required_replica_acks
     }
 }
 
 fn encode_kafka_offset_snapshot(
-    offsets: &HashMap<(String, i32), i64>,
+    offsets: &HashMap<KafkaTopicPartition, i64>,
     schedules: &HashMap<String, KafkaTopicSchedulingState>,
 ) -> Result<Vec<u8>, RuntimePersistenceError> {
     let mut entries = offsets
         .iter()
-        .map(
-            |((topic, partition), next_offset)| KafkaOffsetEntrySnapshot {
-                topic: topic.clone(),
-                partition: *partition,
-                next_offset: *next_offset,
-            },
-        )
+        .map(|(key, next_offset)| KafkaOffsetEntrySnapshot {
+            topic: key.topic.clone(),
+            partition: key.partition,
+            next_offset: *next_offset,
+        })
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| {
         left.topic
@@ -330,7 +366,13 @@ fn decode_kafka_offset_snapshot(
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
     let mut offsets = HashMap::default();
     for entry in snapshot.offsets {
-        offsets.insert((entry.topic, entry.partition), entry.next_offset);
+        offsets.insert(
+            KafkaTopicPartition {
+                topic: entry.topic,
+                partition: entry.partition,
+            },
+            entry.next_offset,
+        );
     }
     let mut schedules = HashMap::default();
     for schedule in snapshot.schedules {
@@ -350,5 +392,5 @@ fn decode_kafka_offset_snapshot(
             },
         );
     }
-    Ok((offsets, schedules))
+    Ok(KafkaOffsetSnapshotState { offsets, schedules })
 }

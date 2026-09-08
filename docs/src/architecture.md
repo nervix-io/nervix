@@ -23,18 +23,24 @@ The graph itself is built out of persisted NSPL models:
 - `REINGESTOR`
 - `EMITTER`
 
-Those models are stored in the registry and scheduled into a `DomainSchedule`. The schedule says which nodes exist in a domain, which server is primary for each node, and which servers hold replicas.
+Those models are stored in the registry and scheduled into a `DomainSchedule`. The schedule says
+which nodes exist in a domain, which server is primary for each node, and which servers hold
+replicas. A relay is one of those runtime nodes: it has one owner, and only materialized relay state
+has scheduler-selected replicas.
 
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
 The runtime then instantiates that schedule:
 
 - ingestors attach to external systems or local endpoints
-- relays buffer and route records
-- junctions, deduplicators, reingestors, and materializers route or transform records between relays
+- relay owners buffer and route records, including fan-out to remote consumer nodes and sessions
+- junctions, deduplicators, and reingestors transform or route records between relays
 - emitters encode records and publish them externally
 
-Runtime execution has its own persistence boundary. Selected execution node state is persisted through periodic snapshots and replication, but in-flight message batches and ACK state are hot-path memory only.
+Runtime execution has its own persistence boundary. Selected execution-node state is persisted
+through periodic snapshots and replication, but in-flight message batches and ACK state are
+hot-path memory only. Relay buffers, concrete presence, fan-out, and metrics are owner-local and
+unreplicated; optional materialized records use the relay's state replicas.
 
 `RESOURCE` sits between the control plane and the runtime. The control plane versions and replicates it across the cluster, while runtime nodes use its unpacked local directory form when a model depends on concrete files.
 

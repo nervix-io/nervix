@@ -1,4 +1,7 @@
+use std::num::NonZeroUsize;
+
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterRelay, AlterRelayOperation, CreateRelay, CreateStatement, MaterializedRelayState,
     RelayBranching, default_relay_buffer,
@@ -7,27 +10,26 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, alter_op_separator, branch_ref, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref, schema_ref,
-        suggest_from, tok, word_raw,
+        LexedInput, ParseError, ParseFromSourceError, alter_op_separator, branch_ref,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref,
+        schema_ref, suggest_from, tok, word_raw,
     },
 };
 
-fn positive_usize<'src>()
--> impl Parser<'src, &'src [Token], usize, extra::Err<ParseError<'src>>> + Clone {
+/// The count after `CAPACITY`, parsed straight into `NonZeroUsize` so a relay buffer that could
+/// never hold a message is rejected here rather than by the registry or the runtime.
+fn relay_capacity<'src>()
+-> impl Parser<'src, &'src [Token], NonZeroUsize, extra::Err<ParseError<'src>>> + Clone {
     choice((select! { Token::NumberLiteral(v) => v }, word_raw()))
-        .try_map(|raw, span| {
-            raw.parse::<usize>()
-                .map_err(|_| Rich::custom(span, format!("invalid usize literal '{raw}'")))
-                .and_then(|value| {
-                    if value == 0 {
-                        Err(Rich::custom(span, "capacity must be greater than 0"))
-                    } else {
-                        Ok(value)
-                    }
-                })
-        })
         .labelled("relay_capacity")
+        .try_map(|raw: String, span| {
+            raw.parse::<NonZeroUsize>().map_err(|_| {
+                Rich::custom(
+                    span,
+                    format!("invalid relay capacity '{raw}'; expected a positive integer"),
+                )
+            })
+        })
 }
 
 pub fn create_relay_parser<'src>()
@@ -41,7 +43,7 @@ pub fn create_relay_parser<'src>()
         .ignore_then(kw(Identifier::Timestamp))
         .to(MaterializedRelayState::LastByTimestamp);
 
-    let capacity = kw(Identifier::Capacity).ignore_then(positive_usize());
+    let capacity = kw(Identifier::Capacity).ignore_then(relay_capacity());
 
     let branched_tail = kw_phrase2(Identifier::Branched, Identifier::By)
         .ignore_then(branch_ref())
@@ -84,7 +86,7 @@ pub fn alter_relay_parser<'src>()
     let operation = choice((
         kw(Identifier::Set)
             .ignore_then(kw(Identifier::Capacity))
-            .ignore_then(positive_usize())
+            .ignore_then(relay_capacity())
             .map(|capacity| AlterRelayOperation::SetCapacity { capacity }),
         kw(Identifier::Set)
             .ignore_then(kw(Identifier::Schema))
@@ -137,14 +139,18 @@ pub fn parse_create_stream_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_stream(
     input: &str,
 ) -> Result<CreateStatement<CreateRelay>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_stream_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -156,12 +162,16 @@ pub fn parse_alter_relay_tokens(tokens: &[Token]) -> Result<AlterRelay, Vec<Pars
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_alter_relay(input: &str) -> Result<AlterRelay, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_relay_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -176,6 +186,8 @@ pub fn suggest_alter_relay(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -194,7 +206,7 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "notifications");
         assert_eq!(parsed.schema.as_str(), "event_schema");
-        assert_eq!(parsed.buffer, 1);
+        assert_eq!(parsed.buffer, nonzero!(1usize));
         assert_eq!(parsed.branching, RelayBranching::unbranched());
         assert_eq!(parsed.materialized_state, None);
     }
@@ -208,7 +220,7 @@ mod tests {
         assert_eq!(
             parsed.branching,
             RelayBranching::branched_by(
-                nervix_models::Identifier::parse("by_tenant").expect("valid identifier"),
+                nervix_models::BranchName::parse("by_tenant").expect("valid branch name"),
             )
         );
     }
@@ -242,7 +254,7 @@ mod tests {
             to_tokens("CREATE RELAY notifications SCHEMA event_schema UNBRANCHED CAPACITY 32;");
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.buffer, 32);
+        assert_eq!(parsed.buffer, nonzero!(32usize));
     }
 
     #[test]
@@ -253,7 +265,9 @@ mod tests {
         assert_eq!(parsed.relay.as_str(), "notifications");
         assert_eq!(
             parsed.operations,
-            vec![AlterRelayOperation::SetCapacity { capacity: 32 }]
+            vec![AlterRelayOperation::SetCapacity {
+                capacity: nonzero!(32usize)
+            }]
         );
     }
 
@@ -269,14 +283,17 @@ mod tests {
         assert_eq!(
             parsed.operations,
             vec![
-                AlterRelayOperation::SetCapacity { capacity: 8 },
+                AlterRelayOperation::SetCapacity {
+                    capacity: nonzero!(8usize)
+                },
                 AlterRelayOperation::SetSchema {
-                    schema: nervix_models::Identifier::try_from("event_v2")
+                    schema: nervix_models::SchemaName::try_from("event_v2")
                         .expect("valid identifier"),
                 },
                 AlterRelayOperation::SetBranching {
                     branching: RelayBranching::branched_by(
-                        nervix_models::Identifier::try_from("by_tenant").expect("valid identifier"),
+                        nervix_models::BranchName::try_from("by_tenant")
+                            .expect("valid branch name"),
                     ),
                 },
                 AlterRelayOperation::SetBranching {

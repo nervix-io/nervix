@@ -1,9 +1,11 @@
-use std::{ops::Range, time::Duration};
+use std::{num::NonZeroUsize, ops::Range, time::Duration};
 
 use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction};
 use sorted_vec::SortedSet;
 
@@ -40,7 +42,7 @@ pub type WindowAggregateDemandId = usize;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowLinearHistogramConfig {
-    pub buckets: usize,
+    pub buckets: NonZeroUsize,
     pub min: f64,
     pub max: f64,
     pub delay: Duration,
@@ -403,7 +405,7 @@ pub fn parse_aggregate_tokens(
     } else {
         let mut program = parsed
             .into_output()
-            .expect("successful parse must contain an aggregate program");
+            .verified("has_errors returned false above, so this parse produced output");
         assign_aggregate_demands(&mut program.inner);
         Ok(program)
     }
@@ -549,7 +551,7 @@ fn validate_aggregate_call<'src>(
 
 fn percentile_arg<'src>(expr: &SpannedExpr, span: Span) -> Result<f64, Rich<'src, Token>> {
     let value = match &expr.inner {
-        Expr::Literal(Literal::Int64(value)) => *value as f64,
+        Expr::Literal(Literal::Int64(value)) => (*value).approx_into(),
         Expr::Literal(Literal::Float64(value)) => *value,
         _ => {
             return Err(Rich::custom(
@@ -571,13 +573,15 @@ fn linear_histogram_config<'src>(
     args: &[SpannedExpr],
     span: Span,
 ) -> Result<WindowLinearHistogramConfig, Rich<'src, Token>> {
-    let buckets = int_arg(&args[2], span, "bucket count")?;
-    if buckets <= 0 {
-        return Err(Rich::custom(
-            span,
-            "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
-        ));
-    }
+    let buckets = usize::try_from(int_arg(&args[2], span, "bucket count")?)
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| {
+            Rich::custom(
+                span,
+                "PERCENTILE_LINEAR_HISTOGRAM bucket count must be greater than zero",
+            )
+        })?;
     let min = numeric_arg(&args[3], span, "minimum")?;
     let max = numeric_arg(&args[4], span, "maximum")?;
     if min >= max {
@@ -602,7 +606,7 @@ fn linear_histogram_config<'src>(
         )
     })?;
     Ok(WindowLinearHistogramConfig {
-        buckets: buckets as usize,
+        buckets,
         min,
         max,
         delay,
@@ -621,7 +625,7 @@ fn int_arg<'src>(expr: &SpannedExpr, span: Span, name: &str) -> Result<i64, Rich
 
 fn numeric_arg<'src>(expr: &SpannedExpr, span: Span, name: &str) -> Result<f64, Rich<'src, Token>> {
     match &expr.inner {
-        Expr::Literal(Literal::Int64(value)) => Ok(*value as f64),
+        Expr::Literal(Literal::Int64(value)) => Ok((*value).approx_into()),
         Expr::Literal(Literal::Float64(value)) => Ok(*value),
         _ => Err(Rich::custom(
             span,
@@ -702,19 +706,17 @@ fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggreg
             };
             let percentile =
                 if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
-                    Some(
-                        percentile_arg(&args[1], expr.span)
-                            .expect("validated percentile argument must remain valid"),
-                    )
+                    Some(percentile_arg(&args[1], expr.span).verified(
+                        "the parser validated these same arguments before the demand pass runs",
+                    ))
                 } else {
                     None
                 };
             let linear_histogram =
                 if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
-                    Some(
-                        linear_histogram_config(args, expr.span)
-                            .expect("validated histogram configuration must remain valid"),
-                    )
+                    Some(linear_histogram_config(args, expr.span).verified(
+                        "the parser validated these same arguments before the demand pass runs",
+                    ))
                 } else {
                     None
                 };
@@ -769,7 +771,7 @@ fn aggregate_demand_for_call(
 ) -> WindowAggregateDemand {
     let input = Some(
         args.first()
-            .expect("aggregate call must carry its validated input argument")
+            .verified("the parser rejects an aggregate call without its input argument")
             .inner
             .clone(),
     );
@@ -846,6 +848,8 @@ pub fn span_range(span: Span) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
 
     #[test]
@@ -997,7 +1001,7 @@ mod tests {
         assert_eq!(
             parsed.demands()[0].linear_histogram,
             Some(WindowLinearHistogramConfig {
-                buckets: 2048,
+                buckets: nonzero!(2048usize),
                 min: 0.0,
                 max: 10000.0,
                 delay: Duration::from_secs(2),

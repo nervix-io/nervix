@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, Event, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,
@@ -29,7 +30,7 @@ impl MqttEmitter {
     pub(in crate::runtime) fn new(
         client: &CreateClientMqtt,
         resolved: Option<&ResolvedClientConfig>,
-        topic: &Identifier,
+        topic: &TopicName,
         context: &EmitterSinkContext,
         mode: MqttPublishingMode,
         retry_policy: ParsedRetryPolicy,
@@ -43,7 +44,7 @@ impl MqttEmitter {
         )?;
         let domain = context.domain.clone();
         let emitter = context.emitter.clone();
-        let events = context.events.clone();
+        let events = context.runtime.events().clone();
         let runtime = context.runtime.clone();
         let (eventloop_shutdown, mut eventloop_shutdown_rx) = watch::channel(false);
         tokio::spawn(async move {
@@ -72,14 +73,14 @@ impl MqttEmitter {
                             error.to_string(),
                             wait,
                         );
-                        let _ = events.send(RuntimeEvent::Error(format!(
+                        events.report_error(format!(
                             "mqtt emitter event loop failed for '{}' in domain '{}'; reconnecting \
                              in {}: {}",
                             emitter.as_str(),
                             domain.as_str(),
                             humantime::format_duration(wait),
                             error
-                        )));
+                        ));
                         warn!(
                             domain = domain.as_str(),
                             emitter = emitter.as_str(),
@@ -156,12 +157,13 @@ impl MqttEmitter {
             }));
         }
         let request_capacity = match mode {
-            MqttPublishingMode::Qos0 => 1,
-            MqttPublishingMode::Qos1 { max_in_flight, .. }
-            | MqttPublishingMode::Qos2 { max_in_flight, .. } => max_in_flight,
+            MqttPublishingMode::Qos0 => NonZeroUsize::MIN,
+            MqttPublishingMode::Qos1(confirmation) | MqttPublishingMode::Qos2(confirmation) => {
+                confirmation.max_in_flight
+            }
         };
         AsyncClient::builder(options)
-            .capacity(request_capacity)
+            .capacity(request_capacity.get())
             .try_build()
             .map_err(|error| emitter_config_error(format!("invalid MQTT client config: {error}")))
     }
@@ -197,7 +199,7 @@ impl MqttEmitter {
 
     pub(super) async fn publish_records(
         &self,
-        topic: &Identifier,
+        topic: &TopicName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -216,7 +218,7 @@ impl MqttEmitter {
                 confirmation.acks.ack_alive();
             }
             record.acks.ack_alive();
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             if let MqttPublishingMode::Qos0 = self.mode {
                 match client.try_publish(
                     topic.as_str(),
@@ -250,17 +252,19 @@ impl MqttEmitter {
                     return outcome;
                 }
             };
-            let (max_in_flight, timeout) = self
-                .mode
-                .confirmation_settings()
-                .expect("confirmed MQTT mode must have confirmation settings");
+            let AckConfirmation {
+                max_in_flight,
+                timeout,
+            } = self.mode.confirmation_settings().verified(
+                "this path only runs for the confirmed publishing mode, which carries the settings",
+            );
             pending.push_back(PendingMqttConfirmation {
                 position,
                 acks: record.acks,
                 deadline: Instant::now() + timeout,
                 confirmation: Box::pin(notice.wait_completion_async()),
             });
-            if pending.len() >= max_in_flight
+            if pending.len() >= max_in_flight.get()
                 && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
             {
                 outcome.fail(error);
@@ -269,10 +273,9 @@ impl MqttEmitter {
         }
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
-            let (_, timeout) = self
-                .mode
-                .confirmation_settings()
-                .expect("confirmed MQTT mode must have confirmation settings");
+            let AckConfirmation { timeout, .. } = self.mode.confirmation_settings().verified(
+                "this path only runs for the confirmed publishing mode, which carries the settings",
+            );
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
                 outcome.fail(error);
                 return outcome;
@@ -349,9 +352,10 @@ impl MqttEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready MQTT confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(()) => outcome.deliver(confirmation.position),
                 Err(error) if Self::is_record_notice_rejection(&error) => outcome.reject(
@@ -393,22 +397,15 @@ impl MqttPublishingMode {
     fn publish_options(self) -> PublishOptions {
         match self {
             Self::Qos0 => PublishOptions::at_most_once(),
-            Self::Qos1 { .. } => PublishOptions::at_least_once(),
-            Self::Qos2 { .. } => PublishOptions::exactly_once(),
+            Self::Qos1(_) => PublishOptions::at_least_once(),
+            Self::Qos2(_) => PublishOptions::exactly_once(),
         }
     }
 
-    fn confirmation_settings(self) -> Option<(usize, Duration)> {
+    fn confirmation_settings(self) -> Option<AckConfirmation> {
         match self {
             Self::Qos0 => None,
-            Self::Qos1 {
-                max_in_flight,
-                timeout,
-            }
-            | Self::Qos2 {
-                max_in_flight,
-                timeout,
-            } => Some((max_in_flight, timeout)),
+            Self::Qos1(confirmation) | Self::Qos2(confirmation) => Some(confirmation),
         }
     }
 }
@@ -428,19 +425,28 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut pending = VecDeque::from([
             PendingMqttConfirmation {
-                position: (0, 0),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 0,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(std::future::pending()),
             },
             PendingMqttConfirmation {
-                position: (0, 1),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 1,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(async { Ok(()) }),
             },
             PendingMqttConfirmation {
-                position: (0, 2),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 2,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(async {
@@ -450,7 +456,10 @@ mod tests {
                 }),
             },
             PendingMqttConfirmation {
-                position: (0, 3),
+                position: BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: 3,
+                },
                 acks: AckSet::empty(),
                 deadline,
                 confirmation: Box::pin(async { Err(PublishNoticeError::SessionReset) }),
@@ -461,9 +470,15 @@ mod tests {
         MqttEmitter::harvest_ready_after_oldest_failure(&mut pending, &mut outcome);
 
         assert_eq!(pending.len(), 1, "only the unresolved oldest must remain");
-        assert_eq!(outcome.delivered, vec![(0, 1)]);
+        assert_eq!(
+            outcome.delivered,
+            vec![BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 1,
+            }]
+        );
         assert_eq!(outcome.rejected.len(), 1);
-        assert_eq!(outcome.rejected[0].position, (0, 2));
+        assert_eq!(outcome.rejected[0].position.row_index, 2);
         assert!(outcome.infrastructure_error.is_none());
     }
 

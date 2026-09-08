@@ -192,6 +192,27 @@ Each of these submits one statement and exits:
 Drain and replication behaviour is described in
 [Replication And Drain Behavior](metrics-and-observability.md#replication-and-drain-behavior).
 
+`drain-node` cordons the target before moving work. It visits domains and their hard placement
+groups or independent runtime nodes in canonical order, drains one unit at a time, and leaves the
+node cordoned. A successful result starts with the aggregate and effective quiesce level, followed
+by one line per move:
+
+```text
+drained node 'node-2' (moved 2 of 2 scheduled graph node(s))
+quiesce level: ENTITY_PAUSE
+- kind=ingestor name=orders from=node-2 to=node-3 replicas=node-2 promoted_replica=yes
+- kind=emitter name=warehouse from=node-2 to=node-1 replicas=none promoted_replica=no
+```
+
+Each move line identifies the runtime-node kind and name, former and destination owners, resulting
+replicas, and whether the destination was promoted from a replica. A node with no scheduled graph
+work reports `moved 0 of 0` and `quiesce level: DYNAMIC`.
+
+If one unit cannot drain or activate, the command returns an error containing the same header plus
+a `failed:` line for that unit. Independent units continue moving, so `moved` can be smaller than
+`of`. The node stays cordoned, successful moves remain committed, and running `drain-node` again
+retries the units it still owns.
+
 ## Shell Completions
 
 ```bash

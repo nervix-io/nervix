@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
+use meticulous::OptionExt as _;
 use nervix_benchmark::{
     AbArm, AbSummary, BenchmarkCatalog, BenchmarkDependency, BenchmarkRunFailure,
     BenchmarkSuiteReport, ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape,
@@ -114,7 +115,10 @@ impl WorkloadOptions {
     }
 }
 
-const DEFAULT_AB_RUNS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
+const DEFAULT_AB_RUNS: NonZeroUsize = match NonZeroUsize::new(3) {
+    Some(runs) => runs,
+    None => panic!("three is nonzero"),
+};
 
 #[derive(Debug, clap::Args)]
 struct RunAbArgs {
@@ -704,7 +708,7 @@ impl ResolvedRun {
             .unwrap_or(benchmark.definition().load.warmup_seconds);
         ensure!(partitions > 0, "partition count must be positive");
         ensure!(
-            partitions <= i32::MAX as u32,
+            i32::try_from(partitions).is_ok(),
             "partition count exceeds Kafka's supported range"
         );
         ensure!(value_bytes > 0, "value byte count must be positive");
@@ -1247,11 +1251,16 @@ async fn run_load_driver(
     }
     fs::write(&go_file, b"go\n")?;
 
+    const COMPLETION_GRACE_SECONDS: u64 = 30;
+
     let completion_timeout = Duration::from_secs(
         resolved
-            .duration_seconds
-            .saturating_add(resolved.wait_timeout.as_secs().saturating_mul(4))
-            .saturating_add(30),
+            .wait_timeout
+            .as_secs()
+            .checked_mul(4)
+            .and_then(|wait| wait.checked_add(resolved.duration_seconds))
+            .and_then(|total| total.checked_add(COMPLETION_GRACE_SECONDS))
+            .assured("a benchmark run is configured in seconds, far below the u64 second range"),
     );
     let completion_deadline = tokio::time::Instant::now() + completion_timeout;
     let status = loop {

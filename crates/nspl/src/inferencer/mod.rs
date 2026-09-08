@@ -1,4 +1,7 @@
+use std::num::NonZeroU32;
+
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, CreateInferencer, CreateStatement, InferencerTensorDeclaration,
     InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
@@ -8,11 +11,11 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, filter_where_clause,
-        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, inferencer_name,
-        into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies,
-        render_vm_program_tokens, resource_ref, string_lit, suggest_from, tok, u64_value,
-        vm_program_error_message,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection,
+        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
+        inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, render_vm_program_tokens, resource_ref, string_lit,
+        suggest_from, tok, u64_value, vm_program_error_message,
     },
 };
 
@@ -99,18 +102,12 @@ fn tensor_schema<'src>()
         kw(Identifier::Batch).to(InferencerTensorDimension::Batch),
         kw(Identifier::Dynamic).to(InferencerTensorDimension::Dynamic),
         select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
-            let size = raw.parse::<u32>().map_err(|_| {
+            let size = raw.parse::<NonZeroU32>().map_err(|_| {
                 Rich::custom(
                     span,
                     "tensor dimension must be a positive integer, DYNAMIC, or BATCH",
                 )
             })?;
-            if size == 0 {
-                return Err(Rich::custom(
-                    span,
-                    "tensor dimension must be greater than zero",
-                ));
-            }
             Ok(InferencerTensorDimension::Fixed(size))
         }),
     ));
@@ -242,14 +239,18 @@ pub fn parse_create_inferencer_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_inferencer(
     input: &str,
 ) -> Result<CreateStatement<CreateInferencer>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_inferencer_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -260,6 +261,8 @@ pub fn suggest_create_inferencer(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -369,16 +372,16 @@ mod tests {
         assert_eq!(
             parsed.inputs[1].schema.dimensions,
             vec![
-                nervix_models::InferencerTensorDimension::Fixed(3),
-                nervix_models::InferencerTensorDimension::Fixed(224),
-                nervix_models::InferencerTensorDimension::Fixed(224),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(3u32)),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(224u32)),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(224u32)),
             ]
         );
         assert_eq!(
             parsed.inputs[2].schema.dimensions,
             vec![
                 nervix_models::InferencerTensorDimension::Dynamic,
-                nervix_models::InferencerTensorDimension::Fixed(64),
+                nervix_models::InferencerTensorDimension::Fixed(nonzero!(64u32)),
             ]
         );
         assert_eq!(parsed.inputs[3].schema.batch_axis(), Some(1));

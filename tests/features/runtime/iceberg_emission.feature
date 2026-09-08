@@ -595,6 +595,7 @@ Feature: Iceberg emission
       | 1            | 0             |
       | 3            | 0             |
 
+  @planned-graceful-handoff
   Scenario Outline: Iceberg emitter commits staged IPC batches during graceful shutdown
     Given MQTT is running
     And Iceberg dependencies are running

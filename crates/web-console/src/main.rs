@@ -10,12 +10,14 @@ use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
     DataflowStatistics,
 };
-use nervix_models::Statement;
+use nervix_models::{ClusterNodeName, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
@@ -175,7 +177,7 @@ struct ResourceVersionView {
     manifest_checksum: Option<String>,
     file_count: Option<String>,
     total_bytes: Option<String>,
-    created_by_node: Option<String>,
+    created_by_node: Option<ClusterNodeName>,
     created_at: Option<String>,
     files: Vec<ResourceFileView>,
 }
@@ -325,7 +327,8 @@ fn App() -> impl IntoView {
             suggestions.set(Vec::new());
             return;
         }
-        let cursor = value.len() as u32;
+        let cursor = u32::try_from(value.len())
+            .assured("WebAssembly linear memory limits input lengths to u32");
         let request = nervix_proto::SessionRequest {
             request: Some(nervix_proto::session_request::Request::Suggest(
                 nervix_proto::SuggestRequest {
@@ -465,6 +468,8 @@ fn App() -> impl IntoView {
             return;
         };
         let title = subscription_tab_title(&relay, &filter);
+        // Bounded by the subscription tabs the operator has open in this console, and the tab
+        // strip renders them in this order.
         if let Some(existing) = subscription_tabs.get_untracked().into_iter().find(|tab| {
             tab.domain == domain
                 && tab.relay == relay
@@ -733,26 +738,27 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                         let mut resend_pending_after_connect = !pending_requests.is_empty();
                         let mut waiting_for_transaction_attach = false;
                         if transaction_is_active(transaction_status.get_untracked()) {
-                            let existing_attach = pending_requests.front().and_then(|pending| {
-                                let PendingRequest::AttachTransaction { request } = pending else {
-                                    return None;
-                                };
-                                Some(request.clone())
-                            });
-                            let had_existing_attach = existing_attach.is_some();
-                            let request = existing_attach.unwrap_or_else(|| {
-                                let id = transaction_status
-                                    .get_untracked()
-                                    .map(|status| status.id)
-                                    .unwrap_or_default();
-                                nervix_proto::SessionRequest {
-                                    request: Some(
-                                        nervix_proto::session_request::Request::AttachTransaction(
-                                            nervix_proto::AttachTransactionRequest { id },
-                                        ),
-                                    ),
+                            let (request, had_existing_attach) = match pending_requests.front() {
+                                Some(PendingRequest::AttachTransaction { request }) => {
+                                    (request.clone(), true)
                                 }
-                            });
+                                _ => {
+                                    let id = transaction_status
+                                        .get_untracked()
+                                        .map(|status| status.id)
+                                        .unwrap_or_default();
+                                    (
+                                        nervix_proto::SessionRequest {
+                                            request: Some(
+                                                nervix_proto::session_request::Request::AttachTransaction(
+                                                    nervix_proto::AttachTransactionRequest { id },
+                                                ),
+                                            ),
+                                        },
+                                        false,
+                                    )
+                                }
+                            };
                             if socket
                                 .send(WebSocketMessage::Bytes(request.encode_to_vec()))
                                 .await
@@ -969,7 +975,7 @@ async fn wait_for_websocket_reconnect(delay: Duration) {
         if let Some(window) = web_sys::window() {
             let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                 &resolve,
-                delay.as_millis().min(i32::MAX as u128) as i32,
+                i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
             );
         } else {
             let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
@@ -1143,7 +1149,9 @@ fn handle_session_response(
                     .map(|status| status.id)
                     .filter(|id| !id.is_empty())
             {
-                pending_requests.push_front(pending.take().expect("pending was checked above"));
+                pending_requests.push_front(pending.take().verified(
+                    "the condition above matched on this same pending request being present",
+                ));
                 return SessionResponseAction::ReattachTransaction { id };
             }
             let pending = pending;
@@ -1543,7 +1551,7 @@ fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
             "manifest_checksum" => manifest_checksum = Some(value.to_string()),
             "file_count" => file_count = Some(value.to_string()),
             "total_bytes" => total_bytes = Some(value.to_string()),
-            "created_by_node" => created_by_node = Some(value.to_string()),
+            "created_by_node" => created_by_node = ClusterNodeName::parse(value).ok(),
             "created_at" => created_at = Some(value.to_string()),
             _ => {}
         }
@@ -1657,8 +1665,10 @@ fn is_domainless_server_command(command: &str) -> bool {
 }
 
 fn diagnostic_line(query: &str, diagnostic: nervix_proto::Diagnostic) -> TermLine {
-    let span_start = diagnostic.span_start as usize;
-    let span_end = diagnostic.span_end as usize;
+    let span_start = usize::try_from(diagnostic.span_start)
+        .assured("supported browser and test targets have at least 32-bit pointers");
+    let span_end = usize::try_from(diagnostic.span_end)
+        .assured("supported browser and test targets have at least 32-bit pointers");
     if span_start < span_end && span_end <= query.len() {
         TermLine::output(format!(
             "- {} at {}..{}: {}",
@@ -1871,13 +1881,14 @@ fn Sidebar(
             .get()
             .into_iter()
             .find(|domain| Some(domain.id.clone()) == active);
-        found.or_else(|| {
-            active.map(|id| DomainView {
+        match found {
+            Some(domain) => Some(domain),
+            None => active.map(|id| DomainView {
                 id,
                 mode: "UNKNOWN".to_string(),
                 status: "UNKNOWN".to_string(),
-            })
-        })
+            }),
+        }
     };
     view! {
         <aside class="sidebar">
@@ -1890,26 +1901,22 @@ fn Sidebar(
                 >
                     <span class="status-dot"></span>
                     <span>{move || {
-                        selected_domain()
-                            .map(|domain| domain.id)
-                            .unwrap_or_else(|| {
-                                if domains_loaded.get() {
-                                    "no domain".to_string()
-                                } else {
-                                    "loading domains".to_string()
-                                }
-                            })
+                        if let Some(domain) = selected_domain() {
+                            domain.id
+                        } else if domains_loaded.get() {
+                            "no domain".to_string()
+                        } else {
+                            "loading domains".to_string()
+                        }
                     }}</span>
                     <span class="domain-mode">{move || {
-                        selected_domain()
-                            .map(|domain| domain.mode)
-                            .unwrap_or_else(|| {
-                                if domains_loaded.get() {
-                                    "NONE".to_string()
-                                } else {
-                                    "WAIT".to_string()
-                                }
-                            })
+                        if let Some(domain) = selected_domain() {
+                            domain.mode
+                        } else if domains_loaded.get() {
+                            "NONE".to_string()
+                        } else {
+                            "WAIT".to_string()
+                        }
                     }}</span>
                     <span class="chevron">{move || if domain_open.get() { "⌃" } else { "⌄" }}</span>
                 </button>
@@ -2372,7 +2379,7 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
     event
         .target()
         .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-        .expect("upload input event target must be an input")
+        .verified("this handler is only bound to the upload input element")
 }
 
 async fn upload_resource_files(
@@ -2464,10 +2471,12 @@ fn web_console_resource_upload_url(
 }
 
 fn file_relative_path(file: &web_sys::File) -> String {
-    js_sys::Reflect::get(file, &wasm_bindgen::JsValue::from_str("webkitRelativePath"))
-        .ok()
-        .and_then(|value| value.as_string())
-        .unwrap_or_default()
+    let Ok(value) =
+        js_sys::Reflect::get(file, &wasm_bindgen::JsValue::from_str("webkitRelativePath"))
+    else {
+        return String::new();
+    };
+    value.as_string().unwrap_or_default()
 }
 
 fn encode_query_component(value: &str) -> String {
@@ -2546,39 +2555,51 @@ fn SidebarIcon(kind: &'static str) -> impl IntoView {
     }
 }
 
-fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<(String, String, DataflowEdgeKind)> {
-    let hit = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| {
-            document.element_from_point(event.client_x() as f32, event.client_y() as f32)
-        })
-        .and_then(graph_edge_hit_from_element)
-        .or_else(|| {
-            event
-                .target()
-                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-                .and_then(graph_edge_hit_from_element)
-        })?;
+/// The edge a click landed on, named the way the graph identifies it.
+struct GraphEdgeFocusRequest {
+    source: String,
+    target: String,
+    kind: DataflowEdgeKind,
+}
+
+fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<GraphEdgeFocusRequest> {
+    let pointer_hit = if let Some(window) = web_sys::window()
+        && let Some(document) = window.document()
+        && let Some(element) = document.element_from_point(
+            event.client_x().approx_into(),
+            event.client_y().approx_into(),
+        ) {
+        graph_edge_hit_from_element(element)
+    } else {
+        None
+    };
+    let hit = if let Some(hit) = pointer_hit {
+        hit
+    } else {
+        let target = event.target()?;
+        let Ok(element) = target.dyn_into::<web_sys::Element>() else {
+            return None;
+        };
+        graph_edge_hit_from_element(element)?
+    };
     let source = hit.get_attribute("data-source")?;
     let target = hit.get_attribute("data-target")?;
     let kind = graph_edge_kind_from_label(hit.get_attribute("data-kind")?.as_str())?;
-    Some((source, target, kind))
+    Some(GraphEdgeFocusRequest {
+        source,
+        target,
+        kind,
+    })
 }
 
 fn graph_edge_hit_from_element(element: web_sys::Element) -> Option<web_sys::Element> {
-    element
-        .closest(".graph-edge-hit")
-        .ok()
-        .flatten()
-        .or_else(|| {
-            element
-                .closest(".graph-edge-group")
-                .ok()
-                .flatten()?
-                .query_selector(".graph-edge-hit")
-                .ok()
-                .flatten()
-        })
+    if let Ok(Some(hit)) = element.closest(".graph-edge-hit") {
+        return Some(hit);
+    }
+    let Ok(Some(group)) = element.closest(".graph-edge-group") else {
+        return None;
+    };
+    group.query_selector(".graph-edge-hit").unwrap_or_default()
 }
 
 fn graph_edge_kind_from_label(label: &str) -> Option<DataflowEdgeKind> {
@@ -2630,7 +2651,11 @@ fn GraphPanel(
             if topology_key_state.get_untracked().as_ref() != Some(&next_key) {
                 topology_key_state.set(Some(next_key));
                 topology_graph_state.set(Some(graph.clone()));
-                topology_render_count.update(|count| *count = count.saturating_add(1));
+                topology_render_count.update(|count| {
+                    *count = count
+                        .checked_add(1)
+                        .assured("a console session cannot render 2^64 topologies");
+                });
             }
         } else {
             topology_key_state.set(None);
@@ -2662,10 +2687,14 @@ fn GraphPanel(
             .filter(|graph| graph.id == selected_domain)
             .or_else(&visible_graph)
     };
-    let current_graph =
-        move || visible_graph().expect("graph view must exist when graph is visible");
-    let current_topology_graph =
-        move || visible_topology_graph().expect("graph topology must exist when graph is visible");
+    let current_graph = move || {
+        visible_graph()
+            .verified("the panel only renders while the visible graph signal holds a value")
+    };
+    let current_topology_graph = move || {
+        visible_topology_graph()
+            .verified("the panel only renders while the visible graph signal holds a value")
+    };
     let active_graph_search = move || {
         let query = graph_search.get().trim().to_ascii_lowercase();
         (query.chars().count() >= 2).then_some(query)
@@ -2684,7 +2713,7 @@ fn GraphPanel(
             return "OFFLINE";
         }
         let age = freshness_now.get() - snapshot_observed_at.get();
-        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis() as f64 {
+        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis().approx_into::<f64>() {
             "LIVE"
         } else {
             "STALE"
@@ -2721,9 +2750,10 @@ fn GraphPanel(
             focus_graph_bounds(&graph, graph.canvas_bounds(), GRAPH_FIT_MAX_ZOOM);
         }
     };
-    let focus_graph_edge = move |source: String, target: String, kind: DataflowEdgeKind| {
+    let focus_graph_edge = move |request: GraphEdgeFocusRequest| {
         let graph = current_topology_graph();
-        let Some(bounds) = graph.edge_focus_bounds(&source, &target, kind) else {
+        let Some(bounds) = graph.edge_focus_bounds(&request.source, &request.target, request.kind)
+        else {
             return;
         };
         focus_graph_bounds(&graph, bounds, GRAPH_MAX_ZOOM);
@@ -2825,7 +2855,13 @@ fn GraphPanel(
                                 graph_pan_y.set(0.0);
                             }
                         >
-                            {move || format!("{}%", (graph_zoom.get() * 100.0).round() as i32)}
+                            {move || {
+                                let percent: i32 = (graph_zoom.get() * 100.0)
+                                    .round()
+                                    .checked_approx_into()
+                                    .unwrap_or(i32::MAX);
+                                format!("{percent}%")
+                            }}
                         </button>
                         <button
                             type="button"
@@ -2915,10 +2951,10 @@ fn GraphPanel(
                         graph_hover.set(None);
                     }
                     on:click=move |event: ev::MouseEvent| {
-                        if let Some((source, target, kind)) = graph_edge_focus_request(&event) {
+                        if let Some(request) = graph_edge_focus_request(&event) {
                             event.prevent_default();
                             event.stop_propagation();
-                            focus_graph_edge(source, target, kind);
+                            focus_graph_edge(request);
                         }
                     }
                 >
@@ -2973,10 +3009,10 @@ fn GraphPanel(
                             aria-hidden="true"
                             focusable="false"
                             on:click:capture=move |event: ev::MouseEvent| {
-                                if let Some((source, target, kind)) = graph_edge_focus_request(&event) {
+                                if let Some(request) = graph_edge_focus_request(&event) {
                                     event.prevent_default();
                                     event.stop_propagation();
-                                    focus_graph_edge(source, target, kind);
+                                    focus_graph_edge(request);
                                 }
                             }
                         >
@@ -3054,11 +3090,11 @@ fn GraphPanel(
                                                 .is_some_and(|hover| hover.emphasises_edge(&emphasis_edge))
                                         }
                                         on:mouseenter=move |_| {
-                                            graph_hover.set(Some(GraphHover::Edge(
-                                                hover_source.clone(),
-                                                hover_target.clone(),
+                                            graph_hover.set(Some(GraphHover::Edge {
+                                                source: hover_source.clone(),
+                                                target: hover_target.clone(),
                                                 kind,
-                                            )));
+                                            }));
                                         }
                                         on:mouseleave=move |_| graph_hover.set(None)
                                     >
@@ -3137,17 +3173,7 @@ fn GraphPanel(
                             }} />
                         </div>
                         <div class="graph-hit-layer" aria-label="Execution graph interactions">
-                            <For each={move || current_graph().relays.clone()} key=|relay| {
-                                (
-                                    relay.id.clone(),
-                                    relay.rect_key(),
-                                    relay.label.clone(),
-                                    relay.statistics.relay_buffer_capacity,
-                                    relay.statistics.relay_buffer_len_p50.map(f64::to_bits),
-                                    relay.statistics.relay_buffer_len_p90.map(f64::to_bits),
-                                    relay.statistics.relay_buffer_len_p99.map(f64::to_bits),
-                                )
-                            } children={move |relay| {
+                            <For each={move || current_graph().relays.clone()} key=GraphViewRelayKey::of children={move |relay| {
                             let click_relay = relay.clone();
                             let relay_label = relay.label.clone();
                             let relay_title = relay.buffer_summary();
@@ -3262,17 +3288,7 @@ fn GraphPanel(
                                     </Show>
                                 }
                             }} />
-                            <For each={move || current_graph().nodes.clone()} key=|node| {
-                                (
-                                    node.id.clone(),
-                                    node.rect_key(),
-                                    node.label.clone(),
-                                    node.detail_label().to_string(),
-                                    node.status,
-                                    node.status_detail.clone(),
-                                    node.reconnect_wait_millis,
-                                )
-                            } children={move |node| {
+                            <For each={move || current_graph().nodes.clone()} key=GraphViewNodeKey::of children={move |node| {
                             let class_node = node.clone();
                             let click_node = node.clone();
                             let detail = node.detail_label().to_string();
@@ -3357,7 +3373,9 @@ fn GraphPanel(
                                 <button
                                     type="button"
                                     on:click=move |_| {
-                                        if let Some(command) = selected_action_target.get().and_then(|target| target.describe_command) {
+                                        if let Some(target) = selected_action_target.get()
+                                            && let Some(command) = target.describe_command
+                                        {
                                             run_command(Some(command));
                                             selected_action_target.set(None);
                                         }
@@ -3381,7 +3399,9 @@ fn GraphPanel(
                                 <button
                                     type="button"
                                     on:click=move |_| {
-                                        if let Some(relay) = selected_action_target.get().and_then(|target| target.relay) {
+                                        if let Some(target) = selected_action_target.get()
+                                            && let Some(relay) = target.relay
+                                        {
                                             selected_relay.set(Some(relay));
                                             subscribe_filter.set(String::new());
                                             sample_rate.set(0);
@@ -3503,11 +3523,15 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
         return view! { <span class="node-reconnect-timer empty"></span> }.into_any();
     };
     let started_at = js_sys::Date::now();
-    let deadline = started_at + wait_millis as f64;
+    let deadline = started_at + wait_millis.approx_into::<f64>();
     let remaining = RwSignal::new(wait_millis);
     let interval = set_interval_with_handle(
         move || {
-            let millis = (deadline - js_sys::Date::now()).max(0.0).round() as u64;
+            let millis = (deadline - js_sys::Date::now())
+                .max(0.0)
+                .round()
+                .checked_approx_into()
+                .unwrap_or(u64::MAX);
             remaining.set(millis);
         },
         Duration::from_millis(100),
@@ -3520,8 +3544,8 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
     });
     let label = move || format_timer_millis(remaining.get());
     let progress_style = move || {
-        let remaining = remaining.get() as f64;
-        let total = wait_millis.max(1) as f64;
+        let remaining = remaining.get().approx_into::<f64>();
+        let total = wait_millis.max(1).approx_into::<f64>();
         let progress = (1.0 - remaining / total).clamp(0.0, 1.0);
         format!("--timer-progress: {:.3};", progress)
     };
@@ -3536,7 +3560,7 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
 
 fn format_timer_millis(millis: u64) -> String {
     if millis >= 1_000 {
-        format!("{:.1}s", millis as f64 / 1_000.0)
+        format!("{:.1}s", millis.approx_into::<f64>() / 1_000.0)
     } else {
         format!("{millis}ms")
     }
@@ -3914,6 +3938,7 @@ impl CommandHistory {
             return None;
         }
         let next_position = if let Some(position) = self.position {
+            // Stepping back from the oldest entry stays on it.
             position.saturating_sub(1)
         } else {
             self.draft = current;
@@ -4396,6 +4421,33 @@ struct GraphViewNode {
     branches: Vec<GraphBranchStatistics>,
 }
 
+/// Everything a drawn node card shows. The hit layer re-renders a card exactly when one of these
+/// changes, so a node that only gains statistics keeps its element.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GraphViewNodeKey {
+    id: String,
+    rect: Rect,
+    label: String,
+    detail: String,
+    status: DataflowNodeStatus,
+    status_detail: Option<String>,
+    reconnect_wait_millis: Option<u64>,
+}
+
+impl GraphViewNodeKey {
+    fn of(node: &GraphViewNode) -> Self {
+        Self {
+            id: node.id.clone(),
+            rect: node.rect,
+            label: node.label.clone(),
+            detail: node.detail_label().to_string(),
+            status: node.status,
+            status_detail: node.status_detail.clone(),
+            reconnect_wait_millis: node.reconnect_wait_millis,
+        }
+    }
+}
+
 impl GraphViewNode {
     fn hit_class(&self) -> &'static str {
         match (self.kind, self.status) {
@@ -4430,11 +4482,6 @@ impl GraphViewNode {
 
     fn kind_label(&self) -> String {
         self.role.kind().as_ref().to_string()
-    }
-
-    /// The drawn rectangle as a keyable value, so a card is re-rendered exactly when it moves.
-    const fn rect_key(&self) -> (i32, i32, i32, i32) {
-        rect_key(self.rect)
     }
 
     /// The caption drawn on the card: the transport for a connector, the processor for a
@@ -4592,11 +4639,34 @@ impl From<DataflowSchemaField> for GraphSchemaField {
     }
 }
 
-impl GraphViewRelay {
-    const fn rect_key(&self) -> (i32, i32, i32, i32) {
-        rect_key(self.rect)
-    }
+/// Everything a drawn relay card shows, including the buffer percentages its meter renders. The
+/// float percentiles are keyed by their bit pattern because they are compared, never ordered.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GraphViewRelayKey {
+    id: String,
+    rect: Rect,
+    label: String,
+    buffer_capacity: Option<u64>,
+    buffer_len_p50: Option<u64>,
+    buffer_len_p90: Option<u64>,
+    buffer_len_p99: Option<u64>,
+}
 
+impl GraphViewRelayKey {
+    fn of(relay: &GraphViewRelay) -> Self {
+        Self {
+            id: relay.id.clone(),
+            rect: relay.rect,
+            label: relay.label.clone(),
+            buffer_capacity: relay.statistics.relay_buffer_capacity,
+            buffer_len_p50: relay.statistics.relay_buffer_len_p50.map(f64::to_bits),
+            buffer_len_p90: relay.statistics.relay_buffer_len_p90.map(f64::to_bits),
+            buffer_len_p99: relay.statistics.relay_buffer_len_p99.map(f64::to_bits),
+        }
+    }
+}
+
+impl GraphViewRelay {
     fn hit_style(&self) -> String {
         format!(
             "{} --relay-buffer-p50: {:.2}%; --relay-buffer-p90: {:.2}%; --relay-buffer-p99: \
@@ -4642,7 +4712,7 @@ impl GraphViewRelay {
             return 0.0;
         }
         let value = value.unwrap_or(0.0);
-        (value / capacity as f64 * 100.0).clamp(0.0, 100.0)
+        (value / capacity.approx_into::<f64>() * 100.0).clamp(0.0, 100.0)
     }
 
     fn buffer_capacity_data(&self) -> String {
@@ -4743,7 +4813,7 @@ impl GraphBranchGroup {
     /// The outline weight, which grows with the number of live branches so a busy group reads as
     /// heavier than a quiet one.
     fn outline_stroke_width(&self) -> String {
-        let count = self.active_branches.min(8) as f64;
+        let count = self.active_branches.min(8).approx_into::<f64>();
         format!("{:.2}", 1.0 + count * 0.35)
     }
 
@@ -4883,7 +4953,10 @@ impl GraphViewEdge {
                 current.0, current.1, exit.0, exit.1
             ));
         }
-        let end = self.points.last().expect("non-empty points checked above");
+        let end = self
+            .points
+            .last()
+            .verified("the empty-points branch above already returned");
         path.push_str(&format!(" L{} {}", end.0, end.1));
         path
     }
@@ -5156,23 +5229,29 @@ struct GraphDrag {
 #[derive(Clone, PartialEq, Eq)]
 enum GraphHover {
     Item(String),
-    Edge(String, String, DataflowEdgeKind),
+    Edge {
+        source: String,
+        target: String,
+        kind: DataflowEdgeKind,
+    },
 }
 
 impl GraphHover {
     fn emphasises_item(&self, id: &str) -> bool {
         match self {
             Self::Item(hovered) => hovered == id,
-            Self::Edge(source, target, _) => source == id || target == id,
+            Self::Edge { source, target, .. } => source == id || target == id,
         }
     }
 
     fn emphasises_edge(&self, edge: &GraphViewEdge) -> bool {
         match self {
             Self::Item(hovered) => *hovered == edge.source || *hovered == edge.target,
-            Self::Edge(source, target, kind) => {
-                *source == edge.source && *target == edge.target && *kind == edge.kind
-            }
+            Self::Edge {
+                source,
+                target,
+                kind,
+            } => *source == edge.source && *target == edge.target && *kind == edge.kind,
         }
     }
 }
@@ -5182,11 +5261,6 @@ fn graph_position_style(rect: Rect) -> String {
         "left: {}px; top: {}px; width: {}px; height: {}px;",
         rect.x, rect.y, rect.width, rect.height
     )
-}
-
-/// A rectangle reduced to the hashable tuple keyed views compare.
-const fn rect_key(rect: Rect) -> (i32, i32, i32, i32) {
-    (rect.x, rect.y, rect.width, rect.height)
 }
 
 #[derive(Clone)]
@@ -5265,7 +5339,7 @@ mod tests {
         let lines = command_result_lines(
             nervix_proto::CommandResult {
                 success: true,
-                kind: nervix_proto::CommandResultKind::Ok as i32,
+                kind: i32::from(nervix_proto::CommandResultKind::Ok),
                 ..Default::default()
             },
             "CREATE DOMAIN quiet",
@@ -5279,7 +5353,7 @@ mod tests {
         let previous = nervix_proto::TransactionStatus {
             id: "tx-1".to_string(),
             domain: "tenant".to_string(),
-            state: nervix_proto::TransactionState::Open as i32,
+            state: i32::from(nervix_proto::TransactionState::Open),
             pending_count: 1,
             completed_count: 0,
             total_count: 1,
@@ -5300,7 +5374,7 @@ mod tests {
         ));
 
         let mut committing = previous.clone();
-        committing.state = nervix_proto::TransactionState::Committing as i32;
+        committing.state = i32::from(nervix_proto::TransactionState::Committing);
         assert!(transaction_operation_was_observed(
             Some(&previous),
             Some(&committing)
@@ -5823,11 +5897,11 @@ mod tests {
         assert!(hover.emphasises_edge(first));
         assert!(!hover.emphasises_edge(second));
 
-        let hover = GraphHover::Edge(
-            "relay:telemetry".to_string(),
-            "emitter:redis".to_string(),
-            DataflowEdgeKind::Data,
-        );
+        let hover = GraphHover::Edge {
+            source: "relay:telemetry".to_string(),
+            target: "emitter:redis".to_string(),
+            kind: DataflowEdgeKind::Data,
+        };
         assert!(hover.emphasises_item("relay:telemetry"));
         assert!(hover.emphasises_item("emitter:redis"));
         assert!(!hover.emphasises_item("ingestor:mqtt"));

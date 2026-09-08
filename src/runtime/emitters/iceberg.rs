@@ -36,6 +36,7 @@ use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filt
 use error_stack::{Report, ResultExt};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
+use nervix_models::TableName;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 use triomphe::Arc;
@@ -276,7 +277,7 @@ struct IcebergEmitterClientInit<'a> {
     catalog_client: &'a CreateClientIcebergRest,
     catalog_config: &'a [nervix_models::ClientConfigEntry],
     context: &'a EmitterSinkContext,
-    table: &'a Identifier,
+    table: &'a TableName,
     location: &'a str,
     catalog: &'a IcebergCatalog,
 }
@@ -293,7 +294,7 @@ pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
     pub(in crate::runtime::emitters) catalog_client: &'a CreateClientIcebergRest,
     pub(in crate::runtime::emitters) catalog_resolved: Option<&'a ResolvedClientConfig>,
     pub(in crate::runtime::emitters) context: &'a EmitterSinkContext,
-    pub(in crate::runtime::emitters) table: &'a Identifier,
+    pub(in crate::runtime::emitters) table: &'a TableName,
     pub(in crate::runtime::emitters) values: &'a [IcebergValueMapping],
     pub(in crate::runtime::emitters) location: &'a str,
     pub(in crate::runtime::emitters) catalog: &'a IcebergCatalog,
@@ -355,9 +356,10 @@ impl IcebergEmitter {
         rejected_records: usize,
     ) -> usize {
         let records = pending_rows
-            .saturating_add(staged_rows)
-            .saturating_add(u64::try_from(rejected_records).unwrap_or(u64::MAX));
-        usize::try_from(records).unwrap_or(usize::MAX)
+            .checked_add(staged_rows)
+            .and_then(|rows| rows.checked_add(rejected_records.arch_into()))
+            .assured("every count totals rows this emitter already holds in memory");
+        records.arch_into()
     }
 
     fn update_buffered_messages(&self) {
@@ -412,7 +414,7 @@ impl IcebergEmitter {
             Report::new(IcebergEmitterError::CompileValues).attach_printable(error.to_string())
         })?;
         let mapped_schema = Self::mapped_arrow_schema(&program, values)?;
-        let staging_dir = Self::create_staging_dir(context.temp_dir.as_path())?;
+        let staging_dir = Self::create_staging_dir(context.runtime.temp_dir())?;
         let client_init = IcebergEmitterClientInit {
             config: resolved
                 .map(|config| config.entries.as_slice())
@@ -671,8 +673,14 @@ impl IcebergEmitter {
             acks: batch.acks,
             domain_timestamp,
         });
-        self.pending_rows = self.pending_rows.saturating_add(rows);
-        self.pending_bytes = self.pending_bytes.saturating_add(bytes);
+        self.pending_rows = self
+            .pending_rows
+            .checked_add(rows)
+            .assured("both counts total rows this emitter already holds in memory");
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(bytes)
+            .assured("both counts estimate bytes of batches this emitter already holds");
         self.update_buffered_messages();
         if self.flush_at.is_none() {
             self.flush_at = Some(Instant::now() + self.flush_policy.interval());
@@ -815,16 +823,33 @@ impl IcebergEmitter {
                 )),
             );
         }
-        let accepted_rows = u64::try_from(actual_accepted_rows).map_err(|error| {
-            Report::new(IcebergEmitterError::MapBatch).attach_printable(error.to_string())
-        })?;
-        let (path, staged_bytes, accepted_rows) = match accepted {
+        let accepted_rows = actual_accepted_rows.arch_into();
+        /// The staged file this flush wrote, if any rows survived validation.
+        struct StagedFlush {
+            path: Option<PathBuf>,
+            bytes: u64,
+            rows: u64,
+        }
+
+        let StagedFlush {
+            path,
+            bytes: staged_bytes,
+            rows: accepted_rows,
+        } = match accepted {
             Some(batch) => {
                 let path = self.next_staged_path();
-                let staged_bytes = Self::write_ipc_batch(path.clone(), batch).await?;
-                (Some(path), staged_bytes, accepted_rows)
+                let bytes = Self::write_ipc_batch(path.clone(), batch).await?;
+                StagedFlush {
+                    path: Some(path),
+                    bytes,
+                    rows: accepted_rows,
+                }
             }
-            None => (None, 0, 0),
+            None => StagedFlush {
+                path: None,
+                bytes: 0,
+                rows: 0,
+            },
         };
         let domain_timestamp = self
             .pending_batches
@@ -837,8 +862,9 @@ impl IcebergEmitter {
             .into_iter()
             .flat_map(|batch| batch.acks)
             .collect::<Vec<_>>();
-        let mut accepted_acks = Vec::with_capacity(usize::try_from(accepted_rows).unwrap_or(0));
-        for (row, ((metadata, key), acks)) in metadata.into_iter().zip(keys).zip(acks).enumerate() {
+        let mut accepted_acks = Vec::with_capacity(accepted_rows.arch_into());
+        for (row, (sidecars, acks)) in metadata.into_iter().zip(keys).zip(acks).enumerate() {
+            let (metadata, key) = sidecars;
             if let Some(error) = rejected_errors[row].take() {
                 self.rejected_records.push_back(IcebergRejectedRecord {
                     batch: input_batch.clone(),
@@ -861,8 +887,14 @@ impl IcebergEmitter {
                 acks: accepted_acks,
                 domain_timestamp,
             });
-            self.staged_rows = self.staged_rows.saturating_add(accepted_rows);
-            self.staged_bytes = self.staged_bytes.saturating_add(staged_bytes);
+            self.staged_rows = self
+                .staged_rows
+                .checked_add(accepted_rows)
+                .assured("both counts total rows this emitter already staged on disk");
+            self.staged_bytes = self
+                .staged_bytes
+                .checked_add(staged_bytes)
+                .assured("both counts total bytes this emitter already staged on disk");
         }
         self.pending_rows = 0;
         self.pending_bytes = 0;
@@ -903,11 +935,10 @@ impl IcebergEmitter {
             self.commit_state.store(prepared);
         }
         self.client
-            .commit_prepared(
-                self.commit_state
-                    .prepared()
-                    .expect("Iceberg commit must remain prepared until it finishes"),
-            )
+            .commit_prepared(self.commit_state.prepared().verified(
+                "the commit state holds its prepared commit from preparation until this call \
+                 completes",
+            ))
             .await?;
         self.commit_state.finish();
         let staged = std::mem::take(&mut self.staged_batches);
@@ -1032,29 +1063,23 @@ impl IcebergEmitter {
             );
         }
         let mut rejected = Vec::new();
-        let accepted_rows = result
-            .batch
-            .errors()
-            .iter()
-            .enumerate()
-            .filter_map(|(row, errors)| {
-                if let Some(side_error) = errors.first() {
-                    let reason = format!(
-                        "Iceberg VALUES side error {}: {} at {}",
-                        side_error.code.as_str(),
-                        side_error.message,
-                        side_error.span
-                    );
-                    rejected.push(IcebergRejectedRow {
-                        row,
-                        error: program.structured_side_error(reason, side_error.span),
-                    });
-                    None
-                } else {
-                    Some(row)
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut accepted_rows = Vec::new();
+        for (row, errors) in result.batch.errors().iter().enumerate() {
+            let Some(side_error) = errors.first() else {
+                accepted_rows.push(row);
+                continue;
+            };
+            let reason = format!(
+                "Iceberg VALUES side error {}: {} at {}",
+                side_error.code.as_str(),
+                side_error.message,
+                side_error.span
+            );
+            rejected.push(IcebergRejectedRow {
+                row,
+                error: program.structured_side_error(reason, side_error.span),
+            });
+        }
         if accepted_rows.is_empty() {
             return Ok(IcebergMappedBatch {
                 accepted: None,
@@ -1118,7 +1143,10 @@ impl IcebergEmitter {
     }
 
     fn next_staged_path(&mut self) -> PathBuf {
-        self.pending_sequence = self.pending_sequence.saturating_add(1);
+        self.pending_sequence = self
+            .pending_sequence
+            .checked_add(1)
+            .assured("an emitter cannot stage 2^64 batches in the lifetime of a node");
         self.staging_dir
             .path()
             .join(format!("batch-{}.arrow", self.pending_sequence))
@@ -1293,7 +1321,10 @@ impl IcebergEmitterClient {
         self.refresh_table().await?;
         let location_generator = DefaultLocationGenerator::new(self.table.metadata())
             .change_context(IcebergEmitterError::Commit)?;
-        self.data_file_sequence = self.data_file_sequence.saturating_add(1);
+        self.data_file_sequence = self
+            .data_file_sequence
+            .checked_add(1)
+            .assured("an emitter cannot commit 2^64 data files in the lifetime of a node");
         let file_name_generator = DefaultFileNameGenerator::new(
             format!("{}-{}", self.file_name_prefix, self.data_file_sequence),
             None,
@@ -1496,6 +1527,7 @@ mod tests {
     };
     use arrow_array::{Array, Int64Array, TimestampMicrosecondArray, TimestampNanosecondArray};
     use arrow_schema::{DataType, Field, TimeUnit};
+    use nervix_models::DomainName;
     use tokio::time::timeout;
 
     use super::*;
@@ -1678,10 +1710,6 @@ mod tests {
     #[test]
     fn iceberg_drain_count_includes_pending_staged_and_rejected_records() {
         assert_eq!(IcebergEmitter::buffered_message_count(2, 3, 4), 9);
-        assert_eq!(
-            IcebergEmitter::buffered_message_count(u64::MAX, u64::MAX, usize::MAX),
-            usize::MAX
-        );
     }
 
     #[test]
@@ -1745,8 +1773,8 @@ mod tests {
                 .expect("valid VALUES expression"),
         }];
         let program = compile_iceberg_values_program(
-            &Domain::parse("test").expect("valid domain"),
-            &Identifier::parse("iceberg_values").expect("valid emitter"),
+            &DomainName::parse("test").expect("valid domain"),
+            &EmitterName::parse("iceberg_values").expect("valid emitter"),
             &values,
             input_schema,
             None,

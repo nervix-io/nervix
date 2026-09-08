@@ -1,4 +1,5 @@
 use nervix_benchmark::{MetricsReportError, NervixMetricsReport};
+use nervix_models::ClusterNodeName;
 
 const PROMETHEUS_FIXTURE: &str = r#"
 # HELP nervix_messages_total Total graph messages observed by Nervix runtime targets.
@@ -28,6 +29,10 @@ fn derives_target_batch_sizes_and_relay_percentiles_from_prometheus_histograms()
     assert_eq!(report.batch_targets.len(), 1);
     let target = &report.batch_targets[0];
     assert_eq!(target.target_kind, "INGESTOR");
+    assert_eq!(
+        target.physical_node_id,
+        Some(ClusterNodeName::parse("node-1").expect("valid name"))
+    );
     assert_eq!(target.target, "kafka_in");
     assert_eq!(target.direction, "sent");
     assert_eq!(target.relay, "ingested");
@@ -65,5 +70,30 @@ fn rejects_a_batch_histogram_without_its_batch_counter() {
             metric: "nervix_batches_total",
             ..
         }
+    ));
+}
+
+#[test]
+fn reads_the_absent_owner_label_as_no_cluster_node() {
+    let metrics =
+        PROMETHEUS_FIXTURE.replace("physical_node_id=\"node-1\"", "physical_node_id=\"-\"");
+
+    let report = NervixMetricsReport::from_prometheus(&metrics, "benchmark_run")
+        .expect("a series observed without a placed owner should still produce a report");
+
+    assert_eq!(report.batch_targets[0].physical_node_id, None);
+    assert_eq!(report.relay_buffers[0].physical_node_id, None);
+}
+
+#[test]
+fn rejects_an_owner_label_that_is_not_a_cluster_node_name() {
+    let metrics =
+        PROMETHEUS_FIXTURE.replace("physical_node_id=\"node-1\"", "physical_node_id=\"node 1\"");
+
+    let error = NervixMetricsReport::from_prometheus(&metrics, "benchmark_run")
+        .expect_err("a physical_node_id that is not a cluster node name must be rejected");
+    assert!(matches!(
+        error,
+        MetricsReportError::InvalidPrometheusSample { .. }
     ));
 }

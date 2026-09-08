@@ -1,14 +1,14 @@
 use dashmap::mapref::entry::Entry as DashMapEntry;
+use nervix_models::{DomainName, NodeRef};
 
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MessageErrorRouteKey {
-    pub(super) domain: Domain,
-    pub(super) node_kind: String,
-    pub(super) node: Identifier,
-    pub(super) source_route: Option<Identifier>,
-    pub(super) error_relay: Identifier,
+    pub(super) domain: DomainName,
+    pub(super) node: NodeRef,
+    pub(super) source_route: Option<RelayName>,
+    pub(super) error_relay: RelayName,
 }
 
 #[derive(Clone)]
@@ -62,27 +62,33 @@ struct MessageErrorRouteTask {
     pending: HashMap<Option<BranchKey>, PendingMessageErrorDelivery>,
 }
 
+/// Resolves the output route a message-error policy belongs to.
+///
+/// Both passes walk the node's own declared routes, whose order is part of the Model, and each
+/// call resolves a single route while an error route is compiled. Building an index would cost the
+/// same walk it replaces.
 pub(super) fn matching_message_error_output<'a>(
     outputs: &'a nervix_models::ProcessorOutputs,
-    source_route: Option<&Identifier>,
-    error_relay: &Identifier,
+    source_route: Option<&RelayName>,
+    error_relay: &RelayName,
     assignments: &[Assignment],
 ) -> Option<&'a ProcessorOutput> {
-    source_route
-        .and_then(|route| outputs.routes.iter().find(|output| &output.relay == route))
-        .or_else(|| {
-            outputs.routes.iter().find(|output| {
-                if let MessageErrorPolicy::Dlq {
-                    relay,
-                    assignments: configured,
-                } = &output.message_error_policy
-                {
-                    relay == error_relay && configured == assignments
-                } else {
-                    false
-                }
-            })
-        })
+    if let Some(route) = source_route
+        && let Some(output) = outputs.routes.iter().find(|output| &output.relay == route)
+    {
+        return Some(output);
+    }
+    outputs.routes.iter().find(|output| {
+        if let MessageErrorPolicy::Dlq {
+            relay,
+            assignments: configured,
+        } = &output.message_error_policy
+        {
+            relay == error_relay && configured == assignments
+        } else {
+            false
+        }
+    })
 }
 
 impl MessageErrorRouteRuntime {
@@ -117,7 +123,7 @@ impl MessageErrorRouteRuntime {
         let _ = self.shutdown.send(true);
         let task = self.task.lock().take();
         if let Some(task) = task {
-            let _ = task.await;
+            task.join_after_shutdown("message error delivery").await;
         }
     }
 }
@@ -132,14 +138,11 @@ impl MessageErrorRouteTask {
     }
 
     fn report_failure(&self, acks: &[AckSet], reason: String) {
-        let _ = self
-            .runtime
-            .events
-            .send(RuntimeEvent::Error(reason.clone()));
+        self.runtime.events().report_error(reason.clone());
         warn!(
             domain = self.route.domain.as_str(),
-            node_kind = self.route.node_kind.as_str(),
-            node = self.route.node.as_str(),
+            node_kind = self.route.node.kind.as_str(),
+            node = self.route.node.identifier.as_str(),
             error_relay = self.route.error_relay.as_str(),
             reason = %reason,
             "runtime node failed to flush message errors"
@@ -185,8 +188,8 @@ impl MessageErrorRouteTask {
                     format!(
                         "{} '{}' failed to concatenate buffered message errors for relay '{}' in \
                          domain '{}': {}",
-                        self.route.node_kind,
-                        self.route.node.as_str(),
+                        self.route.node.kind.as_str(),
+                        self.route.node.identifier.as_str(),
                         self.route.error_relay.as_str(),
                         self.route.domain.as_str(),
                         error
@@ -212,8 +215,8 @@ impl MessageErrorRouteTask {
                 &source_acks,
                 format!(
                     "{} '{}' failed to flush message errors to relay '{}' in domain '{}'",
-                    self.route.node_kind,
-                    self.route.node.as_str(),
+                    self.route.node.kind.as_str(),
+                    self.route.node.identifier.as_str(),
                     self.route.error_relay.as_str(),
                     self.route.domain.as_str()
                 ),
@@ -237,7 +240,10 @@ impl MessageErrorRouteTask {
                     estimated_bytes: 0,
                     flush_at: checked_add_duration_to_timestamp(now, self.flush_policy.interval()),
                 });
-        pending.estimated_bytes = pending.estimated_bytes.saturating_add(estimated_bytes);
+        pending.estimated_bytes = pending
+            .estimated_bytes
+            .checked_add(estimated_bytes)
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         pending.deliveries.push(delivery);
         if self
             .flush_policy
@@ -345,7 +351,7 @@ impl Runtime {
         delivery: MessageErrorDelivery,
     ) -> Result<(), String> {
         let failure_route = route.clone();
-        let route_runtime = match self.message_error_routes.entry(route.clone()) {
+        let route_runtime = match self.inner.message_error_routes.entry(route.clone()) {
             DashMapEntry::Occupied(entry) => entry.get().clone(),
             DashMapEntry::Vacant(entry) => {
                 let route_runtime =
@@ -360,22 +366,23 @@ impl Runtime {
             .map_err(|_| {
                 format!(
                     "message-error route for {} '{}' to relay '{}' is stopped",
-                    failure_route.node_kind,
-                    failure_route.node.as_str(),
+                    failure_route.node.kind.as_str(),
+                    failure_route.node.identifier.as_str(),
                     failure_route.error_relay.as_str()
                 )
             })
     }
 
-    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &Domain) {
+    pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {
         let keys = self
+            .inner
             .message_error_routes
             .iter()
             .filter_map(|entry| (&entry.key().domain == domain).then_some(entry.key().clone()))
             .collect::<Vec<_>>();
         for key in keys {
             tokio::task::consume_budget().await;
-            if let Some((_, route)) = self.message_error_routes.remove(&key) {
+            if let Some((_, route)) = self.inner.message_error_routes.remove(&key) {
                 route.shutdown().await;
             }
         }
@@ -386,13 +393,17 @@ impl Runtime {
 mod tests {
     use super::*;
 
-    fn identifier(value: &str) -> Identifier {
-        Identifier::parse(value).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn test_delivery() -> (MessageErrorDelivery, AckCompletion) {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
-            name: identifier("message_error"),
+            name: named("message_error"),
             fields: Vec::new(),
         }));
         let batch = RelayRecordBatch::single(schema, None, test_runtime_row([]), AckSet::empty())
@@ -410,15 +421,14 @@ mod tests {
     fn test_task(
         flush_policy: RuntimeFlushPolicy,
         fanout: RelayBoundaryFanout,
-    ) -> MessageErrorRouteTask {
-        MessageErrorRouteTask {
+    ) -> (MessageErrorRouteTask, RelayOwnerTask) {
+        let task = MessageErrorRouteTask {
             runtime: Runtime::default(),
             route: MessageErrorRouteKey {
-                domain: Domain::try_from("test").expect("valid domain"),
-                node_kind: "emitter".to_string(),
-                node: identifier("notifications"),
+                domain: DomainName::try_from("test").expect("valid domain"),
+                node: NodeRef::new(ModelKind::Emitter, named::<ModelName>("notifications")),
                 source_route: None,
-                error_relay: identifier("emitter_errors"),
+                error_relay: named("emitter_errors"),
             },
             target: MessageErrorRouteTarget {
                 registry: RelayRegistry::new(),
@@ -426,16 +436,24 @@ mod tests {
             },
             flush_policy,
             pending: HashMap::default(),
-        }
+        };
+        let owner_task = task.runtime.spawn_relay_owner_task(
+            &task.route.domain,
+            &task.route.error_relay,
+            task.target.registry.clone(),
+            task.target.services.clone(),
+            RelayRetention::default(),
+        );
+        (task, owner_task)
     }
 
     #[tokio::test]
     async fn buffered_message_error_refreshes_source_ack_before_flush_deadline() {
-        let interval = REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(4);
+        let interval = REMOTE_ACK_ALIVE_INTERVAL * 4;
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
         );
-        let task = test_task(
+        let (task, owner_task) = test_task(
             RuntimeFlushPolicy::Each {
                 interval,
                 max_batch_size: u64::MAX,
@@ -454,7 +472,7 @@ mod tests {
 
         assert_eq!(
             tokio::time::timeout(
-                REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(2),
+                REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )
             .await
@@ -465,6 +483,10 @@ mod tests {
         shutdown.send_replace(true);
         task.await.expect("message-error task must stop cleanly");
         assert_eq!(completion.wait().await, AckOutcome::Ack);
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
     }
 
     #[tokio::test]
@@ -477,7 +499,7 @@ mod tests {
             Instant::now() + Duration::from_secs(2),
             "block message-error relay delivery",
         );
-        let task = test_task(RuntimeFlushPolicy::Immediate, fanout);
+        let (task, owner_task) = test_task(RuntimeFlushPolicy::Immediate, fanout);
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(task.run(input, shutdown_rx));
@@ -490,7 +512,7 @@ mod tests {
 
         assert_eq!(
             tokio::time::timeout(
-                REMOTE_ACK_ALIVE_INTERVAL.saturating_mul(2),
+                REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )
             .await
@@ -502,5 +524,9 @@ mod tests {
         assert_eq!(completion.wait().await, AckOutcome::Ack);
         shutdown.send_replace(true);
         task.await.expect("message-error task must stop cleanly");
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
     }
 }

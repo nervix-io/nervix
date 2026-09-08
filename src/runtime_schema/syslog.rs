@@ -4,6 +4,7 @@ use arrow_array::{
     builder::{StringBuilder, TimestampNanosecondBuilder, UInt8Builder},
 };
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
+use meticulous::OptionExt as _;
 use nervix_models::{CreateCodec, ParseAsType};
 
 use super::{
@@ -88,11 +89,11 @@ pub(super) fn decode(
     }
     let payload = std::str::from_utf8(payload)
         .map_err(|error| decode_error(codec, format!("payload is not valid UTF-8: {error}")))?;
-    let (priority, body, has_priority) = split_priority(payload);
-    let parsed = if has_priority && looks_like_rfc5424(body) {
-        parse_rfc5424(codec, priority, body)?
+    let split = split_priority(payload);
+    let parsed = if split.has_priority && looks_like_rfc5424(split.body) {
+        parse_rfc5424(codec, split.priority, split.body)?
     } else {
-        parse_rfc3164(codec, priority, body)?
+        parse_rfc3164(codec, split.priority, split.body)?
     };
     build_batch(codec, &parsed)
 }
@@ -188,12 +189,32 @@ fn encode_field_error(
     }
 }
 
-fn split_priority(payload: &str) -> (u8, &str, bool) {
+/// A payload split at its `<PRI>` header. `has_priority` says whether the header was actually
+/// present, because a payload without one keeps the default priority and is never read as RFC
+/// 5424.
+struct SplitPriority<'payload> {
+    priority: u8,
+    body: &'payload str,
+    has_priority: bool,
+}
+
+impl<'payload> SplitPriority<'payload> {
+    /// A payload whose `<PRI>` header is missing or malformed, which stays whole and unprefixed.
+    const fn absent(payload: &'payload str) -> Self {
+        Self {
+            priority: DEFAULT_PRIORITY,
+            body: payload,
+            has_priority: false,
+        }
+    }
+}
+
+fn split_priority(payload: &str) -> SplitPriority<'_> {
     let Some(rest) = payload.strip_prefix('<') else {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     };
     let Some(end) = rest.find('>') else {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     };
     let digits = &rest[..end];
     if digits.is_empty()
@@ -201,15 +222,19 @@ fn split_priority(payload: &str) -> (u8, &str, bool) {
         || !digits.bytes().all(|byte| byte.is_ascii_digit())
         || (digits.len() > 1 && digits.starts_with('0'))
     {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     }
     let Ok(priority) = digits.parse::<u8>() else {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     };
     if priority > 191 {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     }
-    (priority, &rest[end + 1..], true)
+    SplitPriority {
+        priority,
+        body: &rest[end + 1..],
+        has_priority: true,
+    }
 }
 
 fn looks_like_rfc5424(body: &str) -> bool {
@@ -395,7 +420,10 @@ fn parse_rfc5424_timestamp(
 ) -> Result<DateTime<FixedOffset>, CodecError> {
     let bytes = value.as_bytes();
     let zone_start = if bytes.last() == Some(&b'Z') {
-        bytes.len().saturating_sub(1)
+        bytes
+            .len()
+            .checked_sub(1)
+            .verified("a trailing byte means the value holds at least one byte")
     } else if bytes.len() >= 6
         && matches!(bytes[bytes.len() - 6], b'+' | b'-')
         && bytes[bytes.len() - 3] == b':'

@@ -1,4 +1,5 @@
 [package]
+description = "Client session against a Nervix server: connection, statements, transactions, subscriptions and resource upload"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-client-core"
@@ -12,13 +13,16 @@ autocomplete = []
 default = []
 
 [dependencies]
+arch-into = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
+meticulous = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-proto = { workspace = true, features = ["client"] }
 prost = { workspace = true }
 rustls = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "fs",

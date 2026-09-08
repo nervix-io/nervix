@@ -3,11 +3,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use nervix_approx_into::ApproxInto as _;
 use thiserror::Error;
 
 use crate::comparison::{
     ComparisonError, RunArtifact, display_name, emphasize_best, ensure_matching_run_configuration,
-    format_count, format_percentage, render_parameters, single_line,
+    format_count, format_percentage, format_rounded_count, render_parameters, single_line,
 };
 
 /// One side of a local A/B comparison: a labelled server binary and the run directories that
@@ -142,8 +143,8 @@ impl AbSummary {
         markdown.push_str("|:--|--:|--:|:--|\n");
         for arm in [&self.baseline, &self.candidate] {
             for run in &arm.runs {
-                let backlog_percentage = run.report.peak_backlog_messages as f64
-                    / run.report.max_backlog_messages as f64
+                let backlog_percentage = run.report.peak_backlog_messages.approx_into::<f64>()
+                    / run.report.max_backlog_messages.approx_into::<f64>()
                     * 100.0;
                 let marker = if run.report.saturated_backlog() {
                     "⚠️ "
@@ -248,7 +249,7 @@ impl ArmSummary {
     }
 
     fn mean_rate(&self) -> f64 {
-        self.rates().sum::<f64>() / self.runs.len() as f64
+        self.rates().sum::<f64>() / self.runs.len().approx_into::<f64>()
     }
 
     fn min_rate(&self) -> f64 {
@@ -268,5 +269,5 @@ impl ArmSummary {
 }
 
 fn format_rate(rate: f64) -> String {
-    format!("{} msg/s", format_count(rate.round() as u64))
+    format!("{} msg/s", format_rounded_count(rate))
 }

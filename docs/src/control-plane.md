@@ -23,6 +23,7 @@ In practice, the control plane covers:
 - explicit node removal with `DROP NODE <node_id>`
 - node cordon and uncordon with `CORDON NODE <node_id>` and `UNCORDON NODE <node_id>`
 - node drain with `DRAIN NODE <node_id>`, which cordons the node and moves scheduled graph nodes away one at a time
+- explicit relocation with `RELOCATE <selection> ONTO NODE <node_id>`, which moves a selected subgraph onto a named cluster node, and `DESCRIBE RELOCATION`, which shows the plan without executing it
 - primary and replica assignment
 - Kafka `OFFSET BY DOMAIN` partition-to-instance assignment and rebalance
 - domain `START` and `STOP`
@@ -77,7 +78,7 @@ same user, are offered committed configuration alone.
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
 Session subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
-`UNCORDON`, `DRAIN`, and `DROP NODE`) are also immediate, non-transaction content. Run those
+`UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate, non-transaction content. Run those
 statements outside `BEGIN`/`COMMIT`.
 
 Queue admission is not a blind append. The leader replays the replicated transaction prefix into a
@@ -148,6 +149,17 @@ rule claims, applies rank resolution, rejects equal-rank policy conflicts, and f
 `REQUIRE COLOCATION` groups before publishing the schedule. A rejected candidate writes nothing
 and leaves the prior models and schedule active.
 
+Schedule publication preserves the existing primary and replicas of every single-owner ingestor
+while all cluster nodes in that assignment are live. Outbound WebSocket-client ingestors follow
+this rule along with the other client sources, so unrelated graph changes, cluster-node joins or
+uncordons, and soft placement changes do not restart their external sessions. Endpoint-source and
+Syslog ingestors are the only ingestors whose assignments follow live membership, because their
+listeners execute on every cluster node.
+
+Every relay is also scheduled with one primary owner. Ordinary relays have no replicas.
+Materialized relays use the same relay schedule entry: additional assigned nodes are replicas of
+materialized state only, not relay buffers, branch presence, fan-out, or metrics.
+
 Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
 through the normal runtime-node handoff path, and failover or drain moves the group as one unit.
 Soft policies affect only future placement decisions and do not relocate existing assignments.
@@ -175,11 +187,12 @@ operator `PAUSE` or `RESUME` statement.
 - `DYNAMIC` changes do not pause ingestion. Relay capacity; processor filters, source predicates,
   collection, route construction, route flush, and same-target message-error policies;
   deduplicator/reorderer `MAX TIME`; emitter flush policy; and placement definitions are
-  hot-applied from the published schedule while retaining buffered and branch-local state.
-  Placement changes can still hand off runtime nodes when a new hard colocation group requires it.
-  `CREATE` and `DROP` retain their existing pause-free schedule-rebuild behavior.
+  hot-applied while retaining buffered and branch-local state when ownership stays fixed. A
+  placement definition is a dynamic model change, but its effective command level rises to
+  `ENTITY_PAUSE` when the resulting schedule moves a running runtime node.
 - `ENTITY_PAUSE` changes gate only the affected relays on every live node, force-flush affected
-  work, and wait for the gated relay rings and target-node work counters to drain before commit.
+  work, and wait for the owner buffers, fixed dispatch slots, and target-node work counters to
+  drain before commit.
   Other domain traffic continues. A processor topology change then swaps only the affected node
   tasks and hands pending materialized-state work to their replacements. Deduplicator key changes
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
@@ -196,6 +209,17 @@ operator `PAUSE` or `RESUME` statement.
   as well. A WASM processor participates like every other stateful node: the host gates its input
   relays, asks the guest to release what it buffers, snapshots it, and restores that snapshot into
   the replacement instance.
+- A schedule change that only adjusts replica roles is `DYNAMIC`. A planned primary-owner change
+  uses `ENTITY_PAUSE`, even when no model changed. `RELOCATE` is classified this way: it reports
+  `ENTITY_PAUSE` when it moves at least one runtime node in a running domain, and `DYNAMIC` when it
+  moves nothing or the domain is stopped. Both reach every live node as narrow activations:
+  a runtime node whose primary owner and replica set stay fixed does not stop, restart, restore a
+  snapshot, or reopen an external session. Its in-flight batches, retained `REQUIRED WAIT` work,
+  branch instances, branch-local state, and ingestor session continue. Producers and materialized
+  state readers rebind to a moved node at the published revision. A cluster node that gains or
+  loses only a replica role starts or stops replication without restarting the primary. A hard
+  colocation group moves in one narrow activation, and a model batch applies its model and schedule
+  changes together.
 - `DOMAIN_PAUSE` changes stop ingestion and generators across the domain and fully drain attached
   work before commit. Relay schema or branching changes and schema or wire-schema definition
   changes use this level. Changing the membership of an emitter's `FROM` relay list also uses this
@@ -205,33 +229,71 @@ operator `PAUSE` or `RESUME` statement.
   when they are built, so the domain rebuilds around the new models rather than reconfiguring in
   place.
 
-An entity-paused change also gates everything downstream of it in the dataflow graph, not only the
-models the batch names, so a dependent node cannot observe a half-applied change through its input
-relay.
+An entity-paused model change also gates everything downstream of the affected model, so a
+dependent node cannot observe a half-applied change through its input relay.
 
-Entity holds are transient and deadline-bound. A relay gate self-releases if the leader disappears;
-an ingestor hold releases the old source under its declared mode when it expires. Schedule application re-engages a local
-relay gate before an affected node swaps itself. Sibling consumers of a gated relay can therefore
-see bounded backpressure for at most the gate deadline, but unrelated relays and nodes continue
-flowing. Pending `REQUIRED WAIT` materialized records are carried through a node handoff rather than
-treated as drainable work. A node that joins the cluster while an entity hold is engaged is not
-covered by that hold; it re-engages its own local relay gate when it applies the new schedule, and
-the hold's deadline bounds the window.
+## Planned Ownership Handoffs And Failover
 
-These modes govern only pauses that resume the same running graph on the same node. Stopping a
-domain, dropping an ingestor, node drain or cordon relocation, failover, and graceful shutdown are
-terminations: the source session ends after already admitted work drains, and a later start relies
-only on external source retention. Volatile quiesce buffers do not migrate and are lost if a
-termination or crash interrupts them. Quiesced connected modes count as drained because their raw
-buffers have not entered the graph.
+Node drain, graceful-shutdown drain, placement consolidation, and `RELOCATE` are planned ownership
+handoffs.
+Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
+the affected subgraph boundary on every live node, stops new intake for each moved ingestor, and
+drains work already admitted to the moved unit. Ownership-handoff intake does not consult `ON
+QUIESCE`: an already admitted payload continues through its routes, while polling and endpoint
+admission stop. The drain includes relay rings, processor work, moved-ingestor ACK roots, emitter
+buffers and active publishing, and an Iceberg emitter's staged commit. Internal relays whose every
+producer moves with the same hard group remain open so admitted work can reach the group's output
+boundary.
+
+Nervix writes the new schedule only after that drain succeeds. A drain writes and activates one hard
+group or independent node at a time. Placement consolidation gates all of its moved groups together
+and publishes its model and assignments in one schedule update. Only moved runtime nodes restart;
+unaffected nodes and branches keep their sessions, buffers, state, and in-flight work. The gate is
+released after the destination owners activate the published runtime revision. A fence or drain
+timeout releases the old graph without writing the candidate schedule. If activation fails after a
+schedule commit, the gate stays closed until its lease deadline rather than opening before the
+destination is ready.
+
+Pending `REQUIRED WAIT` materialized records cannot finish a planned drain because the dependency is
+absent. They do not block the handoff; destroying the old task negatively acknowledges their
+attached work. Replicated state is available immediately when the destination was already a replica.
+Otherwise the state kind starts from its normal empty or local recovery boundary. When the schedule
+has a replica slot, the live former owner is the first replica candidate after the new primary.
+
+`RELOCATE` differs from the others in one respect: it holds and commits its whole unit at once,
+because the unit is the plan the operator inspected and approved. A hold that cannot complete
+leaves the domain on its previous schedule and moves nothing. It holds the domain's exclusive
+alteration lock from planning through release, so it and a concurrent model change, placement
+change, or `DRAIN NODE` of the same domain are mutually exclusive. `RELOCATE` is immediate,
+non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and `DROP NODE`, because its plan
+depends on live cluster state that a queued transaction cannot pin. `DESCRIBE RELOCATION` is
+read-only content served by any cluster node. See
+[Placement Policies](placement.md#relocating-runtime-nodes) for the statements, the selection
+forms, and the plan output.
+
+`DRAIN NODE` cordons first, visits domains and schedule units in canonical order, and continues with
+independent units after one times out. Its result lists every successful move and failure. Any failed
+unit makes the command unsuccessful, while a later `DRAIN NODE` retries the units still owned by the
+cordoned node. Endpoint and Syslog listeners bind on every live node and are not schedule units.
+
+Unexpected owner loss remains a termination and uses the failover path. The failed task and its
+volatile buffers disappear immediately, attached work is negatively acknowledged, and the scheduler
+promotes a live replica or chooses a fresh owner. Failover does not wait for the planned handoff gate.
+If a former owner disappears while a planned hold is active, that hold aborts without publishing its
+candidate; ordinary failover then relocates from the last committed schedule.
+
+Entity-gate leases are deadline-bound. They release their relay fences and ingestor holds at the
+configured entity-gate deadline even if the coordinator disappears. A node that joins during a hold
+applies the published schedule through its normal revision path.
 
 An unchanged candidate contributes no aspect. An all-no-op batch therefore performs no storage
 write or schedule publication and reports `DYNAMIC`, even when the running domain has work that
 could not currently drain. A `DROP` followed by `CREATE` of the same key in one batch is compared as
 one modification, so recreating a relay with a different schema cannot bypass domain quiescing.
 An immediate model command reports the level it executed. A queued model command reports its own
-preflighted level before execution, while `COMMIT` reports the maximum level actually executed for
-the complete transaction. Nervix always executes exactly the level classified at commit time.
+preflighted model level before execution. `COMMIT` reports the maximum effective level actually
+executed and the total planned relocations when the transaction moved owners. Nervix recalculates
+the effective level and target schedule from the complete candidate at commit time.
 
 For an immediate model alteration, local registry persistence and schedule publication are
 separate steps. If schedule publication fails, Nervix restores the previous models and republishes

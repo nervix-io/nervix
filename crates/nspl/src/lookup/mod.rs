@@ -1,10 +1,11 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{CreateLookup, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, codec_ref, field_ref, if_not_exists_clause,
+        LexedInput, ParseError, ParseFromSourceError, codec_ref, field_ref, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, lex_input, lookup_name, resource_ref, string_lit,
         suggest_from, tok,
     },
@@ -53,14 +54,18 @@ pub fn parse_create_lookup_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_lookup(
     input: &str,
 ) -> Result<CreateStatement<CreateLookup>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_lookup_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

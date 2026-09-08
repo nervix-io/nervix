@@ -1,3 +1,4 @@
+use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use url::Url;
@@ -28,12 +29,13 @@ pub(in crate::runtime) struct PrometheusVectorResult {
 impl PrometheusIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientPrometheus,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -90,14 +92,16 @@ impl PrometheusIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled Prometheus ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events.clone();
+        let task_events = runtime.events().clone();
         let task_client_mounts = resolved_client.mounts.clone();
         let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
@@ -122,7 +126,7 @@ impl PrometheusIngestor {
                 {
                     break;
                 }
-                if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
                 let mut buffered_collector =
@@ -146,13 +150,13 @@ impl PrometheusIngestor {
                         })
                         .await
                     {
-                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                        task_events.report_error(format!(
                             "failed to dispatch buffered prometheus payload for ingestor '{}' in \
                              domain '{}': {}",
                             task_ingestor.as_str(),
                             task_domain.as_str(),
                             error
-                        )));
+                        ));
                     }
                 }
                 if drained_buffer {
@@ -165,24 +169,29 @@ impl PrometheusIngestor {
                         )
                         .await
                     {
-                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                        task_events.report_error(format!(
                             "failed to flush buffered prometheus payloads for ingestor '{}' in \
                              domain '{}': {}",
                             task_ingestor.as_str(),
                             task_domain.as_str(),
                             error
-                        )));
+                        ));
                     }
                     continue;
                 }
                 let mut query_time = current_timestamp();
-                let paced_state = task_runtime.domains.get(&task_domain).map(|domain_state| {
-                    (
-                        domain_state.config.pace,
-                        domain_state.clock.clone(),
-                        domain_state.ticks.lock().back().cloned(),
-                    )
-                });
+                let paced_state =
+                    task_runtime
+                        .inner
+                        .domains
+                        .get(&task_domain)
+                        .map(|domain_state| {
+                            (
+                                domain_state.config.pace,
+                                domain_state.clock.clone(),
+                                domain_state.ticks.lock().back().cloned(),
+                            )
+                        });
                 let sleep_duration =
                     if let Some((DomainPace::Paced, clock, latest_tick)) = paced_state {
                         let Some(clock) = clock else {
@@ -204,13 +213,13 @@ impl PrometheusIngestor {
                         ) {
                             Ok(value) => value,
                             Err(error) => {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to resolve prometheus domain clock for ingestor '{}' \
                                      in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 tokio::select! {
                                     changed = shutdown_rx.changed() => {
                                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -228,7 +237,7 @@ impl PrometheusIngestor {
                             next_logical_query = current_logical
                                 .into_datetime()
                                 .checked_add_signed(TimeDelta::nanoseconds(
-                                    logical_interval_nanos.min(i64::MAX as u64) as i64,
+                                    i64::try_from(logical_interval_nanos).unwrap_or(i64::MAX),
                                 ))
                                 .map(Timestamp::from);
                             Duration::ZERO
@@ -240,13 +249,13 @@ impl PrometheusIngestor {
                             ) {
                                 Ok(duration) => duration,
                                 Err(error) => {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to resolve prometheus cadence for ingestor '{}' \
                                          in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     Duration::from_millis(100)
                                 }
                             }
@@ -266,7 +275,7 @@ impl PrometheusIngestor {
                         if task_quiesce.should_skip_poll() {
                             continue;
                         }
-                        let query_time = if let Some(domain_state) = task_runtime.domains.get(&task_domain) {
+                        let query_time = if let Some(domain_state) = task_runtime.inner.domains.get(&task_domain) {
                             if let DomainPace::Paced = domain_state.config.pace {
                                 Some(query_time)
                             } else {
@@ -286,16 +295,16 @@ impl PrometheusIngestor {
                                         Ok(payload) => {
                                             entries.push((
                                                 payload,
-                                                BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                                BufferedIngestMetadata::without_headers(),
                                             ));
                                         }
                                         Err(error) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to materialize prometheus sample for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                             warn!(
                                                 domain = task_domain.as_str(),
                                                 ingestor = task_ingestor.as_str(),
@@ -331,12 +340,12 @@ impl PrometheusIngestor {
                                         })
                                         .await
                                     {
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "failed to dispatch prometheus poll result for ingestor '{}' in domain '{}': {}",
                                             task_ingestor.as_str(),
                                             task_domain.as_str(),
                                             error
-                                        )));
+                                        ));
                                     }
                                 }
                             }
@@ -346,12 +355,12 @@ impl PrometheusIngestor {
                                     &task_ingestor,
                                     format!("prometheus query failed: {error}"),
                                 );
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to query prometheus for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 warn!(
                                     domain = task_domain.as_str(),
                                     ingestor = task_ingestor.as_str(),
@@ -371,7 +380,7 @@ impl PrometheusIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -411,8 +420,7 @@ impl PrometheusIngestor {
     ) -> Result<Vec<PrometheusVectorResult>, String> {
         let mut params = vec![("query".to_string(), query.to_string())];
         if let Some(query_time) = query_time {
-            let seconds = query_time.unix_nanos() as f64 / 1_000_000_000.0;
-            params.push(("time".to_string(), format!("{seconds:.9}")));
+            params.push(("time".to_string(), Self::query_time_seconds(query_time)));
         }
         let url = Self::query_url(addr, params)?;
         let response = client
@@ -442,6 +450,23 @@ impl PrometheusIngestor {
             ));
         }
         Ok(payload.data.result)
+    }
+
+    /// Renders an evaluation instant as the decimal number of seconds Prometheus expects.
+    ///
+    /// Nanosecond Unix time passed the `f64` mantissa in 1970, so the digits are laid out from the
+    /// integer. Routing them through a float would round the sub-microsecond ones away, and a
+    /// paced domain clock queries at instants that differ by less than that.
+    pub(in crate::runtime) fn query_time_seconds(query_time: Timestamp) -> String {
+        let unix_nanos = query_time.unix_nanos();
+        let seconds = unix_nanos / 1_000_000_000;
+        let fraction = (unix_nanos % 1_000_000_000).unsigned_abs();
+        let sign = if unix_nanos < 0 && seconds == 0 {
+            "-"
+        } else {
+            ""
+        };
+        format!("{sign}{seconds}.{fraction:09}")
     }
 
     pub(in crate::runtime) fn query_url(
@@ -485,12 +510,87 @@ impl PrometheusIngestor {
         if !timestamp.is_finite() {
             return Err(format!("invalid prometheus timestamp '{timestamp}'"));
         }
-        let secs = timestamp.trunc() as i64;
-        let nanos = ((timestamp.fract().abs()) * 1_000_000_000.0).round() as u32;
+        let secs: i64 = timestamp
+            .trunc()
+            .checked_approx_into()
+            .ok_or_else(|| format!("invalid prometheus timestamp '{timestamp}'"))?;
+        let nanos: u32 = (timestamp.fract().abs() * 1_000_000_000.0)
+            .round()
+            .checked_approx_into()
+            .verified("a fractional part scaled by a billion stays inside the u32 range");
         let datetime = Utc
             .timestamp_opt(secs, nanos.min(999_999_999))
             .single()
             .ok_or_else(|| format!("invalid prometheus timestamp '{timestamp}'"))?;
         Ok(datetime.to_rfc3339())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use nervix_models::Timestamp;
+
+    use super::*;
+
+    #[test]
+    fn prometheus_helpers_render_payload_and_validate_inputs() {
+        let sample = ingestors::prometheus::PrometheusVectorResult {
+            metric: BTreeMap::from([("source".to_string(), "local".to_string())]),
+            value: (1_735_782_245.25, "12.5".to_string()),
+        };
+
+        let timestamp =
+            ingestors::prometheus::PrometheusIngestor::timestamp_to_rfc3339(sample.value.0)
+                .expect("valid ts");
+        assert!(timestamp.starts_with("2025-"));
+
+        let payload = ingestors::prometheus::PrometheusIngestor::sample_payload(&sample)
+            .expect("must render");
+        let value: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
+        assert_eq!(value["source"], "local");
+        assert_eq!(value["value"], 12.5);
+        assert_eq!(value["timestamp"], timestamp);
+
+        let bad_value = ingestors::prometheus::PrometheusVectorResult {
+            metric: BTreeMap::new(),
+            value: (1.0, "NaN".to_string()),
+        };
+        assert!(ingestors::prometheus::PrometheusIngestor::sample_payload(&bad_value).is_err());
+        assert!(
+            ingestors::prometheus::PrometheusIngestor::timestamp_to_rfc3339(f64::INFINITY).is_err()
+        );
+    }
+
+    #[test]
+    fn prometheus_query_time_keeps_every_nanosecond_digit() {
+        let render = |unix_nanos: i64| {
+            ingestors::prometheus::PrometheusIngestor::query_time_seconds(
+                Timestamp::from_unix_nanos(unix_nanos),
+            )
+        };
+
+        assert_eq!(render(1_788_765_595_123_456_789), "1788765595.123456789");
+        assert_ne!(
+            render(1_788_765_595_123_456_789),
+            render(1_788_765_595_123_456_790)
+        );
+        assert_eq!(render(0), "0.000000000");
+        assert_eq!(render(-500_000_000), "-0.500000000");
+        assert_eq!(render(-1_500_000_000), "-1.500000000");
+    }
+
+    #[test]
+    fn prometheus_query_url_uses_url_parser_for_path_and_query() {
+        let url = ingestors::prometheus::PrometheusIngestor::query_url(
+            "http://prometheus:9090/base/?stale=true",
+            vec![("query".to_string(), "vector(1)".to_string())],
+        )
+        .expect("must build url");
+        assert_eq!(
+            url.as_str(),
+            "http://prometheus:9090/base/api/v1/query?query=vector%281%29"
+        );
     }
 }

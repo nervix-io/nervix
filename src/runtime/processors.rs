@@ -1,11 +1,17 @@
-use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
+use std::{
+    collections::VecDeque,
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc as StdArc,
+    time::Duration,
+};
 
 use ahash::{HashMap, HashSet};
+use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, Assignment, AssignmentTarget, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-    CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorDeclaration,
-    InferencerTensorMapping, MessageErrorPolicy, ModelKind, RouteConstruction,
-    StructuredMessageError, Timestamp, WindowBound,
+    AckMode, Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction,
+    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ErrorPolicies, FieldName,
+    InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, ModelKind, ModelName,
+    RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp, WindowBound,
 };
 use nervix_nspl::{
     vm_program::{
@@ -28,11 +34,11 @@ use triomphe::Arc;
 
 use super::{
     BranchRuntime, CompiledBranchProgram, CompiledDeduplicatorKeyProgram,
-    CompiledProgramWithMaterializedInterest, RelayBoundaryServices, RelayMessage, RelayRecordBatch,
-    RelayRegistry, ReplicatedDeduplicatorState, ReplicatedWasmProcessorState,
-    ReplicatedWindowProcessorState, RuntimeFlushPolicy, RuntimeInputCollectPolicy,
-    SharedActiveGraph, WindowProcessorState, inferencer::OnnxInferencerSession,
-    relay_batch::RelayRecordBatchReorderError,
+    CompiledProgramWithMaterializedInterest, PendingMaterializedBatch, RelayBoundaryServices,
+    RelayMessage, RelayRecordBatch, RelayRegistry, ReplicatedDeduplicatorState,
+    ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
+    RuntimeInputCollectPolicy, SharedActiveGraph, WindowProcessorState,
+    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchReorderError,
 };
 use crate::{
     registry::ActiveGraph,
@@ -55,11 +61,11 @@ pub(super) struct WasmAckContext {
 #[derive(Debug, Clone)]
 pub(super) struct BranchedIngestorSpec {
     pub(super) kind: ModelKind,
-    pub(super) identifier: Identifier,
-    pub(super) root_relay: Identifier,
-    pub(super) branch: Option<Identifier>,
+    pub(super) identifier: ModelName,
+    pub(super) root_relay: RelayName,
+    pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<String>,
-    pub(super) branch_max_instances: Option<u64>,
+    pub(super) branch_max_instances: Option<NonZeroU64>,
     pub(super) output_ack_boundary: BranchInstanceAckBoundary,
     pub(super) output_flush_each: String,
     pub(super) output_max_batch_size: Option<String>,
@@ -69,9 +75,9 @@ pub(super) struct BranchedIngestorSpec {
 #[derive(Debug, Clone)]
 pub(super) struct BranchedProcessorNodeSpec {
     pub(super) spec: BranchedProcessorSpec,
-    pub(super) branch: Option<Identifier>,
+    pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<String>,
-    pub(super) branch_max_instances: Option<u64>,
+    pub(super) branch_max_instances: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +90,7 @@ impl BranchedNodeSpecs {
     pub(super) fn processor(
         &self,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: &ModelName,
     ) -> Option<&BranchedProcessorNodeSpec> {
         self.processors
             .iter()
@@ -101,12 +107,12 @@ pub(super) enum BranchInstanceAckBoundary {
 #[derive(Debug, Clone)]
 pub(super) struct BranchedProcessorSpec {
     pub(super) kind: ModelKind,
-    pub(super) processor: Identifier,
-    pub(super) input_relays: Vec<Identifier>,
-    pub(super) input_collect_policies: HashMap<Identifier, nervix_models::InputCollectPolicy>,
+    pub(super) processor: ModelName,
+    pub(super) input_relays: Vec<RelayName>,
+    pub(super) input_collect_policies: HashMap<RelayName, nervix_models::InputCollectPolicy>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
+    pub(super) from_where: HashMap<RelayName, nervix_models::Expression>,
     pub(super) filter_where: Option<nervix_models::Expression>,
     pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
     pub(super) operation: BranchedProcessorOperationSpec,
@@ -131,8 +137,8 @@ pub(super) enum BranchedProcessorOperationSpec {
     },
     Correlator {
         output_routes: BranchedProcessorOutputsSpec,
-        left_relays: Vec<Identifier>,
-        right_relays: Vec<Identifier>,
+        left_relays: Vec<RelayName>,
+        right_relays: Vec<RelayName>,
         correlate_where: nervix_models::Expression,
         match_policy: CorrelatorMatchPolicy,
         max_time: String,
@@ -143,7 +149,7 @@ pub(super) enum BranchedProcessorOperationSpec {
     },
     Inferencer {
         output_routes: BranchedProcessorOutputsSpec,
-        resource: Identifier,
+        resource: ResourceName,
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
@@ -151,7 +157,7 @@ pub(super) enum BranchedProcessorOperationSpec {
     },
     WasmProcessor {
         output_routes: BranchedProcessorOutputsSpec,
-        resource: Identifier,
+        resource: ResourceName,
         resource_version: Option<u64>,
         file: String,
         limits: nervix_models::WasmProcessorLimits,
@@ -171,7 +177,7 @@ impl BranchedProcessorOutputsSpec {
 
 #[derive(Debug, Clone)]
 pub(super) struct BranchedProcessorOutputSpec {
-    pub(super) relay: Identifier,
+    pub(super) relay: RelayName,
     pub(super) construction: nervix_models::RouteConstruction,
     pub(super) flush_each: Option<String>,
     pub(super) max_batch_size: Option<String>,
@@ -179,7 +185,7 @@ pub(super) struct BranchedProcessorOutputSpec {
 }
 
 impl BranchedProcessorSpec {
-    pub(super) fn output_relays(&self) -> HashSet<Identifier> {
+    pub(super) fn output_relays(&self) -> HashSet<RelayName> {
         let mut relays = HashSet::default();
         match &self.operation {
             BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
@@ -207,7 +213,7 @@ impl BranchedProcessorSpec {
         relays
     }
 
-    pub(super) fn relay_ids(&self) -> HashSet<Identifier> {
+    pub(super) fn relay_ids(&self) -> HashSet<RelayName> {
         let mut relays = self.output_relays();
         relays.extend(self.input_relays.iter().cloned());
         relays
@@ -217,15 +223,15 @@ impl BranchedProcessorSpec {
 #[derive(Debug, Clone)]
 pub(super) struct BranchInstanceTemplate {
     pub(super) source_kind: ModelKind,
-    pub(super) source: Identifier,
-    pub(super) root_relay: Identifier,
-    pub(super) branch: Option<Identifier>,
+    pub(super) source: RelayName,
+    pub(super) root_relay: RelayName,
+    pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<Duration>,
-    pub(super) branch_max_instances: Option<usize>,
+    pub(super) branch_max_instances: Option<NonZeroUsize>,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) relays: HashMap<Identifier, RelayProcessorRelayTemplate>,
-    pub(super) materialized_streams: HashSet<Identifier>,
-    pub(super) processors: HashMap<Identifier, RelayProcessorTemplate>,
+    pub(super) relays: HashMap<RelayName, RelayProcessorRelayTemplate>,
+    pub(super) materialized_streams: HashSet<RelayName>,
+    pub(super) processors: HashMap<ModelName, RelayProcessorTemplate>,
 }
 
 #[derive(Debug, Clone)]
@@ -244,11 +250,11 @@ pub(super) struct RelayProcessorRelayTemplate {
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorTemplate {
     pub(super) kind: ModelKind,
-    pub(super) processor: Identifier,
-    pub(super) input_relays: Vec<Identifier>,
-    pub(super) input_collect_policies: HashMap<Identifier, RuntimeInputCollectPolicy>,
+    pub(super) processor: ModelName,
+    pub(super) input_relays: Vec<RelayName>,
+    pub(super) input_collect_policies: HashMap<RelayName, RuntimeInputCollectPolicy>,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
+    pub(super) from_where: HashMap<RelayName, nervix_models::Expression>,
     pub(super) filter_where: Option<nervix_models::Expression>,
     pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
     pub(super) operation: RelayProcessorOperationTemplate,
@@ -277,8 +283,8 @@ pub(super) enum RelayProcessorOperationTemplate {
     },
     Correlator {
         output_routes: RelayProcessorOutputsTemplate,
-        left_relays: Vec<Identifier>,
-        right_relays: Vec<Identifier>,
+        left_relays: Vec<RelayName>,
+        right_relays: Vec<RelayName>,
         correlate_where: nervix_models::Expression,
         match_policy: CorrelatorMatchPolicy,
         max_time: Duration,
@@ -289,7 +295,7 @@ pub(super) enum RelayProcessorOperationTemplate {
     },
     Inferencer {
         output_routes: RelayProcessorOutputsTemplate,
-        resource: Identifier,
+        resource: ResourceName,
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
@@ -298,7 +304,7 @@ pub(super) enum RelayProcessorOperationTemplate {
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsTemplate,
-        resource: Identifier,
+        resource: ResourceName,
         resource_version: Option<u64>,
         file: String,
         limits: nervix_models::WasmProcessorLimits,
@@ -313,7 +319,7 @@ pub(super) struct RelayProcessorOutputsTemplate {
 
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputTemplate {
-    pub(super) output_relay: Identifier,
+    pub(super) output_relay: RelayName,
     pub(super) construction: nervix_models::RouteConstruction,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
@@ -322,16 +328,16 @@ pub(super) struct RelayProcessorOutputTemplate {
 #[derive(Debug)]
 pub(super) struct RelayProcessorNode {
     pub(super) kind: ModelKind,
-    pub(super) processor: Identifier,
-    pub(super) input_relays: Vec<Identifier>,
-    pub(super) input_collectors: HashMap<Identifier, RuntimeInputCollector>,
+    pub(super) processor: ModelName,
+    pub(super) input_relays: Vec<RelayName>,
+    pub(super) input_collectors: HashMap<RelayName, RuntimeInputCollector>,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
-    pub(super) compiled_from_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
+    pub(super) from_where: HashMap<RelayName, nervix_models::Expression>,
+    pub(super) compiled_from_where: HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     pub(super) filter_where: Option<nervix_models::Expression>,
     pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
-    pub(super) pending_materialized: VecDeque<(Identifier, RelayRecordBatch)>,
-    pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
+    pub(super) pending_materialized: VecDeque<PendingMaterializedBatch>,
+    pub(super) compiled_filter_where: HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) last_graph: Option<StdArc<ActiveGraph>>,
     pub(super) applied_generation: u64,
@@ -356,7 +362,10 @@ impl RuntimeInputCollector {
     }
 
     pub(super) fn push(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
-        self.pending_bytes = self.pending_bytes.saturating_add(batch.estimated_bytes());
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
         self.deadline.get_or_insert_with(|| {
             super::checked_add_duration_to_timestamp(now, self.policy.interval)
@@ -405,8 +414,8 @@ pub(super) enum RelayProcessorOperationNode {
     },
     Correlator {
         output_routes: RelayProcessorOutputsNode,
-        left_relays: Vec<Identifier>,
-        right_relays: Vec<Identifier>,
+        left_relays: Vec<RelayName>,
+        right_relays: Vec<RelayName>,
         correlate_where: nervix_models::Expression,
         match_policy: CorrelatorMatchPolicy,
         max_time: Duration,
@@ -420,7 +429,7 @@ pub(super) enum RelayProcessorOperationNode {
     },
     Inferencer {
         output_routes: RelayProcessorOutputsNode,
-        resource: Identifier,
+        resource: ResourceName,
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
@@ -431,7 +440,7 @@ pub(super) enum RelayProcessorOperationNode {
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsNode,
-        resource: Identifier,
+        resource: ResourceName,
         resource_version: Option<u64>,
         file: String,
         limits: nervix_models::WasmProcessorLimits,
@@ -451,7 +460,7 @@ pub(super) struct CompiledInferencerInputProgram {
 
 impl CompiledInferencerInputProgram {
     pub(super) fn compile(
-        processor: &Identifier,
+        processor: &ModelName,
         mappings: &[InferencerTensorMapping],
         input_schema: &CompiledSchema,
         udfs: Option<&UdfExecutor>,
@@ -460,7 +469,7 @@ impl CompiledInferencerInputProgram {
             .iter()
             .map(|mapping| {
                 Ok(Assignment {
-                    target: AssignmentTarget::bare(Identifier::parse(&mapping.tensor).map_err(
+                    target: AssignmentTarget::bare(FieldName::parse(&mapping.tensor).map_err(
                         |error| {
                             format!(
                                 "inferencer '{}' tensor name '{}' is not a valid field: {error}",
@@ -592,9 +601,9 @@ pub(super) enum CompiledWindowAggregateExpr {
 impl CompiledWindowAggregateProgram {
     pub(super) fn compile(
         aggregate: &WindowAggregateProgram,
-        input_relays: &[Identifier],
-        output_relay: &Identifier,
-        relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+        input_relays: &[RelayName],
+        output_relay: &RelayName,
+        relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
         udfs: Option<&UdfExecutor>,
     ) -> Result<Self, String> {
         let output_schema = relay_schemas.get(output_relay).ok_or_else(|| {
@@ -687,23 +696,22 @@ impl CompiledWindowAggregateProgram {
                     .map(|_| format!("demand_{}", demand.id))
             })
             .collect::<Vec<_>>();
-        let set = aggregate
-            .demands()
-            .iter()
-            .filter_map(|demand| {
-                let input = demand.input.as_ref()?;
-                Some((
-                    FieldRef {
-                        relay: OUTPUT_NAMESPACE.to_string(),
-                        field: format!("demand_{}", demand.id),
-                    },
-                    SpannedNode {
-                        inner: input.clone(),
-                        span,
-                    },
-                ))
-            })
-            .collect::<Vec<_>>();
+        let mut set = Vec::new();
+        for demand in aggregate.demands() {
+            let Some(input) = demand.input.as_ref() else {
+                continue;
+            };
+            set.push((
+                FieldRef {
+                    relay: OUTPUT_NAMESPACE.to_string(),
+                    field: format!("demand_{}", demand.id),
+                },
+                SpannedNode {
+                    inner: input.clone(),
+                    span,
+                },
+            ));
+        }
         let program = SpannedNode {
             inner: VmProgram {
                 filter: None,
@@ -731,8 +739,8 @@ impl CompiledWindowAggregateProgram {
         let output_schema = StdArc::new(arrow_schema::Schema::new(
             inferred
                 .into_iter()
-                .map(|(name, data_type, nullable)| {
-                    arrow_schema::Field::new(name, data_type, nullable)
+                .map(|inferred| {
+                    arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
                 })
                 .collect::<Vec<_>>(),
         ));
@@ -899,7 +907,7 @@ pub(super) struct RelayProcessorOutputsNode {
 }
 
 impl RelayProcessorOutputsNode {
-    pub(super) fn base_relay(&self) -> Option<Identifier> {
+    pub(super) fn base_relay(&self) -> Option<RelayName> {
         self.routes.first().map(|output| output.relay.clone())
     }
 
@@ -913,7 +921,7 @@ impl RelayProcessorOutputsNode {
 
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputNode {
-    pub(super) relay: Identifier,
+    pub(super) relay: RelayName,
     pub(super) construction: nervix_models::RouteConstruction,
     pub(super) branch: Option<nervix_models::OutputBranch>,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
@@ -1044,7 +1052,10 @@ impl ReordererOutputBuffer {
         row_order: Arc<Vec<ReordererRowOrder>>,
         received_at: Timestamp,
     ) {
-        self.estimated_bytes = self.estimated_bytes.saturating_add(batch.estimated_bytes());
+        self.estimated_bytes = self
+            .estimated_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(ReordererPendingBatch {
             received_at,
             row_order,
@@ -1158,7 +1169,10 @@ pub(super) struct InferencerOutputBuffer {
 
 impl InferencerOutputBuffer {
     pub(super) fn push(&mut self, batch: RelayRecordBatch) {
-        self.estimated_bytes = self.estimated_bytes.saturating_add(batch.estimated_bytes());
+        self.estimated_bytes = self
+            .estimated_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
     }
 
@@ -1211,8 +1225,8 @@ pub(super) struct WindowBounds {
 
 pub(super) struct WindowFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
-    pub(super) node_kind: &'a str,
-    pub(super) processor: &'a Identifier,
+    pub(super) node_kind: ModelKind,
+    pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
@@ -1222,10 +1236,10 @@ pub(super) struct WindowFlushContext<'a> {
 pub(super) struct JunctionFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
-    pub(super) node_kind: &'a str,
-    pub(super) processor: &'a Identifier,
+    pub(super) node_kind: ModelKind,
+    pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relays: &'a [Identifier],
+    pub(super) input_relays: &'a [RelayName],
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     /// Resolved when the junction admitted this batch; a junction flushes within the same
     /// execution, so its routes read that snapshot rather than resolving again.
@@ -1235,17 +1249,17 @@ pub(super) struct JunctionFlushContext<'a> {
 pub(super) struct InferencerFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
-    pub(super) node_kind: &'a str,
-    pub(super) processor: &'a Identifier,
+    pub(super) node_kind: ModelKind,
+    pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
-    pub(super) resource: &'a Identifier,
+    pub(super) resource: &'a ResourceName,
     pub(super) resource_version: Option<u64>,
     pub(super) file: &'a str,
     pub(super) inputs: &'a [InferencerTensorMapping],
     pub(super) output_schema: &'a [InferencerTensorDeclaration],
     pub(super) compiled_input_program: &'a CompiledInferencerInputProgram,
-    pub(super) input_relays: &'a [Identifier],
+    pub(super) input_relays: &'a [RelayName],
     pub(super) session: &'a mut Option<OnnxInferencerSession>,
     pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
@@ -1253,12 +1267,12 @@ pub(super) struct InferencerFlushContext<'a> {
 pub(super) struct WasmFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
-    pub(super) node_kind: &'a str,
-    pub(super) processor: &'a Identifier,
+    pub(super) node_kind: ModelKind,
+    pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relays: &'a [Identifier],
+    pub(super) input_relays: &'a [RelayName],
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
-    pub(super) resource: &'a Identifier,
+    pub(super) resource: &'a ResourceName,
     pub(super) resource_version: Option<u64>,
     pub(super) file: &'a str,
     pub(super) limits: nervix_models::WasmProcessorLimits,

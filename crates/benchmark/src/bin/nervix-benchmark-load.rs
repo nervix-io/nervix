@@ -9,7 +9,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use arch_into::ArchInto as _;
 use clap::{Parser, Subcommand};
+use meticulous::ResultExt as _;
+use nervix_approx_into::ApproxInto as _;
 use nervix_benchmark::LoadShape;
 use parking_lot::Mutex;
 use rdkafka::{
@@ -196,7 +199,10 @@ impl PayloadWriter {
                 ..
             } => {
                 ensure!(
-                    *keys_per_cycle <= 16_u64.pow(KEY_INDEX_DIGITS as u32),
+                    *keys_per_cycle
+                        <= 16_u64.pow(u32::try_from(KEY_INDEX_DIGITS).assured(
+                            "the hexadecimal key digit count is a small compile-time constant",
+                        )),
                     "keys_per_cycle exceeds the {KEY_INDEX_DIGITS} hexadecimal digits reserved \
                      for the key index"
                 );
@@ -264,7 +270,7 @@ impl PayloadWriter {
                     cycle_digits = KEY_CYCLE_DIGITS,
                     index_digits = KEY_INDEX_DIGITS,
                 )
-                .expect("the key slot is exactly as wide as the formatted key");
+                .assured("fmt::Write over an in-memory buffer has no failure mode");
                 payload
             }
         }
@@ -421,31 +427,38 @@ impl DrainState {
             let Some(result) = consumer.poll(SUMMARY_POLL_INTERVAL) else {
                 continue;
             };
-            match result
-                .map_err(|error| error.to_string())
-                .and_then(|message| {
-                    let payload = message
-                        .payload()
-                        .ok_or_else(|| "output summary has no payload".to_string())?;
-                    let record_count = serde_json::from_slice::<serde_json::Value>(payload)
-                        .map_err(|error| format!("output summary is not JSON: {error}"))?
-                        .get(count_field)
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or_else(|| {
-                            format!("output summary has no unsigned '{count_field}' field")
-                        })?;
-                    Ok(SummaryObservation {
-                        partition: message.partition(),
-                        offset: message.offset(),
-                        record_count,
-                    })
-                }) {
-                Ok(observation) => self.record_summary(observation),
-                Err(failure) => {
+            let message = match result {
+                Ok(message) => message,
+                Err(error) => {
+                    self.failure.lock().get_or_insert(error.to_string());
+                    return;
+                }
+            };
+            let Some(payload) = message.payload() else {
+                self.failure
+                    .lock()
+                    .get_or_insert("output summary has no payload".to_string());
+                return;
+            };
+            let output = match serde_json::from_slice::<serde_json::Value>(payload) {
+                Ok(output) => output,
+                Err(error) => {
+                    let failure = format!("output summary is not JSON: {error}");
                     self.failure.lock().get_or_insert(failure);
                     return;
                 }
-            }
+            };
+            let Some(record_count) = output.get(count_field).and_then(serde_json::Value::as_u64)
+            else {
+                let failure = format!("output summary has no unsigned '{count_field}' field");
+                self.failure.lock().get_or_insert(failure);
+                return;
+            };
+            self.record_summary(SummaryObservation {
+                partition: message.partition(),
+                offset: message.offset(),
+                record_count,
+            });
         }
     }
 }
@@ -520,12 +533,13 @@ impl BenchmarkReport {
     fn print(&self) {
         let generation_seconds = self.generation_elapsed.as_secs_f64();
         let end_to_end_seconds = self.end_to_end_elapsed.as_secs_f64();
-        let input_rate = self.input_messages as f64 / generation_seconds;
-        let end_to_end_rate = self.input_messages as f64 / end_to_end_seconds;
+        let input_messages = self.input_messages.approx_into::<f64>();
+        let input_rate = input_messages / generation_seconds;
+        let end_to_end_rate = input_messages / end_to_end_seconds;
         let output_rate_during_generation =
-            self.output_records_at_generation_end as f64 / generation_seconds;
+            self.output_records_at_generation_end.approx_into::<f64>() / generation_seconds;
         let input_mib =
-            self.input_messages as f64 * self.wire_bytes_per_message as f64 / (1024.0 * 1024.0);
+            input_messages * self.wire_bytes_per_message.approx_into::<f64>() / (1024.0 * 1024.0);
 
         println!(
             "target_duration_seconds={:.6}",
@@ -664,8 +678,7 @@ impl BenchmarkRunner {
         let benchmark_result = (|| -> Result<BenchmarkReport> {
             self.wait_for_consumer_group()?;
 
-            let partition_count = u64::try_from(input_partitions.len())
-                .context("Kafka partition count does not fit")?;
+            let partition_count: u64 = input_partitions.len().arch_into();
             let messages_per_cycle = self.shape.messages_per_cycle();
             let minimum_warmup_messages = partition_count
                 .checked_mul(messages_per_cycle)
@@ -900,8 +913,7 @@ impl BenchmarkRunner {
         meter: &OutputMeter,
         plan: LoadGenerationPlan<'_>,
     ) -> Result<LoadGeneration> {
-        let partition_count = u64::try_from(plan.input_partitions.len())
-            .context("Kafka partition count does not fit")?;
+        let partition_count: u64 = plan.input_partitions.len().arch_into();
         let messages_per_cycle = self.shape.messages_per_cycle();
         let cycles_per_clock_batch = (SEND_CLOCK_MESSAGES / messages_per_cycle).max(1);
         let started = Instant::now();
@@ -914,8 +926,7 @@ impl BenchmarkRunner {
         // the target duration. Subsequent cycles use the same bounded-pressure loop as the
         // measured phase.
         for _ in 0..plan.minimum_cycles {
-            let partition_index = usize::try_from(cycle % partition_count)
-                .context("Kafka partition index does not fit in usize")?;
+            let partition_index: usize = (cycle % partition_count).arch_into();
             self.send_cycle(
                 payload,
                 cycle,
@@ -947,6 +958,7 @@ impl BenchmarkRunner {
             let backlog_messages =
                 self.backlog_messages(observed.since(plan.baseline)?, accepted_messages)?;
             peak_backlog_messages = peak_backlog_messages.max(backlog_messages);
+            // A backlog past the configured ceiling leaves no room for another cycle.
             let available_cycles = self
                 .args
                 .max_backlog_messages
@@ -964,8 +976,7 @@ impl BenchmarkRunner {
             // A cycle is indivisible: parity is exact only for whole cycles, so the deadline is
             // observed between cycles and overshoots by at most one.
             for _ in 0..cycles_per_clock_batch.min(available_cycles) {
-                let partition_index = usize::try_from(cycle % partition_count)
-                    .context("Kafka partition index does not fit in usize")?;
+                let partition_index = (cycle % partition_count).arch_into();
                 self.send_cycle(
                     payload,
                     cycle,
@@ -1411,9 +1422,11 @@ mod tests {
         let state = DrainState::default();
         for offset in 0_i64..40 {
             state.record_summary(SummaryObservation {
-                partition: i32::try_from(offset % 2).expect("partition should fit"),
+                partition: i32::try_from(offset % 2)
+                    .assured("the partition remainder is either zero or one"),
                 offset,
-                record_count: u64::try_from(offset + 1).expect("record count should fit"),
+                record_count: u64::try_from(offset + 1)
+                    .assured("the test iterates positive offsets below forty"),
             });
         }
 

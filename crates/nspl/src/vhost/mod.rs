@@ -1,11 +1,12 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{CreateStatement, CreateVhost, VhostTlsResource};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, hostname_lit, if_not_exists_clause, into_parse_error, kw,
-        lex_input, resource_ref, suggest_from, tok, vhost_name,
+        LexedInput, ParseError, ParseFromSourceError, hostname_lit, if_not_exists_clause,
+        into_parse_error, kw, lex_input, resource_ref, suggest_from, tok, vhost_name,
     },
 };
 
@@ -61,14 +62,18 @@ pub fn parse_create_vhost_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_vhost(
     input: &str,
 ) -> Result<CreateStatement<CreateVhost>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_vhost_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -114,7 +119,7 @@ mod tests {
         assert_eq!(
             parsed.tls,
             Some(VhostTlsResource {
-                resource: nervix_models::Identifier::parse("my_cert").expect("valid resource"),
+                resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
                 version: None,
             })
         );
@@ -128,7 +133,7 @@ mod tests {
         assert_eq!(
             parsed.tls,
             Some(VhostTlsResource {
-                resource: nervix_models::Identifier::parse("my_cert").expect("valid resource"),
+                resource: nervix_models::ResourceName::parse("my_cert").expect("valid resource"),
                 version: Some(7),
             })
         );

@@ -10,6 +10,7 @@ use ::mongodb::{
         UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel,
     },
 };
+use nervix_models::CollectionName;
 
 use super::*;
 
@@ -57,7 +58,7 @@ impl MongoDbEmitter {
         ) {
             Ok(program) => Some(program),
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(error.to_string()));
+                context.runtime.events().report_error(error.to_string());
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),
@@ -246,14 +247,20 @@ impl MongoDbEmitter {
             if let Some(code) = errors.get(&local_index) {
                 if Self::is_record_write_error(*code) {
                     outcome.reject(
-                        (batch_index, *row),
+                        BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        },
                         format!("MongoDB rejected document with code {code}"),
                     );
                 } else {
                     has_infrastructure_error = true;
                 }
             } else {
-                outcome.deliver((batch_index, *row));
+                outcome.deliver(BrokerRecordPosition {
+                    batch_index,
+                    row_index: *row,
+                });
             }
         }
         if has_infrastructure_error {
@@ -284,7 +291,10 @@ impl MongoDbEmitter {
                 .chain(result.delete_results.keys())
             {
                 if let Some(row) = chunk.get(*local_index) {
-                    outcome.deliver((batch_index, *row));
+                    outcome.deliver(BrokerRecordPosition {
+                        batch_index,
+                        row_index: *row,
+                    });
                     accounted[*local_index] = true;
                 }
             }
@@ -297,7 +307,10 @@ impl MongoDbEmitter {
             };
             if Self::is_record_write_error(error.code) {
                 outcome.reject(
-                    (batch_index, *row),
+                    BrokerRecordPosition {
+                        batch_index,
+                        row_index: *row,
+                    },
                     format!("MongoDB rejected document with code {}", error.code),
                 );
                 accounted[*local_index] = true;
@@ -313,7 +326,7 @@ impl MongoDbEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        collection: &Identifier,
+        collection: &CollectionName,
         values: &[MongoDbValueMapping],
         conflict_action: &MongoDbConflictAction,
         batch: &RelayRecordBatch,
@@ -397,17 +410,23 @@ impl MongoDbEmitter {
             let chunk_documents = match chunk
                 .iter()
                 .map(|row| {
-                    documents
-                        .get(*row)
-                        .and_then(|document| document.as_ref().ok())
-                        .cloned()
-                        .ok_or_else(|| {
-                            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    let Some(document) = documents.get(*row) else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
                                 "mongodb pending row {row} has no mapped document in batch with \
                                  {} rows",
                                 documents.len()
-                            ))
-                        })
+                            )));
+                    };
+                    let Ok(document) = document else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
+                                "mongodb pending row {row} has no mapped document in batch with \
+                                 {} rows",
+                                documents.len()
+                            )));
+                    };
+                    Ok(document.clone())
                 })
                 .collect::<EmitterRuntimeResult<Vec<_>>>()
             {
@@ -429,7 +448,10 @@ impl MongoDbEmitter {
                     {
                         Ok(_) => {
                             for row in chunk {
-                                outcome.deliver((batch_index, *row));
+                                outcome.deliver(BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                });
                             }
                         }
                         Err(error) => {
@@ -467,7 +489,10 @@ impl MongoDbEmitter {
                     {
                         Ok(_) => {
                             for row in chunk {
-                                outcome.deliver((batch_index, *row));
+                                outcome.deliver(BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                });
                             }
                         }
                         Err(error) => {
@@ -521,9 +546,21 @@ mod tests {
             &mut outcome,
         );
 
-        assert_eq!(outcome.delivered, [(7, 10)]);
+        assert_eq!(
+            outcome.delivered,
+            [BrokerRecordPosition {
+                batch_index: 7,
+                row_index: 10,
+            }]
+        );
         assert_eq!(outcome.rejected.len(), 1);
-        assert_eq!(outcome.rejected[0].position, (7, 11));
+        assert_eq!(
+            outcome.rejected[0].position,
+            BrokerRecordPosition {
+                batch_index: 7,
+                row_index: 11,
+            }
+        );
         assert!(outcome.infrastructure_error.is_some());
     }
 }

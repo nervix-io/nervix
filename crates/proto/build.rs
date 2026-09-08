@@ -11,9 +11,14 @@ fn main() {
             "#[expect(clippy::result_large_err, reason = \"tonic client methods must return \
              tonic::Status\")]",
         )
+        .server_mod_attribute(
+            ".",
+            "#[expect(clippy::as_conversions, reason = \"tonic renders an unimplemented status \
+             code with a cast\")]",
+        )
         .compile_protos(
             &["../../proto/io/nervix/api/v1/nervix.proto"],
             &["../../proto"],
         )
-        .expect("failed to compile protobuf definitions");
+        .unwrap_or_else(|error| panic!("failed to compile the protobuf definitions: {error}"));
 }

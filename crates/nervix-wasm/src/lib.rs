@@ -1,5 +1,17 @@
+//! The wasmtime host for Nervix WASM processors.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Engine configuration, instance lifetime, linear-memory limits, epoch deadlines, the
+//!   host half of the C ABI, and the guest snapshot calls.
+//! - **Depends on.** The vocabulary for processor limits and timestamps, and `nervix-wasm-protocol`
+//!   for the envelopes it exchanges with a guest.
+//! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
+//!   routed. It calls a guest and returns what the guest produced.
+
 use std::{
     convert::Infallible,
+    num::NonZeroU64,
     ops::{Deref, DerefMut},
     sync::{
         Arc as StdArc,
@@ -9,8 +21,10 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use bytes::Bytes;
 use flatbuffers::{Allocator, FlatBufferBuilder};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
@@ -35,6 +49,8 @@ pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
 pub enum WasmProcessorError {
     #[error("failed to configure wasmtime: {0}")]
     Configure(#[source] wasmtime::Error),
+    #[error("failed to spawn the wasm epoch driver thread: {0}")]
+    SpawnEpochDriver(#[source] std::io::Error),
     #[error("failed to compile wasm module: {0}")]
     Compile(#[source] wasmtime::Error),
     #[error("failed to join wasm compilation task: {0}")]
@@ -43,26 +59,26 @@ pub enum WasmProcessorError {
     Link(#[source] wasmtime::Error),
     #[error("failed to instantiate wasm module: {0}")]
     Instantiate(#[source] wasmtime::Error),
-    #[error("MAX FUEL must be greater than zero")]
-    InvalidMaxFuel,
-    #[error("MAX MEMORY {limit} bytes is not supported on this host")]
-    InvalidMaxMemory { limit: u64 },
     #[error("failed to reset MAX FUEL {limit} before {operation}: {source}")]
     ResetFuel {
-        limit: u64,
+        limit: NonZeroU64,
         operation: &'static str,
         #[source]
         source: wasmtime::Error,
     },
     #[error("wasm guest exhausted MAX FUEL {limit} during {operation}")]
-    FuelExhausted { limit: u64, operation: &'static str },
+    FuelExhausted {
+        limit: NonZeroU64,
+        operation: &'static str,
+    },
     #[error(
-        "wasm guest exceeded MAX MEMORY {limit} bytes during {operation} (linear-memory total \
-         would be {desired} bytes)"
+        "wasm guest exceeded MAX MEMORY {limit} bytes during {operation} (growing linear memory \
+         by {growth} bytes past the {allocated} bytes already allocated)"
     )]
     MemoryLimitExceeded {
         limit: u64,
-        desired: u64,
+        allocated: u64,
+        growth: u64,
         operation: &'static str,
     },
     #[error("missing required export '{0}'")]
@@ -112,9 +128,10 @@ impl WasmProcessorError {
 }
 
 #[derive(Debug, Error)]
-#[error("guest linear memory total of {desired} bytes exceeds {limit} bytes")]
+#[error("growing guest linear memory by {growth} bytes past {allocated} exceeds {limit} bytes")]
 struct GuestMemoryLimitExceeded {
-    desired: usize,
+    allocated: usize,
+    growth: usize,
     limit: usize,
 }
 
@@ -145,24 +162,35 @@ impl ResourceLimiter for GuestMemoryLimiter {
         // Wasmtime calls `memory_grow_failed` synchronously after a permitted growth fails. If
         // another growth begins, the preceding one therefore succeeded and needs no rollback.
         self.pending_growth_bytes = 0;
-        let growth_bytes = desired.saturating_sub(current);
-        let desired_total = self.allocated_memory_bytes.saturating_add(growth_bytes);
-        if desired_total > self.max_memory_bytes {
-            Err(wasmtime::Error::new(GuestMemoryLimitExceeded {
-                desired: desired_total,
+        let growth_bytes = desired
+            .checked_sub(current)
+            .assured("wasmtime only asks to grow a memory to a size at or above its current one");
+        // Admission is a remaining budget rather than a projected total, so a growth request is
+        // never sized against a sum that could leave `usize`.
+        let remaining = self
+            .max_memory_bytes
+            .checked_sub(self.allocated_memory_bytes)
+            .verified("every permitted growth left the allocated total at or below the limit");
+        if growth_bytes > remaining {
+            return Err(wasmtime::Error::new(GuestMemoryLimitExceeded {
+                allocated: self.allocated_memory_bytes,
+                growth: growth_bytes,
                 limit: self.max_memory_bytes,
-            }))
-        } else {
-            self.allocated_memory_bytes = desired_total;
-            self.pending_growth_bytes = growth_bytes;
-            Ok(true)
+            }));
         }
+        self.allocated_memory_bytes = self
+            .allocated_memory_bytes
+            .checked_add(growth_bytes)
+            .verified("the remaining-budget check above bounds this sum by the configured limit");
+        self.pending_growth_bytes = growth_bytes;
+        Ok(true)
     }
 
     fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
         self.allocated_memory_bytes = self
             .allocated_memory_bytes
-            .saturating_sub(self.pending_growth_bytes);
+            .checked_sub(self.pending_growth_bytes)
+            .verified("the growth being rolled back was added to this total when it was permitted");
         self.pending_growth_bytes = 0;
         Ok(())
     }
@@ -191,8 +219,9 @@ fn wasm_limit_error(
     source
         .downcast_ref::<GuestMemoryLimitExceeded>()
         .map(|exceeded| WasmProcessorError::MemoryLimitExceeded {
-            limit: u64::try_from(exceeded.limit).unwrap_or(u64::MAX),
-            desired: u64::try_from(exceeded.desired).unwrap_or(u64::MAX),
+            limit: exceeded.limit.arch_into(),
+            allocated: exceeded.allocated.arch_into(),
+            growth: exceeded.growth.arch_into(),
             operation,
         })
 }
@@ -319,7 +348,8 @@ impl WasmRuntime {
             engine.clone(),
             StdArc::clone(&stop),
             config.epoch_tick_interval,
-        );
+        )
+        .map_err(WasmProcessorError::SpawnEpochDriver)?;
         Ok(Self {
             engine,
             stop,
@@ -361,7 +391,11 @@ impl Drop for WasmRuntime {
     }
 }
 
-fn spawn_epoch_driver(engine: Engine, stop: StdArc<AtomicBool>, interval: Duration) {
+fn spawn_epoch_driver(
+    engine: Engine,
+    stop: StdArc<AtomicBool>,
+    interval: Duration,
+) -> std::io::Result<()> {
     let weak_stop = StdArc::downgrade(&stop);
     thread::Builder::new()
         .name("nervix-wasm-epoch".to_string())
@@ -377,7 +411,7 @@ fn spawn_epoch_driver(engine: Engine, stop: StdArc<AtomicBool>, interval: Durati
                 engine.increment_epoch();
             }
         })
-        .expect("failed to spawn nervix wasm epoch driver");
+        .map(|_handle| ())
 }
 
 #[derive(Debug, Clone)]
@@ -463,7 +497,7 @@ impl From<&ParseAsType> for WasmProcessorType {
             ParseAsType::F64 => Self::F64,
             ParseAsType::Array { element, len } => Self::Array {
                 element: Box::new(Self::from(element.as_ref())),
-                len: *len,
+                len: len.get(),
             },
             ParseAsType::Vec { element } => Self::Vec {
                 element: Box::new(Self::from(element.as_ref())),
@@ -472,20 +506,55 @@ impl From<&ParseAsType> for WasmProcessorType {
     }
 }
 
+/// A serialized-size estimate for one guest protocol message, in bytes.
+///
+/// Every term is the length of a value already resident in memory or a fixed per-element overhead
+/// constant, so the running total is bounded by the address space those values already occupy. An
+/// estimate that leaves `usize` was therefore built from something other than the message about to
+/// be encoded, which is an invariant violation and not a size worth clamping.
+#[derive(Clone, Copy, Debug, Default)]
+struct CapacityHint(usize);
+
+impl CapacityHint {
+    const OVERFLOW: &'static str =
+        "a serialized-size estimate only sums lengths of values already held in memory";
+
+    const fn of(bytes: usize) -> Self {
+        Self(bytes)
+    }
+
+    fn plus(self, bytes: usize) -> Self {
+        Self(self.0.checked_add(bytes).assured(Self::OVERFLOW))
+    }
+
+    fn plus_all(self, bytes: impl IntoIterator<Item = usize>) -> Self {
+        bytes.into_iter().fold(self, Self::plus)
+    }
+
+    fn plus_each(self, count: usize, bytes_each: usize) -> Self {
+        self.plus(count.checked_mul(bytes_each).assured(Self::OVERFLOW))
+    }
+
+    const fn bytes(self) -> usize {
+        self.0
+    }
+}
+
 impl WasmBranchInit {
     fn serialized_capacity_hint(&self) -> usize {
-        self.domain_name
-            .len()
-            .saturating_add(self.domain_type.len())
-            .saturating_add(self.branch_key.as_ref().map_or(0, Vec::len))
-            .saturating_add(self.input_schema.serialized_capacity_hint())
-            .saturating_add(
+        const BRANCH_INIT_OVERHEAD: usize = 512;
+
+        CapacityHint::of(self.domain_name.len())
+            .plus(self.domain_type.len())
+            .plus(self.branch_key.as_ref().map_or(0, Vec::len))
+            .plus(self.input_schema.serialized_capacity_hint())
+            .plus_all(
                 self.output_schemas
                     .iter()
-                    .map(WasmProcessorSchema::serialized_capacity_hint)
-                    .fold(0_usize, usize::saturating_add),
+                    .map(WasmProcessorSchema::serialized_capacity_hint),
             )
-            .saturating_add(512)
+            .plus(BRANCH_INIT_OVERHEAD)
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::BranchInit {
@@ -505,10 +574,16 @@ impl WasmBranchInit {
 
 impl WasmProcessorSchema {
     fn serialized_capacity_hint(&self) -> usize {
-        self.fields
-            .iter()
-            .map(WasmProcessorField::serialized_capacity_hint)
-            .fold(self.name.len().saturating_add(96), usize::saturating_add)
+        const SCHEMA_OVERHEAD: usize = 96;
+
+        CapacityHint::of(self.name.len())
+            .plus(SCHEMA_OVERHEAD)
+            .plus_all(
+                self.fields
+                    .iter()
+                    .map(WasmProcessorField::serialized_capacity_hint),
+            )
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::ProcessorSchema {
@@ -525,10 +600,12 @@ impl WasmProcessorSchema {
 
 impl WasmProcessorField {
     fn serialized_capacity_hint(&self) -> usize {
-        self.name
-            .len()
-            .saturating_add(self.ty.serialized_capacity_hint())
-            .saturating_add(64)
+        const FIELD_OVERHEAD: usize = 64;
+
+        CapacityHint::of(self.name.len())
+            .plus(self.ty.serialized_capacity_hint())
+            .plus(FIELD_OVERHEAD)
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::ProcessorField {
@@ -542,11 +619,13 @@ impl WasmProcessorField {
 
 impl WasmProcessorType {
     fn serialized_capacity_hint(&self) -> usize {
+        const TYPE_OVERHEAD: usize = 64;
+
         match self {
-            Self::Array { element, .. } | Self::Vec { element } => {
-                64_usize.saturating_add(element.serialized_capacity_hint())
-            }
-            _ => 64,
+            Self::Array { element, .. } | Self::Vec { element } => CapacityHint::of(TYPE_OVERHEAD)
+                .plus(element.serialized_capacity_hint())
+                .bytes(),
+            _ => TYPE_OVERHEAD,
         }
     }
 
@@ -786,24 +865,25 @@ impl WasmEnvelope {
             Self::Input {
                 arrow_ipc_batch,
                 acks,
-            } => arrow_ipc_batch
-                .len()
-                .saturating_add(acks.serialized_capacity_hint())
-                .saturating_add(ROOT_OVERHEAD),
+            } => CapacityHint::of(arrow_ipc_batch.len())
+                .plus(acks.serialized_capacity_hint())
+                .plus(ROOT_OVERHEAD)
+                .bytes(),
             Self::Output {
                 generated_arrow_ipc_batch,
                 outputs,
-            } => outputs.iter().fold(
-                generated_arrow_ipc_batch
-                    .len()
-                    .saturating_add(ROOT_OVERHEAD),
-                |size, output| {
-                    size.saturating_add(output.output_relay.len())
-                        .saturating_add(output.columns.len().saturating_mul(COLUMN_OVERHEAD))
-                        .saturating_add(output.acks.serialized_capacity_hint())
-                        .saturating_add(ROUTED_OUTPUT_OVERHEAD)
-                },
-            ),
+            } => outputs
+                .iter()
+                .fold(
+                    CapacityHint::of(generated_arrow_ipc_batch.len()).plus(ROOT_OVERHEAD),
+                    |size, output| {
+                        size.plus(output.output_relay.len())
+                            .plus_each(output.columns.len(), COLUMN_OVERHEAD)
+                            .plus(output.acks.serialized_capacity_hint())
+                            .plus(ROUTED_OUTPUT_OVERHEAD)
+                    },
+                )
+                .bytes(),
         }
     }
 
@@ -864,8 +944,15 @@ impl WasmEnvelope {
                 let generated_arrow_ipc_batch = if generated.is_empty() {
                     Bytes::new()
                 } else {
-                    let offset = generated.as_ptr() as usize - bytes.as_ptr() as usize;
-                    bytes.slice(offset..offset + generated.len())
+                    let offset = generated
+                        .as_ptr()
+                        .addr()
+                        .checked_sub(bytes.as_ptr().addr())
+                        .assured("the accessor returns a subslice of the envelope bytes");
+                    let end = offset
+                        .checked_add(generated.len())
+                        .assured("the subslice ends inside the envelope bytes");
+                    bytes.slice(offset..end)
                 };
                 Ok(Self::Output {
                     generated_arrow_ipc_batch,
@@ -885,32 +972,36 @@ impl WasmAckSidecar {
         const SIDECAR_OVERHEAD: usize = 128;
         const SET_OVERHEAD: usize = 64;
 
-        let token_count = self
-            .rows
-            .iter()
-            .map(|row| row.tokens.len())
-            .chain(self.acked.iter().map(|set| set.tokens.len()))
-            .chain(self.nacked.iter().map(|set| set.tokens.len()))
-            .chain(self.message_errors.iter().map(|set| set.tokens.len()))
-            .fold(0_usize, usize::saturating_add);
-        let set_count = self
-            .rows
-            .len()
-            .saturating_add(self.acked.len())
-            .saturating_add(self.nacked.len())
-            .saturating_add(self.message_errors.len());
-        let reason_bytes = self
-            .nacked
-            .iter()
-            .map(|set| set.reason.len())
-            .chain(self.message_errors.iter().map(|set| set.reason.len()))
-            .fold(0_usize, usize::saturating_add);
+        let token_count = CapacityHint::default()
+            .plus_all(
+                self.rows
+                    .iter()
+                    .map(|row| row.tokens.len())
+                    .chain(self.acked.iter().map(|set| set.tokens.len()))
+                    .chain(self.nacked.iter().map(|set| set.tokens.len()))
+                    .chain(self.message_errors.iter().map(|set| set.tokens.len())),
+            )
+            .bytes();
+        let set_count = CapacityHint::of(self.rows.len())
+            .plus(self.acked.len())
+            .plus(self.nacked.len())
+            .plus(self.message_errors.len())
+            .bytes();
+        let reason_bytes = CapacityHint::default()
+            .plus_all(
+                self.nacked
+                    .iter()
+                    .map(|set| set.reason.len())
+                    .chain(self.message_errors.iter().map(|set| set.reason.len())),
+            )
+            .bytes();
 
-        token_count
-            .saturating_mul(std::mem::size_of::<u64>())
-            .saturating_add(set_count.saturating_mul(SET_OVERHEAD))
-            .saturating_add(reason_bytes)
-            .saturating_add(SIDECAR_OVERHEAD)
+        CapacityHint::default()
+            .plus_each(token_count, std::mem::size_of::<u64>())
+            .plus_each(set_count, SET_OVERHEAD)
+            .plus(reason_bytes)
+            .plus(SIDECAR_OVERHEAD)
+            .bytes()
     }
 
     fn to_protocol(&self) -> protocol::AckSidecar {
@@ -1099,7 +1190,10 @@ impl BranchStore {
             return ERR_INVALID_SIZE.into();
         };
         let handle = WasmTimeoutHandle(self.next_timeout_handle);
-        self.next_timeout_handle = self.next_timeout_handle.saturating_add(1);
+        self.next_timeout_handle = self
+            .next_timeout_handle
+            .checked_add(1)
+            .assured("a guest cannot request 2^64 timeouts within one branch instance");
         self.timeout_requests.push(WasmTimeoutRequest {
             handle,
             requested_at: self.now(),
@@ -1136,26 +1230,14 @@ impl CompiledWasmProcessor {
         restored_state: Option<&[u8]>,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
-        if limits.max_fuel == 0 {
-            return Err(WasmProcessorError::InvalidMaxFuel);
-        }
-        let max_memory_bytes = usize::try_from(limits.max_memory_bytes).map_err(|_| {
-            WasmProcessorError::InvalidMaxMemory {
-                limit: limits.max_memory_bytes,
-            }
-        })?;
-        if max_memory_bytes == 0 {
-            return Err(WasmProcessorError::InvalidMaxMemory {
-                limit: limits.max_memory_bytes,
-            });
-        }
+        let max_memory_bytes = limits.max_memory_bytes.get().arch_into();
         let mut store = Store::new(
             &self.engine,
             BranchStore::new(clock, max_memory_bytes, emitted_batch_sender),
         );
         store.limiter(|state| &mut state.memory_limiter);
         store
-            .set_fuel(limits.max_fuel)
+            .set_fuel(limits.max_fuel.get())
             .map_err(|source| WasmProcessorError::ResetFuel {
                 limit: limits.max_fuel,
                 operation: "module instantiation",
@@ -1247,7 +1329,7 @@ impl WasmBranchInstance {
 
     fn begin_operation(&mut self, operation: &'static str) -> Result<(), WasmProcessorError> {
         self.store
-            .set_fuel(self.limits.max_fuel)
+            .set_fuel(self.limits.max_fuel.get())
             .map_err(|source| WasmProcessorError::ResetFuel {
                 limit: self.limits.max_fuel,
                 operation,
@@ -1422,11 +1504,13 @@ impl WasmBranchInstance {
         let mut pending = Vec::new();
         let mut due = Vec::new();
         for request in std::mem::take(&mut self.store.data_mut().timeout_requests) {
-            let deadline = request
-                .requested_at
-                .unix_nanos()
-                .saturating_add(i64::try_from(request.delay.as_nanos()).unwrap_or(i64::MAX));
-            if deadline <= now.unix_nanos() {
+            // A guest may ask for a delay that runs past the representable timestamp range. Such
+            // a request has no deadline this clock can reach, so it stays pending forever rather
+            // than becoming due immediately.
+            let deadline = i64::try_from(request.delay.as_nanos())
+                .ok()
+                .and_then(|delay| request.requested_at.unix_nanos().checked_add(delay));
+            if deadline.is_some_and(|deadline| deadline <= now.unix_nanos()) {
                 due.push(request);
             } else {
                 pending.push(request);
@@ -1556,13 +1640,21 @@ impl WasmBranchInstance {
                         limit: self.max_guest_buffer_bytes,
                     });
                 }
+                // Doubling is a growth policy rather than an exact size: the target is clamped
+                // to the configured guest buffer limit, so a doubling that leaves `usize` clamps
+                // to that same limit.
                 let growth_target = capacity
-                    .saturating_mul(2)
-                    .max(bytes.len())
-                    .min(self.max_guest_buffer_bytes);
+                    .checked_mul(2)
+                    .unwrap_or(self.max_guest_buffer_bytes)
+                    .clamp(bytes.len(), self.max_guest_buffer_bytes);
                 let ptr = self.allocate_guest_buffer(growth_target).await?;
                 self.memory
-                    .write(&mut self.store, ptr as usize, bytes)
+                    .write(
+                        &mut self.store,
+                        usize::try_from(ptr)
+                            .verified("the guest allocator returned a non-negative pointer"),
+                        bytes,
+                    )
                     .map_err(WasmProcessorError::MemoryWrite)?;
                 let size =
                     i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
@@ -1590,7 +1682,10 @@ impl WasmBranchInstance {
                 code: ptr,
             });
         }
-        self.guest_buffer_capacity = self.guest_buffer_capacity.max(size as usize);
+        self.guest_buffer_capacity = self.guest_buffer_capacity.max(
+            usize::try_from(size)
+                .verified("this size was converted from a supported host buffer length"),
+        );
         Ok(ptr)
     }
 
@@ -1601,7 +1696,12 @@ impl WasmBranchInstance {
         let ptr = self.allocate_guest_buffer(bytes.len()).await?;
         let size = i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
         self.memory
-            .write(&mut self.store, ptr as usize, bytes)
+            .write(
+                &mut self.store,
+                usize::try_from(ptr)
+                    .verified("the guest allocator returned a non-negative pointer"),
+                bytes,
+            )
             .map_err(WasmProcessorError::MemoryWrite)?;
         Ok((ptr, size))
     }
@@ -1745,7 +1845,8 @@ mod tests {
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_ipc::writer::StreamWriter;
     use arrow_schema::{DataType, Field, Schema};
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, SchemaField};
+    use nervix_models::{CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName};
+    use nonzero_ext::nonzero;
 
     use super::*;
 
@@ -1961,9 +2062,9 @@ mod tests {
 
     fn processor_schema(name: &str) -> CreateSchema {
         CreateSchema {
-            name: Identifier::parse(name).expect("schema name must be valid"),
+            name: SchemaName::parse(name).expect("schema name must be valid"),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("field name must be valid"),
+                name: FieldName::parse("value").expect("field name must be valid"),
                 ty: ParseAsType::I32,
                 optional: false,
                 sensitive: false,
@@ -2014,16 +2115,16 @@ mod tests {
 
     fn string_passthrough_init() -> WasmBranchInit {
         let schema = CreateSchema {
-            name: Identifier::parse("input_events").expect("schema name must be valid"),
+            name: SchemaName::parse("input_events").expect("schema name must be valid"),
             fields: vec![
                 SchemaField {
-                    name: Identifier::parse("value").expect("field name must be valid"),
+                    name: FieldName::parse("value").expect("field name must be valid"),
                     ty: ParseAsType::I32,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("payload").expect("field name must be valid"),
+                    name: FieldName::parse("payload").expect("field name must be valid"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -2043,20 +2144,20 @@ mod tests {
 
     fn shared_generated_init() -> WasmBranchInit {
         let input_schema = CreateSchema {
-            name: Identifier::parse("input_events").expect("schema name must be valid"),
+            name: SchemaName::parse("input_events").expect("schema name must be valid"),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("field name must be valid"),
+                name: FieldName::parse("value").expect("field name must be valid"),
                 ty: ParseAsType::I32,
                 optional: false,
                 sensitive: false,
             }],
         };
         let enriched_schema = CreateSchema {
-            name: Identifier::parse("enriched_events").expect("schema name must be valid"),
+            name: SchemaName::parse("enriched_events").expect("schema name must be valid"),
             fields: vec![
                 input_schema.fields[0].clone(),
                 SchemaField {
-                    name: Identifier::parse("bucket").expect("field name must be valid"),
+                    name: FieldName::parse("bucket").expect("field name must be valid"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -2064,11 +2165,11 @@ mod tests {
             ],
         };
         let audit_schema = CreateSchema {
-            name: Identifier::parse("audit_events").expect("schema name must be valid"),
+            name: SchemaName::parse("audit_events").expect("schema name must be valid"),
             fields: vec![
                 input_schema.fields[0].clone(),
                 SchemaField {
-                    name: Identifier::parse("classification").expect("field name must be valid"),
+                    name: FieldName::parse("classification").expect("field name must be valid"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -2124,9 +2225,9 @@ mod tests {
             panic!("expected borrowed input envelope");
         };
         assert_eq!(view.arrow_ipc_batch(), [0, 1, 2, 255]);
-        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_start = encoded.as_ptr().addr();
         let encoded_end = encoded_start + encoded.len();
-        assert!((encoded_start..encoded_end).contains(&(view.arrow_ipc_batch().as_ptr() as usize)));
+        assert!((encoded_start..encoded_end).contains(&view.arrow_ipc_batch().as_ptr().addr()));
     }
 
     #[test]
@@ -2188,7 +2289,7 @@ mod tests {
             .expect("spill must be copied into a grown guest buffer");
 
         assert_eq!(
-            usize::try_from(size).expect("size must be positive"),
+            usize::try_from(size).verified("the returned buffer size is positive"),
             expected.len()
         );
         assert!(branch.guest_buffer_capacity >= expected.len());
@@ -2197,7 +2298,7 @@ mod tests {
             .memory
             .read(
                 &branch.store,
-                usize::try_from(ptr).expect("pointer must be positive"),
+                usize::try_from(ptr).verified("the returned buffer pointer is positive"),
                 &mut actual,
             )
             .expect("finished spill must be readable from guest memory");
@@ -2251,11 +2352,11 @@ mod tests {
             panic!("expected borrowed output envelope");
         };
         assert_eq!(view.generated_arrow_ipc_batch(), generated_arrow_ipc_batch);
-        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_start = encoded.as_ptr().addr();
         let encoded_end = encoded_start + encoded.len();
         assert!(
             (encoded_start..encoded_end)
-                .contains(&(view.generated_arrow_ipc_batch().as_ptr() as usize))
+                .contains(&view.generated_arrow_ipc_batch().as_ptr().addr())
         );
         let WasmEnvelope::Output {
             generated_arrow_ipc_batch,
@@ -2264,9 +2365,7 @@ mod tests {
         else {
             panic!("expected owned output envelope");
         };
-        assert!(
-            (encoded_start..encoded_end).contains(&(generated_arrow_ipc_batch.as_ptr() as usize))
-        );
+        assert!((encoded_start..encoded_end).contains(&generated_arrow_ipc_batch.as_ptr().addr()));
     }
 
     #[test]
@@ -2301,16 +2400,16 @@ mod tests {
     #[test]
     fn wasm_schema_contract_converts_from_nervix_schema_model() {
         let source = CreateSchema {
-            name: Identifier::parse("events").expect("schema name must be valid"),
+            name: SchemaName::parse("events").expect("schema name must be valid"),
             fields: vec![
                 SchemaField {
-                    name: Identifier::parse("value").expect("field name must be valid"),
+                    name: FieldName::parse("value").expect("field name must be valid"),
                     ty: ParseAsType::I32,
                     optional: false,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("tags").expect("field name must be valid"),
+                    name: FieldName::parse("tags").expect("field name must be valid"),
                     ty: ParseAsType::Vec {
                         element: Box::new(ParseAsType::String),
                     },
@@ -2350,8 +2449,8 @@ mod tests {
 
     fn limits() -> WasmProcessorLimits {
         WasmProcessorLimits {
-            max_fuel: 1_000_000_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(1_000_000_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         }
     }
 
@@ -3574,8 +3673,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 1_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(1_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3595,9 +3694,9 @@ mod tests {
         assert!(matches!(
             error,
             WasmProcessorError::FuelExhausted {
-                limit: 1_000,
+                limit,
                 operation: "nervix_process_batch"
-            }
+            } if limit == nonzero!(1_000u64)
         ));
     }
 
@@ -3609,8 +3708,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 10_000,
-            max_memory_bytes: 64 * 1024 * 1024,
+            max_fuel: nonzero!(10_000u64),
+            max_memory_bytes: nonzero!(67_108_864u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3633,7 +3732,7 @@ mod tests {
             .expect("second operation must receive a fresh fuel budget");
         let second_remaining = branch.store.get_fuel().expect("fuel must be enabled");
 
-        assert!(first_remaining < configured_limits.max_fuel);
+        assert!(first_remaining < configured_limits.max_fuel.get());
         assert_eq!(second_remaining, first_remaining);
     }
 
@@ -3645,8 +3744,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 100_000,
-            max_memory_bytes: 128 * 1024,
+            max_fuel: nonzero!(100_000u64),
+            max_memory_bytes: nonzero!(131_072u64),
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -3663,14 +3762,18 @@ mod tests {
             .await
             .expect_err("guest memory growth must exceed MAX MEMORY");
 
-        assert!(matches!(
-            error,
-            WasmProcessorError::MemoryLimitExceeded {
-                limit: 131_072,
-                desired: 196_608,
-                operation: "nervix_process_batch"
-            }
-        ));
+        assert!(
+            matches!(
+                error,
+                WasmProcessorError::MemoryLimitExceeded {
+                    limit: 131_072,
+                    allocated: 131_072,
+                    growth: 65_536,
+                    operation: "nervix_process_batch"
+                }
+            ),
+            "unexpected growth memory error: {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -3681,8 +3784,8 @@ mod tests {
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
-            max_fuel: 100_000,
-            max_memory_bytes: 64 * 1024,
+            max_fuel: nonzero!(100_000u64),
+            max_memory_bytes: nonzero!(65_536u64),
         };
 
         let error = compiled
@@ -3695,14 +3798,18 @@ mod tests {
             .await
             .expect_err("two initial pages must exceed MAX MEMORY");
 
-        assert!(matches!(
-            error,
-            WasmProcessorError::MemoryLimitExceeded {
-                limit: 65_536,
-                desired: 131_072,
-                operation: "module instantiation"
-            }
-        ));
+        assert!(
+            matches!(
+                error,
+                WasmProcessorError::MemoryLimitExceeded {
+                    limit: 65_536,
+                    allocated: 65_536,
+                    growth: 65_536,
+                    operation: "module instantiation"
+                }
+            ),
+            "unexpected instantiation memory error: {error:?}"
+        );
     }
 
     #[tokio::test]

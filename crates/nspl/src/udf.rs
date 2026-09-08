@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CreateStatement, CreateUdf, DescribeUdf, ShowUdfs, UdfArgument, UdfLanguage, UdfReturn,
 };
@@ -6,9 +7,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, completion_context, if_not_exists_clause,
-        into_parse_error, kw, lex_input, string_lit, suggestions_from_errors, tok, udf_name,
-        udf_ref,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, field_ref,
+        if_not_exists_clause, into_parse_error, kw, lex_input, string_lit, suggestions_from_errors,
+        tok, udf_name, udf_ref,
     },
     schema::nervix_type,
 };
@@ -16,7 +17,7 @@ use crate::{
 pub fn create_udf_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateUdf>, extra::Err<ParseError<'src>>> + Clone
 {
-    let argument = udf_name()
+    let argument = field_ref()
         .then(nervix_type())
         .then(kw(Identifier::Optional).or_not())
         .map(|((name, ty), optional)| UdfArgument {
@@ -114,7 +115,11 @@ pub fn show_udfs_parser<'src>()
 }
 
 pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let output = create_udf_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -128,13 +133,13 @@ pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, Parse
     } else {
         Ok(output
             .into_output()
-            .expect("successful UDF parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn suggest_create_udf(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let (_, _, tokens) = match lex_input(&source) {
+    let LexedInput { tokens, .. } = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };
@@ -151,6 +156,7 @@ pub fn suggest_create_udf(input: &str, cursor: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use nervix_models::{Model, ParseAsType, Statement};
+    use nonzero_ext::nonzero;
 
     use super::*;
     use crate::statement::{parse_statement, suggest_statement};
@@ -181,7 +187,7 @@ $roto$;";
             udf.arguments[1].ty,
             ParseAsType::Array {
                 element: Box::new(ParseAsType::F64),
-                len: 3,
+                len: nonzero!(3u32),
             }
         );
         assert!(udf.returns.optional);

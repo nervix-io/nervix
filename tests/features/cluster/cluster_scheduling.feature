@@ -1,4 +1,26 @@
 Feature: Cluster scheduling
+  Scenario: Relays are scheduled and only materialized state has replicas
+    Given runtime replication is configured with replica count 1 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY transient_events SCHEMA event UNBRANCHED;
+      CREATE RELAY latest_events SCHEMA event UNBRANCHED
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "relay" "transient_events" is saved as placeholder "transient_relay_owner"
+    And the last command output contains
+      """
+      kind=relay name=transient_events owner={{transient_relay_owner}} replicas=-
+      """
+    And the last cluster status owner for scheduled "relay" "latest_events" is saved as placeholder "materialized_relay_owner"
+    And the first replica for scheduled "relay" "latest_events" in the last cluster status is saved as placeholder "materialized_relay_replica"
+
   Scenario Outline: All nodes can be terminated with an active session
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -604,7 +626,8 @@ Feature: Cluster scheduling
       "user_id":42
       """
 
-  Scenario: Attached ACK stays alive across explicitly placed remote nodes
+  @planned-ingestor-handoff
+  Scenario: A planned Kafka ingestor handoff drains attached ACKs from two branches
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -642,7 +665,7 @@ Feature: Cluster scheduling
           'auto.offset.reset' = 'earliest'
         };
         CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -677,7 +700,7 @@ Feature: Cluster scheduling
       """
     When these NSPL commands are executed on the leader node
       """
-      CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -719,17 +742,45 @@ Feature: Cluster scheduling
       """
       {"user_id":42}
       """
-    Then the relay subscription receives a payload
+    And Kafka message is published to topic "notifications_{{test_id}}"
+      """
+      {"user_id":84}
+      """
+    Then within "10s" the relay subscription receives payloads
       """
       "user_id":42
+      "user_id":84
+      """
+    And the observed broker does not receive a payload within "1s"
+    Given the entity gate for domain "{{domain}}" pauses after engagement
+    When these NSPL commands begin executing in the background
+      """
+      DRAIN NODE node-2;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    When emitter "kafka_forward" leaves fault mode
+    Then within "10s" the observed broker receives payloads
+      """
+      "user_id":42
+      "user_id":84
+      """
+    When the entity gate pause for domain "{{domain}}" is released
+    Then the background NSPL execution succeeds
+    And the last command output contains
+      """
+      quiesce level: ENTITY_PAUSE
+      - kind=ingestor name=kafka_notifications from=node-2 to=
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output does not contain
+      """
+      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
       """
     And the relay subscription does not receive a payload within "1s"
     And the observed broker does not receive a payload within "1s"
-    When emitter "kafka_forward" leaves fault mode
-    Then the observed broker receives a payload
-      """
-      "user_id":42
-      """
 
   Scenario: Deduplicator schedule movement resumes processing on the new owner
     Given Kafka is running

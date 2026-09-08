@@ -1,4 +1,5 @@
 [package]
+description = "Authenticated node-to-node transport for Nervix clusters: TLS, framing, backpressure and envelopes"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-interconnect"
@@ -9,14 +10,17 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true }
+arch-into = { workspace = true }
 dashmap = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
+meticulous = { workspace = true }
 nervix-models = { workspace = true }
 rand_core = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }

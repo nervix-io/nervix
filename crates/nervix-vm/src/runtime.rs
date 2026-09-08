@@ -5,6 +5,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt};
+use arch_into::ArchInto as _;
 use arrow_arith::{
     aggregate::sum as arrow_sum,
     boolean::{and_kleene, is_null, not, or_kleene},
@@ -41,6 +42,8 @@ use arrow_string::like::{
     contains as string_contains, ends_with as string_ends_with, starts_with as string_starts_with,
 };
 use chrono::DateTime;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 use regex::Regex;
@@ -59,211 +62,67 @@ use crate::{
 
 pub const SPAWN_BLOCKING_ROW_THRESHOLD: usize = 1_024;
 
-struct TypedBank {
-    uint8: Vec<Option<UInt8Array>>,
-    int8: Vec<Option<Int8Array>>,
-    uint16: Vec<Option<UInt16Array>>,
-    int16: Vec<Option<Int16Array>>,
-    uint32: Vec<Option<UInt32Array>>,
-    int32: Vec<Option<Int32Array>>,
-    uint64: Vec<Option<UInt64Array>>,
-    int64: Vec<Option<Int64Array>>,
-    float32: Vec<Option<Float32Array>>,
-    float64: Vec<Option<Float64Array>>,
-    boolean: Vec<Option<BooleanArray>>,
-    utf8: Vec<Option<StringArray>>,
-    datetime: Vec<Option<TimestampNanosecondArray>>,
-    generic: Vec<Option<ArrayRef>>,
-}
-
-impl TypedBank {
-    fn new(layout: &RegisterLayout) -> Self {
-        Self {
-            uint8: vec![None; layout.uint8],
-            int8: vec![None; layout.int8],
-            uint16: vec![None; layout.uint16],
-            int16: vec![None; layout.int16],
-            uint32: vec![None; layout.uint32],
-            int32: vec![None; layout.int32],
-            uint64: vec![None; layout.uint64],
-            int64: vec![None; layout.int64],
-            float32: vec![None; layout.float32],
-            float64: vec![None; layout.float64],
-            boolean: vec![None; layout.boolean],
-            utf8: vec![None; layout.utf8],
-            datetime: vec![None; layout.datetime],
-            generic: vec![None; layout.generic],
+macro_rules! declare_typed_bank {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+        struct TypedBank {
+            $($field: Vec<Option<$Array>>,)+
+            datetime: Vec<Option<TimestampNanosecondArray>>,
+            generic: Vec<Option<ArrayRef>>,
         }
-    }
 
-    fn set_uint8(&mut self, index: usize, value: UInt8Array) -> Result<(), ()> {
-        let Some(slot) = self.uint8.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
+        impl TypedBank {
+            fn new(layout: &RegisterLayout) -> Self {
+                Self {
+                    $($field: vec![None; layout.$field],)+
+                    datetime: vec![None; layout.datetime],
+                    generic: vec![None; layout.generic],
+                }
+            }
 
-    fn set_int8(&mut self, index: usize, value: Int8Array) -> Result<(), ()> {
-        let Some(slot) = self.int8.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
+            $(fn $setter(&mut self, index: usize, value: $Array) -> Result<(), ()> {
+                let Some(slot) = self.$field.get_mut(index) else {
+                    return Err(());
+                };
+                *slot = Some(value);
+                Ok(())
+            })+
 
-    fn set_uint16(&mut self, index: usize, value: UInt16Array) -> Result<(), ()> {
-        let Some(slot) = self.uint16.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
+            fn set_datetime(
+                &mut self,
+                index: usize,
+                value: TimestampNanosecondArray,
+            ) -> Result<(), ()> {
+                let Some(slot) = self.datetime.get_mut(index) else {
+                    return Err(());
+                };
+                *slot = Some(value);
+                Ok(())
+            }
 
-    fn set_int16(&mut self, index: usize, value: Int16Array) -> Result<(), ()> {
-        let Some(slot) = self.int16.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
+            fn set_generic(&mut self, index: usize, value: ArrayRef) -> Result<(), ()> {
+                let Some(slot) = self.generic.get_mut(index) else {
+                    return Err(());
+                };
+                *slot = Some(value);
+                Ok(())
+            }
 
-    fn set_uint32(&mut self, index: usize, value: UInt32Array) -> Result<(), ()> {
-        let Some(slot) = self.uint32.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
+            $(fn $field(&self, index: usize) -> Option<&$Array> {
+                self.$field.get(index).and_then(Option::as_ref)
+            })+
 
-    fn set_int32(&mut self, index: usize, value: Int32Array) -> Result<(), ()> {
-        let Some(slot) = self.int32.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
+            fn datetime(&self, index: usize) -> Option<&TimestampNanosecondArray> {
+                self.datetime.get(index).and_then(Option::as_ref)
+            }
 
-    fn set_uint64(&mut self, index: usize, value: UInt64Array) -> Result<(), ()> {
-        let Some(slot) = self.uint64.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn set_int64(&mut self, index: usize, value: Int64Array) -> Result<(), ()> {
-        let Some(slot) = self.int64.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn set_float32(&mut self, index: usize, value: Float32Array) -> Result<(), ()> {
-        let Some(slot) = self.float32.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn set_float64(&mut self, index: usize, value: Float64Array) -> Result<(), ()> {
-        let Some(slot) = self.float64.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn set_boolean(&mut self, index: usize, value: BooleanArray) -> Result<(), ()> {
-        let Some(slot) = self.boolean.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn set_utf8(&mut self, index: usize, value: StringArray) -> Result<(), ()> {
-        let Some(slot) = self.utf8.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn set_datetime(&mut self, index: usize, value: TimestampNanosecondArray) -> Result<(), ()> {
-        let Some(slot) = self.datetime.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn set_generic(&mut self, index: usize, value: ArrayRef) -> Result<(), ()> {
-        let Some(slot) = self.generic.get_mut(index) else {
-            return Err(());
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-
-    fn uint8(&self, index: usize) -> Option<&UInt8Array> {
-        self.uint8.get(index).and_then(Option::as_ref)
-    }
-
-    fn int8(&self, index: usize) -> Option<&Int8Array> {
-        self.int8.get(index).and_then(Option::as_ref)
-    }
-
-    fn uint16(&self, index: usize) -> Option<&UInt16Array> {
-        self.uint16.get(index).and_then(Option::as_ref)
-    }
-
-    fn int16(&self, index: usize) -> Option<&Int16Array> {
-        self.int16.get(index).and_then(Option::as_ref)
-    }
-
-    fn uint32(&self, index: usize) -> Option<&UInt32Array> {
-        self.uint32.get(index).and_then(Option::as_ref)
-    }
-
-    fn int32(&self, index: usize) -> Option<&Int32Array> {
-        self.int32.get(index).and_then(Option::as_ref)
-    }
-
-    fn uint64(&self, index: usize) -> Option<&UInt64Array> {
-        self.uint64.get(index).and_then(Option::as_ref)
-    }
-
-    fn int64(&self, index: usize) -> Option<&Int64Array> {
-        self.int64.get(index).and_then(Option::as_ref)
-    }
-
-    fn float32(&self, index: usize) -> Option<&Float32Array> {
-        self.float32.get(index).and_then(Option::as_ref)
-    }
-
-    fn float64(&self, index: usize) -> Option<&Float64Array> {
-        self.float64.get(index).and_then(Option::as_ref)
-    }
-
-    fn boolean(&self, index: usize) -> Option<&BooleanArray> {
-        self.boolean.get(index).and_then(Option::as_ref)
-    }
-
-    fn utf8(&self, index: usize) -> Option<&StringArray> {
-        self.utf8.get(index).and_then(Option::as_ref)
-    }
-
-    fn datetime(&self, index: usize) -> Option<&TimestampNanosecondArray> {
-        self.datetime.get(index).and_then(Option::as_ref)
-    }
-
-    fn generic(&self, index: usize) -> Option<&ArrayRef> {
-        self.generic.get(index).and_then(Option::as_ref)
-    }
+            fn generic(&self, index: usize) -> Option<&ArrayRef> {
+                self.generic.get(index).and_then(Option::as_ref)
+            }
+        }
+    };
 }
+
+with_typed_registers!(declare_typed_bank);
 
 struct RegisterBank {
     inputs: TypedBank,
@@ -273,317 +132,157 @@ struct RegisterBank {
     uninitialized: HashMap<RegisterRef, DataType>,
 }
 
-impl RegisterBank {
-    fn new(layouts: &RegisterLayouts) -> Self {
-        Self {
-            inputs: TypedBank::new(&layouts.inputs),
-            temps: TypedBank::new(&layouts.temps),
-            condition: TypedBank::new(&layouts.condition),
-            outputs: TypedBank::new(&layouts.outputs),
-            uninitialized: HashMap::new(),
-        }
-    }
+macro_rules! impl_register_bank {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+        impl RegisterBank {
+            fn new(layouts: &RegisterLayouts) -> Self {
+                Self {
+                    inputs: TypedBank::new(&layouts.inputs),
+                    temps: TypedBank::new(&layouts.temps),
+                    condition: TypedBank::new(&layouts.condition),
+                    outputs: TypedBank::new(&layouts.outputs),
+                    uninitialized: HashMap::new(),
+                }
+            }
 
-    fn load_input_batch(
-        &mut self,
-        inputs: &[InputBinding],
-        batch: &TypedBatch,
-    ) -> Result<(), RuntimeError> {
-        for input in inputs {
-            self.set_array(input.reg, batch.column(input.column_index).clone())?;
-        }
-        Ok(())
-    }
-
-    fn bank(&self, space: RegisterSpace) -> &TypedBank {
-        match space {
-            RegisterSpace::Input => &self.inputs,
-            RegisterSpace::Temp => &self.temps,
-            RegisterSpace::Condition => &self.condition,
-            RegisterSpace::Output => &self.outputs,
-        }
-    }
-
-    fn bank_mut(&mut self, space: RegisterSpace) -> &mut TypedBank {
-        match space {
-            RegisterSpace::Input => &mut self.inputs,
-            RegisterSpace::Temp => &mut self.temps,
-            RegisterSpace::Condition => &mut self.condition,
-            RegisterSpace::Output => &mut self.outputs,
-        }
-    }
-
-    fn set_array(&mut self, reg: RegisterRef, value: TypedArray) -> Result<(), RuntimeError> {
-        self.uninitialized.remove(&reg);
-        match value {
-            TypedArray::UInt8(array) => self.set_uint8(reg, array),
-            TypedArray::Int8(array) => self.set_int8(reg, array),
-            TypedArray::UInt16(array) => self.set_uint16(reg, array),
-            TypedArray::Int16(array) => self.set_int16(reg, array),
-            TypedArray::UInt32(array) => self.set_uint32(reg, array),
-            TypedArray::Int32(array) => self.set_int32(reg, array),
-            TypedArray::UInt64(array) => self.set_uint64(reg, array),
-            TypedArray::Int64(array) => self.set_int64(reg, array),
-            TypedArray::Float32(array) => self.set_float32(reg, array),
-            TypedArray::Float64(array) => self.set_float64(reg, array),
-            TypedArray::Boolean(array) => self.set_boolean(reg, array),
-            TypedArray::Utf8(array) => self.set_utf8(reg, array),
-            TypedArray::Datetime(array) => self.set_datetime(reg, array),
-            TypedArray::Generic(array) => self.set_generic(reg, array),
-            TypedArray::Uninitialized { data_type, len } => {
-                let materialized = array_ref_to_typed_array(new_null_array(&data_type, len))?;
-                self.set_array(reg, materialized)?;
-                self.uninitialized.insert(reg, data_type);
+            fn load_input_batch(
+                &mut self,
+                inputs: &[InputBinding],
+                batch: &TypedBatch,
+            ) -> Result<(), RuntimeError> {
+                for input in inputs {
+                    self.set_array(input.reg, batch.column(input.column_index).clone())?;
+                }
                 Ok(())
             }
+
+            fn bank(&self, space: RegisterSpace) -> &TypedBank {
+                match space {
+                    RegisterSpace::Input => &self.inputs,
+                    RegisterSpace::Temp => &self.temps,
+                    RegisterSpace::Condition => &self.condition,
+                    RegisterSpace::Output => &self.outputs,
+                }
+            }
+
+            fn bank_mut(&mut self, space: RegisterSpace) -> &mut TypedBank {
+                match space {
+                    RegisterSpace::Input => &mut self.inputs,
+                    RegisterSpace::Temp => &mut self.temps,
+                    RegisterSpace::Condition => &mut self.condition,
+                    RegisterSpace::Output => &mut self.outputs,
+                }
+            }
+
+            fn set_array(
+                &mut self,
+                reg: RegisterRef,
+                value: TypedArray,
+            ) -> Result<(), RuntimeError> {
+                self.uninitialized.remove(&reg);
+                match value {
+                    $(TypedArray::$Variant(array) => self.$setter(reg, array),)+
+                    TypedArray::Datetime(array) => self.set_datetime(reg, array),
+                    TypedArray::Generic(array) => self.set_generic(reg, array),
+                    TypedArray::Uninitialized { data_type, len } => {
+                        let materialized =
+                            array_ref_to_typed_array(new_null_array(&data_type, len))?;
+                        self.set_array(reg, materialized)?;
+                        self.uninitialized.insert(reg, data_type);
+                        Ok(())
+                    }
+                }
+            }
+
+            fn output_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
+                if let Some(data_type) = self.uninitialized.get(&reg) {
+                    return Ok(TypedArray::uninitialized(
+                        data_type.clone(),
+                        self.read_array(reg)?.len(),
+                    ));
+                }
+                self.read_array(reg)
+            }
+
+            fn read_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
+                match reg.ty {
+                    $(RegisterType::$Variant => {
+                        Ok(TypedArray::$Variant(self.$field(reg)?.clone()))
+                    },)+
+                    RegisterType::Datetime => Ok(TypedArray::Datetime(self.datetime(reg)?.clone())),
+                    RegisterType::Generic => Ok(TypedArray::Generic(self.generic(reg)?.clone())),
+                }
+            }
+
+            $(fn $setter(&mut self, reg: RegisterRef, value: $Array) -> Result<(), RuntimeError> {
+                self.ensure_type(reg, RegisterType::$Variant, stringify!($Array))?;
+                self.bank_mut(reg.space)
+                    .$setter(reg.index, value)
+                    .map_err(|()| RuntimeError::MissingRegister { reg })
+            })+
+
+            fn set_datetime(
+                &mut self,
+                reg: RegisterRef,
+                value: TimestampNanosecondArray,
+            ) -> Result<(), RuntimeError> {
+                self.ensure_type(reg, RegisterType::Datetime, "TimestampNanosecondArray")?;
+                self.bank_mut(reg.space)
+                    .set_datetime(reg.index, value)
+                    .map_err(|()| RuntimeError::MissingRegister { reg })
+            }
+
+            fn set_generic(&mut self, reg: RegisterRef, value: ArrayRef) -> Result<(), RuntimeError> {
+                self.ensure_type(reg, RegisterType::Generic, "ArrayRef")?;
+                self.bank_mut(reg.space)
+                    .set_generic(reg.index, value)
+                    .map_err(|()| RuntimeError::MissingRegister { reg })
+            }
+
+            $(fn $field(&self, reg: RegisterRef) -> Result<&$Array, RuntimeError> {
+                self.ensure_type(reg, RegisterType::$Variant, stringify!($Array))?;
+                self.bank(reg.space)
+                    .$field(reg.index)
+                    .ok_or(RuntimeError::MissingRegister { reg })
+            })+
+
+            fn datetime(
+                &self,
+                reg: RegisterRef,
+            ) -> Result<&TimestampNanosecondArray, RuntimeError> {
+                self.ensure_type(reg, RegisterType::Datetime, "TimestampNanosecondArray")?;
+                self.bank(reg.space)
+                    .datetime(reg.index)
+                    .ok_or(RuntimeError::MissingRegister { reg })
+            }
+
+            fn generic(&self, reg: RegisterRef) -> Result<&ArrayRef, RuntimeError> {
+                self.ensure_type(reg, RegisterType::Generic, "ArrayRef")?;
+                self.bank(reg.space)
+                    .generic(reg.index)
+                    .ok_or(RuntimeError::MissingRegister { reg })
+            }
+
+            fn ensure_type(
+                &self,
+                reg: RegisterRef,
+                expected: RegisterType,
+                label: &'static str,
+            ) -> Result<(), RuntimeError> {
+                if reg.ty == expected {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::InvalidRegisterType {
+                        reg,
+                        expected: label,
+                    })
+                }
+            }
         }
-    }
-
-    fn output_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
-        if let Some(data_type) = self.uninitialized.get(&reg) {
-            return Ok(TypedArray::uninitialized(
-                data_type.clone(),
-                self.read_array(reg)?.len(),
-            ));
-        }
-        self.read_array(reg)
-    }
-
-    fn read_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
-        match reg.ty {
-            RegisterType::UInt8 => Ok(TypedArray::UInt8(self.uint8(reg)?.clone())),
-            RegisterType::Int8 => Ok(TypedArray::Int8(self.int8(reg)?.clone())),
-            RegisterType::UInt16 => Ok(TypedArray::UInt16(self.uint16(reg)?.clone())),
-            RegisterType::Int16 => Ok(TypedArray::Int16(self.int16(reg)?.clone())),
-            RegisterType::UInt32 => Ok(TypedArray::UInt32(self.uint32(reg)?.clone())),
-            RegisterType::Int32 => Ok(TypedArray::Int32(self.int32(reg)?.clone())),
-            RegisterType::UInt64 => Ok(TypedArray::UInt64(self.uint64(reg)?.clone())),
-            RegisterType::Int64 => Ok(TypedArray::Int64(self.int64(reg)?.clone())),
-            RegisterType::Float32 => Ok(TypedArray::Float32(self.float32(reg)?.clone())),
-            RegisterType::Float64 => Ok(TypedArray::Float64(self.float64(reg)?.clone())),
-            RegisterType::Boolean => Ok(TypedArray::Boolean(self.boolean(reg)?.clone())),
-            RegisterType::Utf8 => Ok(TypedArray::Utf8(self.utf8(reg)?.clone())),
-            RegisterType::Datetime => Ok(TypedArray::Datetime(self.datetime(reg)?.clone())),
-            RegisterType::Generic => Ok(TypedArray::Generic(self.generic(reg)?.clone())),
-        }
-    }
-
-    fn set_uint8(&mut self, reg: RegisterRef, value: UInt8Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt8, "UInt8Array")?;
-        self.bank_mut(reg.space)
-            .set_uint8(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_int8(&mut self, reg: RegisterRef, value: Int8Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int8, "Int8Array")?;
-        self.bank_mut(reg.space)
-            .set_int8(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_uint16(&mut self, reg: RegisterRef, value: UInt16Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt16, "UInt16Array")?;
-        self.bank_mut(reg.space)
-            .set_uint16(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_int16(&mut self, reg: RegisterRef, value: Int16Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int16, "Int16Array")?;
-        self.bank_mut(reg.space)
-            .set_int16(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_uint32(&mut self, reg: RegisterRef, value: UInt32Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt32, "UInt32Array")?;
-        self.bank_mut(reg.space)
-            .set_uint32(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_int32(&mut self, reg: RegisterRef, value: Int32Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int32, "Int32Array")?;
-        self.bank_mut(reg.space)
-            .set_int32(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_uint64(&mut self, reg: RegisterRef, value: UInt64Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt64, "UInt64Array")?;
-        self.bank_mut(reg.space)
-            .set_uint64(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_int64(&mut self, reg: RegisterRef, value: Int64Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int64, "Int64Array")?;
-        self.bank_mut(reg.space)
-            .set_int64(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_float32(&mut self, reg: RegisterRef, value: Float32Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Float32, "Float32Array")?;
-        self.bank_mut(reg.space)
-            .set_float32(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_float64(&mut self, reg: RegisterRef, value: Float64Array) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Float64, "Float64Array")?;
-        self.bank_mut(reg.space)
-            .set_float64(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_boolean(&mut self, reg: RegisterRef, value: BooleanArray) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Boolean, "BooleanArray")?;
-        self.bank_mut(reg.space)
-            .set_boolean(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_utf8(&mut self, reg: RegisterRef, value: StringArray) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Utf8, "StringArray")?;
-        self.bank_mut(reg.space)
-            .set_utf8(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_datetime(
-        &mut self,
-        reg: RegisterRef,
-        value: TimestampNanosecondArray,
-    ) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Datetime, "TimestampNanosecondArray")?;
-        self.bank_mut(reg.space)
-            .set_datetime(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn set_generic(&mut self, reg: RegisterRef, value: ArrayRef) -> Result<(), RuntimeError> {
-        self.ensure_type(reg, RegisterType::Generic, "ArrayRef")?;
-        self.bank_mut(reg.space)
-            .set_generic(reg.index, value)
-            .map_err(|()| RuntimeError::MissingRegister { reg })
-    }
-
-    fn uint8(&self, reg: RegisterRef) -> Result<&UInt8Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt8, "UInt8Array")?;
-        self.bank(reg.space)
-            .uint8(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn int8(&self, reg: RegisterRef) -> Result<&Int8Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int8, "Int8Array")?;
-        self.bank(reg.space)
-            .int8(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn uint16(&self, reg: RegisterRef) -> Result<&UInt16Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt16, "UInt16Array")?;
-        self.bank(reg.space)
-            .uint16(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn int16(&self, reg: RegisterRef) -> Result<&Int16Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int16, "Int16Array")?;
-        self.bank(reg.space)
-            .int16(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn uint32(&self, reg: RegisterRef) -> Result<&UInt32Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt32, "UInt32Array")?;
-        self.bank(reg.space)
-            .uint32(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn int32(&self, reg: RegisterRef) -> Result<&Int32Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int32, "Int32Array")?;
-        self.bank(reg.space)
-            .int32(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn uint64(&self, reg: RegisterRef) -> Result<&UInt64Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::UInt64, "UInt64Array")?;
-        self.bank(reg.space)
-            .uint64(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn int64(&self, reg: RegisterRef) -> Result<&Int64Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Int64, "Int64Array")?;
-        self.bank(reg.space)
-            .int64(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn float32(&self, reg: RegisterRef) -> Result<&Float32Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Float32, "Float32Array")?;
-        self.bank(reg.space)
-            .float32(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn float64(&self, reg: RegisterRef) -> Result<&Float64Array, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Float64, "Float64Array")?;
-        self.bank(reg.space)
-            .float64(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn boolean(&self, reg: RegisterRef) -> Result<&BooleanArray, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Boolean, "BooleanArray")?;
-        self.bank(reg.space)
-            .boolean(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn utf8(&self, reg: RegisterRef) -> Result<&StringArray, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Utf8, "StringArray")?;
-        self.bank(reg.space)
-            .utf8(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn datetime(&self, reg: RegisterRef) -> Result<&TimestampNanosecondArray, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Datetime, "TimestampNanosecondArray")?;
-        self.bank(reg.space)
-            .datetime(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn generic(&self, reg: RegisterRef) -> Result<&ArrayRef, RuntimeError> {
-        self.ensure_type(reg, RegisterType::Generic, "ArrayRef")?;
-        self.bank(reg.space)
-            .generic(reg.index)
-            .ok_or(RuntimeError::MissingRegister { reg })
-    }
-
-    fn ensure_type(
-        &self,
-        reg: RegisterRef,
-        expected: RegisterType,
-        label: &'static str,
-    ) -> Result<(), RuntimeError> {
-        if reg.ty == expected {
-            Ok(())
-        } else {
-            Err(RuntimeError::InvalidRegisterType {
-                reg,
-                expected: label,
-            })
-        }
-    }
+    };
 }
+
+with_typed_registers!(impl_register_bank);
 
 pub async fn execute_program(
     program: &triomphe::Arc<CompiledProgram>,
@@ -849,25 +548,40 @@ fn execute_program_with_selection_in_context_sync(
         None
     };
 
-    let (columns, row_errors, selected_rows) = if let Some(predicate) = global_predicate.as_ref() {
+    /// The program output after the global filter has been applied, which narrows the columns and
+    /// the per-row errors together with the selection that says which input rows survived.
+    struct FilteredOutput {
+        columns: Vec<TypedArray>,
+        row_errors: RowErrors,
+        selected_rows: RowSelection,
+    }
+
+    let filtered = if let Some(predicate) = global_predicate.as_ref() {
         let selected = selected_rows(predicate);
         for invocation in &mut invocations {
             invocation.arguments =
                 filter_columns(&invocation.arguments, predicate, selected.len())?;
         }
-        let filtered_errors = row_errors.select_rows(&selected);
-        (
-            filter_columns(&columns, predicate, selected.len())?,
-            filtered_errors,
-            RowSelection::Selected(selected),
-        )
+        FilteredOutput {
+            columns: filter_columns(&columns, predicate, selected.len())?,
+            row_errors: row_errors.select_rows(&selected),
+            selected_rows: RowSelection::Selected(selected),
+        }
     } else {
-        (columns, row_errors, RowSelection::All(batch.row_count()))
+        FilteredOutput {
+            columns,
+            row_errors,
+            selected_rows: RowSelection::All(batch.row_count()),
+        }
     };
 
     Ok(ExecutionResult {
-        batch: TypedBatch::with_errors(program.output_schema.clone(), columns, row_errors)?,
-        selected_rows,
+        batch: TypedBatch::with_errors(
+            program.output_schema.clone(),
+            filtered.columns,
+            filtered.row_errors,
+        )?,
+        selected_rows: filtered.selected_rows,
         invocations,
     })
 }
@@ -922,11 +636,13 @@ impl Instruction {
                         registers.read_array(*previous)?
                     }
                 };
-                let input = typed_array_to_array_ref(input);
-                let previous = typed_array_to_array_ref(previous);
+                let input = input.into_array_ref();
+                let previous = previous.into_array_ref();
                 let input = input.as_ref();
                 let previous = previous.as_ref();
-                let output = zip(&success, &input as &dyn Datum, &previous as &dyn Datum)
+                let success_input: &dyn Datum = &input;
+                let success_previous: &dyn Datum = &previous;
+                let output = zip(&success, success_input, success_previous)
                     .map_err(|error| arrow_kernel_error("assignment fallback failed", error))?;
                 registers.set_array(*dst, array_ref_to_typed_array(output)?)
             }
@@ -993,7 +709,9 @@ impl Instruction {
                         Err(RuntimeError::MissingFunctionInjector { .. })
                             if default_injector.is_some() =>
                         {
-                            inject(default_injector.expect("checked above"))?
+                            inject(default_injector.verified(
+                                "the match guard above requires the default injector to be present",
+                            ))?
                         }
                         result => result?,
                     }
@@ -1034,14 +752,13 @@ impl Instruction {
                 let mut output = registers.read_array(*otherwise)?;
                 for arm in arms.iter().rev() {
                     let mask = registers.boolean(arm.mask)?;
-                    let value = typed_array_to_array_ref(registers.read_array(arm.value)?);
-                    let fallback = typed_array_to_array_ref(output);
-                    let selected = zip(
-                        mask,
-                        &value.as_ref() as &dyn Datum,
-                        &fallback.as_ref() as &dyn Datum,
-                    )
-                    .map_err(|error| arrow_kernel_error("conditional selection failed", error))?;
+                    let value = registers.read_array(arm.value)?.into_array_ref();
+                    let fallback = output.into_array_ref();
+                    let value_datum: &dyn Datum = &value.as_ref();
+                    let fallback_datum: &dyn Datum = &fallback.as_ref();
+                    let selected = zip(mask, value_datum, fallback_datum).map_err(|error| {
+                        arrow_kernel_error("conditional selection failed", error)
+                    })?;
                     output = array_ref_to_typed_array(selected)?;
                 }
                 registers.set_array(*dst, output)
@@ -1195,179 +912,49 @@ fn arrow_kernel_error(context: &str, error: ArrowError) -> RuntimeError {
     }
 }
 
-fn array_ref_to_typed_array(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
-    match array.data_type() {
-        DataType::UInt8 => Ok(TypedArray::UInt8(
-            array
-                .as_any()
-                .downcast_ref::<UInt8Array>()
-                .expect("arrow kernel returned UInt8 data type without UInt8Array backing")
-                .clone(),
-        )),
-        DataType::Int8 => Ok(TypedArray::Int8(
-            array
-                .as_any()
-                .downcast_ref::<Int8Array>()
-                .expect("arrow kernel returned Int8 data type without Int8Array backing")
-                .clone(),
-        )),
-        DataType::UInt16 => Ok(TypedArray::UInt16(
-            array
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .expect("arrow kernel returned UInt16 data type without UInt16Array backing")
-                .clone(),
-        )),
-        DataType::Int16 => Ok(TypedArray::Int16(
-            array
-                .as_any()
-                .downcast_ref::<Int16Array>()
-                .expect("arrow kernel returned Int16 data type without Int16Array backing")
-                .clone(),
-        )),
-        DataType::UInt32 => Ok(TypedArray::UInt32(
-            array
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .expect("arrow kernel returned UInt32 data type without UInt32Array backing")
-                .clone(),
-        )),
-        DataType::Int32 => Ok(TypedArray::Int32(
-            array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("arrow kernel returned Int32 data type without Int32Array backing")
-                .clone(),
-        )),
-        DataType::UInt64 => Ok(TypedArray::UInt64(
-            array
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .expect("arrow kernel returned UInt64 data type without UInt64Array backing")
-                .clone(),
-        )),
-        DataType::Int64 => Ok(TypedArray::Int64(
-            array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .expect("arrow kernel returned Int64 data type without Int64Array backing")
-                .clone(),
-        )),
-        DataType::Float32 => Ok(TypedArray::Float32(
-            array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .expect("arrow kernel returned Float32 data type without Float32Array backing")
-                .clone(),
-        )),
-        DataType::Float64 => Ok(TypedArray::Float64(
-            array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .expect("arrow kernel returned Float64 data type without Float64Array backing")
-                .clone(),
-        )),
-        DataType::Boolean => Ok(TypedArray::Boolean(
-            array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .expect("arrow kernel returned Boolean data type without BooleanArray backing")
-                .clone(),
-        )),
-        DataType::Utf8 => Ok(TypedArray::Utf8(
-            array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("arrow kernel returned Utf8 data type without StringArray backing")
-                .clone(),
-        )),
-        DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
-            if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
-        {
-            Ok(TypedArray::Datetime(
-                array
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .expect(
-                        "arrow kernel returned UTC nanosecond timestamp data type without \
-                         TimestampNanosecondArray backing",
-                    )
-                    .clone(),
-            ))
+macro_rules! define_array_ref_to_typed_array {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+        fn array_ref_to_typed_array(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
+            match array.data_type() {
+                $($data_type => Ok(TypedArray::$Variant(
+                    array
+                        .as_any()
+                        .downcast_ref::<$Array>()
+                        .verified(
+                            "the match arm above narrowed this array's data type, which fixes its \
+                             concrete Arrow array type",
+                        )
+                        .clone(),
+                )),)+
+                DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
+                    if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
+                {
+                    Ok(TypedArray::Datetime(
+                        array
+                            .as_any()
+                            .downcast_ref::<TimestampNanosecondArray>()
+                            .verified(
+                                "the match arm above narrowed this array's data type, which fixes its \
+                                 concrete Arrow array type",
+                            )
+                            .clone(),
+                    ))
+                }
+                _ => Ok(TypedArray::Generic(array)),
+            }
         }
-        _ => Ok(TypedArray::Generic(array)),
-    }
+    };
 }
 
-fn typed_array_as_array(column: &TypedArray) -> &dyn Array {
-    match column {
-        TypedArray::UInt8(array) => array,
-        TypedArray::Int8(array) => array,
-        TypedArray::UInt16(array) => array,
-        TypedArray::Int16(array) => array,
-        TypedArray::UInt32(array) => array,
-        TypedArray::Int32(array) => array,
-        TypedArray::UInt64(array) => array,
-        TypedArray::Int64(array) => array,
-        TypedArray::Float32(array) => array,
-        TypedArray::Float64(array) => array,
-        TypedArray::Boolean(array) => array,
-        TypedArray::Utf8(array) => array,
-        TypedArray::Datetime(array) => array,
-        TypedArray::Generic(array) => array.as_ref(),
-        TypedArray::Uninitialized { .. } => {
-            unreachable!("uninitialized arrays must be materialized before Arrow kernel access")
-        }
-    }
-}
-
-fn typed_array_to_array_ref(column: TypedArray) -> ArrayRef {
-    match column {
-        TypedArray::UInt8(array) => StdArc::new(array),
-        TypedArray::Int8(array) => StdArc::new(array),
-        TypedArray::UInt16(array) => StdArc::new(array),
-        TypedArray::Int16(array) => StdArc::new(array),
-        TypedArray::UInt32(array) => StdArc::new(array),
-        TypedArray::Int32(array) => StdArc::new(array),
-        TypedArray::UInt64(array) => StdArc::new(array),
-        TypedArray::Int64(array) => StdArc::new(array),
-        TypedArray::Float32(array) => StdArc::new(array),
-        TypedArray::Float64(array) => StdArc::new(array),
-        TypedArray::Boolean(array) => StdArc::new(array),
-        TypedArray::Utf8(array) => StdArc::new(array),
-        TypedArray::Datetime(array) => StdArc::new(array),
-        TypedArray::Generic(array) => array,
-        TypedArray::Uninitialized { data_type, len } => new_null_array(&data_type, len),
-    }
-}
-
-fn typed_array_is_null(column: &TypedArray, row: usize) -> bool {
-    match column {
-        TypedArray::UInt8(array) => array.is_null(row),
-        TypedArray::Int8(array) => array.is_null(row),
-        TypedArray::UInt16(array) => array.is_null(row),
-        TypedArray::Int16(array) => array.is_null(row),
-        TypedArray::UInt32(array) => array.is_null(row),
-        TypedArray::Int32(array) => array.is_null(row),
-        TypedArray::UInt64(array) => array.is_null(row),
-        TypedArray::Int64(array) => array.is_null(row),
-        TypedArray::Float32(array) => array.is_null(row),
-        TypedArray::Float64(array) => array.is_null(row),
-        TypedArray::Boolean(array) => array.is_null(row),
-        TypedArray::Utf8(array) => array.is_null(row),
-        TypedArray::Datetime(array) => array.is_null(row),
-        TypedArray::Generic(array) => array.is_null(row),
-        TypedArray::Uninitialized { .. } => true,
-    }
-}
+with_typed_registers!(define_array_ref_to_typed_array);
 
 fn try_execute_numeric_kernel(
     left: &dyn Array,
     right: &dyn Array,
     op: BinaryOp,
 ) -> Option<ArrayRef> {
-    let left = &left as &dyn Datum;
-    let right = &right as &dyn Datum;
+    let left: &dyn Datum = &left;
+    let right: &dyn Datum = &right;
     match op {
         BinaryOp::Add => add(left, right).ok(),
         BinaryOp::Sub => sub(left, right).ok(),
@@ -1436,18 +1023,19 @@ fn sanitize_float64_non_finite(
 }
 
 fn execute_coalesce_arrow(inputs: &[TypedArray]) -> Result<TypedArray, RuntimeError> {
-    let mut result = typed_array_to_array_ref(
-        inputs
-            .first()
-            .expect("coalesce requires at least one input")
-            .clone(),
-    );
+    let mut result = inputs
+        .first()
+        .verified("the compiler rejects a coalesce with fewer than one argument")
+        .clone()
+        .into_array_ref();
     for input in &inputs[1..] {
         let mask = is_null(result.as_ref())
             .map_err(|error| arrow_kernel_error("coalesce is_null kernel failed", error))?;
-        let truthy = typed_array_as_array(input);
+        let truthy = input.as_array();
         let falsy = result.as_ref();
-        result = zip(&mask, &truthy as &dyn Datum, &falsy as &dyn Datum)
+        let truthy_datum: &dyn Datum = &truthy;
+        let falsy_datum: &dyn Datum = &falsy;
+        result = zip(&mask, truthy_datum, falsy_datum)
             .map_err(|error| arrow_kernel_error("coalesce zip kernel failed", error))?;
     }
     array_ref_to_typed_array(result)
@@ -1512,9 +1100,9 @@ fn write_null_literal(
 
 fn execute_neg_i64(input: &Int64Array, row_errors: &mut RowErrors, span: Span) -> Int64Array {
     if let Some(output) = try_execute_neg_kernel(input) {
-        let TypedArray::Int64(output) =
-            array_ref_to_typed_array(output).expect("int64 neg kernel must produce Int64 output")
-        else {
+        let TypedArray::Int64(output) = array_ref_to_typed_array(output).verified(
+            "the kernel returns an array of the operand's own type, which this mapping covers",
+        ) else {
             unreachable!("int64 neg kernel must produce Int64Array");
         };
         return output;
@@ -1543,10 +1131,12 @@ fn execute_neg_i64(input: &Int64Array, row_errors: &mut RowErrors, span: Span) -
 }
 
 fn execute_neg_f64(input: &Float64Array) -> Float64Array {
-    let output = try_execute_neg_kernel(input).expect("float64 neg kernel must succeed");
-    let TypedArray::Float64(output) =
-        array_ref_to_typed_array(output).expect("float64 neg kernel must produce Float64 output")
-    else {
+    let output = try_execute_neg_kernel(input).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float64(output) = array_ref_to_typed_array(output).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float64 neg kernel must produce Float64Array");
     };
     output
@@ -1562,7 +1152,7 @@ macro_rules! define_checked_neg {
             ) -> $array {
                 if let Some(output) = try_execute_neg_kernel(input) {
                     let TypedArray::$typed_variant(output) = array_ref_to_typed_array(output)
-                        .expect("integer neg kernel must produce matching integer output")
+                        .verified("the kernel returns an array of the operand's own type, which this mapping covers")
                     else {
                         unreachable!("integer neg kernel must produce matching integer array");
                     };
@@ -1601,17 +1191,21 @@ define_checked_neg!(
 );
 
 fn execute_neg_f32(input: &Float32Array) -> Float32Array {
-    let output = try_execute_neg_kernel(input).expect("float32 neg kernel must succeed");
-    let TypedArray::Float32(output) =
-        array_ref_to_typed_array(output).expect("float32 neg kernel must produce Float32 output")
-    else {
+    let output = try_execute_neg_kernel(input).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float32(output) = array_ref_to_typed_array(output).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float32 neg kernel must produce Float32Array");
     };
     output
 }
 
 fn execute_not(input: &BooleanArray) -> BooleanArray {
-    not(input).expect("boolean not kernel must succeed for BooleanArray")
+    not(input).assured(
+        "arrow's not kernel is defined for BooleanArray, and this signature accepts nothing else",
+    )
 }
 
 macro_rules! define_integer_binary {
@@ -1628,7 +1222,7 @@ macro_rules! define_integer_binary {
                     BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                         if let Some(output) = try_execute_numeric_kernel(left, right, op) {
                             let typed = array_ref_to_typed_array(output)
-                                .expect("integer arithmetic kernel must produce matching integer output");
+                                .verified("the kernel returns an array of the operand's own type, which this mapping covers");
                             return Ok(typed);
                         }
                         let mut builder = <$builder>::new();
@@ -1864,8 +1458,8 @@ fn compare_with_arrow_ord(
     op: BinaryOp,
     context: &str,
 ) -> Result<BooleanArray, RuntimeError> {
-    let left = &left as &dyn Datum;
-    let right = &right as &dyn Datum;
+    let left: &dyn Datum = &left;
+    let right: &dyn Datum = &right;
     match op {
         BinaryOp::Eq => eq(left, right)
             .map_err(|error| arrow_kernel_error(&format!("{context} eq kernel failed"), error)),
@@ -1891,8 +1485,8 @@ fn compare_with_arrow_ord(
 }
 
 fn execute_nullif_arrow(left: &dyn Array, right: &dyn Array) -> Result<TypedArray, RuntimeError> {
-    let left_datum = &left as &dyn Datum;
-    let right_datum = &right as &dyn Datum;
+    let left_datum: &dyn Datum = &left;
+    let right_datum: &dyn Datum = &right;
     let predicate = eq(left_datum, right_datum)
         .map_err(|error| arrow_kernel_error("nullif eq kernel failed", error))?;
     let output = nullif(left, &predicate)
@@ -1945,10 +1539,7 @@ fn execute_builtin(
         BuiltinLowering::Ascii => Ok(TypedArray::Int64(execute_ascii(as_utf8(&values[0])?))),
         BuiltinLowering::Coalesce => execute_coalesce_arrow(&values),
         BuiltinLowering::IsNull => Ok(TypedArray::Boolean(execute_is_null_typed(&values[0]))),
-        BuiltinLowering::NullIf => execute_nullif_arrow(
-            typed_array_as_array(&values[0]),
-            typed_array_as_array(&values[1]),
-        ),
+        BuiltinLowering::NullIf => execute_nullif_arrow(values[0].as_array(), values[1].as_array()),
         BuiltinLowering::Abs => execute_abs_typed(&values[0], row_errors, span),
         BuiltinLowering::Acos => {
             execute_unary_math_f64(&values[0], row_errors, span, "acos", |v| v.acos())
@@ -2151,14 +1742,14 @@ impl<'a> ListColumn<'a> {
             Self::Variable(array) => {
                 let offsets = array.value_offsets();
                 let start = usize::try_from(offsets[row])
-                    .expect("validated list offset must be non-negative");
+                    .assured("arrow offset and width buffers are non-negative by construction");
                 let end = usize::try_from(offsets[row + 1])
-                    .expect("validated list offset must be non-negative");
+                    .assured("arrow offset and width buffers are non-negative by construction");
                 start..end
             }
             Self::Fixed(array) => {
                 let width = usize::try_from(array.value_length())
-                    .expect("validated fixed-size list width must be non-negative");
+                    .assured("arrow offset and width buffers are non-negative by construction");
                 let start = row * width;
                 start..start + width
             }
@@ -2169,7 +1760,10 @@ impl<'a> ListColumn<'a> {
 fn execute_list_count(input: &TypedArray) -> Result<Int64Array, RuntimeError> {
     let list = ListColumn::from_typed(input)?;
     let lengths = (0..list.len())
-        .map(|row| i64::try_from(list.value_range(row).len()).unwrap_or(i64::MAX))
+        .map(|row| {
+            i64::try_from(list.value_range(row).len())
+                .assured("an Arrow list range cannot exceed the allocator's isize limit")
+        })
         .collect::<Vec<_>>();
     Ok(Int64Array::new(lengths.into(), list.nulls().cloned()))
 }
@@ -2254,12 +1848,8 @@ fn list_nth_indices(index_input: Option<&TypedArray>) -> Result<Int64Array, Runt
         safe: true,
         ..CastOptions::default()
     };
-    let indices = cast_with_options(
-        typed_array_as_array(index_input),
-        &DataType::Int64,
-        &options,
-    )
-    .map_err(|error| arrow_kernel_error("list index cast kernel failed", error))?;
+    let indices = cast_with_options(index_input.as_array(), &DataType::Int64, &options)
+        .map_err(|error| arrow_kernel_error("list index cast kernel failed", error))?;
     indices
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -2312,7 +1902,8 @@ fn execute_list_item(
         let relative = match item {
             ListItem::First => (!range.is_empty()).then_some(0),
             ListItem::Last => range.len().checked_sub(1),
-            ListItem::Nth => nth_indices.as_ref().and_then(|indices| {
+            ListItem::Nth => {
+                let indices = nth_indices.as_ref()?;
                 if indices.is_null(row) {
                     return None;
                 }
@@ -2320,12 +1911,13 @@ fn execute_list_item(
                 if index < 0 {
                     return None;
                 }
-                usize::try_from(index)
-                    .ok()
-                    .filter(|index| *index < range.len())
-            }),
+                let Ok(index) = usize::try_from(index) else {
+                    return None;
+                };
+                (index < range.len()).then_some(index)
+            }
         }?;
-        u64::try_from(range.start + relative).ok()
+        Some((range.start + relative).arch_into())
     }));
     let output = take(
         list.values().as_ref(),
@@ -2340,8 +1932,9 @@ fn execute_list_item(
 /// repeatedly grow and copy the offset and value buffers.
 fn string_builder_like(input: &StringArray) -> StringBuilder {
     let offsets = input.value_offsets();
-    let value_bytes = usize::try_from(offsets[input.len()] - offsets[0])
-        .expect("validated Utf8 offsets must define a non-negative visible byte span");
+    let value_bytes = usize::try_from(offsets[input.len()] - offsets[0]).assured(
+        "arrow offset buffers are non-decreasing, so the span between two of them is non-negative",
+    );
     StringBuilder::with_capacity(input.len(), value_bytes)
 }
 
@@ -2356,7 +1949,10 @@ fn execute_ascii_case(input: &StringArray, convert: fn(&u8) -> u8) -> StringArra
         values.into(),
         input.nulls().cloned(),
     )
-    .expect("ascii case conversion preserves utf8 values, offsets and validity")
+    .verified(
+        "the output reuses the input's offsets and null buffer and maps bytes one to one, so \
+         try_new's invariants still hold",
+    )
 }
 
 fn execute_lower(input: &StringArray) -> StringArray {
@@ -2375,10 +1971,10 @@ fn execute_string_slice_transform(
     transform: impl for<'a> Fn(&'a str) -> &'a str,
 ) -> StringArray {
     let input_offsets = input.value_offsets();
-    let start =
-        usize::try_from(input_offsets[0]).expect("validated string offset must be non-negative");
+    let start = usize::try_from(input_offsets[0])
+        .assured("arrow offset and width buffers are non-negative by construction");
     let end = usize::try_from(input_offsets[input.len()])
-        .expect("validated string offset must be non-negative");
+        .assured("arrow offset and width buffers are non-negative by construction");
     let mut values = Vec::with_capacity(end - start);
     let mut offsets = Vec::with_capacity(input.len() + 1);
     offsets.push(0_i32);
@@ -2386,10 +1982,10 @@ fn execute_string_slice_transform(
         if let Some(value) = value {
             values.extend_from_slice(transform(value).as_bytes());
         }
-        offsets.push(
-            i32::try_from(values.len())
-                .expect("trimmed Utf8 output cannot exceed its input's i32 offset range"),
-        );
+        offsets.push(i32::try_from(values.len()).verified(
+            "the transform returns slices of the input, so the output stays inside the input's \
+             own i32 offset range",
+        ));
     }
     StringArray::new(
         OffsetBuffer::new(offsets.into()),
@@ -2408,16 +2004,19 @@ fn execute_length(input: &StringArray) -> Int64Array {
         .value_offsets()
         .windows(2)
         .map(|offsets| {
-            let start =
-                usize::try_from(offsets[0]).expect("validated string offset must be non-negative");
-            let end =
-                usize::try_from(offsets[1]).expect("validated string offset must be non-negative");
+            let start = usize::try_from(offsets[0])
+                .assured("arrow offset and width buffers are non-negative by construction");
+            let end = usize::try_from(offsets[1])
+                .assured("arrow offset and width buffers are non-negative by construction");
             bytes[start..end]
                 .iter()
                 .filter(|byte| **byte & 0b1100_0000 != 0b1000_0000)
                 .count()
                 .try_into()
-                .expect("Utf8 character count cannot exceed its i32 offset range")
+                .verified(
+                    "the count is bounded by the input's byte span, which already fits an i32 \
+                     offset",
+                )
         })
         .collect::<Vec<_>>();
     Int64Array::new(lengths.into(), input.nulls().cloned())
@@ -2487,16 +2086,24 @@ define_checked_abs!(
 
 fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span) -> Float32Array {
     let zero = Float32Array::new_scalar(0.0);
-    let input_datum = input as &dyn Datum;
-    let zero_datum = &zero as &dyn Datum;
-    let negative = lt(input_datum, zero_datum).expect("float32 abs comparison kernel must succeed");
-    let negated = try_execute_neg_kernel(input).expect("float32 neg kernel must succeed");
+    let input_datum: &dyn Datum = input;
+    let zero_datum: &dyn Datum = &zero;
+    let negative = lt(input_datum, zero_datum).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
+    let negated = try_execute_neg_kernel(input).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
     let negated = negated.as_ref();
-    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum)
-        .expect("float32 abs zip kernel must succeed");
-    let TypedArray::Float32(output) =
-        array_ref_to_typed_array(zipped).expect("float32 abs kernel must produce Float32 output")
-    else {
+    let negated_datum: &dyn Datum = &negated;
+    let zipped = zip(&negative, negated_datum, input_datum).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float32(output) = array_ref_to_typed_array(zipped).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float32 abs kernel must produce Float32Array");
     };
     sanitize_float32_non_finite(
@@ -2509,16 +2116,24 @@ fn execute_abs_f32(input: &Float32Array, row_errors: &mut RowErrors, span: Span)
 
 fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span) -> Float64Array {
     let zero = Float64Array::new_scalar(0.0);
-    let input_datum = input as &dyn Datum;
-    let zero_datum = &zero as &dyn Datum;
-    let negative = lt(input_datum, zero_datum).expect("float64 abs comparison kernel must succeed");
-    let negated = try_execute_neg_kernel(input).expect("float64 neg kernel must succeed");
+    let input_datum: &dyn Datum = input;
+    let zero_datum: &dyn Datum = &zero;
+    let negative = lt(input_datum, zero_datum).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
+    let negated = try_execute_neg_kernel(input).assured(
+        "arrow's neg kernel is defined for every float array, and this signature accepts nothing \
+         else",
+    );
     let negated = negated.as_ref();
-    let zipped = zip(&negative, &negated as &dyn Datum, &input as &dyn Datum)
-        .expect("float64 abs zip kernel must succeed");
-    let TypedArray::Float64(output) =
-        array_ref_to_typed_array(zipped).expect("float64 abs kernel must produce Float64 output")
-    else {
+    let negated_datum: &dyn Datum = &negated;
+    let zipped = zip(&negative, negated_datum, input_datum).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    );
+    let TypedArray::Float64(output) = array_ref_to_typed_array(zipped).verified(
+        "the kernel returns an array of the operand's own type, which this mapping covers",
+    ) else {
         unreachable!("float64 abs kernel must produce Float64Array");
     };
     sanitize_float64_non_finite(
@@ -2530,16 +2145,18 @@ fn execute_abs_f64(input: &Float64Array, row_errors: &mut RowErrors, span: Span)
 }
 
 fn execute_contains(string: &StringArray, substring: &StringArray) -> BooleanArray {
-    string_contains(string, substring).expect("utf8 contains kernel must succeed for Utf8 arrays")
+    string_contains(string, substring)
+        .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
 fn execute_starts_with(string: &StringArray, prefix: &StringArray) -> BooleanArray {
     string_starts_with(string, prefix)
-        .expect("utf8 starts_with kernel must succeed for Utf8 arrays")
+        .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
 fn execute_ends_with(string: &StringArray, suffix: &StringArray) -> BooleanArray {
-    string_ends_with(string, suffix).expect("utf8 ends_with kernel must succeed for Utf8 arrays")
+    string_ends_with(string, suffix)
+        .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
 fn execute_now(row_count: usize, now: Timestamp) -> TimestampNanosecondArray {
@@ -2583,7 +2200,7 @@ fn execute_ascii(input: &StringArray) -> Int64Array {
                 .value(row)
                 .chars()
                 .next()
-                .map(|ch| ch as i64)
+                .map(|ch| i64::from(u32::from(ch)))
                 .unwrap_or(0);
             builder.append_value(value);
         }
@@ -2634,8 +2251,8 @@ fn execute_initcap(input: &StringArray) -> StringArray {
 fn execute_is_null_typed(input: &TypedArray) -> BooleanArray {
     match input {
         TypedArray::Uninitialized { len, .. } => BooleanArray::from(vec![true; *len]),
-        _ => is_null(typed_array_as_array(input))
-            .expect("is_null kernel supports every materialized Arrow array"),
+        _ => is_null(input.as_array())
+            .assured("arrow's is_null kernel is defined for every array type"),
     }
 }
 
@@ -2683,15 +2300,15 @@ fn execute_unary_math_f64(
         };
     }
     match input {
-        TypedArray::UInt8(array) => execute!(array, |value| value as f64),
-        TypedArray::Int8(array) => execute!(array, |value| value as f64),
-        TypedArray::UInt16(array) => execute!(array, |value| value as f64),
-        TypedArray::Int16(array) => execute!(array, |value| value as f64),
-        TypedArray::UInt32(array) => execute!(array, |value| value as f64),
-        TypedArray::Int32(array) => execute!(array, |value| value as f64),
-        TypedArray::UInt64(array) => execute!(array, |value| value as f64),
-        TypedArray::Int64(array) => execute!(array, |value| value as f64),
-        TypedArray::Float32(array) => execute!(array, |value| value as f64),
+        TypedArray::UInt8(array) => execute!(array, f64::from),
+        TypedArray::Int8(array) => execute!(array, f64::from),
+        TypedArray::UInt16(array) => execute!(array, f64::from),
+        TypedArray::Int16(array) => execute!(array, f64::from),
+        TypedArray::UInt32(array) => execute!(array, f64::from),
+        TypedArray::Int32(array) => execute!(array, f64::from),
+        TypedArray::UInt64(array) => execute!(array, |value| value.approx_into()),
+        TypedArray::Int64(array) => execute!(array, |value| value.approx_into()),
+        TypedArray::Float32(array) => execute!(array, f64::from),
         TypedArray::Float64(array) => execute!(array, |value| value),
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
@@ -2981,7 +2598,7 @@ fn execute_concat(values: &[TypedArray]) -> Result<StringArray, RuntimeError> {
 fn execute_left(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
-        if input.is_null(row) || typed_array_is_null(count, row) {
+        if input.is_null(row) || count.is_null(row) {
             builder.append_null();
             continue;
         }
@@ -2994,7 +2611,7 @@ fn execute_left(input: &StringArray, count: &TypedArray) -> Result<StringArray, 
 fn execute_right(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
-        if input.is_null(row) || typed_array_is_null(count, row) {
+        if input.is_null(row) || count.is_null(row) {
             builder.append_null();
             continue;
         }
@@ -3007,12 +2624,13 @@ fn execute_right(input: &StringArray, count: &TypedArray) -> Result<StringArray,
 fn execute_repeat(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
     let mut builder = StringBuilder::new();
     for row in 0..input.len() {
-        if input.is_null(row) || typed_array_is_null(count, row) {
+        if input.is_null(row) || count.is_null(row) {
             builder.append_null();
             continue;
         }
         let count = integral_value_at(count, row)?.unwrap_or(0);
-        let repeat = usize::try_from(count.max(0)).unwrap_or(usize::MAX);
+        let repeat = usize::try_from(count.max(0))
+            .assured("a non-negative i64 fits usize on every supported host architecture");
         builder.append_value(input.value(row).repeat(repeat));
     }
     Ok(builder.finish())
@@ -3043,11 +2661,12 @@ fn execute_pad(
     let mut builder = string_builder_like(input);
     let mut result = String::new();
     for row in 0..input.len() {
-        if input.is_null(row) || typed_array_is_null(length, row) || fill.is_null(row) {
+        if input.is_null(row) || length.is_null(row) || fill.is_null(row) {
             builder.append_null();
             continue;
         }
-        let target_len = integral_value_at(length, row)?.unwrap_or(0).max(0) as usize;
+        let target_len = usize::try_from(integral_value_at(length, row)?.unwrap_or(0).max(0))
+            .assured("a non-negative i64 fits usize on every supported host architecture");
         let source = input.value(row);
         let fill = fill.value(row);
         let source_len = source.chars().count();
@@ -3065,10 +2684,13 @@ fn execute_pad(
         }
         let missing = target_len - source_len;
         result.clear();
+        // The reservation is only a hint: a requested pad width that cannot be sized in
+        // `usize` leaves the buffer to grow as the fill is written.
         result.reserve(
-            source
-                .len()
-                .saturating_add(missing.saturating_mul(fill.len())),
+            missing
+                .checked_mul(fill.len())
+                .and_then(|padding| source.len().checked_add(padding))
+                .unwrap_or(source.len()),
         );
         if pad_left {
             result.extend(fill.chars().cycle().take(missing));
@@ -3084,7 +2706,13 @@ fn execute_pad(
 
 fn execute_md5(input: &StringArray) -> StringArray {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut builder = StringBuilder::with_capacity(input.len(), input.len().saturating_mul(32));
+    let mut builder = StringBuilder::with_capacity(
+        input.len(),
+        input
+            .len()
+            .checked_mul(32)
+            .assured("a fixed width per row of a batch this node already holds in memory"),
+    );
     let mut digest_text = String::with_capacity(32);
     for row in 0..input.len() {
         if input.is_null(row) {
@@ -3192,7 +2820,10 @@ impl RegexCache {
         &self
             .entry
             .as_ref()
-            .expect("regex cache entry was just populated")
+            .verified(
+                "the branch above stores an entry whenever the cache does not already hold this \
+                 pattern",
+            )
             .1
     }
 }
@@ -3308,15 +2939,15 @@ fn execute_replace(input: &StringArray, from: &StringArray, to: &StringArray) ->
         for (start, matched) in value.match_indices(from) {
             builder
                 .write_str(&value[copied_until..start])
-                .expect("StringBuilder writes are infallible");
+                .assured("fmt::Write over an in-memory string buffer has no failure mode");
             builder
                 .write_str(to)
-                .expect("StringBuilder writes are infallible");
+                .assured("fmt::Write over an in-memory string buffer has no failure mode");
             copied_until = start + matched.len();
         }
         builder
             .write_str(&value[copied_until..])
-            .expect("StringBuilder writes are infallible");
+            .assured("fmt::Write over an in-memory string buffer has no failure mode");
         builder.append_value("");
     }
     builder.finish()
@@ -3344,7 +2975,7 @@ fn execute_split_part(
 ) -> Result<StringArray, RuntimeError> {
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
-        if input.is_null(row) || delimiter.is_null(row) || typed_array_is_null(index, row) {
+        if input.is_null(row) || delimiter.is_null(row) || index.is_null(row) {
             builder.append_null();
             continue;
         }
@@ -3361,7 +2992,10 @@ fn execute_split_part(
         }
         let value = string
             .split(delimiter)
-            .nth((index - 1) as usize)
+            .nth(
+                usize::try_from(index - 1)
+                    .assured("the index was checked to be a positive i64 above"),
+            )
             .unwrap_or("");
         builder.append_value(value);
     }
@@ -3376,7 +3010,9 @@ fn execute_strpos(input: &StringArray, needle: &StringArray) -> Int64Array {
             continue;
         }
         let value = if let Some(byte_idx) = input.value(row).find(needle.value(row)) {
-            (input.value(row)[..byte_idx].chars().count() as i64) + 1
+            i64::try_from(input.value(row)[..byte_idx].chars().count())
+                .assured("a string's character count cannot exceed its isize-bounded byte length")
+                + 1
         } else {
             0
         };
@@ -3393,8 +3029,8 @@ fn execute_substr(
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
         if input.is_null(row)
-            || typed_array_is_null(start, row)
-            || length.is_some_and(|value| typed_array_is_null(value, row))
+            || start.is_null(row)
+            || length.is_some_and(|value| value.is_null(row))
         {
             builder.append_null();
             continue;
@@ -3404,8 +3040,16 @@ fn execute_substr(
             Some(value) => Some(integral_value_at(value, row)?.unwrap_or(0)),
             None => None,
         };
-        let begin = usize::try_from(start.saturating_sub(1).max(0)).unwrap_or(usize::MAX);
-        let length = length.map(|value| usize::try_from(value.max(0)).unwrap_or(usize::MAX));
+        // SQL positions count from one, so a start at or before the first position begins at
+        // the start of the string.
+        let begin = start
+            .checked_sub(1)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .unwrap_or(0);
+        let length = length.map(|value| {
+            usize::try_from(value.max(0))
+                .assured("a non-negative i64 fits usize on every supported host architecture")
+        });
         builder.append_value(string_substr(input.value(row), begin, length));
     }
     Ok(builder.finish())
@@ -3417,25 +3061,25 @@ fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
             (!array.is_null(row)).then(|| u64::from(array.value(row)))
         }),
         TypedArray::Int8(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| u64::from(array.value(row) as u8))
+            (!array.is_null(row)).then(|| u64::from(array.value(row).cast_unsigned()))
         }),
         TypedArray::UInt16(array) => execute_to_hex_values(array.len(), |row| {
             (!array.is_null(row)).then(|| u64::from(array.value(row)))
         }),
         TypedArray::Int16(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| u64::from(array.value(row) as u16))
+            (!array.is_null(row)).then(|| u64::from(array.value(row).cast_unsigned()))
         }),
         TypedArray::UInt32(array) => execute_to_hex_values(array.len(), |row| {
             (!array.is_null(row)).then(|| u64::from(array.value(row)))
         }),
         TypedArray::Int32(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| u64::from(array.value(row) as u32))
+            (!array.is_null(row)).then(|| u64::from(array.value(row).cast_unsigned()))
         }),
         TypedArray::UInt64(array) => execute_to_hex_values(array.len(), |row| {
             (!array.is_null(row)).then(|| array.value(row))
         }),
         TypedArray::Int64(array) => execute_to_hex_values(array.len(), |row| {
-            (!array.is_null(row)).then(|| array.value(row) as u64)
+            (!array.is_null(row)).then(|| array.value(row).cast_unsigned())
         }),
         TypedArray::Float32(_)
         | TypedArray::Float64(_)
@@ -3459,7 +3103,12 @@ fn execute_to_hex_values(
     row_count: usize,
     mut value_at: impl FnMut(usize) -> Option<u64>,
 ) -> StringArray {
-    let mut builder = StringBuilder::with_capacity(row_count, row_count.saturating_mul(16));
+    let mut builder = StringBuilder::with_capacity(
+        row_count,
+        row_count
+            .checked_mul(16)
+            .assured("a fixed width per row of a batch this node already holds in memory"),
+    );
     let mut formatted = String::with_capacity(16);
     for row in 0..row_count {
         let Some(value) = value_at(row) else {
@@ -3468,7 +3117,7 @@ fn execute_to_hex_values(
         };
         formatted.clear();
         fmt::write(&mut formatted, format_args!("{value:x}"))
-            .expect("formatting hexadecimal into a String cannot fail");
+            .assured("fmt::Write over an in-memory string buffer has no failure mode");
         builder.append_value(&formatted);
     }
     builder.finish()
@@ -3527,15 +3176,21 @@ impl TranslateTable {
 
 fn numeric_value_as_f64(input: &TypedArray, row: usize) -> Result<Option<f64>, RuntimeError> {
     match input {
-        TypedArray::UInt8(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int8(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::UInt16(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int16(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::UInt32(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int32(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::UInt64(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Int64(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
-        TypedArray::Float32(array) => Ok((!array.is_null(row)).then(|| array.value(row) as f64)),
+        TypedArray::UInt8(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::Int8(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::UInt16(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::Int16(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::UInt32(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::Int32(array) => Ok((!array.is_null(row)).then(|| f64::from(array.value(row)))),
+        TypedArray::UInt64(array) => {
+            Ok((!array.is_null(row)).then(|| array.value(row).approx_into()))
+        }
+        TypedArray::Int64(array) => {
+            Ok((!array.is_null(row)).then(|| array.value(row).approx_into()))
+        }
+        TypedArray::Float32(array) => {
+            Ok((!array.is_null(row)).then(|| f64::from(array.value(row))))
+        }
         TypedArray::Float64(array) => Ok((!array.is_null(row)).then(|| array.value(row))),
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
@@ -3596,9 +3251,12 @@ fn string_substr(value: &str, start: usize, length: Option<usize>) -> &str {
 
 fn string_left(value: &str, count: i64) -> &str {
     if count >= 0 {
-        string_prefix(value, usize::try_from(count).unwrap_or(usize::MAX))
+        string_prefix(
+            value,
+            usize::try_from(count).assured("count is a non-negative i64 on this branch"),
+        )
     } else {
-        let remove = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
+        let remove = count.unsigned_abs().arch_into();
         if remove == 0 {
             return value;
         }
@@ -3613,7 +3271,7 @@ fn string_left(value: &str, count: i64) -> &str {
 
 fn string_right(value: &str, count: i64) -> &str {
     if count >= 0 {
-        let keep = usize::try_from(count).unwrap_or(usize::MAX);
+        let keep = usize::try_from(count).assured("count is a non-negative i64 on this branch");
         if keep == 0 {
             return &value[value.len()..];
         }
@@ -3624,7 +3282,7 @@ fn string_right(value: &str, count: i64) -> &str {
             .map_or(0, |(index, _)| index);
         &value[start..]
     } else {
-        let skip = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
+        let skip = count.unsigned_abs().arch_into();
         let start = value
             .char_indices()
             .nth(skip)
@@ -3663,12 +3321,8 @@ fn cast_typed_array(
         (TypedArray::Datetime(values), RegisterType::Boolean) => {
             new_null_array(&target.data_type(), values.len())
         }
-        _ => cast_with_options(
-            typed_array_as_array(&input),
-            &target.data_type(),
-            &cast_options,
-        )
-        .map_err(|error| arrow_kernel_error("cast kernel failed", error))?,
+        _ => cast_with_options(input.as_array(), &target.data_type(), &cast_options)
+            .map_err(|error| arrow_kernel_error("cast kernel failed", error))?,
     };
     let output = array_ref_to_typed_array(output)?;
     annotate_cast_failures(&input, &output, target, row_errors, span);
@@ -3679,13 +3333,18 @@ fn display_values_as_utf8<T>(len: usize, values: impl Iterator<Item = Option<T>>
 where
     T: fmt::Display,
 {
-    let mut builder = StringBuilder::with_capacity(len, len.saturating_mul(8));
+    let mut builder = StringBuilder::with_capacity(
+        len,
+        len.checked_mul(8)
+            .assured("a fixed width per row of a batch this node already holds in memory"),
+    );
     for value in values {
         let Some(value) = value else {
             builder.append_null();
             continue;
         };
-        write!(&mut builder, "{value}").expect("StringBuilder writes are infallible");
+        write!(&mut builder, "{value}")
+            .assured("fmt::Write over an in-memory string buffer has no failure mode");
         builder.append_value("");
     }
     builder.finish()
@@ -3693,11 +3352,11 @@ where
 
 fn parse_rfc3339_datetimes(input: &StringArray) -> TimestampNanosecondArray {
     TimestampNanosecondArray::from_iter(input.iter().map(|value| {
-        value.and_then(|value| {
-            DateTime::parse_from_rfc3339(value)
-                .ok()
-                .and_then(|value| value.timestamp_nanos_opt())
-        })
+        let value = value?;
+        let Ok(value) = DateTime::parse_from_rfc3339(value) else {
+            return None;
+        };
+        value.timestamp_nanos_opt()
     }))
     .with_timezone_utc()
 }
@@ -3709,8 +3368,8 @@ fn annotate_cast_failures(
     row_errors: &mut RowErrors,
     span: Span,
 ) {
-    let input = typed_array_as_array(input);
-    let output = typed_array_as_array(output);
+    let input = input.as_array();
+    let output = output.as_array();
     // Casts propagate every input null, so equal cached null counts prove that the kernel did not
     // introduce a failure without comparing the full validity buffers.
     if input.null_count() == output.null_count() {
@@ -3718,9 +3377,10 @@ fn annotate_cast_failures(
     }
 
     let input_nulls = input.nulls();
-    let output_nulls = output
-        .nulls()
-        .expect("a cast that introduced nulls must have an output null buffer");
+    let output_nulls = output.nulls().verified(
+        "a cast never removes nulls, so the unequal count checked above leaves the output with \
+         nulls and therefore a null buffer",
+    );
     let invalid_output = !output_nulls.inner();
     let failures = match input_nulls {
         Some(input_nulls) => input_nulls.inner() & &invalid_output,
@@ -3745,7 +3405,7 @@ fn filter_columns(
                 return Ok(TypedArray::uninitialized(data_type.clone(), selected_count));
             }
             let filtered = filter
-                .filter(typed_array_as_array(column))
+                .filter(column.as_array())
                 .map_err(|error| arrow_kernel_error("column filter kernel failed", error))?;
             array_ref_to_typed_array(filtered)
         })
@@ -3756,7 +3416,10 @@ fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
     predicate
         .iter()
         .enumerate()
-        .filter_map(|(index, value)| value.and_then(|keep| keep.then_some(index)))
+        .filter_map(|(index, value)| match value {
+            Some(true) => Some(index),
+            Some(false) | None => None,
+        })
         .collect()
 }
 
@@ -4257,7 +3920,7 @@ mod tests {
 
     #[test]
     fn executes_array_builtins() {
-        let values = StdArc::new(
+        let values: ArrayRef = StdArc::new(
             ListArray::from_iter_primitive::<Int64Type, _, _>([
                 Some(vec![Some(99)]),
                 Some(vec![Some(1), None, Some(3)]),
@@ -4267,7 +3930,7 @@ mod tests {
             ])
             .slice(1, 3),
         );
-        let fixed = StdArc::new(
+        let fixed: ArrayRef = StdArc::new(
             FixedSizeListArray::from_iter_primitive::<Int64Type, _, _>(
                 [
                     Some(vec![Some(98), Some(99)]),
@@ -4304,10 +3967,7 @@ mod tests {
         );
         let batch = TypedBatch::try_new(
             schema,
-            vec![
-                TypedArray::Generic(values as ArrayRef),
-                TypedArray::Generic(fixed as ArrayRef),
-            ],
+            vec![TypedArray::Generic(values), TypedArray::Generic(fixed)],
         )
         .expect("batch must build");
 

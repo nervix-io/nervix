@@ -1,4 +1,5 @@
 [package]
+description = "Roto host for Nervix user-defined functions, injected into the expression VM"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-roto"
@@ -9,12 +10,15 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true }
+arch-into = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
 fastrand = { workspace = true }
+meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 nervix-vm = { workspace = true }

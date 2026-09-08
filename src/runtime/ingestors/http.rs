@@ -1,18 +1,33 @@
+use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 
 use super::super::*;
 
 pub(in crate::runtime) struct HttpIngestor;
 
+/// The headers of one borrowed HTTP response, skipping values that are not UTF-8.
+struct HttpResponseHeaders<'a>(&'a reqwest::header::HeaderMap);
+
+impl IngestMessageHeaders for HttpResponseHeaders<'_> {
+    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
+        for (name, value) in self.0 {
+            if let Ok(value) = value.to_str() {
+                visit(name.as_str(), value);
+            }
+        }
+    }
+}
+
 impl HttpIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         client: CreateClientHttp,
         ingestor: CreateIngestor,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -76,14 +91,16 @@ impl HttpIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled HTTP ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events.clone();
+        let task_events = runtime.events().clone();
         let task_client_mounts = resolved_client.mounts.clone();
         let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
@@ -106,7 +123,7 @@ impl HttpIngestor {
                 {
                     break;
                 }
-                if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
                     continue;
                 }
                 if let Some(payload) = task_quiesce.pop_buffered(0) {
@@ -127,13 +144,13 @@ impl HttpIngestor {
                         })
                         .await
                     {
-                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                        task_events.report_error(format!(
                             "failed to dispatch buffered http payload for ingestor '{}' in domain \
                              '{}': {}",
                             task_ingestor.as_str(),
                             task_domain.as_str(),
                             error
-                        )));
+                        ));
                     }
                     continue;
                 }
@@ -162,12 +179,12 @@ impl HttpIngestor {
                                         &task_ingestor,
                                         format!("http source returned status {status}"),
                                     );
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "http ingestor '{}' in domain '{}' received unexpected status {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         status
-                                    )));
+                                    ));
                                     warn!(
                                         domain = task_domain.as_str(),
                                         ingestor = task_ingestor.as_str(),
@@ -177,7 +194,9 @@ impl HttpIngestor {
                                     continue;
                                 }
 
-                                let headers = Self::headers_from_response(&response);
+                                let headers = RetainedIngestHeaders::capture(
+                                    &HttpResponseHeaders(response.headers()),
+                                );
                                 match response.bytes().await {
                                     Ok(payload) => {
                                         task_runtime.clear_ingestor_transient_error(
@@ -210,12 +229,12 @@ impl HttpIngestor {
                                                 })
                                                 .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                task_events.report_error(format!(
                                                     "failed to dispatch http payload for ingestor '{}' in domain '{}': {}",
                                                     task_ingestor.as_str(),
                                                     task_domain.as_str(),
                                                     error
-                                                )));
+                                                ));
                                             }
                                         }
                                     }
@@ -225,12 +244,12 @@ impl HttpIngestor {
                                             &task_ingestor,
                                             format!("http response body read failed: {error}"),
                                         );
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        task_events.report_error(format!(
                                             "failed to read http response body for ingestor '{}' in domain '{}': {}",
                                             task_ingestor.as_str(),
                                             task_domain.as_str(),
                                             error
-                                        )));
+                                        ));
                                         warn!(
                                             domain = task_domain.as_str(),
                                             ingestor = task_ingestor.as_str(),
@@ -246,12 +265,12 @@ impl HttpIngestor {
                                     &task_ingestor,
                                     format!("http request failed: {error}"),
                                 );
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to request http source for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                                 warn!(
                                     domain = task_domain.as_str(),
                                     ingestor = task_ingestor.as_str(),
@@ -271,7 +290,7 @@ impl HttpIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -288,19 +307,6 @@ impl HttpIngestor {
         client: &CreateClientHttp,
     ) -> Result<String, String> {
         Self::endpoint_from_config(&client.config)
-    }
-
-    fn headers_from_response(response: &reqwest::Response) -> IngestHeaders {
-        response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.as_str().to_string(), value.to_string()))
-            })
-            .collect()
     }
 
     fn endpoint_from_config(config: &[nervix_models::ClientConfigEntry]) -> Result<String, String> {

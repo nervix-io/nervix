@@ -121,6 +121,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Runs before the build: the counts are a text scan, so a change that raises one is named in
+      # seconds rather than after the toolchain has warmed up.
+      - name: Debt ratchet
+        run: just ratchet
+
       - name: Configure kache daemon remote
         env:
           KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}

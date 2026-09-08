@@ -6,6 +6,7 @@ use std::{
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{DataType, Field, Schema};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_nspl::vm_program::{
     BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
     Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
@@ -1200,7 +1201,7 @@ impl Compiler {
                 self.expr_may_be_null(
                     else_result
                         .as_ref()
-                        .expect("checked CASE ELSE presence above"),
+                        .verified("the branch above returned for the absent case"),
                 )
             }
         }
@@ -1476,7 +1477,9 @@ impl Compiler {
                 let left_reg = self.compile_expr(left)?;
                 let right_reg = self.compile_expr(right)?;
                 let output_type = RegisterType::from_data_type(&self.infer_expr_type(expr)?)
-                    .expect("validated expression type must be supported");
+                    .verified(
+                        "type inference above rejected every data type that has no register type",
+                    );
                 let dst = self.alloc_temp(output_type);
                 self.emit(
                     InstructionKind::Binary {
@@ -1494,8 +1497,9 @@ impl Compiler {
                 data_type,
             } => {
                 let input = self.compile_expr(inner)?;
-                let target = RegisterType::from_data_type(data_type)
-                    .expect("validated cast target must be supported");
+                let target = RegisterType::from_data_type(data_type).verified(
+                    "type inference above rejected every data type that has no register type",
+                );
                 let dst = self.alloc_temp(target);
                 self.emit(InstructionKind::Cast { dst, input, target }, expr.span);
                 Ok(dst)
@@ -1511,10 +1515,9 @@ impl Compiler {
                         .iter()
                         .map(|arg| self.compile_expr(arg))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let dst = self.alloc_temp(
-                        RegisterType::from_data_type(&output_type)
-                            .expect("validated injected output type must be supported"),
-                    );
+                    let dst = self.alloc_temp(RegisterType::from_data_type(&output_type).verified(
+                        "type inference above rejected every data type that has no register type",
+                    ));
                     self.emit(
                         InstructionKind::Inject {
                             dst,
@@ -1532,10 +1535,9 @@ impl Compiler {
                         args,
                         expr.span,
                     )?;
-                    let dst = self.alloc_temp(
-                        RegisterType::from_data_type(&output_type)
-                            .expect("validated aggregate output type must be supported"),
-                    );
+                    let dst = self.alloc_temp(RegisterType::from_data_type(&output_type).verified(
+                        "type inference above rejected every data type that has no register type",
+                    ));
                     self.emit(
                         InstructionKind::Inject {
                             dst,
@@ -1553,10 +1555,9 @@ impl Compiler {
                         .iter()
                         .map(|argument| self.compile_expr(argument))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let dst = self.alloc_temp(
-                        RegisterType::from_data_type(&output_type)
-                            .expect("validated UDF output type must be supported"),
-                    );
+                    let dst = self.alloc_temp(RegisterType::from_data_type(&output_type).verified(
+                        "type inference above rejected every data type that has no register type",
+                    ));
                     self.emit(
                         InstructionKind::Inject {
                             dst,
@@ -1606,12 +1607,16 @@ impl Compiler {
         for branch in branches {
             let known_match = if operand.is_some() {
                 if let Some(operand) = &folded_operand {
-                    fold_constant_expr(&branch.when)?
-                        .and_then(|when| fold_binary_expr(BinaryOp::Eq, operand.clone(), when))
-                        .and_then(|value| match value {
+                    if let Some(when) = fold_constant_expr(&branch.when)?
+                        && let Some(value) = fold_binary_expr(BinaryOp::Eq, operand.clone(), when)
+                    {
+                        match value {
                             FoldedValue::NonNull(ScalarValue::Boolean(value)) => Some(value),
                             FoldedValue::NonNull(_) | FoldedValue::Null(_) => None,
-                        })
+                        }
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -1619,10 +1624,10 @@ impl Compiler {
                 match &branch.when.inner {
                     Expr::Literal(Literal::Bool(value)) => Some(*value),
                     Expr::Literal(Literal::Null) => Some(false),
-                    _ => fold_constant_expr(&branch.when)?.and_then(|value| match value {
-                        FoldedValue::NonNull(ScalarValue::Boolean(value)) => Some(value),
-                        FoldedValue::NonNull(_) | FoldedValue::Null(_) => None,
-                    }),
+                    _ => match fold_constant_expr(&branch.when)? {
+                        Some(FoldedValue::NonNull(ScalarValue::Boolean(value))) => Some(value),
+                        Some(FoldedValue::NonNull(_) | FoldedValue::Null(_)) | None => None,
+                    },
                 }
             };
             match known_match {
@@ -1715,7 +1720,8 @@ impl Compiler {
                 );
                 Ok(dst)
             } else {
-                compiler.compile_expr(result.expect("checked CASE result presence above"))
+                compiler
+                    .compile_expr(result.verified("the branch above returned for the absent case"))
             }
         })
     }
@@ -1762,7 +1768,7 @@ impl Compiler {
             .collect::<Result<Vec<_>, _>>()?;
         let output_type = builtin_signature(function, &arg_types, span)?;
         let output_type = RegisterType::from_data_type(&output_type)
-            .expect("validated builtin output type must be supported");
+            .verified("type inference above rejected every data type that has no register type");
         let compiled_args = args
             .iter()
             .map(|arg| self.compile_expr(arg))
@@ -2444,10 +2450,19 @@ pub fn compile_program_for_bindings_with_sensitivity(
     )
 }
 
+/// One field a program's `SET` list writes, as inferred without compiling the program: the field
+/// the assignment targets and the type that assignment produces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InferredSetField {
+    pub field: String,
+    pub data_type: DataType,
+    pub nullable: bool,
+}
+
 pub fn infer_set_expr_types_for_bindings(
     program: &SpannedNode<Program>,
     bindings: impl IntoIterator<Item = CompileBinding>,
-) -> Result<Vec<(String, DataType, bool)>, CompileError> {
+) -> Result<Vec<InferredSetField>, CompileError> {
     infer_set_expr_types_for_bindings_with_udfs(program, bindings, UdfSignatures::default())
 }
 
@@ -2455,7 +2470,7 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
     program: &SpannedNode<Program>,
     bindings: impl IntoIterator<Item = CompileBinding>,
     udf_signatures: UdfSignatures,
-) -> Result<Vec<(String, DataType, bool)>, CompileError> {
+) -> Result<Vec<InferredSetField>, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, _input_schema) = Compiler::new(&bindings)?;
     compiler.udf_signatures = udf_signatures;
@@ -2479,14 +2494,18 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
                 value: ColumnValue::Unsupported,
             },
         );
-        if let Some((_, output_type, output_nullable)) = output
+        if let Some(existing) = output
             .iter_mut()
-            .find(|(field, _, _)| field == &field_ref.field)
+            .find(|inferred: &&mut InferredSetField| inferred.field == field_ref.field)
         {
-            *output_type = data_type;
-            *output_nullable = nullable;
+            existing.data_type = data_type;
+            existing.nullable = nullable;
         } else {
-            output.push((field_ref.field.clone(), data_type, nullable));
+            output.push(InferredSetField {
+                field: field_ref.field.clone(),
+                data_type,
+                nullable,
+            });
         }
     }
     Ok(output)
@@ -2550,7 +2569,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
     for (field_ref, expr) in &program.inner.set {
         let field = output_schema
             .field_with_name(&field_ref.field)
-            .expect("SET target was validated against the output schema");
+            .verified("the SET targets were validated against this same output schema above");
         let field_sensitive = output_sensitivity.is_sensitive(field.name());
         compiler.validate_assignment_expr(
             field.name(),
@@ -2626,7 +2645,9 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         .writable_namespaces
         .iter()
         .next()
-        .expect("compiler requires one writable namespace")
+        .verified(
+            "the compiler is constructed with exactly one writable namespace for a SET program",
+        )
         .clone();
     let mut outputs = Vec::with_capacity(output_schema.fields().len());
     for (output_index, field) in output_schema.fields().iter().enumerate() {
@@ -2636,7 +2657,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                 relay: output_namespace.clone(),
                 field: field.name().clone(),
             }))
-            .expect("output fields were installed in SET scope")
+            .verified("every output-schema field was installed as a column in the SET scope above")
             .clone();
         if binding.data_type != *field.data_type() {
             return Err(CompileError {
@@ -2956,9 +2977,10 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
 
         for input in &inputs {
             if input.space == RegisterSpace::Temp {
-                let physical_index = *active
-                    .get(input)
-                    .expect("temp register must be assigned before it is read");
+                let physical_index = *active.get(input).verified(
+                    "instructions are walked in order, so a temp input was written by an earlier \
+                     instruction",
+                );
                 rewrite_temp_input(instruction, *input, physical_index);
                 if last_uses.get(input) == Some(&inst_idx) {
                     if Some(*input) == logical_error_mask {
@@ -2971,9 +2993,9 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
         }
 
         for dead in dead_inputs {
-            let physical_index = active
-                .remove(&dead)
-                .expect("dead temp register must still be active");
+            let physical_index = active.remove(&dead).verified(
+                "a register is only recorded as dead while it is active, and it is released once",
+            );
             free.release(dead.ty, physical_index);
         }
 
@@ -2985,9 +3007,9 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
         }
 
         for dead in deferred_dead_inputs {
-            let physical_index = active
-                .remove(&dead)
-                .expect("dead error-mask temp register must still be active");
+            let physical_index = active.remove(&dead).verified(
+                "a register is only recorded as dead while it is active, and it is released once",
+            );
             free.release(dead.ty, physical_index);
         }
     }
@@ -3169,6 +3191,7 @@ mod tests {
         Expr, FieldRef, InternalFieldNamespace, InternalFieldRef, Program, SpannedNode,
         parse_program,
     };
+    use rstest::{fixture, rstest};
 
     use super::*;
 
@@ -3190,6 +3213,11 @@ mod tests {
 
     fn sensitivity(fields: &[&str]) -> SchemaSensitivity {
         SchemaSensitivity::from_sensitive_fields(fields.iter().copied())
+    }
+
+    #[fixture]
+    fn sensitive_string_input_schema() -> Arc<Schema> {
+        schema(vec![Field::new("secret", DataType::Utf8, true)])
     }
 
     fn with_output_fields(input_schema: &Arc<Schema>, fields: Vec<Field>) -> Arc<Schema> {
@@ -3573,23 +3601,83 @@ mod tests {
         assert!(compiled.output_schema.field_with_name("total").is_ok());
     }
 
-    #[test]
-    fn rejects_sensitive_field_assignment_to_non_sensitive_output() {
-        let program =
-            parse_program("SET input.public_value = lower(input.secret);").expect("must parse");
-        let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
-        let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
+    #[derive(Clone, Copy)]
+    enum SensitivityExpectation {
+        Accepted,
+        Rejected,
+    }
 
-        let error = compile_program_with_sensitive_output(
+    #[rstest]
+    #[case::rejects_derived_sensitive_value_in_normal_output(
+        "SET input.public_value = lower(input.secret);",
+        "public_value",
+        false,
+        false,
+        SensitivityExpectation::Rejected
+    )]
+    #[case::accepts_sensitive_value_in_sensitive_output(
+        "SET input.copy = input.secret;",
+        "copy",
+        true,
+        false,
+        SensitivityExpectation::Accepted
+    )]
+    #[case::accepts_explicit_sensitive_leak(
+        "SET input.public_value = leak_sensitive(input.secret);",
+        "public_value",
+        false,
+        false,
+        SensitivityExpectation::Accepted
+    )]
+    #[case::accepts_sensitive_external_output(
+        "SET input.public_value = input.secret;",
+        "public_value",
+        false,
+        true,
+        SensitivityExpectation::Accepted
+    )]
+    fn validates_assignment_sensitivity_policy(
+        sensitive_string_input_schema: Arc<Schema>,
+        #[case] source: &str,
+        #[case] output_field: &str,
+        #[case] output_sensitive: bool,
+        #[case] allow_sensitive_output: bool,
+        #[case] expected: SensitivityExpectation,
+    ) {
+        let program = parse_program(source)
+            .unwrap_or_else(|error| panic!("sensitivity case must parse: {error:#?}"));
+        let output_schema = schema(vec![Field::new(output_field, DataType::Utf8, true)]);
+        let output_sensitivity = if output_sensitive {
+            sensitivity(&[output_field])
+        } else {
+            SchemaSensitivity::default()
+        };
+        let result = compile_program_with_options_for_bindings_with_sensitivity(
             &program,
-            input_schema,
-            sensitivity(&["secret"]),
             output_schema,
-            SchemaSensitivity::default(),
-        )
-        .expect_err("sensitive expression must not flow into normal output");
+            output_sensitivity,
+            [
+                CompileBinding::writable("input", sensitive_string_input_schema)
+                    .with_sensitivity(sensitivity(&["secret"])),
+            ],
+            CompileOptions {
+                allow_sensitive_output,
+                ..CompileOptions::default()
+            },
+        );
 
-        assert_eq!(error.code, "sensitive_leak");
+        match (expected, result) {
+            (SensitivityExpectation::Accepted, Ok(_)) => {}
+            (SensitivityExpectation::Rejected, Err(error)) => {
+                assert_eq!(error.code, "sensitive_leak");
+            }
+            (SensitivityExpectation::Accepted, Err(error)) => {
+                panic!("sensitivity case should compile: {error:#}");
+            }
+            (SensitivityExpectation::Rejected, Ok(_)) => {
+                panic!("sensitivity case should reject an implicit downgrade");
+            }
+        }
     }
 
     #[test]
@@ -3615,54 +3703,6 @@ mod tests {
         .expect_err("automatic sensitive passthrough into normal output must fail");
 
         assert_eq!(error.code, "sensitive_leak");
-    }
-
-    #[test]
-    fn allows_sensitive_output_when_compile_option_permits_external_output() {
-        let program = parse_program("SET input.public_value = input.secret;").expect("must parse");
-        let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
-        let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
-
-        compile_program_with_options_for_bindings_with_sensitivity(
-            &program,
-            output_schema,
-            SchemaSensitivity::default(),
-            [CompileBinding::writable("input", input_schema)
-                .with_sensitivity(sensitivity(&["secret"]))],
-            CompileOptions {
-                allow_sensitive_output: true,
-                ..CompileOptions::default()
-            },
-        )
-        .expect("emitter-style external output may receive sensitive values");
-    }
-
-    #[test]
-    fn allows_sensitive_output_and_explicit_leak_sensitive_downgrade() {
-        let sensitive_program =
-            parse_program("SET input.copy = input.secret;").expect("must parse");
-        let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
-        let output_schema = schema(vec![Field::new("copy", DataType::Utf8, true)]);
-        compile_program_with_sensitive_output(
-            &sensitive_program,
-            input_schema.clone(),
-            sensitivity(&["secret"]),
-            output_schema,
-            sensitivity(&["copy"]),
-        )
-        .expect("sensitive value may flow into sensitive output");
-
-        let leak_program = parse_program("SET input.public_value = leak_sensitive(input.secret);")
-            .expect("must parse");
-        let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
-        compile_program_with_sensitive_output(
-            &leak_program,
-            input_schema,
-            sensitivity(&["secret"]),
-            output_schema,
-            SchemaSensitivity::default(),
-        )
-        .expect("leak_sensitive explicitly removes sensitivity");
     }
 
     #[test]

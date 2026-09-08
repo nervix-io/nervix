@@ -1,3 +1,4 @@
+use nervix_models::TableName;
 use postgres_types::ToSql;
 use tokio_postgres::{Client as PostgresClient, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -101,7 +102,7 @@ impl PostgresEmitter {
         ) {
             Ok(program) => Some(program),
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(error.to_string()));
+                context.runtime.events().report_error(error.to_string());
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),
@@ -175,7 +176,7 @@ impl PostgresEmitter {
 
     async fn column_types(
         client: &PostgresClient,
-        table: &Identifier,
+        table: &TableName,
         columns: &[String],
     ) -> Result<Vec<String>, PostgresWriteError> {
         let table_name = table.as_str().to_string();
@@ -212,7 +213,7 @@ impl PostgresEmitter {
 
     async fn publish_rows_with_types(
         client: &PostgresClient,
-        table: &Identifier,
+        table: &TableName,
         mappings: &[PostgresValueMapping],
         conflict_action: &PostgresConflictAction,
         column_types: &[String],
@@ -240,7 +241,7 @@ impl PostgresEmitter {
         }
         let params = column_values
             .iter()
-            .map(|values| values as &(dyn ToSql + Sync))
+            .map(|values| -> &(dyn ToSql + Sync) { values })
             .collect::<Vec<_>>();
         let param_refs = (1..=columns.len())
             .map(|index| format!("${index}::text[]"))
@@ -333,7 +334,7 @@ impl PostgresEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[PostgresValueMapping],
         conflict_action: &PostgresConflictAction,
         batch: &RelayRecordBatch,
@@ -410,7 +411,10 @@ impl PostgresEmitter {
             {
                 Ok(_) => {
                     for row in chunk {
-                        outcome.deliver((batch_index, *row));
+                        outcome.deliver(BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        });
                     }
                 }
                 Err(error) if error.is_record_error() && chunk.len() > 1 => {
@@ -443,10 +447,17 @@ impl PostgresEmitter {
                         )
                         .await
                         {
-                            Ok(_) => outcome.deliver((batch_index, *row)),
-                            Err(error) if error.is_record_error() => {
-                                outcome.reject((batch_index, *row), error.record_reason())
-                            }
+                            Ok(_) => outcome.deliver(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            }),
+                            Err(error) if error.is_record_error() => outcome.reject(
+                                BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                },
+                                error.record_reason(),
+                            ),
                             Err(error) => {
                                 outcome.fail(error.into_report());
                                 return outcome;
@@ -456,7 +467,13 @@ impl PostgresEmitter {
                 }
                 Err(error) if error.is_record_error() => {
                     if let Some(row) = chunk.first() {
-                        outcome.reject((batch_index, *row), error.record_reason());
+                        outcome.reject(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.record_reason(),
+                        );
                     }
                 }
                 Err(error) => {
@@ -481,15 +498,19 @@ impl PostgresEmitter {
         indices
             .iter()
             .map(|row| {
-                rows.get(*row)
-                    .and_then(|values| values.as_ref().ok())
-                    .map(Vec::as_slice)
-                    .ok_or_else(|| {
-                        PostgresWriteError::InvalidValues(format!(
-                            "pending row {row} has no mapped VALUES in batch with {} rows",
-                            rows.len()
-                        ))
-                    })
+                let Some(values) = rows.get(*row) else {
+                    return Err(PostgresWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                let Ok(values) = values else {
+                    return Err(PostgresWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                Ok(values.as_slice())
             })
             .collect()
     }

@@ -7,7 +7,7 @@ use std::{
 };
 
 use nervix_expiry_map::ExpiryMap;
-use nervix_models::{Expression, Identifier, Timestamp};
+use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use ordered_float::OrderedFloat;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -16,6 +16,7 @@ use triomphe::Arc;
 use super::{
     PersistedRuntimeStateEntry, ReorderKeyPart, RuntimePersistenceError, RuntimeStatePlacement,
     UdfExecutor, checked_add_duration_to_timestamp, compile_key_projection_program,
+    lsm_sequence::LsmSequence,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -38,7 +39,7 @@ pub(super) struct CompiledDeduplicatorKeyProgram {
 pub(super) struct ReplicatedDeduplicatorState {
     pub(super) placement: RuntimeStatePlacement,
     recent_keys: parking_lot::Mutex<ExpiryMap<DeduplicatorKey, Timestamp>>,
-    pub(super) current_lsm: AtomicU64,
+    pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
 }
@@ -113,8 +114,8 @@ impl From<DeduplicatorKeySnapshot> for DeduplicatorKey {
 }
 
 pub(super) fn compile_deduplicator_key_program(
-    processor: &Identifier,
-    input_relays: &[Identifier],
+    processor: &ModelName,
+    input_relays: &[RelayName],
     deduplicate_on: &[Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
@@ -171,7 +172,7 @@ impl ReplicatedDeduplicatorState {
         Ok(Self {
             placement,
             recent_keys: parking_lot::Mutex::new(recent_keys),
-            current_lsm: AtomicU64::new(current_lsm),
+            current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
         })
@@ -188,7 +189,7 @@ impl ReplicatedDeduplicatorState {
         if !recent_keys.insert(key, seen_at) {
             return false;
         }
-        self.current_lsm.fetch_add(1, Ordering::SeqCst);
+        self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         true
     }
@@ -201,7 +202,7 @@ impl ReplicatedDeduplicatorState {
         for key in keys {
             recent_keys.remove(key);
         }
-        self.current_lsm.fetch_add(1, Ordering::SeqCst);
+        self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
     }
 
@@ -210,7 +211,7 @@ impl ReplicatedDeduplicatorState {
     ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
         let recent_keys = self.recent_keys.lock();
         Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.load(Ordering::SeqCst),
+            lsm: self.current_lsm.current(),
             schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_deduplicator_snapshot(&recent_keys)?,
         })

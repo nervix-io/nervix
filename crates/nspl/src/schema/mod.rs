@@ -1,4 +1,7 @@
+use std::num::NonZeroU32;
+
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AvroType,
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
@@ -6,7 +9,7 @@ use nervix_models::{
     WireSchemaField, WireSchemaStrictness,
 };
 
-pub use crate::parser_support::{Diagnostic, ParseFromSourceError};
+pub use crate::parser_support::{Diagnostic, LexedInput, ParseFromSourceError};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
@@ -71,17 +74,23 @@ pub(crate) fn nervix_type<'src>()
             kw(Identifier::F64).to(ParseAsType::F64),
         );
 
+        // The label goes on the number itself, not on the checked parser: labelling the check
+        // would rewrite the messages below into a bare expectation and lose the explanation.
         let array_len = select! { Token::NumberLiteral(raw) => raw }
+            .labelled("array_length")
             .try_map(|raw, span| {
-                let len = raw
-                    .parse::<u32>()
-                    .map_err(|_| Rich::custom(span, "array length must be an unsigned integer"))?;
-                if len == 0 {
-                    return Err(Rich::custom(span, "array length must be greater than zero"));
+                let len = raw.parse::<NonZeroU32>().map_err(|_| {
+                    Rich::custom(span, "array length must be a positive unsigned integer")
+                })?;
+                // An array field becomes an Arrow fixed-size list, whose length is an i32.
+                if i32::try_from(len.get()).is_err() {
+                    return Err(Rich::custom(
+                        span,
+                        "array length must not exceed 2147483647",
+                    ));
                 }
                 Ok(len)
-            })
-            .labelled("array_length");
+            });
 
         let array = kw(Identifier::Array).ignore_then(
             ty.clone()
@@ -440,7 +449,7 @@ pub fn parse_create_wire_schema_tokens(tokens: &[Token]) -> Result<Statement, Ve
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -451,7 +460,7 @@ pub fn parse_alter_schema_tokens(tokens: &[Token]) -> Result<AlterSchema, Vec<Pa
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -464,7 +473,7 @@ pub fn parse_alter_wire_schema_tokens(tokens: &[Token]) -> Result<Statement, Vec
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -477,12 +486,16 @@ pub fn parse_create_schema_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_wire_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -490,19 +503,31 @@ pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourc
 pub fn parse_create_schema(
     input: &str,
 ) -> Result<CreateStatement<CreateSchema>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_schema(input: &str) -> Result<AlterSchema, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_wire_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -525,6 +550,8 @@ pub fn suggest_alter_wire_schema(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -623,7 +650,7 @@ mod tests {
             parsed.fields[0].ty,
             ParseAsType::Array {
                 element: Box::new(ParseAsType::F32),
-                len: 64
+                len: nonzero!(64u32)
             }
         );
         assert_eq!(
@@ -649,9 +676,9 @@ mod tests {
         assert_eq!(
             parsed.fields[0].ty,
             ParseAsType::Array {
-                len: 2,
+                len: nonzero!(2u32),
                 element: Box::new(ParseAsType::Array {
-                    len: 3,
+                    len: nonzero!(3u32),
                     element: Box::new(ParseAsType::F32),
                 }),
             }
@@ -660,7 +687,7 @@ mod tests {
             parsed.fields[1].ty,
             ParseAsType::Vec {
                 element: Box::new(ParseAsType::Array {
-                    len: 4,
+                    len: nonzero!(4u32),
                     element: Box::new(ParseAsType::F32),
                 }),
             }
@@ -668,7 +695,7 @@ mod tests {
         assert_eq!(
             parsed.fields[2].ty,
             ParseAsType::Array {
-                len: 2,
+                len: nonzero!(2u32),
                 element: Box::new(ParseAsType::Vec {
                     element: Box::new(ParseAsType::I64),
                 }),
@@ -732,7 +759,7 @@ mod tests {
                 parsed.fields[index * 2].ty,
                 ParseAsType::Array {
                     element: Box::new(element.clone()),
-                    len: 2
+                    len: nonzero!(2u32)
                 }
             );
             assert_eq!(
@@ -753,6 +780,18 @@ mod tests {
     #[test]
     fn rejects_zero_length_in_any_multidimensional_array_axis() {
         let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 2, 0>);";
+        assert!(parse_create_schema(input).is_err());
+    }
+
+    #[test]
+    fn parses_largest_array_length_an_arrow_fixed_size_list_holds() {
+        let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 2147483647>);";
+        assert!(parse_create_schema(input).is_ok());
+    }
+
+    #[test]
+    fn rejects_array_length_beyond_an_arrow_fixed_size_list() {
+        let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 2147483648>);";
         assert!(parse_create_schema(input).is_err());
     }
 

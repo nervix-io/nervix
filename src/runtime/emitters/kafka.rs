@@ -1,4 +1,5 @@
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},
@@ -49,7 +50,7 @@ impl KafkaEmitter {
 
     pub(super) async fn publish(
         &self,
-        topic: &Identifier,
+        topic: &TopicName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -69,7 +70,7 @@ impl KafkaEmitter {
                 confirmation.acks.ack_alive();
             }
             record.acks.ack_alive();
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let confirmation = match Self::enqueue(producer, topic, &record) {
                 Ok(confirmation) => confirmation,
                 Err(error) if Self::is_record_rejection(&error) => {
@@ -86,17 +87,17 @@ impl KafkaEmitter {
                     drop(confirmation);
                     outcome.deliver(position);
                 }
-                BrokerPublishingMode::Ack {
+                BrokerPublishingMode::Ack(AckConfirmation {
                     max_in_flight,
                     timeout,
-                } => {
+                }) => {
                     pending.push_back(PendingKafkaConfirmation {
                         position,
                         acks: record.acks,
                         deadline: Instant::now() + timeout,
                         confirmation,
                     });
-                    if pending.len() >= max_in_flight
+                    if pending.len() >= max_in_flight.get()
                         && let Err(error) =
                             Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
                     {
@@ -109,7 +110,7 @@ impl KafkaEmitter {
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
             let timeout = match self.mode {
-                BrokerPublishingMode::Ack { timeout, .. } => timeout,
+                BrokerPublishingMode::Ack(confirmation) => confirmation.timeout,
                 BrokerPublishingMode::NoAck => unreachable!("NO_ACK has no confirmations"),
             };
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
@@ -122,7 +123,7 @@ impl KafkaEmitter {
 
     fn enqueue(
         producer: &FutureProducer,
-        topic: &Identifier,
+        topic: &TopicName,
         message: &EncodedBrokerRecord,
     ) -> Result<DeliveryFuture, KafkaError> {
         let mut record =
@@ -221,9 +222,10 @@ impl KafkaEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready Kafka confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Ok(_delivery)) => outcome.deliver(confirmation.position),
                 Ok(Err((source, _message))) if Self::is_record_rejection(&source) => outcome

@@ -6,6 +6,7 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_models::QueueName;
 
 use super::*;
 
@@ -25,7 +26,7 @@ impl RabbitMqEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientRabbitMq,
         resolved: Option<&ResolvedClientConfig>,
-        queue: &Identifier,
+        queue: &QueueName,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
         let channel = Self::channel_from_config(
@@ -143,7 +144,7 @@ impl RabbitMqEmitter {
 
     pub(super) async fn publish_records(
         &self,
-        queue: &Identifier,
+        queue: &QueueName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -164,7 +165,7 @@ impl RabbitMqEmitter {
                     .map(|confirmation| confirmation.acks.clone())
                     .chain(std::iter::once(record.acks.clone())),
             );
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let confirmation = match await_emitter_confirmation(
                 &enqueue_acks,
                 Self::publish_message(channel, queue.as_str(), &record.payload, &record.headers),
@@ -203,17 +204,17 @@ impl RabbitMqEmitter {
                         }
                     }
                 }
-                BrokerPublishingMode::Ack {
+                BrokerPublishingMode::Ack(AckConfirmation {
                     max_in_flight,
                     timeout,
-                } => {
+                }) => {
                     pending.push_back(PendingRabbitMqConfirmation {
                         position,
                         acks: record.acks,
                         deadline: Instant::now() + timeout,
                         confirmation,
                     });
-                    if pending.len() >= max_in_flight
+                    if pending.len() >= max_in_flight.get()
                         && let Err(error) =
                             Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
                     {
@@ -226,7 +227,7 @@ impl RabbitMqEmitter {
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
             let timeout = match self.mode {
-                BrokerPublishingMode::Ack { timeout, .. } => timeout,
+                BrokerPublishingMode::Ack(confirmation) => confirmation.timeout,
                 BrokerPublishingMode::NoAck => unreachable!("NO_ACK has no confirmations"),
             };
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
@@ -328,9 +329,10 @@ impl RabbitMqEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready RabbitMQ confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Confirmation::Ack(None)) => outcome.deliver(confirmation.position),
                 Ok(Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)))

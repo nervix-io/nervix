@@ -1,3 +1,5 @@
+use nervix_models::DomainName;
+
 use super::*;
 
 pub(in crate::runtime) mod endpoint;
@@ -33,7 +35,7 @@ pub(in crate::runtime) struct IngestorStarter;
 impl IngestorStarter {
     pub(in crate::runtime) async fn start_scheduled(
         runtime: &Runtime,
-        domain: &Domain,
+        domain: &DomainName,
         source_model: Model,
         ingestor: CreateIngestor,
         kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
