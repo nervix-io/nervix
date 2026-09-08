@@ -1,0 +1,21 @@
+[package]
+description = "Bounded execution and transient-memory admission for a Nervix node: worker classes, byte budgets and cancellation"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-execution"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arch-into = { workspace = true }
+meticulous = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+triomphe = { workspace = true }
+ubyte = { workspace = true }
+
+[dev-dependencies]
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
