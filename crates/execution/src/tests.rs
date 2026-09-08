@@ -35,6 +35,40 @@ fn small_executor() -> Executor {
     .expect("the default budgets hold the default operation limits")
 }
 
+/// One ordered consensus worker with a wait queue deep enough to hold every job a test submits
+/// before the first one is allowed to finish. `small_executor` deliberately allows one waiter, so
+/// it cannot express a queue.
+fn queued_executor(pending_jobs: usize) -> Executor {
+    Executor::new(ExecutionConfig {
+        workers: WorkerCounts {
+            pending_jobs: NonZeroUsize::new(pending_jobs).expect("a test queue holds at least one"),
+            ..WorkerCounts {
+                control_cpu: one(),
+                data_cpu: one(),
+                bulk_cpu: one(),
+                consensus_storage: one(),
+                filesystem_storage: one(),
+                pending_jobs: one(),
+            }
+        },
+        budgets: MemoryBudgets::default(),
+        limits: OperationLimits::default(),
+    })
+    .expect("the default budgets hold the default operation limits")
+}
+
+/// Spin until `reached` holds, failing with `whose` rather than hanging the suite when it never
+/// does.
+async fn wait_for(whose: &str, mut reached: impl FnMut() -> bool) {
+    for _ in 0..100_000 {
+        if reached() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("{whose} never happened");
+}
+
 #[test]
 fn default_limits_validate_together() {
     let executor = Executor::new(ExecutionConfig::default()).expect("defaults are consistent");
@@ -345,7 +379,7 @@ async fn a_full_wait_queue_is_typed_backpressure_rather_than_unbounded_growth() 
 
 #[tokio::test]
 async fn consensus_storage_runs_its_jobs_in_admission_order() {
-    let executor = small_executor();
+    let executor = queued_executor(16);
     let order = StdArc::new(parking_lot::Mutex::new(Vec::new()));
     // Submit every job before any of them can finish, so the single ordered worker is what decides
     // the order rather than the caller awaiting them one at a time.
@@ -370,12 +404,14 @@ async fn consensus_storage_runs_its_jobs_in_admission_order() {
                 })
                 .await
         }));
-        // Admission is taken in submission order, so let each spawn reach the semaphore first.
-        while executor.snapshot().consensus_storage.admitted
-            < u64::try_from(index).expect("a small index fits") + 1
-        {
-            tokio::task::yield_now().await;
-        }
+        // Admission is taken in submission order, so let each spawn reach the semaphore before the
+        // next one is submitted.
+        let submitted_so_far = u64::try_from(index).expect("a small index fits") + 1;
+        let admitted = executor.clone();
+        wait_for(&format!("job {index} reaching consensus admission"), || {
+            admitted.snapshot().consensus_storage.admitted >= submitted_so_far
+        })
+        .await;
     }
 
     release.send(()).expect("the first job is still parked");
