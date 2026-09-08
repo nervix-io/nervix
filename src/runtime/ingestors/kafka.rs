@@ -36,7 +36,7 @@ impl KafkaIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
         plan: KafkaIngestorStartPlan,
-        kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+        kafka_offset_state: Option<KafkaOffsetStateOriginator>,
     ) -> Result<(), RuntimeError> {
         let KafkaIngestorStartPlan {
             ingestor,
@@ -1354,7 +1354,7 @@ impl KafkaIngestor {
     pub(in crate::runtime) fn resume_offsets_from_state(
         consumer: &StreamConsumer,
         topic: &str,
-        state: &ReplicatedKafkaOffsetState,
+        state: &KafkaOffsetStateRead,
         missing_partition_timestamp: Option<Timestamp>,
     ) -> Result<HashMap<KafkaTopicPartition, Offset>, String> {
         let mut offsets = HashMap::default();

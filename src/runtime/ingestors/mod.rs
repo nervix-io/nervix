@@ -49,7 +49,9 @@ impl IngestorStarter {
                                 .inner
                                 .replicated_kafka_offset_states
                                 .get(&planned.placement)
-                                .map(|state| state.value().clone())
+                                .and_then(|state| {
+                                    ReplicatedKafkaOffsetState::current_originator(state.value())
+                                })
                         })
                         .flatten()
                 });
