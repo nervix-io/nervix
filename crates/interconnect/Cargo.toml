@@ -13,6 +13,7 @@ ahash = { workspace = true }
 arch-into = { workspace = true }
 dashmap = { workspace = true }
 ed25519-dalek = { workspace = true }
+error-stack = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }

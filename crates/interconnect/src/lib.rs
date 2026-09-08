@@ -8,9 +8,8 @@
 //! - **Must not know.** Why a message is sent. It has no view of domains, graphs, schedules or the
 //!   runtime.
 //!
-//! This crate breaks its own contract: it names one request and one response type per cross-node
-//! query, and leaves correlation, timeout and cancellation to each caller instead of owning them
-//! once behind a single typed request primitive.
+//! The remaining hand-written control request pairs still break this contract and migrate to the
+//! typed request primitive by attrition.
 
 use std::{
     hash::RandomState,
@@ -51,6 +50,14 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, warn};
 use triomphe::Arc;
+
+mod request;
+
+pub use request::{
+    HandlerRegistrationError, InterconnectRequest, RemoteRequestFailure, RequestContext,
+    RequestError,
+};
+use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEND_QUEUE_CAPACITY: usize = 1024;
@@ -151,8 +158,8 @@ pub enum ControlEnvelope {
     StateSyncRequest(StateSyncRequest),
     StateSyncResponse(StateSyncResponse),
     StateReplicationAck(StateReplicationAck),
-    DescribeIngestorRequest(DescribeIngestorRequest),
-    DescribeIngestorResponse(DescribeIngestorResponse),
+    Request(RequestEnvelope),
+    Response(ResponseEnvelope),
     DataflowNodeStatusRequest(DataflowNodeStatusRequest),
     DataflowNodeStatusResponse(DataflowNodeStatusResponse),
     DomainDrainStatusRequest(DomainDrainStatusRequest),
@@ -468,15 +475,8 @@ pub struct DescribeMetricsEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeIngestorRequest {
-    pub correlation_id: u64,
     pub domain: DomainName,
     pub name: IngestorName,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DescribeIngestorResponse {
-    pub correlation_id: u64,
-    pub result: Result<IngestorDescribeEnvelope, String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -573,7 +573,8 @@ struct TransportInner {
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
     outbound: DashMap<ConnectionKey, ConnectionHandle, RandomState>,
     outbound_state: DashMap<ConnectionKey, ConnectionState, RandomState>,
-    connected_peers: DashMap<ClusterNodeName, usize, RandomState>,
+    connected_peers: DashMap<ClusterNodeName, Vec<ConnectionHandle>, RandomState>,
+    requests: RequestState,
     outbound_permits: StdArc<Semaphore>,
     shutdown: CancellationToken,
     tasks: TaskTracker,
@@ -758,6 +759,7 @@ impl Transport {
             outbound: DashMap::default(),
             outbound_state: DashMap::default(),
             connected_peers: DashMap::default(),
+            requests: RequestState::default(),
             outbound_permits: StdArc::new(Semaphore::new(options.max_connections)),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
@@ -848,14 +850,15 @@ impl Transport {
     }
 
     pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
-        match self.inner.connected_peers.get(node_id) {
-            Some(count) => *count > 0,
-            None => false,
-        }
+        self.inner
+            .connected_peers
+            .get(node_id)
+            .is_some_and(|connections| !connections.is_empty())
     }
 
     pub async fn shutdown(&self) {
         self.inner.shutdown.cancel();
+        self.inner.requests.shutdown();
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
         self.inner.outbound.clear();
@@ -1102,7 +1105,7 @@ async fn run_connection_loop(
                 .outbound_state
                 .insert(outbound_key.clone(), ConnectionState::Connected);
         }
-        register_connected_peer(&inner, &peer_node_id);
+        register_connected_peer(&inner, &peer_node_id, &reply_handle);
 
         let result = async {
             loop {
@@ -1123,6 +1126,20 @@ async fn run_connection_loop(
                             }
                             WireEnvelope::Payload(envelope) => {
                                 last_ping_at = Instant::now();
+                                let envelope = match envelope {
+                                    Envelope::Control(control) => {
+                                        let Some(control) = inner.requests.route_control(
+                                            &inner,
+                                            &peer_node_id,
+                                            &reply_handle,
+                                            control,
+                                        ) else {
+                                            continue;
+                                        };
+                                        Envelope::Control(control)
+                                    }
+                                    envelope => envelope,
+                                };
                                 inner
                                     .incoming_tx
                                     .send(ReceivedEnvelope {
@@ -1161,7 +1178,7 @@ async fn run_connection_loop(
             }
         }
         .await;
-        unregister_connected_peer(&inner, &peer_node_id);
+        unregister_connected_peer(&inner, &peer_node_id, &reply_handle);
         result
     }
     .await;
@@ -1171,24 +1188,33 @@ async fn run_connection_loop(
     result
 }
 
-fn register_connected_peer(inner: &TransportInner, peer_node_id: &ClusterNodeName) {
+fn register_connected_peer(
+    inner: &TransportInner,
+    peer_node_id: &ClusterNodeName,
+    connection: &ConnectionHandle,
+) {
     inner
         .connected_peers
         .entry(peer_node_id.clone())
-        .and_modify(|count| *count += 1)
-        .or_insert(1);
+        .and_modify(|connections| connections.push(connection.clone()))
+        .or_insert_with(|| vec![connection.clone()]);
+    inner.requests.connection_changed();
 }
 
-fn unregister_connected_peer(inner: &TransportInner, peer_node_id: &ClusterNodeName) {
-    let Some(mut count) = inner.connected_peers.get_mut(peer_node_id) else {
+fn unregister_connected_peer(
+    inner: &TransportInner,
+    peer_node_id: &ClusterNodeName,
+    connection: &ConnectionHandle,
+) {
+    let Some(mut connections) = inner.connected_peers.get_mut(peer_node_id) else {
         return;
     };
-    if *count <= 1 {
-        drop(count);
-        inner.connected_peers.remove(peer_node_id);
-    } else {
-        *count -= 1;
-    }
+    connections.retain(|candidate| !candidate.tx.same_channel(&connection.tx));
+    drop(connections);
+    inner
+        .connected_peers
+        .remove_if(peer_node_id, |_, connections| connections.is_empty());
+    inner.requests.connection_changed();
 }
 
 fn configure_socket(stream: &TcpStream) -> io::Result<()> {
@@ -1976,11 +2002,12 @@ fn map_pem_error(err: PemError) -> TlsConfigError {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind, path::PathBuf, process::Command};
+    use std::{collections::BTreeSet, io::ErrorKind, path::PathBuf, process::Command};
 
     use ahash::HashMap;
+    use error_stack::Report;
     use nervix_models::{DomainName, RelayName};
-    use tokio::time::timeout;
+    use tokio::{sync::Notify, time::timeout};
 
     use super::*;
 
@@ -2050,6 +2077,241 @@ mod tests {
             acks: vec![None],
             admission: None,
         }
+    }
+
+    fn dummy_ingestor_describe(metrics: Vec<String>) -> IngestorDescribeEnvelope {
+        IngestorDescribeEnvelope {
+            running: true,
+            ready: true,
+            quiesce_state: None,
+            quiesce_buffered_records: 0,
+            quiesce_buffered_bytes: 0,
+            quiesce_dropped_total: 0,
+            quiesce_rejected_total: 0,
+            memory_backpressure_paused: false,
+            transient_error: None,
+            reconnect_backoff: None,
+            reconnect_wait_millis: None,
+            kafka_domain_offsets: None,
+            metrics,
+        }
+    }
+
+    struct HangingRequest;
+
+    impl InterconnectRequest for HangingRequest {
+        type Response = ();
+
+        const NAME: &'static str = "hanging_test_request";
+        const TIMEOUT: Duration = Duration::from_millis(100);
+
+        fn encode_request(&self) -> Result<Vec<u8>, Report<RequestError>> {
+            Ok(Vec::new())
+        }
+
+        fn decode_request(payload: &[u8]) -> Result<Self, Report<RequestError>> {
+            if payload.is_empty() {
+                Ok(Self)
+            } else {
+                Err(Report::new(RequestError::Decode {
+                    request: Self::NAME,
+                }))
+            }
+        }
+
+        fn encode_response(_response: &Self::Response) -> Result<Vec<u8>, Report<RequestError>> {
+            Ok(Vec::new())
+        }
+
+        fn decode_response(payload: &[u8]) -> Result<Self::Response, Report<RequestError>> {
+            if payload.is_empty() {
+                Ok(())
+            } else {
+                Err(Report::new(RequestError::Decode {
+                    request: Self::NAME,
+                }))
+            }
+        }
+    }
+
+    async fn connected_plain_transports() -> (Transport, Transport, ClusterNodeName, ClusterNodeName)
+    {
+        let node_a = ClusterNodeName::parse("node-a").expect("valid name");
+        let node_b = ClusterNodeName::parse("node-b").expect("valid name");
+        let identity_a = test_identity(&node_a);
+        let identity_b = test_identity(&node_b);
+        let (transport_a, _incoming_a) = Transport::bind(
+            "127.0.0.1:0".parse().expect("valid address"),
+            TransportMode::Plain,
+            None,
+            identity_a.clone(),
+            verifier_for(&[&identity_b]),
+            TransportOptions::default(),
+        )
+        .await
+        .expect("bind transport a");
+        let (transport_b, _incoming_b) = Transport::bind(
+            "127.0.0.1:0".parse().expect("valid address"),
+            TransportMode::Plain,
+            None,
+            identity_b.clone(),
+            verifier_for(&[&identity_a]),
+            TransportOptions::default(),
+        )
+        .await
+        .expect("bind transport b");
+
+        transport_a
+            .connection_for(transport_b.local_addr(), "localhost", TransportMode::Plain)
+            .await
+            .expect("connect transports");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if transport_a.is_connected_to(&node_b) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("transport should authenticate the peer");
+        let live_nodes = BTreeSet::from([node_a.clone(), node_b.clone()]);
+        transport_a.replace_live_nodes(&live_nodes);
+        transport_b.replace_live_nodes(&live_nodes);
+
+        (transport_a, transport_b, node_a, node_b)
+    }
+
+    #[tokio::test]
+    async fn typed_request_roundtrips_through_registered_handler() {
+        let (transport_a, transport_b, _node_a, node_b) = connected_plain_transports().await;
+        transport_b
+            .register_handler::<DescribeIngestorRequest, _, _>(|_context, request| async move {
+                Ok(dummy_ingestor_describe(vec![format!(
+                    "{}:{}",
+                    request.domain, request.name
+                )]))
+            })
+            .expect("register describe ingestor handler");
+
+        let response = transport_a
+            .request(
+                &node_b,
+                DescribeIngestorRequest {
+                    domain: DomainName::parse("analytics").expect("valid domain"),
+                    name: IngestorName::parse("orders").expect("valid ingestor name"),
+                },
+            )
+            .await
+            .expect("typed request should complete")
+            .expect("describe handler should succeed");
+
+        assert_eq!(response.metrics, vec!["analytics:orders"]);
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn typed_request_classifies_timeout() {
+        let (transport_a, transport_b, _node_a, node_b) = connected_plain_transports().await;
+        transport_b
+            .register_handler::<HangingRequest, _, _>(|_context, _request| async move {
+                std::future::pending().await
+            })
+            .expect("register hanging handler");
+
+        let error = transport_a
+            .request(&node_b, HangingRequest)
+            .await
+            .expect_err("request should time out");
+
+        assert!(matches!(
+            error.current_context(),
+            RequestError::Timeout { node, request, .. }
+                if node == &node_b && request == &HangingRequest::NAME
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn typed_request_is_cancelled_when_transport_shuts_down() {
+        let (transport_a, transport_b, _node_a, node_b) = connected_plain_transports().await;
+        let handled = Arc::new(Notify::new());
+        transport_b
+            .register_handler::<HangingRequest, _, _>({
+                let handled = handled.clone();
+                move |_context, _request| {
+                    let handled = handled.clone();
+                    async move {
+                        handled.notify_one();
+                        std::future::pending().await
+                    }
+                }
+            })
+            .expect("register hanging handler");
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+        timeout(Duration::from_secs(5), handled.notified())
+            .await
+            .expect("handler should receive the request");
+
+        transport_a.shutdown().await;
+        let error = request
+            .await
+            .expect("request task should join")
+            .expect_err("request should be cancelled");
+
+        assert!(matches!(
+            error.current_context(),
+            RequestError::ShuttingDown { node, request }
+                if node == &node_b && request == &HangingRequest::NAME
+        ));
+
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn typed_request_is_cancelled_when_target_leaves() {
+        let (transport_a, transport_b, node_a, node_b) = connected_plain_transports().await;
+        let handled = Arc::new(Notify::new());
+        transport_b
+            .register_handler::<HangingRequest, _, _>({
+                let handled = handled.clone();
+                move |_context, _request| {
+                    let handled = handled.clone();
+                    async move {
+                        handled.notify_one();
+                        std::future::pending().await
+                    }
+                }
+            })
+            .expect("register hanging handler");
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+        timeout(Duration::from_secs(5), handled.notified())
+            .await
+            .expect("handler should receive the request");
+
+        transport_a.replace_live_nodes(&BTreeSet::from([node_a]));
+        let error = request
+            .await
+            .expect("request task should join")
+            .expect_err("request should be cancelled");
+
+        assert!(matches!(
+            error.current_context(),
+            RequestError::TargetLeft { node, request }
+                if node == &node_b && request == &HangingRequest::NAME
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
     }
 
     #[test]
@@ -2489,6 +2751,7 @@ mod tests {
             outbound: DashMap::default(),
             outbound_state: DashMap::default(),
             connected_peers: DashMap::default(),
+            requests: RequestState::default(),
             outbound_permits: StdArc::new(Semaphore::new(1)),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
@@ -2625,6 +2888,7 @@ mod tests {
             outbound: DashMap::default(),
             outbound_state: DashMap::default(),
             connected_peers: DashMap::default(),
+            requests: RequestState::default(),
             outbound_permits: StdArc::new(Semaphore::new(1)),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),

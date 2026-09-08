@@ -90,7 +90,6 @@ use nervix_interconnect::{
     DataflowNodeStatusRequest as RemoteDataflowNodeStatusRequest,
     DataflowNodeStatusResponse as RemoteDataflowNodeStatusResponse,
     DescribeIngestorRequest as RemoteDescribeIngestorRequest,
-    DescribeIngestorResponse as RemoteDescribeIngestorResponse,
     DescribeLookupRequest as RemoteDescribeLookupRequest,
     DescribeLookupResponse as RemoteDescribeLookupResponse,
     DescribeMetricsEnvelope as RemoteDescribeMetricsEnvelope,
@@ -196,8 +195,6 @@ use crate::registry::{
 };
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
-const REMOTE_DESCRIBE_INGESTOR_TIMEOUT: Duration = Duration::from_secs(10);
-const REMOTE_DESCRIBE_INGESTOR_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const SUBSCRIPTION_INTEREST_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(5);
 const SUBSCRIPTION_INTEREST_CHECK_TIMEOUT: Duration = Duration::from_millis(250);
 const RUNTIME_REVISION_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -3091,7 +3088,6 @@ type PendingClusterCommands = DashMap<u64, PendingClusterCommand, RandomState>;
 
 enum PendingClusterCommand {
     DescribeRelay(oneshot::Sender<Result<bool, String>>),
-    DescribeIngestor(oneshot::Sender<Result<IngestorDescribeEnvelope, String>>),
     DataflowNodeStatus(oneshot::Sender<Result<DataflowNodeStatusEnvelope, String>>),
     DomainDrainStatus(oneshot::Sender<Result<DomainDrainStatusEnvelope, String>>),
     EntityGate(oneshot::Sender<Result<(), String>>),
@@ -3624,6 +3620,8 @@ pub enum AppError {
     LoadWebConsoleTls,
     #[error("failed to start interconnect transport")]
     StartInterconnect,
+    #[error("failed to register an interconnect request handler")]
+    RegisterInterconnectRequestHandler,
     #[error("failed to start cluster membership")]
     StartCluster,
     #[error("failed to stop cluster membership")]
@@ -6005,47 +6003,21 @@ impl SessionServiceImpl {
                     )
                 })
         } else if let Some(owner) = ingestor_node.execution_node() {
-            let correlation_id = self.next_cluster_command_correlation_id();
-            let (tx, mut rx) = oneshot::channel();
-            self.inner
-                .pending_cluster_commands
-                .insert(correlation_id, PendingClusterCommand::DescribeIngestor(tx));
-            let deadline = tokio::time::Instant::now() + REMOTE_DESCRIBE_INGESTOR_TIMEOUT;
-            loop {
-                tokio::task::consume_budget().await;
-                let dispatch_result = self
-                    .dispatch_interconnect_control(
-                        owner,
-                        ControlEnvelope::DescribeIngestorRequest(RemoteDescribeIngestorRequest {
-                            correlation_id,
-                            domain: domain.clone(),
-                            name: describe.ingestor.clone(),
-                        }),
-                    )
-                    .await;
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                let retry_after = remaining.min(REMOTE_DESCRIBE_INGESTOR_RETRY_INTERVAL);
-                match tokio::time::timeout(retry_after, &mut rx).await {
-                    Ok(Ok(Ok(summary))) => {
-                        break Ok(runtime_ingestor_describe_from_envelope(summary));
-                    }
-                    Ok(Ok(Err(message))) => break Err(message),
-                    Ok(Err(_)) => {
-                        break Err("describe ingestor response channel closed".to_string());
-                    }
-                    Err(_) if tokio::time::Instant::now() < deadline => {}
-                    Err(_) => {
-                        self.inner.pending_cluster_commands.remove(&correlation_id);
-                        let error = match dispatch_result {
-                            Err(error) => error,
-                            Ok(()) => format!(
-                                "timed out waiting for DESCRIBE INGESTOR response from '{}'",
-                                owner
-                            ),
-                        };
-                        break Err(error);
-                    }
-                }
+            match self
+                .inner
+                .interconnect
+                .request(
+                    owner,
+                    RemoteDescribeIngestorRequest {
+                        domain: domain.clone(),
+                        name: describe.ingestor.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(Ok(summary)) => Ok(runtime_ingestor_describe_from_envelope(summary)),
+                Ok(Err(message)) => Err(message),
+                Err(error) => Err(error.to_string()),
             }
         } else {
             Ok((
@@ -6080,33 +6052,6 @@ impl SessionServiceImpl {
                 metrics,
             )),
             Err(message) => command_error(message),
-        }
-    }
-
-    async fn handle_describe_ingestor_request(
-        &self,
-        request: RemoteDescribeIngestorRequest,
-    ) -> Result<IngestorDescribeEnvelope, String> {
-        self.prepare_owner_control_request(&request.domain, ModelKind::Ingestor, &request.name)
-            .await?;
-        let summary = self
-            .inner
-            .runtime
-            .describe_local_ingestor(&request.domain, &request.name)?;
-        let metrics =
-            self.inner
-                .runtime
-                .describe_metrics_for(&request.domain, "INGESTOR", &request.name);
-        Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
-    }
-
-    fn handle_describe_ingestor_response(&self, response: RemoteDescribeIngestorResponse) {
-        if let Some((_, PendingClusterCommand::DescribeIngestor(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            let _ = sender.send(response.result);
         }
     }
 
@@ -18728,6 +18673,7 @@ impl Application {
                     .iter()
                     .map(|node| node.node_id.clone())
                     .collect::<std::collections::BTreeSet<_>>();
+                interconnect_for_membership.replace_live_nodes(&live_node_ids);
                 {
                     let mut keys = peer_keys_for_interconnect.write();
                     keys.retain(|node_id, _| {
@@ -18929,6 +18875,31 @@ impl Application {
                 transaction_commit_execution: AsyncMutex::new(()),
             }),
         };
+        let describe_ingestor_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDescribeIngestorRequest, _, _>(move |_context, request| {
+                let service = describe_ingestor_service.clone();
+                async move {
+                    service
+                        .prepare_owner_control_request(
+                            &request.domain,
+                            ModelKind::Ingestor,
+                            &request.name,
+                        )
+                        .await?;
+                    let summary = service
+                        .inner
+                        .runtime
+                        .describe_local_ingestor(&request.domain, &request.name)?;
+                    let metrics = service.inner.runtime.describe_metrics_for(
+                        &request.domain,
+                        "INGESTOR",
+                        &request.name,
+                    );
+                    Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let transaction_service = service.clone();
         let transaction_shutdown = shutdown.clone();
@@ -19169,6 +19140,11 @@ impl Application {
                                 runtime_for_interconnect.handle_remote_ack_resolution(ack);
                             }
                             Envelope::Control(ControlEnvelope::Terminate) => {}
+                            Envelope::Control(
+                                ControlEnvelope::Request(_) | ControlEnvelope::Response(_),
+                            ) => {
+                                unreachable!("typed requests are consumed by the interconnect")
+                            }
                             Envelope::Control(ControlEnvelope::DomainClockStart(start)) => {
                                 service_for_interconnect.handle_domain_clock_start(start);
                             }
@@ -19265,32 +19241,6 @@ impl Application {
                             }
                             Envelope::Control(ControlEnvelope::DescribeRelayResponse(response)) => {
                                 service_for_interconnect.handle_describe_stream_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeIngestorRequest(request)) => {
-                                let request_service = service_for_interconnect.clone();
-                                let peer_node_id = message.peer_node_id.clone();
-                                service_for_interconnect.inner.service_tasks.spawn(async move {
-                                    let result = request_service
-                                        .handle_describe_ingestor_request(request.clone())
-                                        .await;
-                                    if let Err(error) = request_service
-                                        .dispatch_interconnect_control(
-                                            &peer_node_id,
-                                            ControlEnvelope::DescribeIngestorResponse(
-                                            RemoteDescribeIngestorResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        warn!(error = %error, "failed to send DESCRIBE INGESTOR response");
-                                    }
-                                });
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeIngestorResponse(response)) => {
-                                service_for_interconnect.handle_describe_ingestor_response(response);
                             }
                             Envelope::Control(ControlEnvelope::DataflowNodeStatusRequest(request)) => {
                                 let result = service_for_interconnect
