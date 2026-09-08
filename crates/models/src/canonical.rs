@@ -5081,7 +5081,7 @@ mod tests {
             .to_string();
         let udf = CreateUdf::new(
             named("redact"),
-            UdfLanguage::Roto0_11,
+            UdfLanguage::Roto0_13,
             vec![UdfArgument {
                 name: named("value"),
                 ty: ParseAsType::String,
