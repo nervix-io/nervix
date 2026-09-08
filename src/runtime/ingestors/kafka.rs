@@ -337,7 +337,11 @@ impl KafkaIngestor {
                     {
                         break;
                     }
-                    if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
+                    if task_runtime
+                        .inner
+                        .fault_injection
+                        .ingestor_is_failed(&task_ingestor)
+                    {
                         continue;
                     }
                     if task_quiesce.should_suspend_intake() {

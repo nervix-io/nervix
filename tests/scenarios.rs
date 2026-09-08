@@ -51,11 +51,9 @@ use mysql_async::{
 };
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{Client, TransactionState as ClientTransactionState};
-#[cfg(feature = "testing")]
-use nervix_server::SchedulerMode;
 use nervix_server::{
-    application::InternalTransportMode, memory_pressure::MemoryPressureConfig,
-    runtime::RuntimeTestHooks,
+    FaultInjection, SchedulerMode, application::InternalTransportMode,
+    memory_pressure::MemoryPressureConfig,
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs};
 use nervix_wasm::{
@@ -139,7 +137,7 @@ struct ScenarioWorld {
     mqtt_ingestors_by_domain: BTreeMap<String, BTreeSet<String>>,
     avro_http_field_order: Vec<String>,
     avro_http_optional_fields: BTreeSet<String>,
-    runtime_test_hooks: RuntimeTestHooks,
+    fault_injection: FaultInjection,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
@@ -2019,7 +2017,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     ));
     match Cluster::start_with_config(
         node_count,
-        world.runtime_test_hooks.clone(),
+        world.fault_injection.clone(),
         world.cluster_config.clone(),
     )
     .await
@@ -2180,8 +2178,9 @@ async fn given_schema_change_drain_timeout_is_configured(
         world.cluster.is_none(),
         "schema change drain timeout must be configured before cluster startup"
     );
-    world.runtime_test_hooks.domain_drain_timeout =
-        Some(humantime::parse_duration(&timeout).expect("schema drain timeout must be valid"));
+    world.fault_injection.set_domain_drain_timeout(
+        humantime::parse_duration(&timeout).expect("schema drain timeout must be valid"),
+    );
 }
 
 #[given(expr = "entity gate deadline is configured as {string}")]
@@ -2190,8 +2189,9 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
         world.cluster.is_none(),
         "entity gate deadline must be configured before cluster startup"
     );
-    world.runtime_test_hooks.entity_gate_deadline =
-        Some(humantime::parse_duration(&timeout).expect("entity gate deadline must be valid"));
+    world.fault_injection.set_entity_gate_deadline(
+        humantime::parse_duration(&timeout).expect("entity gate deadline must be valid"),
+    );
 }
 
 #[given("graceful shutdown drain is enabled")]
@@ -2247,10 +2247,11 @@ async fn given_branched_relay_expiration_scan_interval_is_configured(
         "expiration must be configured before cluster startup"
     );
     world
-        .runtime_test_hooks
-        .branch_instance_expiration_scan_interval = Some(
-        humantime::parse_duration(&scan_interval).expect("scan interval must be a valid duration"),
-    );
+        .fault_injection
+        .set_branch_instance_expiration_scan_interval(
+            humantime::parse_duration(&scan_interval)
+                .expect("scan interval must be a valid duration"),
+        );
 }
 
 #[given(expr = "node {string} has resource directory {string} containing")]
@@ -3047,7 +3048,7 @@ async fn when_leadership_is_transferred_from_node_to_node(
 async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
     world
-        .runtime_test_hooks
+        .fault_injection
         .drop_transaction_bindings_on(crate::common::cluster::node_name(&leader));
 }
 
@@ -3055,14 +3056,14 @@ async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
 async fn given_command_admission_pause(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     world
-        .runtime_test_hooks
+        .fault_injection
         .pause_command_admission_on(crate::common::cluster::node_name(&node_id));
 }
 
 #[then(expr = "the command admission pause on node {string} is reached")]
 async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
-    let hooks = world.runtime_test_hooks.clone();
+    let fault_injection = world.fault_injection.clone();
     let task = world
         .background_command_result
         .as_mut()
@@ -3070,7 +3071,7 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
     tokio::time::timeout(Duration::from_secs(30), async {
         let node_name = crate::common::cluster::node_name(&node_id);
         tokio::select! {
-            () = hooks.wait_for_command_admission_pause(&node_name) => {},
+            () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
             result = task => panic!(
                 "command on '{node_id}' returned before reaching its admission pause: {result:?}"
             ),
@@ -3086,7 +3087,7 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
 async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     world
-        .runtime_test_hooks
+        .fault_injection
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
@@ -3097,7 +3098,7 @@ async fn given_transaction_commit_pause(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    world.runtime_test_hooks.pause_transaction_commit_after(
+    world.fault_injection.pause_transaction_commit_after(
         crate::common::cluster::node_name(&node_id),
         completed_statements,
     );
@@ -3106,7 +3107,7 @@ async fn given_transaction_commit_pause(
 #[given(expr = "the entity gate for domain {string} pauses after engagement")]
 async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    world.runtime_test_hooks.pause_entity_gate(domain);
+    world.fault_injection.pause_entity_gate(domain);
 }
 
 /// How long a gated cluster operation is given to engage its entity gates.
@@ -3120,13 +3121,13 @@ const ENTITY_GATE_PAUSE_TIMEOUT: Duration = Duration::from_secs(30);
 #[then(expr = "the entity gate pause for domain {string} is reached")]
 async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    let hooks = world.runtime_test_hooks.clone();
+    let fault_injection = world.fault_injection.clone();
     let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
         if tokio::time::timeout(
             Duration::from_millis(50),
-            hooks.wait_for_entity_gate_pause(&domain),
+            fault_injection.wait_for_entity_gate_pause(&domain),
         )
         .await
         .is_ok()
@@ -3160,7 +3161,7 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
 #[when(expr = "the entity gate pause for domain {string} is released")]
 async fn when_entity_gate_pause_is_released(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    world.runtime_test_hooks.release_entity_gate_pause(&domain);
+    world.fault_injection.release_entity_gate_pause(&domain);
 }
 
 #[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]
@@ -3172,7 +3173,7 @@ async fn then_transaction_commit_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     tokio::time::timeout(
         Duration::from_secs(10),
-        world.runtime_test_hooks.wait_for_transaction_commit_pause(
+        world.fault_injection.wait_for_transaction_commit_pause(
             &crate::common::cluster::node_name(&node_id),
             completed_statements,
         ),
@@ -3188,7 +3189,7 @@ async fn when_transaction_commit_pause_is_released(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    world.runtime_test_hooks.release_transaction_commit_pause(
+    world.fault_injection.release_transaction_commit_pause(
         &crate::common::cluster::node_name(&node_id),
         completed_statements,
     );

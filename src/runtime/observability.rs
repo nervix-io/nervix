@@ -335,8 +335,8 @@ impl Runtime {
                 }
             } else if self
                 .inner
-                .ingestor_faults
-                .is_failed(&IngestorName::from(&identifier))
+                .fault_injection
+                .ingestor_is_failed(&IngestorName::from(&identifier))
             {
                 Some("ingestor fault injector failed source".to_string())
             } else {
@@ -355,9 +355,12 @@ impl Runtime {
                 }
             } else if self
                 .inner
-                .emitter_faults
-                .fault_mode(&EmitterName::from(&identifier))
-                .is_some()
+                .fault_injection
+                .emitter_should_fail(&EmitterName::from(&identifier))
+                || self
+                    .inner
+                    .fault_injection
+                    .emitter_should_stall(&EmitterName::from(&identifier))
             {
                 Some("emitter fault injector failed publish".to_string())
             } else {
@@ -747,9 +750,8 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should reopen");
-        let runtime =
-            Runtime::with_persistence(Some(db), Duration::from_millis(100), Default::default())
-                .expect("runtime should open persisted state");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_millis(100))
+            .expect("runtime should open persisted state");
         runtime.inner.metrics.register_global_node(
             &domain,
             ModelKind::Ingestor,
@@ -808,9 +810,8 @@ mod tests {
             .persist_latest_snapshot(&placement, 7, &payload)
             .expect("snapshot should persist");
 
-        let runtime =
-            Runtime::with_persistence(Some(db), Duration::from_millis(100), Default::default())
-                .expect("runtime should open persisted state");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_millis(100))
+            .expect("runtime should open persisted state");
         let stale_state = Arc::new(
             ReplicatedBranchAggregatedState::new(
                 placement.clone(),
@@ -889,9 +890,8 @@ mod tests {
             .persist_latest_snapshot(&placement, 7, &payload)
             .expect("snapshot should persist");
 
-        let runtime =
-            Runtime::with_persistence(Some(db), Duration::from_millis(100), Default::default())
-                .expect("runtime should open persisted state");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_millis(100))
+            .expect("runtime should open persisted state");
         let state = Arc::new(
             ReplicatedBranchAggregatedState::new(
                 placement.clone(),

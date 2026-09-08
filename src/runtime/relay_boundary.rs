@@ -2371,15 +2371,16 @@ mod tests {
             .expect("relay owner should stop");
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn relay_owner_expires_branch_presence_by_ttl() {
-        let runtime = Runtime::with_persistence(
+        let fault_injection = ConfiguredFaultInjection::default();
+        fault_injection.set_branch_instance_expiration_scan_interval(Duration::from_millis(5));
+        let runtime = Runtime::with_persistence_and_temp_dir(
             None,
             Duration::from_secs(60),
-            RuntimeTestHooks {
-                branch_instance_expiration_scan_interval: Some(Duration::from_millis(5)),
-                ..Default::default()
-            },
+            fault_injection,
+            PathBuf::from(DEFAULT_TEMP_DIR),
         )
         .expect("runtime should build");
         let domain = domain("default");
