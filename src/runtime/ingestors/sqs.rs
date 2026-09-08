@@ -1,4 +1,4 @@
-use std::{borrow::Cow, num::NonZeroU64};
+use std::borrow::Cow;
 
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
@@ -6,7 +6,6 @@ use aws_sdk_sqs::{
     Client as SqsClient,
     types::{Message as SqsMessage, MessageAttributeValue},
 };
-use nervix_models::DomainName;
 
 use super::super::*;
 
@@ -32,10 +31,16 @@ impl IngestMessageHeaders for SqsMessageAttributes<'_> {
 impl SqsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientSqs,
-        ingestor: CreateIngestor,
+        plan: SqsIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let SqsIngestorStartPlan {
+            ingestor,
+            client,
+            queue,
+            instances,
+            mode: ack_mode,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -45,37 +50,6 @@ impl SqsIngestor {
             });
         }
 
-        /// The parts of an SQS ingest source this task drives, taken from the model once so the
-        /// rest of startup reads named values rather than re-matching the source.
-        struct SqsSource {
-            queue: nervix_models::QueueName,
-            instances: NonZeroU64,
-            ack_mode: SqsIngestMode,
-        }
-
-        let SqsSource {
-            queue,
-            instances,
-            ack_mode,
-        } = match &ingestor.source {
-            IngestSource::Sqs {
-                queue,
-                instances,
-                mode,
-                ..
-            } => SqsSource {
-                queue: queue.clone(),
-                instances: *instances,
-                ack_mode: mode.clone(),
-            },
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected SQS ingestor source".to_string(),
-                });
-            }
-        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,

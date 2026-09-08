@@ -4,9 +4,9 @@
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 13,
   "files_over_3000_lines": 13,
-  "model_matches_in_data_plane": 140,
+  "model_matches_in_data_plane": 128,
   "parser_imports_outside_edges": 61,
-  "result_string_errors": 529,
+  "result_string_errors": 525,
   "string_node_ids": 0,
   "testing_feature_struct_fields": 9
 }

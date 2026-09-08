@@ -1,4 +1,3 @@
-use nervix_models::DomainName;
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use url::Url;
@@ -29,10 +28,15 @@ pub(in crate::runtime) struct PrometheusVectorResult {
 impl PrometheusIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientPrometheus,
-        ingestor: CreateIngestor,
+        plan: PrometheusIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let PrometheusIngestorStartPlan {
+            ingestor,
+            client,
+            query,
+            every,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -42,16 +46,6 @@ impl PrometheusIngestor {
             });
         }
 
-        let (query, every) = match &ingestor.source {
-            IngestSource::Prometheus { query, every, .. } => (query.clone(), every.clone()),
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected Prometheus ingestor source".to_string(),
-                });
-            }
-        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
 
         let resolved_client = runtime
@@ -393,20 +387,15 @@ impl PrometheusIngestor {
     }
 
     #[cfg(test)]
-    pub(in crate::runtime) fn addr_from_client(
-        client: &CreateClientPrometheus,
-    ) -> Result<String, String> {
-        Self::addr_from_config(&client.config)
-    }
-
-    #[cfg(test)]
-    pub(in crate::runtime) fn client_from_client(
-        client: &CreateClientPrometheus,
+    pub(in crate::runtime) fn client_from_config_for_test(
+        config: &[ClientConfigEntry],
     ) -> Result<HttpClient, String> {
-        HttpClientConfig::new(&client.config, "Prometheus").build()
+        HttpClientConfig::new(config, "Prometheus").build()
     }
 
-    fn addr_from_config(config: &[nervix_models::ClientConfigEntry]) -> Result<String, String> {
+    pub(in crate::runtime) fn addr_from_config(
+        config: &[nervix_models::ClientConfigEntry],
+    ) -> Result<String, String> {
         client_config_value(config, "addr", || {
             "missing Prometheus client config key 'addr'".to_string()
         })

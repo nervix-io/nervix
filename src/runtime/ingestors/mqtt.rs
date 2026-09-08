@@ -61,10 +61,16 @@ enum MqttSubscriptionState {
 impl MqttIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &DomainName,
-        client: CreateClientMqtt,
-        ingestor: CreateIngestor,
+        plan: MqttIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
+        let MqttIngestorStartPlan {
+            ingestor,
+            client,
+            topic,
+            instances,
+            mode,
+        } = plan;
+        let domain = &ingestor.domain;
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if runtime.inner.ingestors.contains_key(&key) {
@@ -74,37 +80,6 @@ impl MqttIngestor {
             });
         }
 
-        /// The parts of an MQTT ingest source this task drives, taken from the model once so the
-        /// rest of startup reads named values rather than re-matching the source.
-        struct MqttSource {
-            topic: String,
-            instances: NonZeroU64,
-            mode: MqttIngestMode,
-        }
-
-        let MqttSource {
-            topic,
-            instances,
-            mode,
-        } = match &ingestor.source {
-            IngestSource::Mqtt {
-                topic,
-                instances,
-                mode,
-                ..
-            } => MqttSource {
-                topic: topic.clone(),
-                instances: *instances,
-                mode: mode.clone(),
-            },
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected MQTT ingestor source".to_string(),
-                });
-            }
-        };
         let ack_timeout = match &mode {
             MqttIngestMode::AckParallel { timeout, .. }
             | MqttIngestMode::AckSequential { timeout, .. } => {
@@ -1142,12 +1117,12 @@ impl MqttIngestor {
     }
 
     #[cfg(test)]
-    pub(in crate::runtime) fn client_from_client(
-        client: &CreateClientMqtt,
+    pub(in crate::runtime) fn client_from_config_for_test(
+        config: &[ClientConfigEntry],
         default_client_id: &str,
     ) -> Result<(AsyncClient, rumqttc::EventLoop), String> {
         Self::client_from_config(
-            &client.config,
+            config,
             default_client_id,
             &MqttClientSettings {
                 session: MqttSession::Clean,
@@ -1409,7 +1384,7 @@ mod tests {
             }],
         };
 
-        MqttIngestor::client_from_client(&client, "default-client")
+        MqttIngestor::client_from_config_for_test(&client.config, "default-client")
             .expect("must build client from default id");
 
         let client_with_id = CreateClientMqtt {
@@ -1427,18 +1402,19 @@ mod tests {
             ],
         };
 
-        MqttIngestor::client_from_client(&client_with_id, "default-client")
+        MqttIngestor::client_from_config_for_test(&client_with_id.config, "default-client")
             .expect("must build client from explicit id");
     }
 
     #[test]
     fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
-        let err = MqttIngestor::client_from_client(
+        let err = MqttIngestor::client_from_config_for_test(
             &CreateClientMqtt {
                 name: named("mqtt_main"),
                 mount: None,
                 config: vec![],
-            },
+            }
+            .config,
             "default-client",
         )
         .err()

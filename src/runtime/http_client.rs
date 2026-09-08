@@ -81,7 +81,7 @@ mod tests {
         .expect_err("invalid timeout");
         assert!(err.contains("invalid HTTP timeout_ms 'oops'"));
 
-        let err = ingestors::prometheus::PrometheusIngestor::client_from_client(
+        let err = ingestors::prometheus::PrometheusIngestor::client_from_config_for_test(
             &CreateClientPrometheus {
                 name: named("prom"),
                 mount: None,
@@ -89,7 +89,8 @@ mod tests {
                     key: "timeout_ms".to_string(),
                     value: "oops".to_string(),
                 }],
-            },
+            }
+            .config,
         )
         .expect_err("invalid prometheus timeout");
         assert!(err.contains("Prometheus timeout_ms"));
