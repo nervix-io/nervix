@@ -2197,6 +2197,18 @@ impl NodeSpec {
         Ok(())
     }
 
+    /// Move this node to a fresh interconnect address, leaving the address it is giving up
+    /// reserved for the rest of the run.
+    ///
+    /// The reservation set is shared by every scenario running concurrently, and `next_ports`
+    /// releases its probe listener as soon as it has read the port number, so the set is the only
+    /// thing stopping two scenarios from landing on the same port. Returning this node's old port
+    /// to it lets another scenario bind the address a peer is still dialling: every scenario names
+    /// its nodes `node-1`, `node-2`, `node-3`, so the impostor passes the peer-identity check and
+    /// is only caught when its introduction fails to verify against the expected key. The dialling
+    /// node then reports its peer unavailable until gossip carries the new address, which is long
+    /// enough to fail the scenario. Only this call site retires ports, and only a few times per
+    /// run, so keeping them costs a handful of entries.
     fn reallocate_interconnect_ports(&mut self) -> io::Result<()> {
         let mut ports = next_ports(2)?.into_iter();
         let interconnect_port = ports
@@ -2205,9 +2217,6 @@ impl NodeSpec {
         let interconnect_https_port = ports.next().ok_or_else(|| {
             io::Error::other("interconnect HTTPS port allocation returned only one port")
         })?;
-        let mut reserved = RESERVED_TEST_PORTS.lock();
-        reserved.remove(&self.interconnect_port);
-        reserved.remove(&self.interconnect_https_port);
         self.interconnect_port = interconnect_port;
         self.interconnect_https_port = interconnect_https_port;
         Ok(())

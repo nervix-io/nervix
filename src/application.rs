@@ -17784,16 +17784,25 @@ fn web_console_advertise_url(
     format!("{scheme}://{addr}")
 }
 
+/// What a scenario run records beyond the node's own default.
+///
+/// The interconnect reports why a connection attempt failed at `debug`: a refused dial, a setup
+/// deadline, a rejected handshake. A scenario that fails on "peer never became connected" is
+/// undiagnosable without those lines — the cluster status only says the peer is unavailable, not
+/// what went wrong reaching it — and the failures that need them appear under whole-suite load,
+/// where re-running the feature alone does not reproduce them. They are per connection event
+/// rather than per message, so keeping them on costs a handful of lines per scenario.
+const TEST_TRACE_FILTER: &str = "nervix_interconnect=debug";
+
 pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let file = Arc::new(ParkingMutex::new(file));
     let make_writer = BoxMakeWriter::new(move || SharedFileWriter(file.clone()));
     let _ = fmt()
         .with_ansi(false)
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(DEFAULT_TRACE_FILTER)),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}"))
+        }))
         .with_writer(make_writer)
         .try_init();
     Ok(())
