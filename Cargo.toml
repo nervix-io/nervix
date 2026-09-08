@@ -202,6 +202,7 @@ playwright-rs = { workspace = true }
 rcgen = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }
+trybuild = { workspace = true }
 
 [[test]]
 harness = false
@@ -478,6 +479,7 @@ tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = "0.3"
 triomphe = "0.1"
+trybuild = "1.0"
 typed-builder = "0.20"
 ubyte = "0.10.4"
 upon = { version = "0.10", default-features = false, features = ["serde"] }

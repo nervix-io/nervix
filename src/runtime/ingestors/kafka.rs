@@ -39,7 +39,7 @@ impl KafkaIngestor {
         domain: &DomainName,
         client: CreateClientKafka,
         ingestor: CreateIngestor,
-        kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+        kafka_offset_state: Option<KafkaOffsetStateOriginator>,
     ) -> Result<(), RuntimeError> {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
@@ -1382,7 +1382,7 @@ impl KafkaIngestor {
     pub(in crate::runtime) fn resume_offsets_from_state(
         consumer: &StreamConsumer,
         topic: &str,
-        state: &ReplicatedKafkaOffsetState,
+        state: &KafkaOffsetStateRead,
         missing_partition_timestamp: Option<Timestamp>,
     ) -> Result<HashMap<KafkaTopicPartition, Offset>, String> {
         let mut offsets = HashMap::default();

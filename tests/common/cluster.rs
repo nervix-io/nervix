@@ -3647,9 +3647,10 @@ async fn ensure_kafka_topic_partitions(
         )
         .await
         .map_err(io::Error::other)?;
+    let mut created_new = false;
     for result in created {
         match result {
-            Ok(_) => {}
+            Ok(_) => created_new = true,
             Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
             Err((topic_name, code)) => {
                 return Err(io::Error::other(format!(
@@ -3659,9 +3660,12 @@ async fn ensure_kafka_topic_partitions(
         }
     }
 
-    let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
     let expected = usize::try_from(partitions)
         .verified("the partition count was checked to be positive above");
+    if created_new {
+        return wait_for_kafka_topic_partitions(dependencies, topic, expected).await;
+    }
+    let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
     if current > expected {
         return Err(io::Error::other(format!(
             "kafka topic '{topic}' already has {current} partitions, cannot shrink to {expected}"

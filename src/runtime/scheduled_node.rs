@@ -32,8 +32,8 @@ pub(super) struct EmitterTaskBuildDeps<'a> {
 #[derive(Default)]
 pub(super) struct ScheduledNodePlacement {
     pub(super) tasks: Vec<JoinHandle<()>>,
-    pub(super) kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
-    pub(super) materialized_state: Option<Arc<ReplicatedMaterializedRelayState>>,
+    pub(super) kafka_offset_state: Option<KafkaOffsetStateOriginator>,
+    pub(super) materialized_state: Option<MaterializedRelayStateOriginator>,
 }
 
 pub(super) struct ScheduledNodeTask {

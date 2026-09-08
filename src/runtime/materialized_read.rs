@@ -21,9 +21,12 @@ impl Runtime {
                 && placement.identifier == ModelName::from(relay)
             {
                 entries.extend(
-                    self.visible_materialized_stream_remote_entries(placement, state.value())?
-                        .into_iter()
-                        .map(|(key, record)| (branch_key_display(&key).to_string(), record)),
+                    self.visible_materialized_stream_remote_entries(
+                        placement,
+                        &ReplicatedMaterializedRelayState::read(state.value()),
+                    )?
+                    .into_iter()
+                    .map(|(key, record)| (branch_key_display(&key).to_string(), record)),
                 );
             }
         }
@@ -53,7 +56,10 @@ impl Runtime {
             .get(&placement)
         {
             let entries = self
-                .visible_materialized_stream_remote_entries(&placement, &state)?
+                .visible_materialized_stream_remote_entries(
+                    &placement,
+                    &ReplicatedMaterializedRelayState::read(state.value()),
+                )?
                 .into_iter()
                 .map(|(key, record)| (branch_key_display(&key).to_string(), record))
                 .collect::<Vec<_>>();
@@ -72,7 +78,10 @@ impl Runtime {
                 .get(&aggregate_placement)
             {
                 return Ok(self
-                    .visible_materialized_stream_remote_entries(&aggregate_placement, &state)?
+                    .visible_materialized_stream_remote_entries(
+                        &aggregate_placement,
+                        &ReplicatedMaterializedRelayState::read(state.value()),
+                    )?
                     .into_iter()
                     .filter(|(key, _)| key == branch_key)
                     .map(|(key, record)| (branch_key_display(&key).to_string(), record))
@@ -164,7 +173,8 @@ impl Runtime {
             .get(&placement)
         {
             let values = if self.materialized_stream_key_is_visible(&placement, branch_key) {
-                state.values_at(branch_key, fields.iter().map(|field| field.column_index))?
+                ReplicatedMaterializedRelayState::read(state.value())
+                    .values_at(branch_key, fields.iter().map(|field| field.column_index))?
             } else {
                 None
             };
@@ -182,8 +192,8 @@ impl Runtime {
                 .replicated_materialized_stream_states
                 .get(&aggregate_placement)
                 && self.materialized_stream_key_is_visible(&aggregate_placement, branch_key)
-                && let Some(values) =
-                    state.values_at(branch_key, fields.iter().map(|field| field.column_index))?
+                && let Some(values) = ReplicatedMaterializedRelayState::read(state.value())
+                    .values_at(branch_key, fields.iter().map(|field| field.column_index))?
             {
                 return Ok(Some(values));
             }
@@ -332,19 +342,14 @@ impl Runtime {
     pub(in crate::runtime) fn visible_materialized_stream_remote_entries(
         &self,
         placement: &RuntimeStatePlacement,
-        state: &ReplicatedMaterializedRelayState,
+        state: &MaterializedRelayStateRead,
     ) -> Result<Vec<(Option<BranchKey>, nervix_models::RemoteRuntimeRecord)>, String> {
         let mut entries = state
-            .entries
-            .iter()
-            .filter(|entry| self.materialized_stream_key_is_visible(placement, entry.key()))
-            .map(|entry| {
-                entry
-                    .value()
-                    .to_remote()
-                    .map(|record| (entry.key().clone(), record))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .remote_entries()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|(key, _)| self.materialized_stream_key_is_visible(placement, key))
+            .collect::<Vec<_>>();
         entries
             .sort_by(|left, right| branch_key_display(&left.0).cmp(branch_key_display(&right.0)));
         Ok(entries)
@@ -353,17 +358,13 @@ impl Runtime {
     pub(super) fn visible_materialized_stream_remote_entry(
         &self,
         placement: &RuntimeStatePlacement,
-        state: &ReplicatedMaterializedRelayState,
+        state: &MaterializedRelayStateRead,
         key: &Option<BranchKey>,
     ) -> Result<Option<(Option<BranchKey>, nervix_models::RemoteRuntimeRecord)>, String> {
         if !self.materialized_stream_key_is_visible(placement, key) {
             return Ok(None);
         }
-        state
-            .entries
-            .get(key)
-            .map(|record| record.to_remote().map(|record| (key.clone(), record)))
-            .transpose()
+        state.remote_entry(key).map_err(|error| error.to_string())
     }
 
     pub async fn remote_materialized_stream_state(

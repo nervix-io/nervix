@@ -9280,6 +9280,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
 ) {
     let timeout =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
     let expected = expand_placeholders(world, docstring(step));
     let command = format!(
         "SHOW RELAY {} MATERIALIZED STATE;",

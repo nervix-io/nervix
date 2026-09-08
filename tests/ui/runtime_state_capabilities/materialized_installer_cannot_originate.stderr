@@ -1,0 +1,5 @@
+error[E0599]: no method named `remove_key` found for reference `&nervix_server::runtime::state_capability_compile_tests::MaterializedRelaySnapshotInstaller` in the current scope
+ --> /kache/home/work/worktrees/nervix/fair-egret/nervix/tests/ui/runtime_state_capabilities/materialized_installer_cannot_originate.rs:4:23
+  |
+4 |     let _ = installer.remove_key(&None);
+  |                       ^^^^^^^^^^ method not found in `&nervix_server::runtime::state_capability_compile_tests::MaterializedRelaySnapshotInstaller`

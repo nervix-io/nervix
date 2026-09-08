@@ -4,7 +4,7 @@ pub(super) struct ScheduledIngestorStartSpec {
     pub(super) domain: DomainName,
     pub(super) source_model: Model,
     pub(super) ingestor: CreateIngestor,
-    pub(super) kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+    pub(super) kafka_offset_state: Option<KafkaOffsetStateOriginator>,
 }
 
 impl Runtime {
@@ -25,7 +25,7 @@ impl Runtime {
         domain: &DomainName,
         source_model: Model,
         ingestor: CreateIngestor,
-        kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
+        kafka_offset_state: Option<KafkaOffsetStateOriginator>,
     ) -> Result<(), RuntimeError> {
         ingestors::IngestorStarter::start_scheduled(
             self,
@@ -168,7 +168,7 @@ impl Runtime {
         node: &ScheduledNode,
         ingestor: &CreateIngestor,
         local_node_id: Option<&ClusterNodeName>,
-    ) -> Option<Arc<ReplicatedKafkaOffsetState>> {
+    ) -> Option<KafkaOffsetStateOriginator> {
         let IngestSource::Kafka {
             offset_mode: KafkaOffsetMode::Domain,
             ..
@@ -190,7 +190,7 @@ impl Runtime {
         self.inner
             .replicated_kafka_offset_states
             .get(&placement)
-            .map(|state| state.value().clone())
+            .and_then(|state| ReplicatedKafkaOffsetState::current_originator(state.value()))
     }
 
     pub(in crate::runtime) async fn stop_ingestor(

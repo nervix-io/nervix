@@ -1,0 +1,5 @@
+error[E0599]: no method named `remove_key` found for reference `&nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead` in the current scope
+ --> /kache/home/work/worktrees/nervix/fair-egret/nervix/tests/ui/runtime_state_capabilities/materialized_reader_cannot_mutate.rs:4:20
+  |
+4 |     let _ = reader.remove_key(&None);
+  |                    ^^^^^^^^^^ method not found in `&nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead`

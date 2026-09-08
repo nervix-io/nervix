@@ -1,0 +1,5 @@
+error[E0599]: no method named `install_snapshot` found for reference `&nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead` in the current scope
+ --> /kache/home/work/worktrees/nervix/fair-egret/nervix/tests/ui/runtime_state_capabilities/materialized_reader_cannot_install.rs:4:20
+  |
+4 |     let _ = reader.install_snapshot(1, &[]);
+  |                    ^^^^^^^^^^^^^^^^ method not found in `&nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead`
