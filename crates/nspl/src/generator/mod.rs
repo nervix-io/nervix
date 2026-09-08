@@ -173,6 +173,8 @@ pub fn suggest_alter_generator(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::FlushPolicy;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -208,11 +210,11 @@ mod tests {
         assert_eq!(route.relay.as_str(), "alerts");
         assert_eq!(route.construction.assignments.len(), 2);
         assert_eq!(
-            route
-                .flush_policy
-                .as_ref()
-                .map(|policy| policy.flush_each.as_str()),
-            Some("100ms")
+            route.flush_policy.as_ref(),
+            Some(&FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            })
         );
     }
 
@@ -233,11 +235,11 @@ mod tests {
         let parsed = parse_create_generator_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.output_routes.routes[0]
-                .flush_policy
-                .as_ref()
-                .map(|policy| policy.flush_each.as_str()),
-            Some("1s")
+            parsed.output_routes.routes[0].flush_policy.as_ref(),
+            Some(&FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string()
+            })
         );
     }
 
@@ -258,11 +260,8 @@ mod tests {
         let parsed = parse_create_generator_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.output_routes.routes[0]
-                .flush_policy
-                .as_ref()
-                .map(|policy| policy.flush_each.as_str()),
-            Some("IMMEDIATE")
+            parsed.output_routes.routes[0].flush_policy.as_ref(),
+            Some(&FlushPolicy::Immediate)
         );
     }
 

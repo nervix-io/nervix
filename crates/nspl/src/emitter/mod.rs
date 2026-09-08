@@ -520,7 +520,6 @@ fn clickhouse_emit_sink_parser<'src>()
                 table,
                 values,
                 max_batch,
-                flush_each: String::new(),
             },
         )
 }
@@ -732,7 +731,6 @@ fn postgres_emit_sink_parser<'src>()
                     values,
                     conflict_action,
                     max_batch,
-                    flush_each: String::new(),
                 })
             },
         )
@@ -756,7 +754,6 @@ fn mysql_emit_sink_parser<'src>()
                 values,
                 conflict_action,
                 max_batch,
-                flush_each: String::new(),
             },
         )
 }
@@ -781,7 +778,6 @@ fn mongodb_emit_sink_parser<'src>()
                     values,
                     conflict_action,
                     max_batch,
-                    flush_each: String::new(),
                 })
             },
         )
@@ -815,8 +811,6 @@ fn iceberg_sink_shape<'src>()
                 values,
                 location,
                 catalog,
-                flush_each: String::new(),
-                max_batch_size: None,
                 commit_each: String::new(),
                 max_commit_size: String::new(),
             },
@@ -837,8 +831,6 @@ fn iceberg_emit_sink_parser<'src>()
                 values,
                 location,
                 catalog,
-                flush_each,
-                max_batch_size,
                 ..
             } => EmitSink::Iceberg {
                 backend,
@@ -847,8 +839,6 @@ fn iceberg_emit_sink_parser<'src>()
                 values,
                 location,
                 catalog,
-                flush_each,
-                max_batch_size,
                 commit_each,
                 max_commit_size,
             },
@@ -1109,15 +1099,9 @@ pub fn alter_emitter_parser<'src>()
     let set_publishing_mode = kw_phrase2(Identifier::Set, Identifier::Mode)
         .ignore_then(any_publishing_mode())
         .map(|mode| AlterEmitterOperation::SetPublishingMode { mode });
-    let set_flush =
-        kw(Identifier::Set)
-            .ignore_then(flush_each())
-            .map(
-                |(flush_each, max_batch_size)| AlterEmitterOperation::SetFlush {
-                    flush_each,
-                    max_batch_size,
-                },
-            );
+    let set_flush = kw(Identifier::Set)
+        .ignore_then(flush_each())
+        .map(|flush_policy| AlterEmitterOperation::SetFlush { flush_policy });
     let set_commit = kw(Identifier::Set).ignore_then(iceberg_commit_each()).map(
         |(commit_each, max_commit_size)| AlterEmitterOperation::SetCommit {
             commit_each,
@@ -1207,7 +1191,7 @@ pub fn create_emitter_parser<'src>()
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
-            |(((head, sink_flush_each), message_error_policy), general_error_policy)| {
+            |(((head, flush_policy), message_error_policy), general_error_policy)| {
                 let EmitterHead {
                     if_not_exists,
                     mode,
@@ -1219,122 +1203,20 @@ pub fn create_emitter_parser<'src>()
                     encode_using_codec,
                     construction,
                 } = head;
-                let construction = construction.unwrap_or_default();
-                let sink = match (sink, sink_flush_each.clone()) {
-                    (
-                        EmitSink::ClickHouse {
-                            client,
-                            table,
-                            values,
-                            max_batch,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::ClickHouse {
-                        client,
-                        table,
-                        values,
-                        max_batch,
-                        flush_each,
-                    },
-                    (
-                        EmitSink::Postgres {
-                            client,
-                            table,
-                            values,
-                            conflict_action,
-                            max_batch,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::Postgres {
-                        client,
-                        table,
-                        values,
-                        conflict_action,
-                        max_batch,
-                        flush_each,
-                    },
-                    (
-                        EmitSink::MySql {
-                            client,
-                            table,
-                            values,
-                            conflict_action,
-                            max_batch,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::MySql {
-                        client,
-                        table,
-                        values,
-                        conflict_action,
-                        max_batch,
-                        flush_each,
-                    },
-                    (
-                        EmitSink::MongoDb {
-                            client,
-                            collection,
-                            values,
-                            conflict_action,
-                            max_batch,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::MongoDb {
-                        client,
-                        collection,
-                        values,
-                        conflict_action,
-                        max_batch,
-                        flush_each,
-                    },
-                    (
-                        // The commit cadence arrives with the sink, which is where it is written.
-                        EmitSink::Iceberg {
-                            backend,
-                            client,
-                            table,
-                            values,
-                            location,
-                            catalog,
-                            commit_each,
-                            max_commit_size,
-                            ..
-                        },
-                        (flush_each, max_batch_size),
-                    ) => EmitSink::Iceberg {
-                        backend,
-                        client,
-                        table,
-                        values,
-                        location,
-                        catalog,
-                        flush_each,
-                        max_batch_size,
-                        commit_each,
-                        max_commit_size,
-                    },
-                    (sink, _) => sink,
-                };
-                let (flush_each, max_batch_size) = sink_flush_each;
                 CreateStatement::new(
                     CreateEmitter {
                         name,
                         from,
                         encode_using_codec,
                         sink: Box::new(sink),
-                        flush_each,
-                        max_batch_size,
+                        flush_policy,
                         error_policies: nervix_models::ErrorPolicies {
                             message: message_error_policy,
                             general: general_error_policy,
                         },
                         publishing_mode,
                         mode: mode.unwrap_or(AckMode::Attached),
-                        construction,
+                        construction: construction.unwrap_or_default(),
                         materialized_state,
                     },
                     if_not_exists,
@@ -1400,6 +1282,7 @@ pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::FlushPolicy;
     use nonzero_ext::nonzero;
 
     use super::*;
@@ -1635,8 +1518,7 @@ mod tests {
         assert_eq!(
             parsed.operations[11],
             AlterEmitterOperation::SetFlush {
-                flush_each: "IMMEDIATE".to_string(),
-                max_batch_size: None,
+                flush_policy: FlushPolicy::Immediate,
             }
         );
     }
@@ -2165,7 +2047,6 @@ mod tests {
                     },
                 ],
                 max_batch: nonzero!(100u64),
-                flush_each: "10s".to_string(),
             }
         );
     }
@@ -2234,8 +2115,6 @@ mod tests {
                     client: nervix_models::ClientName::try_from("iceberg_catalog")
                         .expect("valid catalog client identifier"),
                 },
-                flush_each: "10s".to_string(),
-                max_batch_size: Some("64MiB".to_string()),
                 commit_each: "1m".to_string(),
                 max_commit_size: "512MiB".to_string(),
             }
@@ -2284,8 +2163,6 @@ mod tests {
                     client: nervix_models::ClientName::try_from("iceberg_catalog")
                         .expect("valid catalog client identifier"),
                 },
-                flush_each: "IMMEDIATE".to_string(),
-                max_batch_size: None,
                 commit_each: "1m".to_string(),
                 max_commit_size: "512MiB".to_string(),
             }
@@ -2336,8 +2213,6 @@ mod tests {
                     client: nervix_models::ClientName::try_from("iceberg_catalog")
                         .expect("valid catalog client identifier"),
                 },
-                flush_each: "IMMEDIATE".to_string(),
-                max_batch_size: None,
                 commit_each: "1m".to_string(),
                 max_commit_size: "512MiB".to_string(),
             }
@@ -2591,7 +2466,6 @@ mod tests {
                 ],
                 conflict_action: PostgresConflictAction::None,
                 max_batch: nonzero!(25u64),
-                flush_each: "10s".to_string(),
             }
         );
     }
@@ -2810,7 +2684,6 @@ mod tests {
                 ],
                 conflict_action: MySqlConflictAction::None,
                 max_batch: nonzero!(25u64),
-                flush_each: "10s".to_string(),
             }
         );
     }
@@ -2986,7 +2859,6 @@ mod tests {
                 ],
                 conflict_action: MongoDbConflictAction::None,
                 max_batch: nonzero!(25u64),
-                flush_each: "10s".to_string(),
             }
         );
     }

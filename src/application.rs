@@ -601,7 +601,7 @@ use crate::{
         UploadResourceRequest, UploadResourceResponse,
         session_service_server::{SessionService, SessionServiceServer},
     },
-    resource::{ResourceEntryType, ResourceManifestEntry, ResourceStore},
+    resource::{ResourceEntryContent, ResourceManifestEntry, ResourceStore},
     runtime::{
         CompiledProgramWithMaterializedInterest, EntityGateLease, IngestMessageHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
@@ -12093,18 +12093,13 @@ impl SessionServiceImpl {
     }
 
     fn format_resource_manifest_entry(entry: &ResourceManifestEntry) -> String {
-        let entry_type = match entry.entry_type {
-            ResourceEntryType::File => "file",
-            ResourceEntryType::Directory => "directory",
-        };
-        let checksum = if entry.checksum.is_empty() {
-            "-"
-        } else {
-            entry.checksum.as_str()
+        let (entry_type, size, checksum) = match &entry.content {
+            ResourceEntryContent::File { size, checksum } => ("file", *size, checksum.as_str()),
+            ResourceEntryContent::Directory => ("directory", 0, "-"),
         };
         format!(
             "  - type={} path={} size={} checksum={}",
-            entry_type, entry.path, entry.size, checksum
+            entry_type, entry.path, size, checksum
         )
     }
 
@@ -14853,11 +14848,12 @@ fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
         let flush = output
             .flush_policy
             .as_ref()
-            .map(|policy| match policy.max_batch_size.as_deref() {
-                Some(max_batch_size) => {
-                    format!("{} max-batch-size={max_batch_size}", policy.flush_each)
-                }
-                None => policy.flush_each.clone(),
+            .map(|policy| match policy {
+                nervix_models::FlushPolicy::Each {
+                    interval,
+                    max_batch_size,
+                } => format!("{interval} max-batch-size={max_batch_size}"),
+                nervix_models::FlushPolicy::Immediate => "IMMEDIATE".to_string(),
             })
             .unwrap_or_else(|| "none".to_string());
         lines.push(format!(
@@ -15161,6 +15157,7 @@ fn format_emitter_describe_output(
                 .unwrap_or("none")
         ),
         format!("sink: {}", format_emit_sink(&emitter.sink)),
+        format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
         format!(
             "publishing mode: {}",
             emitter.publishing_mode.to_canonical_nspl()
@@ -15248,21 +15245,18 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             client,
             table,
             max_batch,
-            flush_each,
             ..
         } => format!(
-            "CLICKHOUSE client={} table={} max_batch={} flush={}",
+            "CLICKHOUSE client={} table={} max_batch={}",
             client.as_str(),
             table.as_str(),
-            max_batch,
-            flush_each
+            max_batch
         ),
         EmitSink::Postgres {
             client,
             table,
             conflict_action,
             max_batch,
-            flush_each,
             ..
         } => {
             let conflict = match conflict_action {
@@ -15285,12 +15279,11 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "POSTGRES client={} table={}{} max_batch={} flush={}",
+                "POSTGRES client={} table={}{} max_batch={}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch,
-                flush_each
+                max_batch
             )
         }
         EmitSink::MySql {
@@ -15298,7 +15291,6 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             table,
             conflict_action,
             max_batch,
-            flush_each,
             ..
         } => {
             let conflict = match conflict_action {
@@ -15307,12 +15299,11 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 MySqlConflictAction::DoUpdate => " conflict=ON CONFLICT DO UPDATE".to_string(),
             };
             format!(
-                "MYSQL client={} table={}{} max_batch={} flush={}",
+                "MYSQL client={} table={}{} max_batch={}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch,
-                flush_each
+                max_batch
             )
         }
         EmitSink::MongoDb {
@@ -15320,7 +15311,6 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             collection,
             conflict_action,
             max_batch,
-            flush_each,
             ..
         } => {
             let conflict = match conflict_action {
@@ -15333,12 +15323,11 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "MONGODB client={} collection={}{} max_batch={} flush={}",
+                "MONGODB client={} collection={}{} max_batch={}",
                 client.as_str(),
                 collection.as_str(),
                 conflict,
-                max_batch,
-                flush_each
+                max_batch
             )
         }
         EmitSink::Iceberg {
@@ -15348,8 +15337,6 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             values: _,
             location,
             catalog,
-            flush_each,
-            max_batch_size,
             commit_each,
             max_commit_size,
         } => {
@@ -15357,15 +15344,13 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 IcebergCatalog::Rest { client } => format!("rest client={}", client.as_str()),
             };
             format!(
-                "ICEBERG backend={} client={} table={} location={} catalog={} flush={} \
-                 max_batch_size={} commit_each={} max_commit_size={}",
+                "ICEBERG backend={} client={} table={} location={} catalog={} commit_each={} \
+                 max_commit_size={}",
                 backend.as_ref(),
                 client.as_str(),
                 table.as_str(),
                 location,
                 catalog,
-                flush_each,
-                max_batch_size.as_deref().unwrap_or("none"),
                 commit_each,
                 max_commit_size
             )

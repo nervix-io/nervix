@@ -9,10 +9,10 @@ use nervix_models::{
     AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchName, BranchSelection,
     ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CollectionName,
     ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, EmitterAckWindow, EmitterName,
-    EndpointName, Expression, FieldName, GeneralErrorPolicy, GeneratorName, InferencerName,
-    IngestorName, InputCollectPolicy, JunctionName, LookupName, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError, OutputBranch,
-    OutputFlushPolicy, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    EndpointName, Expression, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    InferencerName, IngestorName, InputCollectPolicy, JunctionName, LookupName,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError,
+    OutputBranch, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
     ReordererName, ResourceName, RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName,
     SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName,
@@ -911,14 +911,16 @@ pub fn collect_for<'src>()
 }
 
 pub fn flush_each<'src>()
--> impl Parser<'src, &'src [Token], (String, Option<String>), extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], FlushPolicy, extra::Err<ParseError<'src>>> + Clone {
     choice((
         kw_phrase2(Identifier::Flush, Identifier::Each)
             .ignore_then(duration_lit())
             .then(max_batch_size_clause())
-            .map(|(flush_each, max_batch_size)| (flush_each, Some(max_batch_size))),
-        kw_phrase2(Identifier::Flush, Identifier::Immediate).to(("IMMEDIATE".to_string(), None)),
+            .map(|(interval, max_batch_size)| FlushPolicy::Each {
+                interval,
+                max_batch_size,
+            }),
+        kw_phrase2(Identifier::Flush, Identifier::Immediate).to(FlushPolicy::Immediate),
     ))
     .boxed()
 }
@@ -999,17 +1001,12 @@ pub fn alter_flushed_route_body<'src>()
         .then(flush_each())
         .then(alter_message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction: construction.unwrap_or_default(),
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -1039,17 +1036,12 @@ pub fn alter_generator_route_body<'src>()
         .then(flush_each())
         .then(alter_message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction,
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction,
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -1064,17 +1056,11 @@ pub fn alter_ingestor_route_body<'src>()
         .then(flush_each())
         .then(alter_message_error_policy())
         .map(
-            |(
-                (((relay, construction), branch), (flush_each, max_batch_size)),
-                message_error_policy,
-            )| {
+            |((((relay, construction), branch), flush_policy), message_error_policy)| {
                 ProcessorOutput {
                     relay,
                     construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
+                    flush_policy: Some(flush_policy),
                     message_error_policy,
                     branch: Some(branch),
                 }
@@ -1589,17 +1575,12 @@ fn flushed_processor_output_route<'src>()
         .then(flush_each())
         .then(message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction: construction.unwrap_or_default(),
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -1613,17 +1594,12 @@ fn flushed_explicit_processor_output_route<'src>()
         .then(flush_each())
         .then(message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction,
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction,
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -1638,17 +1614,11 @@ fn flushed_ingestor_output_route<'src>()
         .then(flush_each())
         .then(message_error_policy())
         .map(
-            |(
-                (((relay, construction), branch), (flush_each, max_batch_size)),
-                message_error_policy,
-            )| {
+            |((((relay, construction), branch), flush_policy), message_error_policy)| {
                 ProcessorOutput {
                     relay,
                     construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
+                    flush_policy: Some(flush_policy),
                     message_error_policy,
                     branch: Some(branch),
                 }

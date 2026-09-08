@@ -262,7 +262,7 @@ impl Runtime {
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
         let mut schemas = HashMap::new();
-        let mut wire_schemas = HashMap::new();
+        let mut wire_schemas = DomainWireSchemas::default();
         let mut codecs = HashMap::new();
         let mut signaling_protocols = HashMap::new();
         let mut transports = HashMap::new();
@@ -353,22 +353,13 @@ impl Runtime {
                     schemas.insert(schema.name.clone(), Arc::new(compile_schema(schema)));
                 }
                 Model::WireJsonSchema(wire_schema) => {
-                    wire_schemas.insert(
-                        (node.kind, wire_schema.name.clone()),
-                        WireSchemaDefinition::Json(wire_schema.clone()),
-                    );
+                    wire_schemas.insert_json(wire_schema.clone());
                 }
                 Model::WireCborSchema(wire_schema) => {
-                    wire_schemas.insert(
-                        (node.kind, wire_schema.name.clone()),
-                        WireSchemaDefinition::Cbor(wire_schema.clone()),
-                    );
+                    wire_schemas.insert_cbor(wire_schema.clone());
                 }
                 Model::WireAvroSchema(wire_schema) => {
-                    wire_schemas.insert(
-                        (node.kind, wire_schema.name.clone()),
-                        WireSchemaDefinition::Avro(wire_schema.clone()),
-                    );
+                    wire_schemas.insert_avro(wire_schema.clone());
                 }
                 model if model.kind() == ModelKind::Client => {
                     transports.insert(
@@ -439,30 +430,9 @@ impl Runtime {
                         reason: format!("missing compiled schema '{}'", codec.schema.as_str()),
                     });
                 };
-                let wire_schema = codec
-                    .wire_schema
-                    .as_ref()
-                    .map(|wire_schema| {
-                        let kind = codec.wire_format.wire_schema_kind().ok_or_else(|| {
-                            RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: "codec wire format cannot reference a wire schema"
-                                    .to_string(),
-                            }
-                        })?;
-                        wire_schemas
-                            .get(&(kind, WireSchemaName::from(&ModelName::from(wire_schema))))
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing compiled wire schema '{}'",
-                                    wire_schema.as_str()
-                                ),
-                            })
-                    })
-                    .transpose()?;
+                let wire_format = wire_schemas.resolve(domain, &codec.wire_format)?;
                 let compiled = self
-                    .compile_domain_codec(domain, codec, schema, wire_schema)
+                    .compile_domain_codec(domain, codec, schema, wire_format)
                     .await?;
                 codecs.insert(codec.name.clone(), compiled);
             }
@@ -1138,7 +1108,7 @@ impl Runtime {
         let mut relay_branching_schemas = HashMap::new();
         let mut relay_schemas = HashMap::new();
         let mut schemas = HashMap::new();
-        let mut wire_schemas = HashMap::new();
+        let mut wire_schemas = DomainWireSchemas::default();
         let mut codecs = HashMap::new();
         let mut lookups = HashMap::new();
 
@@ -1148,22 +1118,13 @@ impl Runtime {
                     schemas.insert(schema.name.clone(), Arc::new(compile_schema(schema)));
                 }
                 Model::WireJsonSchema(wire_schema) => {
-                    wire_schemas.insert(
-                        (node.kind, wire_schema.name.clone()),
-                        WireSchemaDefinition::Json(wire_schema.clone()),
-                    );
+                    wire_schemas.insert_json(wire_schema.clone());
                 }
                 Model::WireCborSchema(wire_schema) => {
-                    wire_schemas.insert(
-                        (node.kind, wire_schema.name.clone()),
-                        WireSchemaDefinition::Cbor(wire_schema.clone()),
-                    );
+                    wire_schemas.insert_cbor(wire_schema.clone());
                 }
                 Model::WireAvroSchema(wire_schema) => {
-                    wire_schemas.insert(
-                        (node.kind, wire_schema.name.clone()),
-                        WireSchemaDefinition::Avro(wire_schema.clone()),
-                    );
+                    wire_schemas.insert_avro(wire_schema.clone());
                 }
                 _ => {}
             }
@@ -1224,30 +1185,9 @@ impl Runtime {
                         reason: format!("missing compiled schema '{}'", codec.schema.as_str()),
                     });
                 };
-                let wire_schema = codec
-                    .wire_schema
-                    .as_ref()
-                    .map(|wire_schema| {
-                        let kind = codec.wire_format.wire_schema_kind().ok_or_else(|| {
-                            RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: "codec wire format cannot reference a wire schema"
-                                    .to_string(),
-                            }
-                        })?;
-                        wire_schemas
-                            .get(&(kind, WireSchemaName::from(&ModelName::from(wire_schema))))
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing compiled wire schema '{}'",
-                                    wire_schema.as_str()
-                                ),
-                            })
-                    })
-                    .transpose()?;
+                let wire_format = wire_schemas.resolve(domain, &codec.wire_format)?;
                 let compiled = self
-                    .compile_domain_codec(domain, codec, schema, wire_schema)
+                    .compile_domain_codec(domain, codec, schema, wire_format)
                     .await?;
                 codecs.insert(codec.name.clone(), compiled);
             }

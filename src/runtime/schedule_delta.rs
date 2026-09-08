@@ -140,9 +140,9 @@ mod tests {
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeName, CreateEmitter, CreateIngestor, CreateJunction,
         CreatePlacement, CreateRelay, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, GeneralErrorPolicy,
-        IngestSource, Literal, Model, ModelKind, ModelName, NodeRef, OutputBranch,
-        OutputFlushPolicy, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
+        GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, ModelName, NodeRef,
+        OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode,
     };
     use nonzero_ext::nonzero;
@@ -204,10 +204,7 @@ mod tests {
                     output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: named("events"),
                         construction: RouteConstruction::default(),
-                        flush_policy: Some(OutputFlushPolicy {
-                            flush_each: "IMMEDIATE".to_string(),
-                            max_batch_size: None,
-                        }),
+                        flush_policy: Some(FlushPolicy::Immediate),
                         message_error_policy: nervix_models::MessageErrorPolicy::Log,
                         branch: Some(OutputBranch::Unbranched),
                     }]),
@@ -284,8 +281,10 @@ mod tests {
             from: ProcessorInputs::single(named("incoming")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("outgoing"),
-                "100ms".to_string(),
-                Some("1MiB".to_string()),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
@@ -370,8 +369,10 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),
-            flush_each: "30s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "30s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -400,8 +401,7 @@ mod tests {
         );
 
         let mut dynamic_emitter = emitter.clone();
-        dynamic_emitter.flush_each = "IMMEDIATE".to_string();
-        dynamic_emitter.max_batch_size = None;
+        dynamic_emitter.flush_policy = FlushPolicy::Immediate;
         let mut dynamic = existing.clone();
         *dynamic.nodes[0].config = Model::Emitter(dynamic_emitter.clone());
         assert_eq!(

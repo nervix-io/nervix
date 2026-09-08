@@ -66,7 +66,8 @@ A node-wide materialized-state dependency and an `ON MESSAGE ERROR SEND TO` rout
 exact-branch compatible with every source. Consequently, an emitter whose inputs use differently
 named branches cannot configure one branch-bound dependency or error relay across those inputs.
 
-All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`. `FLUSH`
+All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`, and
+`DESCRIBE EMITTER` reports the declared policy on its `flush:` line. `FLUSH`
 means Nervix collects an in-memory Arrow batch before handing it to the external sink. The
 [NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg

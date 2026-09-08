@@ -11,14 +11,7 @@ fn branched_output(output: &ModelProcessorOutput) -> BranchedProcessorOutputSpec
     BranchedProcessorOutputSpec {
         relay: output.relay.clone(),
         construction: output.construction.clone(),
-        flush_each: output
-            .flush_policy
-            .as_ref()
-            .map(|policy| policy.flush_each.clone()),
-        max_batch_size: output
-            .flush_policy
-            .as_ref()
-            .and_then(|policy| policy.max_batch_size.clone()),
+        flush_policy: output.flush_policy.clone(),
         message_error_policy: output.message_error_policy.clone(),
     }
 }
@@ -362,19 +355,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         branch_ttl: policy.ttl,
                         branch_max_instances: policy.max_instances,
                         output_ack_boundary: BranchInstanceAckBoundary::Preserve,
-                        output_flush_each: output
-                            .flush_policy
-                            .as_ref()
-                            .verified(
-                                "the registry requires a flush policy on every flush-based output \
-                                 route",
-                            )
-                            .flush_each
-                            .clone(),
-                        output_max_batch_size: output
-                            .flush_policy
-                            .as_ref()
-                            .and_then(|policy| policy.max_batch_size.clone()),
+                        output_flush_policy: output.flush_policy.clone().verified(
+                            "the registry requires a flush policy on every flush-based output \
+                             route",
+                        ),
                         error_policies: output_error_policies(
                             &output.message_error_policy,
                             ingestor.general_error_policy.clone(),
@@ -397,19 +381,10 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         branch_ttl: policy.ttl,
                         branch_max_instances: policy.max_instances,
                         output_ack_boundary: BranchInstanceAckBoundary::Reingestor(reingestor.mode),
-                        output_flush_each: output
-                            .flush_policy
-                            .as_ref()
-                            .verified(
-                                "the registry requires a flush policy on every flush-based output \
-                                 route",
-                            )
-                            .flush_each
-                            .clone(),
-                        output_max_batch_size: output
-                            .flush_policy
-                            .as_ref()
-                            .and_then(|policy| policy.max_batch_size.clone()),
+                        output_flush_policy: output.flush_policy.clone().verified(
+                            "the registry requires a flush policy on every flush-based output \
+                             route",
+                        ),
                         error_policies: output_error_policies(
                             &output.message_error_policy,
                             GeneralErrorPolicy::Log,
@@ -456,16 +431,9 @@ pub(in crate::runtime) fn materialize_output(
         output_relay: output.relay.clone(),
         construction: output.construction.clone(),
         flush_policy: output
-            .flush_each
-            .as_deref()
-            .map(|flush_each| {
-                parse_branch_flush_policy(
-                    "processor output",
-                    &output.relay,
-                    flush_each,
-                    output.max_batch_size.as_deref(),
-                )
-            })
+            .flush_policy
+            .as_ref()
+            .map(|policy| parse_branch_flush_policy("processor output", &output.relay, policy))
             .transpose()?,
         message_error_policy: output.message_error_policy.clone(),
     })
@@ -486,30 +454,26 @@ fn materialize_outputs(
 fn parse_branch_flush_policy(
     kind: &str,
     processor: impl Into<ModelName>,
-    value: &str,
-    max_batch_size: Option<&str>,
+    policy: &FlushPolicy,
 ) -> Result<RuntimeFlushPolicy, String> {
     let processor = processor.into();
-    if value.eq_ignore_ascii_case("IMMEDIATE") {
+    let FlushPolicy::Each {
+        interval,
+        max_batch_size,
+    } = policy
+    else {
         return Ok(RuntimeFlushPolicy::Immediate);
-    }
-    let interval = humantime::parse_duration(value).map_err(|error| {
+    };
+    let parsed_interval = humantime::parse_duration(interval).map_err(|error| {
         format!(
             "invalid {} '{}' flush_each duration '{}': {}",
             kind,
             processor.as_str(),
-            value,
+            interval,
             error
         )
     })?;
-    let max_batch_size = max_batch_size.ok_or_else(|| {
-        format!(
-            "{} '{}' FLUSH EACH requires MAX BATCH SIZE",
-            kind,
-            processor.as_str()
-        )
-    })?;
-    let max_batch_size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
+    let parsed_max_batch_size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
         format!(
             "invalid {} '{}' max_batch_size '{}': {}",
             kind,
@@ -519,8 +483,8 @@ fn parse_branch_flush_policy(
         )
     })?;
     Ok(RuntimeFlushPolicy::Each {
-        interval,
-        max_batch_size: max_batch_size.as_u64(),
+        interval: parsed_interval,
+        max_batch_size: parsed_max_batch_size.as_u64(),
     })
 }
 
@@ -911,8 +875,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         flush_policy: parse_branch_flush_policy(
             spec.kind.as_str(),
             &spec.identifier,
-            &spec.output_flush_each,
-            spec.output_max_batch_size.as_deref(),
+            &spec.output_flush_policy,
         )?,
     })
 }
@@ -1040,8 +1003,7 @@ mod tests {
                     routes: vec![BranchedProcessorOutputSpec {
                         relay: named("scores"),
                         construction: RouteConstruction::default(),
-                        flush_each: Some("IMMEDIATE".to_string()),
-                        max_batch_size: None,
+                        flush_policy: Some(FlushPolicy::Immediate),
                         message_error_policy: MessageErrorPolicy::Log,
                     }],
                 },
@@ -1084,7 +1046,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("orders_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("orders", &["tenant"])),
                         decode_using_codec: named("orders_codec"),
                         timestamp_source: None,
@@ -1105,7 +1070,10 @@ mod tests {
                         from: ProcessorInputs::single(named("orders"))
                             .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
                         output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1121,7 +1089,10 @@ mod tests {
                         name: named("dedup_projected_orders"),
                         from: ProcessorInputs::single(named("projected_orders")),
                         output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("projected_orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1140,8 +1111,10 @@ mod tests {
                         sink: Box::new(EmitSink::ZeroMq {
                             client: named("zmq_client"),
                         }),
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
+                        flush_policy: FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        },
                         mode: AckMode::Attached,
                         error_policies: ErrorPolicies::handled_by_log(),
                         publishing_mode: EmitterPublishingMode::NoAck {
@@ -1211,7 +1184,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("metrics_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("metrics")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("metrics", &["host"])),
                         decode_using_codec: named("metrics_codec"),
                         timestamp_source: None,
@@ -1255,7 +1231,10 @@ mod tests {
                         name: named("dedup_summary"),
                         from: ProcessorInputs::single(named("metric_summary")),
                         output_routes: (ProcessorOutputs::single(named("projected_summary")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("metric_summary", &["host"]),
                         deduplicate_on: vec![expression("input.count")],
                         max_time: "10m".to_string(),
@@ -1314,7 +1293,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("features_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("features")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("features", &["tenant"])),
                         decode_using_codec: named("features_codec"),
                         timestamp_source: None,
@@ -1334,7 +1316,7 @@ mod tests {
                         name: named("score_model"),
                         from: ProcessorInputs::single(named("features")),
                         output_routes: (ProcessorOutputs::single(named("scores")))
-                            .with_flush_policy("IMMEDIATE".to_string(), None),
+                            .with_flush_policy(FlushPolicy::Immediate),
                         branched_by: processor_branched_by("features", &["tenant"]),
                         resource: named("fraud_model"),
                         resource_version: Some(3),
@@ -1360,7 +1342,10 @@ mod tests {
                         name: named("dedup_scores"),
                         from: ProcessorInputs::single(named("scores")),
                         output_routes: (ProcessorOutputs::single(named("projected_scores")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("scores", &["tenant"]),
                         deduplicate_on: vec![expression("input.score")],
                         max_time: "10m".to_string(),
@@ -1404,7 +1389,7 @@ mod tests {
         assert_eq!(file, "models/fraud.onnx");
         assert_eq!(inputs.len(), 1);
         assert_eq!(output_schema.len(), 1);
-        assert_eq!(output.flush_each.as_deref(), Some("IMMEDIATE"));
+        assert_eq!(output.flush_policy, Some(FlushPolicy::Immediate));
         assert_eq!(
             inferencer.spec.filter_where,
             Some(expression("input.active"))
@@ -1432,7 +1417,10 @@ mod tests {
                         output_routes: with_inherit_all(ProcessorOutputs::single(named(
                             "tenant_orders",
                         )))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        })
                         .with_branch(branched_by("tenant_orders", &["tenant"])),
                         mode: AckMode::Attached,
                         filter_where: None,
@@ -1446,7 +1434,10 @@ mod tests {
                         name: named("dedup_orders"),
                         from: ProcessorInputs::single(named("tenant_orders")),
                         output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("tenant_orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1491,7 +1482,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("orders_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("orders", &["tenant"])),
                         decode_using_codec: named("orders_codec"),
                         timestamp_source: None,
@@ -1529,7 +1523,10 @@ mod tests {
                                 branch: None,
                             },
                         ]))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
                         branched_by: processor_branched_by("orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1545,7 +1542,10 @@ mod tests {
                         name: named("dedup_urgent"),
                         from: ProcessorInputs::single(named("urgent_orders")),
                         output_routes: (ProcessorOutputs::single(named("urgent_projected")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("urgent_orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1561,7 +1561,10 @@ mod tests {
                         name: named("dedup_default"),
                         from: ProcessorInputs::single(named("default_orders")),
                         output_routes: (ProcessorOutputs::single(named("default_projected")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("default_orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1623,7 +1626,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("left_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("left_stream")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("left_stream", &["tenant"])),
                         decode_using_codec: named("notification_codec"),
                         timestamp_source: None,
@@ -1643,7 +1649,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("right_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("right_stream")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("right_stream", &["tenant"])),
                         decode_using_codec: named("notification_codec"),
                         timestamp_source: None,
@@ -1667,7 +1676,10 @@ mod tests {
                             Vec::new(),
                         ),
                         output_routes: (ProcessorOutputs::single(named("joined_stream")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("left_stream", &["tenant"]),
                         mode: AckMode::Attached,
                         filter_where: None,
@@ -1681,7 +1693,10 @@ mod tests {
                         name: named("dedup_joined"),
                         from: ProcessorInputs::single(named("joined_stream")),
                         output_routes: (ProcessorOutputs::single(named("projected_joined")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("joined_stream", &["tenant"]),
                         deduplicate_on: vec![expression("input.tenant")],
                         max_time: "10m".to_string(),
@@ -1742,7 +1757,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("orders_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("orders", &["tenant"])),
                         decode_using_codec: named("orders_codec"),
                         timestamp_source: None,
@@ -1769,7 +1787,10 @@ mod tests {
                             }],
                         ),
                         output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1785,7 +1806,10 @@ mod tests {
                         name: named("dedup_projected"),
                         from: ProcessorInputs::single(named("projected_orders")),
                         output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("projected_orders", &["tenant"]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1841,7 +1865,10 @@ mod tests {
                     model: nervix_models::Model::Ingestor(CreateIngestor {
                         name: named("orders_ingestor"),
                         output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(OutputBranch::Unbranched),
                         decode_using_codec: named("orders_codec"),
                         timestamp_source: None,
@@ -1862,7 +1889,10 @@ mod tests {
                         name: named("dedup_orders"),
                         from: ProcessorInputs::single(named("orders")),
                         output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: processor_branched_by("orders", &[]),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1909,7 +1939,10 @@ mod tests {
                         name: named("dedup_orders"),
                         from: ProcessorInputs::single(named("orders")),
                         output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -1992,7 +2025,10 @@ mod tests {
                         name: named("tenant_partition"),
                         from: ProcessorInputs::single(named("notifications")),
                         output_routes: (ProcessorOutputs::single(named("tenant_notifications")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            })
                             .with_branch(branched_by("tenant_notifications", &["tenant"])),
                         mode: AckMode::Attached,
                         filter_where: None,

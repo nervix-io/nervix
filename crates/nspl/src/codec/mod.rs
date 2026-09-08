@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CreateCodec, CreateStatement, SchemaName, WireSchemaName,
+    CodecWireFormat, CreateCodec, CreateStatement, SchemaName,
 };
 
 use crate::{
@@ -15,11 +15,11 @@ use crate::{
     },
 };
 
-/// The part of `CREATE CODEC` that follows `FROM`: the wire format the codec reads, the wire schema
-/// that format needs, the Nervix schema it decodes into, and the per-field encoding rules.
+/// The part of `CREATE CODEC` that follows `FROM`: the wire format the codec reads together with
+/// the wire schema that format needs, the Nervix schema it decodes into, and the per-field
+/// encoding rules.
 struct CodecBody {
     wire_format: CodecWireFormat,
-    wire_schema: Option<WireSchemaName>,
     schema: SchemaName,
     encoding_rules: Vec<CodecEncodingRule>,
 }
@@ -75,15 +75,15 @@ pub fn create_codec_parser<'src>()
     let json_wire = kw(Identifier::Json)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_json_schema_ref())
-        .map(|wire_schema| (CodecWireFormat::Json, wire_schema));
+        .map(|wire_schema| CodecWireFormat::Json { wire_schema });
     let cbor_wire = kw(Identifier::Cbor)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_cbor_schema_ref())
-        .map(|wire_schema| (CodecWireFormat::Cbor, wire_schema));
+        .map(|wire_schema| CodecWireFormat::Cbor { wire_schema });
     let avro_wire = kw(Identifier::Avro)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_avro_schema_ref())
-        .map(|wire_schema| (CodecWireFormat::Avro, wire_schema));
+        .map(|wire_schema| CodecWireFormat::Avro { wire_schema });
     let schemaful_codec = kw(Identifier::Wire)
         .ignore_then(choice((json_wire, cbor_wire, avro_wire)))
         .then_ignore(kw(Identifier::To))
@@ -91,14 +91,11 @@ pub fn create_codec_parser<'src>()
         .then(schema_ref())
         .boxed()
         .then(encoding_rules.clone())
-        .map(
-            |(((wire_format, wire_schema), schema), encoding_rules)| CodecBody {
-                wire_format,
-                wire_schema: Some(wire_schema),
-                schema,
-                encoding_rules,
-            },
-        )
+        .map(|((wire_format, schema), encoding_rules)| CodecBody {
+            wire_format,
+            schema,
+            encoding_rules,
+        })
         .boxed();
     let jaq_format = choice((
         kw(Identifier::Json).to(CodecJaqFormat::Json),
@@ -121,7 +118,6 @@ pub fn create_codec_parser<'src>()
                     format,
                     transformations,
                 },
-                wire_schema: None,
                 schema,
                 encoding_rules,
             },
@@ -155,7 +151,6 @@ pub fn create_codec_parser<'src>()
                         message,
                         transformations,
                     }),
-                    wire_schema: None,
                     schema,
                     encoding_rules,
                 }
@@ -168,7 +163,6 @@ pub fn create_codec_parser<'src>()
         .ignore_then(schema_ref())
         .map(|schema| CodecBody {
             wire_format: CodecWireFormat::Syslog,
-            wire_schema: None,
             schema,
             encoding_rules: Vec::new(),
         })
@@ -195,7 +189,6 @@ pub fn create_codec_parser<'src>()
                 CreateCodec {
                     name,
                     wire_format: body.wire_format,
-                    wire_schema: body.wire_schema,
                     schema: body.schema,
                     encoding_rules: body.encoding_rules,
                 },
@@ -236,7 +229,7 @@ pub fn suggest_create_codec(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::ClientConfigEntry;
+    use nervix_models::{ClientConfigEntry, WireSchemaName};
     use rstest::rstest;
 
     use super::*;
@@ -297,7 +290,6 @@ mod tests {
                 },
             }
         );
-        assert_eq!(parsed.wire_schema, None);
     }
 
     #[test]
@@ -333,60 +325,51 @@ mod tests {
                 },
             })
         );
-        assert_eq!(parsed.wire_schema, None);
         assert_eq!(parsed.schema.as_str(), "notification_schema");
+    }
+
+    fn wire_schema_name(name: &str) -> WireSchemaName {
+        WireSchemaName::parse(name).expect("valid identifier")
     }
 
     #[rstest]
     #[case::json(
         "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
          notification_schema;",
-        CodecWireFormat::Json,
+        CodecWireFormat::Json { wire_schema: wire_schema_name("notification_wire") },
         "notification_codec",
-        Some("notification_wire"),
         "notification_schema"
     )]
     #[case::avro(
         "CREATE CODEC notification_codec FROM WIRE AVRO SCHEMA notification_wire TO SCHEMA \
          notification_schema;",
-        CodecWireFormat::Avro,
+        CodecWireFormat::Avro { wire_schema: wire_schema_name("notification_wire") },
         "notification_codec",
-        Some("notification_wire"),
         "notification_schema"
     )]
     #[case::cbor(
         "CREATE CODEC notification_codec FROM WIRE CBOR SCHEMA notification_wire TO SCHEMA \
          notification_schema;",
-        CodecWireFormat::Cbor,
+        CodecWireFormat::Cbor { wire_schema: wire_schema_name("notification_wire") },
         "notification_codec",
-        Some("notification_wire"),
         "notification_schema"
     )]
     #[case::syslog(
         "CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event;",
         CodecWireFormat::Syslog,
         "events",
-        None,
         "syslog_event"
     )]
     fn parses_schemaful_codec_formats(
         #[case] input: &str,
         #[case] wire_format: CodecWireFormat,
         #[case] name: &str,
-        #[case] wire_schema: Option<&str>,
         #[case] schema: &str,
     ) {
         let parsed = parse_create_codec(input).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), name);
         assert_eq!(parsed.wire_format, wire_format);
-        assert_eq!(
-            parsed
-                .wire_schema
-                .as_ref()
-                .map(|wire_schema| wire_schema.as_str()),
-            wire_schema
-        );
         assert!(parsed.encoding_rules.is_empty());
         assert_eq!(parsed.schema.as_str(), schema);
     }

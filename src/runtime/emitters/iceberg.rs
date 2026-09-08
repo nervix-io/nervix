@@ -298,8 +298,7 @@ pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
     pub(in crate::runtime::emitters) values: &'a [IcebergValueMapping],
     pub(in crate::runtime::emitters) location: &'a str,
     pub(in crate::runtime::emitters) catalog: &'a IcebergCatalog,
-    pub(in crate::runtime::emitters) flush_each: &'a str,
-    pub(in crate::runtime::emitters) max_batch_size: Option<&'a str>,
+    pub(in crate::runtime::emitters) flush_policy: &'a FlushPolicy,
     pub(in crate::runtime::emitters) commit_each: &'a str,
     pub(in crate::runtime::emitters) max_commit_size: &'a str,
     pub(in crate::runtime::emitters) input_schema: Arc<CompiledSchema>,
@@ -384,8 +383,7 @@ impl IcebergEmitter {
             values,
             location,
             catalog,
-            flush_each,
-            max_batch_size,
+            flush_policy,
             commit_each,
             max_commit_size,
             input_schema,
@@ -395,8 +393,7 @@ impl IcebergEmitter {
             &context.domain,
             "iceberg emitter",
             &context.emitter,
-            flush_each,
-            max_batch_size,
+            flush_policy,
         )
         .map_err(|error| {
             Report::new(IcebergEmitterError::InvalidFlushPolicy).attach_printable(error.to_string())

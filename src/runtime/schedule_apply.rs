@@ -2112,7 +2112,10 @@ mod tests {
                         name: named("dedup_orders"),
                         from: ProcessorInputs::single(named("orders")),
                         output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![expression("input.order_id")],
                         max_time: "10m".to_string(),
@@ -2131,7 +2134,10 @@ mod tests {
                             Vec::new(),
                         ),
                         output_routes: (ProcessorOutputs::single(named("joined_orders")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                         branched_by: BranchSelection::unbranched(),
                         mode: AckMode::Attached,
                         filter_where: None,
@@ -2217,7 +2223,10 @@ mod tests {
                         output_routes: with_inherit_all(ProcessorOutputs::single(named(
                             "unique_events",
                         )))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![expression("input.event_id")],
                         max_time: "10m".to_string(),
@@ -2333,7 +2342,10 @@ mod tests {
                         output_routes: with_inherit_all(ProcessorOutputs::single(named(
                             "unique_events",
                         )))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![expression("input.event_id")],
                         max_time: "10m".to_string(),
