@@ -5,6 +5,32 @@ from pathlib import Path
 
 
 class BenchmarkWorkflowTests(unittest.TestCase):
+    def test_no_docker_label_skips_pr_pipeline_until_removed(self) -> None:
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        trigger, jobs = workflow.split("\njobs:", maxsplit=1)
+        meta = jobs.split("\n  meta:", maxsplit=1)[1]
+        meta = meta.split("\n  build-arch:", maxsplit=1)[0]
+        reporter = jobs.split("\n  benchmark-comment:", maxsplit=1)[1]
+        reporter = reporter.split("\n  publish-manifest:", maxsplit=1)[0]
+
+        self.assertIn(
+            "types: [opened, synchronize, reopened, labeled, unlabeled]",
+            trigger,
+        )
+        self.assertIn(
+            "!contains(github.event.pull_request.labels.*.name, 'no-docker')",
+            meta,
+        )
+        self.assertIn(
+            "github.event.action != 'unlabeled' || "
+            "github.event.label.name == 'no-docker'",
+            " ".join(meta.split()),
+        )
+        self.assertIn(
+            "!contains(github.event.pull_request.labels.*.name, 'no-docker')",
+            reporter,
+        )
+
     def test_reporter_job_is_separate_least_privilege_and_always_updates_pr(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
         reporter = workflow.split("\n  benchmark-comment:", maxsplit=1)[1]
