@@ -70,6 +70,8 @@ pub(crate) struct EntityGateLease<'a> {
 
 pub(super) struct EntityAlterHold {
     pub(super) gates: EntityGateHold,
+    pub(super) affected_entities: Vec<NodeRef>,
+    pub(super) purpose: EntityGatePurpose,
     /// The quiesce this hold engaged, holding the control it engaged rather than a name to look
     /// up again. An ingestor that is dropped and rebuilt gets a fresh control with zero counts,
     /// so releasing by name could decrement a control that was never engaged.
@@ -487,6 +489,8 @@ impl Runtime {
             hold_key.clone(),
             EntityAlterHold {
                 gates,
+                affected_entities: affected_entities.to_vec(),
+                purpose,
                 quiesced_ingestors: Vec::new(),
             },
         );
@@ -532,6 +536,9 @@ impl Runtime {
         let entity_gate_holds = self.inner.entity_gate_holds.clone();
         let ingestors = self.inner.ingestors.clone();
         let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
+        let frozen_ownership_handoff_entities =
+            self.inner.frozen_ownership_handoff_entities.clone();
+        let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
         let domain = domain.clone();
         drop(tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
@@ -547,6 +554,8 @@ impl Runtime {
                     &entity_gate_holds,
                     &ingestors,
                     &ingestor_quiescence,
+                    &frozen_ownership_handoff_entities,
+                    &ownership_handoff_freeze_changed,
                     operation_id,
                     &domain,
                 )
@@ -571,6 +580,8 @@ impl Runtime {
             &self.inner.entity_gate_holds,
             &self.inner.ingestors,
             &self.inner.ingestor_quiescence,
+            &self.inner.frozen_ownership_handoff_entities,
+            &self.inner.ownership_handoff_freeze_changed,
             operation_id,
             domain,
         )
@@ -581,6 +592,8 @@ impl Runtime {
         entity_gate_holds: &DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>,
         ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
+        frozen_ownership_handoff_entities: &DashMap<DomainNodeRef, (), RandomState>,
+        ownership_handoff_freeze_changed: &Notify,
         operation_id: u64,
         domain: &DomainName,
     ) -> Result<(), String> {
@@ -594,6 +607,16 @@ impl Runtime {
         let Some((_, hold)) = entity_gate_holds.remove(&hold_key) else {
             return Ok(());
         };
+        if hold.purpose == EntityGatePurpose::OwnershipHandoff {
+            for entity in &hold.affected_entities {
+                frozen_ownership_handoff_entities.remove(&DomainNodeRef::node_in(
+                    domain.clone(),
+                    entity.kind,
+                    entity.identifier.clone(),
+                ));
+            }
+            ownership_handoff_freeze_changed.notify_waiters();
+        }
         for quiesced in &hold.quiesced_ingestors {
             tokio::task::consume_budget().await;
             quiesced.control.release(quiesced.cause);

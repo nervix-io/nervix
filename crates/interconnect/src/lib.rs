@@ -27,8 +27,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use meticulous::ResultExt as _;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_models::{
-    ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
-    LookupName, ModelKind, ModelName, NodeRef, RelayName, RemoteAckRegistration,
+    ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName,
+    FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
     SubscriptionBinding, Timestamp,
 };
@@ -256,6 +257,7 @@ pub enum ControlEnvelope {
     StateSyncRequest(StateSyncRequest),
     StateSyncResponse(StateSyncResponse),
     StateReplicationAck(StateReplicationAck),
+    StateCheckpointAvailable(StateCheckpointAvailable),
     Request(RequestEnvelope),
     Response(ResponseEnvelope),
     DataflowNodeStatusRequest(DataflowNodeStatusRequest),
@@ -374,7 +376,7 @@ pub struct StateSnapshotEnvelope {
 pub struct StateSyncRequest {
     pub correlation_id: u64,
     pub placement: StatePlacementEnvelope,
-    pub after_lsm: u64,
+    pub after_lsm: Option<u64>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -387,6 +389,109 @@ pub struct StateSyncResponse {
 pub struct StateReplicationAck {
     pub placement: StatePlacementEnvelope,
     pub lsm: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct StateCheckpointAvailable {
+    pub placement: StatePlacementEnvelope,
+    pub lsm: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct OwnershipHandoffCheckpoint {
+    pub placement: StatePlacementEnvelope,
+    pub snapshot: StateSnapshotEnvelope,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CaptureOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct PrepareOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+    pub checkpoints: Vec<OwnershipHandoffCheckpoint>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfirmOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrepareForcedOwnershipRecoveryRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForcedOwnershipRecoveryPreparation {
+    pub state_recovery: OwnershipStateRecoveryOutcome,
+    pub resets: Vec<OwnershipStateReset>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+pub enum OwnershipHandoffFailure {
+    #[error("{reason}")]
+    Rejected { reason: String },
+}
+
+impl OwnershipHandoffFailure {
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self::Rejected {
+            reason: reason.into(),
+        }
+    }
+}
+
+pub type OwnershipHandoffResponse<T> = Result<T, OwnershipHandoffFailure>;
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivateOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscardOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub domain: DomainName,
+    pub entity: NodeRef,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

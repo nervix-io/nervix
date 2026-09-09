@@ -47,6 +47,7 @@ use arrow_select::{
 };
 use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
+use error_stack::Report;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -58,28 +59,30 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
-    ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CorrelationTimeoutAction,
-    CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel, CreateClientPulsar,
-    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
-    CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
-    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState,
-    DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
-    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
-    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
+    CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec,
+    CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSignalingProtocol, CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace,
+    DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName,
+    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
+    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
+    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, PostgresConflictAction, PostgresValueMapping,
+    ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceName,
+    ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode,
+    ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -126,6 +129,8 @@ use tokio_stream::StreamExt;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
+
+const OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL: Duration = Duration::from_millis(25);
 use upon::Engine as TemplateEngine;
 
 #[cfg(test)]
@@ -135,7 +140,7 @@ use crate::{
     metrics::{
         BranchEvictionReason, IngestorQuiesceMetricLabels, NodeBatchObservation,
         NodeLatencyObservation, NodeWithoutRelayObservation, RelayBatchObservation,
-        RelayBufferObservation, RuntimeMetrics,
+        RelayBufferObservation, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
@@ -188,6 +193,7 @@ mod message_error;
 mod message_error_delivery;
 mod node_settings;
 mod observability;
+mod ownership_handoff_error;
 mod planning;
 mod processor_branch_task;
 mod processor_output;
@@ -217,7 +223,6 @@ mod syslog;
 #[cfg(test)]
 mod test_fixtures;
 
-#[cfg(test)]
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, encode_branch_aggregated_snapshot,
 };
@@ -400,6 +405,7 @@ use nervix_models::{
 pub use observability::{
     DataflowNodeTransientState, IngestorDescribe, KafkaDomainOffsetDescribe, LocalLookupDescription,
 };
+pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoffResult};
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
     SpawnedSnapshotTask, WindowProcessorSnapshotRequest,
@@ -438,13 +444,16 @@ use scheduled_node::{
 use service_url::ServiceUrl;
 pub(crate) use state_replication::StateSyncAck;
 use state_replication::{
-    DEFAULT_STATE_REPLICATION_POLL_INTERVAL, DEFAULT_STATE_SNAPSHOT_INTERVAL,
-    PendingStateSyncSender,
+    ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
+    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateCheckpointAnnouncement, PendingStateReplicaSync,
+    PendingStateSyncSender, PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff,
+    PreparedRuntimeStateSnapshot,
 };
 pub(crate) use state_store::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind,
-    RuntimeStateOperationError, RuntimeStatePlacement, RuntimeStateStore, StateAssignmentAuthority,
-    StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
+    RuntimeStateOperationError, RuntimeStatePlacement, RuntimeStateResult, RuntimeStateStore,
+    StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError, StateCapability,
+    StateReplicationRoles,
 };
 #[cfg(test)]
 use test_fixtures::{
@@ -486,7 +495,10 @@ use vm_input::{
     runtime_values_input_column, vm_output_value, vm_typed_batch_selected_rows_to_runtime_batch,
     vm_typed_batch_to_runtime_batch,
 };
-use wasm_output::{WasmOutputContext, dispatch_wasm_output_envelopes, persist_wasm_guest_state};
+use wasm_output::{
+    WasmOutputContext, checkpoint_wasm_guest_state, dispatch_wasm_output_envelopes,
+    persist_wasm_guest_state,
+};
 use wasm_processor::flush_branch_wasm_processor;
 use wasm_state::ReplicatedWasmProcessorState;
 pub use websocket_signaling::CompiledSignalingProtocol;
@@ -537,6 +549,10 @@ impl ConfiguredFaultInjection {
 
     fn syslog_ingestor_bind_addr(&self, _node_id: &ClusterNodeName, configured: &str) -> String {
         configured.to_string()
+    }
+
+    fn state_replica_polling_is_paused(&self) -> bool {
+        false
     }
 
     fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
@@ -673,6 +689,11 @@ struct RuntimeInner {
     node_quiesce_counters: DashMap<DomainNodeRef, Arc<NodeQuiesceCounters>, RandomState>,
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
     entity_gate_holds: Arc<DashMap<EntityGateHoldKey, EntityAlterHold, RandomState>>,
+    /// Also held by the entity gate deadline task so a failed handoff resumes state timers when
+    /// its lease expires.
+    frozen_ownership_handoff_entities: Arc<DashMap<DomainNodeRef, (), RandomState>>,
+    /// Also held by branch tasks waiting for a handoff freeze to end.
+    ownership_handoff_freeze_changed: Arc<Notify>,
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     active_domain_alters: Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     state_schema_fingerprints: DashMap<DomainNodeRef, [u8; 32], RandomState>,
@@ -694,6 +715,23 @@ struct RuntimeInner {
     remote_dispatch: Arc<RemoteDispatchRegistry>,
     next_state_sync_correlation_id: AtomicU64,
     pending_state_syncs: DashMap<u64, PendingStateSyncSender, RandomState>,
+    state_checkpoint_notifications: DashMap<RuntimeStatePlacement, Arc<Notify>, RandomState>,
+    pending_state_replica_syncs:
+        DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,
+    pending_state_checkpoint_announcements:
+        DashMap<RuntimeStatePlacement, PendingStateCheckpointAnnouncement, RandomState>,
+    passive_runtime_state_snapshots:
+        DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    replicated_branch_lru_snapshots:
+        DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    prepared_runtime_state_handoffs:
+        DashMap<DomainNodeRef, PreparedRuntimeStateHandoff, RandomState>,
+    activated_runtime_state_handoffs:
+        DashMap<DomainNodeRef, ActivatedRuntimeStateHandoff, RandomState>,
+    prepared_forced_runtime_state_recoveries:
+        DashMap<DomainNodeRef, PreparedForcedRuntimeStateRecovery, RandomState>,
+    prepared_runtime_state_snapshots:
+        DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
     expiring_stream_states: DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>,
     latest_resource_versions: DashMap<DomainResourceKey, u64, RandomState>,
     replicated_deduplicator_states:

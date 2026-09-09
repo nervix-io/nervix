@@ -1,5 +1,474 @@
 Feature: Relocating runtime nodes onto a named cluster node
 
+  @ownership-state-handoff
+  Scenario: Immediate materialized relay relocation transfers the final owner state
+    Given runtime replication is configured with replica count 1 and snapshot interval "1h"
+    And runtime state replica polling is paused
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA state_event ( tenant STRING, id I64 );
+      CREATE WIRE JSON SCHEMA state_event_wire MODE STRICT (
+        tenant string,
+        id integer
+      );
+      CREATE CODEC state_event_codec
+        FROM WIRE JSON SCHEMA state_event_wire
+        TO SCHEMA state_event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge state-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE INGESTOR state_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
+        TO moving_state INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      SHOW RELAY moving_state MATERIALIZED STATE;
+      """
+    Then the last command output owner is saved as placeholder "state_owner"
+    And the first replica in the last command output is saved as placeholder "state_destination"
+    When http payload is posted to node "node-1" with host "state-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"acme","id":1}
+      """
+    Then within "10s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      """
+    When these NSPL commands are executed on the active session
+      """
+      RELOCATE RELAY moving_state ONTO NODE {{state_destination}} IGNORE PREFERENCES;
+      """
+    Then within "10s" node "{{state_destination}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      """
+
+  @ownership-state-handoff
+  Scenario: A persisted owner checkpoint promptly wakes its replica
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And runtime state replica polling is paused
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA state_event ( tenant STRING, id I64 );
+      CREATE WIRE JSON SCHEMA state_event_wire MODE STRICT (
+        tenant string,
+        id integer
+      );
+      CREATE CODEC state_event_codec
+        FROM WIRE JSON SCHEMA state_event_wire
+        TO SCHEMA state_event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge state-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE INGESTOR state_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
+        TO moving_state INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      SHOW RELAY moving_state MATERIALIZED STATE;
+      """
+    Then the last command output owner is saved as placeholder "state_owner"
+    And the first replica in the last command output is saved as placeholder "state_replica"
+    When http payload is posted to node "node-1" with host "state-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"acme","id":1}
+      """
+    Then within "10s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      """
+    And within "10s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      """
+
+  @ownership-state-handoff
+  Scenario: Relocating a stopped domain preserves branch-local deduplication state
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING );
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
+        transaction_id string
+      );
+      CREATE CODEC transaction_codec
+        FROM WIRE JSON SCHEMA transaction_wire
+        TO SCHEMA transaction;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE VHOST edge stopped-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/stopped' TYPE HTTP;
+      CREATE INGESTOR source_txns
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        TO inbound INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION deduped_seen TO deduped;
+      """
+    When http payload is posted to node "node-1" with host "stopped-{{test_id}}.example.com" path "/stopped"
+      """
+      {"tenant":"acme","transaction_id":"txn-1"}
+      """
+    And http payload is posted to node "node-1" with host "stopped-{{test_id}}.example.com" path "/stopped"
+      """
+      {"tenant":"beta","transaction_id":"txn-1"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"tenant":"acme","transaction_id":"txn-1"}
+      """
+    And within "10s" the relay subscription receives a payload
+      """
+      {"tenant":"beta","transaction_id":"txn-1"}
+      """
+    When these NSPL commands are executed on the active session
+      """
+      STOP;
+      RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
+      START;
+      """
+    Then the last command output contains
+      """
+      starting domain '{{domain}}'
+      """
+    When http payload is posted to node "node-1" with host "stopped-{{test_id}}.example.com" path "/stopped"
+      """
+      {"tenant":"acme","transaction_id":"txn-1"}
+      """
+    And http payload is posted to node "node-1" with host "stopped-{{test_id}}.example.com" path "/stopped"
+      """
+      {"tenant":"beta","transaction_id":"txn-1"}
+      """
+    Then the relay subscription does not receive a payload within "5s"
+
+  @ownership-state-handoff
+  Scenario: Relocating an empty stopped processor prepares an explicit empty checkpoint
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING );
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
+        transaction_id string
+      );
+      CREATE CODEC transaction_codec
+        FROM WIRE JSON SCHEMA transaction_wire
+        TO SCHEMA transaction;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE VHOST edge empty-stopped-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/empty-stopped' TYPE HTTP;
+      CREATE INGESTOR source_txns
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        TO inbound INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
+      START;
+      """
+    Then the last command output contains
+      """
+      starting domain '{{domain}}'
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION deduped_seen TO deduped;
+      """
+    When http payload is posted to node "node-1" with host "empty-stopped-{{test_id}}.example.com" path "/empty-stopped"
+      """
+      {"tenant":"acme","transaction_id":"txn-1"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"tenant":"acme","transaction_id":"txn-1"}
+      """
+
+  @ownership-state-handoff
+  Scenario: A destination guest that rejects transferred WASM state aborts relocation
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" has state-rejecting WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE rejecting_guest;
+      UPLOAD RESOURCE rejecting_guest VERSION '{{wasm_processor}}';
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( value I32 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY raw_events SCHEMA event UNBRANCHED;
+      CREATE RELAY restored_events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge rejecting-wasm-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/rejecting-wasm' TYPE HTTP;
+      CREATE INGESTOR event_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO raw_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR stateful_guest FROM raw_events
+        USING RESOURCE rejecting_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        UNBRANCHED
+        TO restored_events SET value = value
+        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restored_seen TO restored_events;
+      """
+    When http payload is posted to node "node-1" with host "rejecting-wasm-{{test_id}}.example.com" path "/rejecting-wasm"
+      """
+      {"value":1}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"value":1}
+      """
+    When these NSPL commands fail with "rejected transferred branch 'none'"
+      """
+      RELOCATE WASM PROCESSOR stateful_guest ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=wasm_processor name=stateful_guest owner=node-1
+      """
+
+  @ownership-state-handoff
+  Scenario: A destination restart after preparation aborts the ownership handoff
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY inbound SCHEMA event UNBRANCHED;
+      CREATE RELAY outbound SCHEMA event UNBRANCHED;
+      CREATE JUNCTION moving_route FROM inbound UNBRANCHED
+        TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    When these NSPL commands begin executing in the background
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    When node "node-2" is stopped
+    And node "node-2" is started
+    And the ownership handoff preparation pause for domain "{{domain}}" is released
+    Then the background NSPL execution fails with "destination node 'node-2' changed process incarnation during ownership handoff"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=moving_route owner=node-1
+      """
+
+  @ownership-state-handoff
+  Scenario: Owner loss promotes a replica with visible unverified state
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And runtime state replica polling is paused
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA state_event ( tenant STRING, id I64 );
+      CREATE WIRE JSON SCHEMA state_event_wire MODE STRICT (
+        tenant string,
+        id integer
+      );
+      CREATE CODEC state_event_codec
+        FROM WIRE JSON SCHEMA state_event_wire
+        TO SCHEMA state_event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge forced-state-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/forced-state' TYPE HTTP;
+      CREATE INGESTOR state_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
+        TO moving_state INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      SHOW RELAY moving_state MATERIALIZED STATE;
+      """
+    Then the last command output owner is saved as placeholder "failed_state_owner"
+    And the first replica in the last command output is saved as placeholder "promoted_state_replica"
+    When http payload is posted to node "node-1" with host "forced-state-{{test_id}}.example.com" path "/forced-state"
+      """
+      {"tenant":"acme","id":7}
+      """
+    Then within "10s" node "{{promoted_state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":7,"tenant":"acme"}
+      """
+    When physical time passes for "1s"
+    When node "{{failed_state_owner}}" is stopped
+    Then node "{{promoted_state_replica}}" eventually observes a stable leader
+    And within "20s" node "{{promoted_state_replica}}" eventually reports scheduled "relay" "moving_state" owner equals placeholder "promoted_state_replica"
+    And within "10s" node "{{promoted_state_replica}}" eventually reports materialized state for relay "moving_state" containing
+      """
+      key={"tenant":"acme"} payload={"id":7,"tenant":"acme"}
+      """
+    When these NSPL commands are executed through the client on node "{{promoted_state_replica}}"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      transition_from={{failed_state_owner}} state_recovery=unverified
+      """
+
+  @ownership-state-handoff
+  Scenario: Owner loss without a replica publishes an explicit state reset
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA state_event ( tenant STRING, id I64 );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      START;
+      SHOW RELAY moving_state MATERIALIZED STATE;
+      """
+    Then the last command output owner is saved as placeholder "failed_state_owner"
+    And a node other than placeholder "failed_state_owner" is saved as placeholder "surviving_node"
+    When node "{{failed_state_owner}}" is stopped
+    Then node "{{surviving_node}}" eventually observes a stable leader
+    And within "20s" node "{{surviving_node}}" eventually reports scheduled "relay" "moving_state" owner different from placeholder "failed_state_owner"
+    When these NSPL commands are executed through the client on node "{{surviving_node}}"
+      """
+      SHOW RELAY moving_state MATERIALIZED STATE;
+      """
+    Then the last command output contains
+      """
+      relay 'moving_state' materialized state is empty
+      """
+    When these NSPL commands are executed through the client on node "{{surviving_node}}"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      transition_from={{failed_state_owner}} state_recovery=reset resets=materialized_relay:missing_checkpoint
+      """
+
   Scenario: Relocating a deduplicator moves it and resumes deduplication on the destination
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -108,6 +577,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - domain={{domain}} kind=deduplicator name=dedup_txns owner=node-2
       """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    Then the relay subscription does not receive a payload within "5s"
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
       """
       {"tenant":"acme","transaction_id":"txn-2","amount":11}

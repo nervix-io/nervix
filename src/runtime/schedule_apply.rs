@@ -295,6 +295,13 @@ impl Runtime {
             }
         };
         let mut relay_states_moved = false;
+        let schedule_fingerprint =
+            Self::ownership_handoff_schedule_fingerprint(schedule).map_err(|reason| {
+                RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: reason.to_string(),
+                }
+            })?;
         for entity in reassignments {
             tokio::task::consume_budget().await;
             let desired_node = Self::scheduled_node(schedule, entity).ok_or_else(|| {
@@ -312,6 +319,36 @@ impl Runtime {
                     .is_some_and(|existing| existing.executes_on(local_node_id))
             });
             let executes_locally = desired_node.executes_on(local_node_id);
+            self.activate_prepared_forced_ownership_recovery_state(
+                domain,
+                desired_node,
+                local_node_id,
+                schedule_fingerprint,
+                true,
+            )
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "failed to activate forced recovery state for {} '{}': {error}",
+                    desired_node.kind().as_str(),
+                    desired_node.identifier.as_str()
+                ),
+            })?;
+            self.activate_prepared_ownership_handoff_state(
+                domain,
+                desired_node,
+                local_node_id,
+                schedule_fingerprint,
+                true,
+            )
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "failed to activate prepared state for {} '{}': {error}",
+                    desired_node.kind().as_str(),
+                    desired_node.identifier.as_str()
+                ),
+            })?;
             let relay_runtime = if entity.kind == ModelKind::Relay
                 && let Some(execution) = self.inner.executions.get(domain)
                 && let Some(registry) = execution
@@ -1577,7 +1614,6 @@ impl Runtime {
         let executes_locally = node.executes_on(local_node_id);
         let assigned_locally = node.is_assigned_to(local_node_id);
         let execution_node = node.execution_node().cloned();
-
         if let Model::Relay(relay) = node.config.as_ref()
             && relay.materialized_state.is_some()
             && (executes_locally || assigned_locally)
@@ -1750,6 +1786,12 @@ impl Runtime {
             if let Some(task) = task {
                 placement.tasks.push(task);
             }
+        }
+        if assigned_locally
+            && !node.is_primary_on(local_node_id)
+            && let Some(task) = self.spawn_branch_state_replica_poll_task(shutdown_tx, domain, node)
+        {
+            placement.tasks.push(task);
         }
         if node.kind() != ModelKind::Relay || executes_locally {
             self.inner.metrics.register_global_node(

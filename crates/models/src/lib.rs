@@ -19,6 +19,7 @@ mod expression;
 mod message_error;
 mod model_index;
 mod names;
+mod node_incarnation;
 mod node_ref;
 mod quiesce;
 mod remote;
@@ -52,6 +53,7 @@ pub use names::{
     SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName,
     VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
+pub use node_incarnation::ClusterNodeIncarnation;
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use quiesce::{
     DynamicModelUpdate, ModelChangeAspect, ModelChangeAspects, QuiesceLevel, StatePurge,
@@ -108,21 +110,22 @@ pub use statement::{
     ModelKind, MongoDbConfigEntry, MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry,
     MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping,
     NatsConfigEntry, NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, PlacementGroupSchedule,
-    PlacementPolicy, PostgresConfigEntry, PostgresConflictAction, PostgresValueMapping,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
-    RedisPubSubIngestMode, RelayBranching, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResolvedCodecWireFormat, RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode,
-    ScheduledNodes, SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    SqsConfigEntry, SqsFifoGroup, SqsIngestMode, StartDomain, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaLookup, ZeroMqConfigEntry,
-    ZeroMqIngestMode, default_relay_buffer,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, PlacementGroupSchedule, PlacementPolicy, PostgresConfigEntry,
+    PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, ResolvedCodecWireFormat, RetryPolicy,
+    S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
+    ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
+    ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
+    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
+    SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UniquelyKindedModel, UploadResource,
+    VhostTlsResource, WasmProcessorLimits, WebsocketsConfigEntry, WebsocketsIngestMode,
+    WindowBound, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::Timestamp;
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

@@ -1604,6 +1604,9 @@ impl Runtime {
                  interaction",
             );
             let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
+            let relay_model_name = ModelName::from(&relay);
+            let ownership_entity =
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay_model_name);
             let mut restored_branches = state.read().restored_branch_watermarks();
             restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
             for (key, last_ingestion) in restored_branches {
@@ -1612,7 +1615,8 @@ impl Runtime {
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
                 tokio::task::consume_budget().await;
-                if let Some(branch_ttl) = branch_ttl
+                if !runtime.ownership_handoff_entity_is_frozen(&ownership_entity)
+                    && let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
                 {
                     let now = runtime
@@ -1635,11 +1639,16 @@ impl Runtime {
                     next_expiration_scan = Instant::now() + expiration_scan_interval;
                     continue;
                 }
-                let expiration_sleep = branch_ttl.map(|_| {
-                    next_expiration_scan
-                        .checked_duration_since(Instant::now())
-                        .unwrap_or(Duration::ZERO)
-                });
+                let expiration_sleep =
+                    if runtime.ownership_handoff_entity_is_frozen(&ownership_entity) {
+                        Some(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
+                    } else {
+                        branch_ttl.map(|_| {
+                            next_expiration_scan
+                                .checked_duration_since(Instant::now())
+                                .unwrap_or(Duration::ZERO)
+                        })
+                    };
                 let wake_at = expiration_sleep.map(|sleep| Instant::now() + sleep);
                 let work = match interaction.next(wake_at).await {
                     Ok(work) => work,

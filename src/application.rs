@@ -51,7 +51,10 @@ use dashmap::DashMap;
 use ed25519_dalek::VerifyingKey;
 use error_stack::{Report, ResultExt};
 use fjall::Database;
-use futures_util::{SinkExt, StreamExt, stream};
+use futures_util::{
+    SinkExt, StreamExt,
+    stream::{self, FuturesUnordered},
+};
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::{
@@ -87,6 +90,9 @@ use nervix_consensus::{
 use nervix_dataflow_graph::{DataflowGraph, DataflowNodeHealth, DataflowNodeStatus};
 use nervix_execution::MemoryClass;
 use nervix_interconnect::{
+    ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
+    CaptureOwnershipHandoffStateRequest as RemoteCaptureOwnershipHandoffStateRequest,
+    ConfirmOwnershipHandoffStateRequest as RemoteConfirmOwnershipHandoffStateRequest,
     ControlEnvelope, DataflowNodeStatusEnvelope,
     DataflowNodeStatusRequest as RemoteDataflowNodeStatusRequest,
     DataflowNodeStatusResponse as RemoteDataflowNodeStatusResponse,
@@ -97,8 +103,10 @@ use nervix_interconnect::{
     DescribeMetricsRequest as RemoteDescribeMetricsRequest,
     DescribeMetricsResponse as RemoteDescribeMetricsResponse,
     DescribeRelayRequest as RemoteDescribeRelayRequest,
-    DescribeRelayResponse as RemoteDescribeRelayResponse, DomainClockStart, DomainClockStop,
-    DomainDrainStatusEnvelope, DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
+    DescribeRelayResponse as RemoteDescribeRelayResponse,
+    DiscardOwnershipHandoffStateRequest as RemoteDiscardOwnershipHandoffStateRequest,
+    DomainClockStart, DomainClockStop, DomainDrainStatusEnvelope,
+    DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
     DomainDrainStatusResponse as RemoteDomainDrainStatusResponse, DomainTickEnvelope,
     EmitterPublishingDrainStateEnvelope, EmitterPublishingDrainStatusEnvelope,
     EntityDrainStatusEnvelope, EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
@@ -107,33 +115,36 @@ use nervix_interconnect::{
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
     Envelope, IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
-    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse, PeerTarget,
-    PeerVerifier, RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
-    StateSyncResponse as RemoteStateSyncResponse,
+    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
+    OwnershipHandoffFailure, PeerTarget, PeerVerifier,
+    PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
+    PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest, RelayPayload,
+    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncResponse as RemoteStateSyncResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AlterDomain, BranchSelection, ClusterNodeName, CreateBranch, CreateCorrelator,
-    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateInferencer,
-    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateResource, CreateSchema, CreateStatement, CreateUdf, CreateUser,
-    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
+    AlterDomain, BranchSelection, ClusterNodeIncarnation, ClusterNodeName, CreateBranch,
+    CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSchema, CreateStatement,
+    CreateUdf, CreateUser, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
+    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
+    DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainClockState, DomainConfig, DomainName, DomainPace,
     DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, FieldName, IcebergCatalog,
     InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
     IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName, LookupQuery, Model,
-    ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef, ParseAsType,
-    PlacementGroupSchedule, PlacementName, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId, ResourceName,
-    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledModel, ScheduledNode,
-    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp,
-    UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
+    ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId,
+    ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledModel,
+    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
+    Timestamp, UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
     ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
@@ -200,6 +211,7 @@ const SUBSCRIPTION_INTEREST_CHECK_TIMEOUT: Duration = Duration::from_millis(250)
 const RUNTIME_REVISION_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const RUNTIME_REVISION_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
@@ -399,9 +411,14 @@ struct PendingClusterEntityGateRelease {
 }
 
 struct PlannedOwnershipHandoff {
+    operation_id: String,
+    base_schedule_fingerprint: [u8; 32],
+    target_schedule_fingerprint: [u8; 32],
+    node_incarnations: BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
     gate: ClusterEntityGate,
     moves: Vec<PlannedOwnershipMove>,
     started_at: tokio::time::Instant,
+    deadline: tokio::time::Instant,
 }
 
 struct InterconnectRelayPayloadLane {
@@ -609,9 +626,10 @@ use crate::{
     resource::{ResourceEntryContent, ResourceManifestEntry, ResourceStore},
     runtime::{
         CompiledProgramWithMaterializedInterest, EntityGateLease, IngestMessageHeaders,
-        IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
-        RelaySubscriptionReceiver, RelaySubscriptionRecvError, RetainedIngestHeaders, Runtime,
-        RuntimeEvent, RuntimeMaterializedRelaySpec, RuntimeVmCompileContext, SignalingDataSink,
+        IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, OwnershipHandoffError,
+        OwnershipHandoffResult, RelayMessage, RelayRecordBatch, RelaySubscriptionReceiver,
+        RelaySubscriptionRecvError, RetainedIngestHeaders, Runtime, RuntimeEvent,
+        RuntimeMaterializedRelaySpec, RuntimeVmCompileContext, SignalingDataSink,
         WebsocketSignalingSession, compile_session_filter_map_program,
         execute_filter_map_on_record, scheduled_relay_owner_nodes,
     },
@@ -3241,6 +3259,38 @@ impl AssignmentRelocation {
             Self::Failure => false,
         }
     }
+
+    fn ownership_transition(
+        self,
+        source: ClusterNodeName,
+        destination: ClusterNodeName,
+        node: &ScheduledNode,
+        promoted_replica: bool,
+    ) -> OwnershipTransition {
+        let state_recovery = match self {
+            Self::Planned => OwnershipStateRecoveryOutcome::Complete,
+            Self::Failure if promoted_replica => OwnershipStateRecoveryOutcome::Unverified,
+            Self::Failure => OwnershipStateRecoveryOutcome::Reset,
+        };
+        let resets = if state_recovery == OwnershipStateRecoveryOutcome::Reset {
+            node.ownership_state_components()
+                .into_iter()
+                .map(|component| OwnershipStateReset {
+                    component,
+                    cause: OwnershipStateResetCause::MissingCheckpoint,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        OwnershipTransition {
+            id: uuid::Uuid::now_v7().to_string(),
+            source,
+            destination,
+            state_recovery,
+            resets,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3250,6 +3300,229 @@ struct PlannedOwnershipMove {
     destination: ClusterNodeName,
     replicas: Vec<ClusterNodeName>,
     promoted_replica: bool,
+}
+
+struct ForcedOwnershipRecoveryCoordinator<'a> {
+    runtime: &'a Runtime,
+    interconnect: &'a Transport,
+    local_node_id: &'a ClusterNodeName,
+    node_incarnations: &'a BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+}
+
+impl ForcedOwnershipRecoveryCoordinator<'_> {
+    async fn prepare_schedule(
+        &self,
+        current: &nervix_models::DomainSchedule,
+        target: &mut nervix_models::DomainSchedule,
+    ) {
+        let base_schedule_fingerprint =
+            match Runtime::ownership_handoff_schedule_fingerprint(current) {
+                Ok(fingerprint) => fingerprint,
+                Err(reason) => {
+                    self.reset_every_move(
+                        current,
+                        target,
+                        OwnershipStateResetCause::InvalidCheckpoint,
+                    );
+                    warn!(
+                        domain = current.domain.as_str(),
+                        error = %reason,
+                        "forced ownership recovery could not fingerprint the committed schedule"
+                    );
+                    return;
+                }
+            };
+        let target_schedule_fingerprint =
+            match Runtime::ownership_handoff_schedule_fingerprint(target) {
+                Ok(fingerprint) => fingerprint,
+                Err(reason) => {
+                    self.reset_every_move(
+                        current,
+                        target,
+                        OwnershipStateResetCause::InvalidCheckpoint,
+                    );
+                    warn!(
+                        domain = current.domain.as_str(),
+                        error = %reason,
+                        "forced ownership recovery could not fingerprint the target schedule"
+                    );
+                    return;
+                }
+            };
+        struct PreparedForcedMove {
+            moved: PlannedOwnershipMove,
+            transition_id: String,
+            result: OwnershipHandoffResult<nervix_interconnect::ForcedOwnershipRecoveryPreparation>,
+        }
+
+        let moves = planned_ownership_moves(Some(current), Some(target));
+        let mut preparations = FuturesUnordered::new();
+        for moved in moves {
+            tokio::task::consume_budget().await;
+            let Some(transition) = target
+                .nodes
+                .get(&moved.entity)
+                .and_then(|node| node.ownership_transition.as_ref())
+            else {
+                continue;
+            };
+            if transition.state_recovery == OwnershipStateRecoveryOutcome::Complete {
+                continue;
+            }
+            let transition_id = transition.id.clone();
+            let destination_incarnation = self.node_incarnations.get(&moved.destination).copied();
+            preparations.push(async move {
+                let result = match destination_incarnation {
+                    Some(destination_incarnation) => {
+                        let deadline =
+                            tokio::time::Instant::now() + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                        let preparation = async {
+                            if moved.destination == *self.local_node_id {
+                                return self
+                                    .runtime
+                                    .prepare_forced_ownership_recovery(
+                                        transition_id.clone(),
+                                        &moved.former_owner,
+                                        &moved.destination,
+                                        destination_incarnation,
+                                        &current.domain,
+                                        &moved.entity,
+                                        base_schedule_fingerprint,
+                                        target_schedule_fingerprint,
+                                        deadline,
+                                    )
+                                    .await;
+                            }
+                            let response = self
+                                .interconnect
+                                .request(
+                                    &moved.destination,
+                                    RemotePrepareForcedOwnershipRecoveryRequest {
+                                        operation_id: transition_id.clone(),
+                                        source: moved.former_owner.clone(),
+                                        destination: moved.destination.clone(),
+                                        destination_incarnation,
+                                        domain: current.domain.clone(),
+                                        entity: moved.entity.clone(),
+                                        base_schedule_fingerprint,
+                                        target_schedule_fingerprint,
+                                    },
+                                )
+                                .await
+                                .map_err(|error| {
+                                    OwnershipHandoffError::transport(error.to_string())
+                                })?;
+                            response.map_err(|failure| {
+                                OwnershipHandoffError::participant(failure.to_string())
+                            })
+                        };
+                        match tokio::time::timeout_at(deadline, preparation).await {
+                            Ok(result) => result,
+                            Err(_) => Err(OwnershipHandoffError::deadline(
+                                "state preparation exceeded its five-second budget",
+                            )),
+                        }
+                    }
+                    None => Err(OwnershipHandoffError::participant(format!(
+                        "destination node '{}' has no live process incarnation",
+                        moved.destination
+                    ))),
+                };
+                PreparedForcedMove {
+                    moved,
+                    transition_id,
+                    result,
+                }
+            });
+        }
+        while let Some(preparation) = preparations.next().await {
+            tokio::task::consume_budget().await;
+            let moved = preparation.moved;
+            let node = target
+                .nodes
+                .get_mut(&moved.entity)
+                .verified("the forced recovery move was derived from this target schedule");
+            match preparation.result {
+                Ok(prepared) => {
+                    node.ownership_transition = Some(OwnershipTransition {
+                        id: preparation.transition_id,
+                        source: moved.former_owner.clone(),
+                        destination: moved.destination.clone(),
+                        state_recovery: prepared.state_recovery,
+                        resets: prepared.resets,
+                    });
+                    warn!(
+                        domain = current.domain.as_str(),
+                        kind = moved.entity.kind.as_str(),
+                        name = moved.entity.identifier.as_str(),
+                        source = %moved.former_owner,
+                        destination = %moved.destination,
+                        state_recovery = prepared.state_recovery.as_ref(),
+                        "forced ownership recovery prepared destination state"
+                    );
+                }
+                Err(reason) => {
+                    Self::mark_reset(
+                        node,
+                        preparation.transition_id,
+                        moved.former_owner.clone(),
+                        moved.destination.clone(),
+                        OwnershipStateResetCause::MissingCheckpoint,
+                    );
+                    warn!(
+                        domain = current.domain.as_str(),
+                        kind = moved.entity.kind.as_str(),
+                        name = moved.entity.identifier.as_str(),
+                        source = %moved.former_owner,
+                        destination = %moved.destination,
+                        error = %reason,
+                        "forced ownership recovery is publishing with recreated runtime state"
+                    );
+                }
+            }
+        }
+    }
+
+    fn reset_every_move(
+        &self,
+        current: &nervix_models::DomainSchedule,
+        target: &mut nervix_models::DomainSchedule,
+        cause: OwnershipStateResetCause,
+    ) {
+        for moved in planned_ownership_moves(Some(current), Some(target)) {
+            let node = target
+                .nodes
+                .get_mut(&moved.entity)
+                .verified("the forced recovery move was derived from this target schedule");
+            Self::mark_reset(
+                node,
+                uuid::Uuid::now_v7().to_string(),
+                moved.former_owner,
+                moved.destination,
+                cause,
+            );
+        }
+    }
+
+    fn mark_reset(
+        node: &mut ScheduledNode,
+        id: String,
+        source: ClusterNodeName,
+        destination: ClusterNodeName,
+        cause: OwnershipStateResetCause,
+    ) {
+        node.ownership_transition = Some(OwnershipTransition {
+            id,
+            source,
+            destination,
+            state_recovery: OwnershipStateRecoveryOutcome::Reset,
+            resets: node
+                .ownership_state_components()
+                .into_iter()
+                .map(|component| OwnershipStateReset { component, cause })
+                .collect(),
+        });
+    }
 }
 
 type AuthRateLimiter = DefaultKeyedRateLimiter<String>;
@@ -6525,13 +6798,83 @@ impl SessionServiceImpl {
     /// A node marked unavailable cannot answer a gate request, and contacting it only spends the
     /// request deadline before the hold fails.
     async fn available_node_ids(&self) -> Vec<ClusterNodeName> {
+        self.available_node_incarnations()
+            .await
+            .into_keys()
+            .collect()
+    }
+
+    async fn available_node_incarnations(
+        &self,
+    ) -> BTreeMap<ClusterNodeName, ClusterNodeIncarnation> {
         let gossip = self.inner.cluster.gossip_state().await;
         gossip
             .live_nodes
             .into_iter()
-            .map(|node| node.node_id)
-            .filter(|node_id| !gossip.dead_node_ids.contains(node_id))
+            .filter(|node| !gossip.dead_node_ids.contains(&node.node_id))
+            .map(|node| (node.node_id, node.incarnation))
             .collect()
+    }
+
+    async fn live_node_incarnations(&self) -> BTreeMap<ClusterNodeName, ClusterNodeIncarnation> {
+        self.inner
+            .cluster
+            .gossip_state()
+            .await
+            .live_nodes
+            .into_iter()
+            .map(|node| (node.node_id, node.incarnation))
+            .collect()
+    }
+
+    fn verify_ownership_handoff_node_incarnation(
+        current: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+        node: &ClusterNodeName,
+        expected: ClusterNodeIncarnation,
+        role: &str,
+    ) -> OwnershipHandoffResult<()> {
+        let Some(actual) = current.get(node) else {
+            return Err(OwnershipHandoffError::participant(format!(
+                "{role} node '{node}' is unavailable during ownership handoff"
+            )));
+        };
+        if *actual != expected {
+            return Err(OwnershipHandoffError::participant(format!(
+                "{role} node '{node}' changed process incarnation during ownership handoff"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn verify_planned_ownership_handoff_incarnations(
+        &self,
+        handoff: &PlannedOwnershipHandoff,
+    ) -> OwnershipHandoffResult<()> {
+        let current = self.live_node_incarnations().await;
+        for moved in &handoff.moves {
+            tokio::task::consume_budget().await;
+            let source = *handoff
+                .node_incarnations
+                .get(&moved.former_owner)
+                .verified("every planned former owner has a bound incarnation");
+            Self::verify_ownership_handoff_node_incarnation(
+                &current,
+                &moved.former_owner,
+                source,
+                "source",
+            )?;
+            let destination = *handoff
+                .node_incarnations
+                .get(&moved.destination)
+                .verified("every planned destination has a bound incarnation");
+            Self::verify_ownership_handoff_node_incarnation(
+                &current,
+                &moved.destination,
+                destination,
+                "destination",
+            )?;
+        }
+        Ok(())
     }
 
     async fn engage_cluster_entity_gates(
@@ -6596,14 +6939,79 @@ impl SessionServiceImpl {
         if moves.is_empty() {
             return Ok(None);
         }
-        let live_nodes = self
-            .available_node_ids()
-            .await
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let current = current
+            .verified("an ownership move can only be derived from a current domain schedule");
+        let planned = planned
+            .verified("an ownership move can only be derived from a planned domain schedule");
+        let base_schedule_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(current)
+            .map_err(|reason| {
+                Report::new(DomainAlterError::EntityGate {
+                    domain: domain.clone(),
+                    operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                    reason: reason.to_string(),
+                })
+            })?;
+        let target_schedule_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(planned)
+            .map_err(|reason| {
+                Report::new(DomainAlterError::EntityGate {
+                    domain: domain.clone(),
+                    operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                    reason: reason.to_string(),
+                })
+            })?;
+        let first_move = moves
+            .first()
+            .verified("the empty ownership move set returned before planning a handoff");
+        let first_node = planned
+            .nodes
+            .get(&first_move.entity)
+            .verified("every ownership move was derived from the planned schedule");
+        let Some(first_transition) = first_node.ownership_transition.as_ref() else {
+            return Err(Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: "planned schedule does not identify its ownership handoff transition"
+                    .to_string(),
+            }));
+        };
+        let operation_id = first_transition.id.clone();
+        for moved in &moves {
+            let node = planned
+                .nodes
+                .get(&moved.entity)
+                .verified("every ownership move was derived from the planned schedule");
+            let Some(transition) = node.ownership_transition.as_ref() else {
+                return Err(Report::new(DomainAlterError::EntityGate {
+                    domain: domain.clone(),
+                    operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                    reason: format!(
+                        "planned {} '{}' does not identify its ownership handoff transition",
+                        moved.entity.kind.as_str(),
+                        moved.entity.identifier.as_str()
+                    ),
+                }));
+            };
+            if transition.id != operation_id
+                || transition.source != moved.former_owner
+                || transition.destination != moved.destination
+                || transition.state_recovery != OwnershipStateRecoveryOutcome::Complete
+                || !transition.resets.is_empty()
+            {
+                return Err(Report::new(DomainAlterError::EntityGate {
+                    domain: domain.clone(),
+                    operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                    reason: format!(
+                        "planned {} '{}' has an inconsistent ownership handoff transition",
+                        moved.entity.kind.as_str(),
+                        moved.entity.identifier.as_str()
+                    ),
+                }));
+            }
+        }
+        let node_incarnations = self.available_node_incarnations().await;
         if let Some(moved) = moves
             .iter()
-            .find(|moved| !live_nodes.contains(&moved.former_owner))
+            .find(|moved| !node_incarnations.contains_key(&moved.former_owner))
         {
             return Err(Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
@@ -6614,16 +7022,24 @@ impl SessionServiceImpl {
                 ),
             }));
         }
+        if let Some(moved) = moves
+            .iter()
+            .find(|moved| !node_incarnations.contains_key(&moved.destination))
+        {
+            return Err(Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: format!(
+                    "destination node '{}' is unavailable before ownership handoff",
+                    moved.destination
+                ),
+            }));
+        }
         let affected_entities = moves
             .iter()
             .map(|moved| moved.entity.clone())
             .collect::<Vec<_>>();
-        let relays = match current {
-            Some(schedule) => {
-                Runtime::ownership_handoff_relays_for_schedule(schedule, &affected_entities)
-            }
-            None => Vec::new(),
-        };
+        let relays = Runtime::ownership_handoff_relays_for_schedule(current, &affected_entities);
         let former_owners = moves
             .iter()
             .map(|moved| moved.former_owner.clone())
@@ -6657,18 +7073,576 @@ impl SessionServiceImpl {
             self.release_cluster_entity_gates(gate).await;
             return Err(error);
         }
-        Ok(Some(PlannedOwnershipHandoff {
+        let mut prepared = Vec::new();
+        for moved in &moves {
+            tokio::task::consume_budget().await;
+            let result = tokio::time::timeout_at(deadline, async {
+                let checkpoints = self
+                    .capture_ownership_handoff_state(
+                        &operation_id,
+                        domain,
+                        moved,
+                        *node_incarnations
+                            .get(&moved.former_owner)
+                            .verified("every former owner was found in live gossip above"),
+                        base_schedule_fingerprint,
+                    )
+                    .await?;
+                self.prepare_ownership_handoff_state(
+                    &operation_id,
+                    domain,
+                    moved,
+                    *node_incarnations
+                        .get(&moved.former_owner)
+                        .verified("every former owner was found in live gossip above"),
+                    *node_incarnations
+                        .get(&moved.destination)
+                        .verified("every destination was found in live gossip above"),
+                    base_schedule_fingerprint,
+                    target_schedule_fingerprint,
+                    checkpoints,
+                )
+                .await
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => prepared.push(moved.clone()),
+                Ok(Err(reason)) => {
+                    self.discard_ownership_handoff_state(&operation_id, domain, &prepared)
+                        .await;
+                    self.release_cluster_entity_gates(gate).await;
+                    return Err(Report::new(DomainAlterError::EntityGate {
+                        domain: domain.clone(),
+                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                        reason: format!(
+                            "failed to prepare {} '{}' from node '{}' on node '{}': {reason}",
+                            moved.entity.kind.as_str(),
+                            moved.entity.identifier.as_str(),
+                            moved.former_owner,
+                            moved.destination
+                        ),
+                    }));
+                }
+                Err(_) => {
+                    self.discard_ownership_handoff_state(&operation_id, domain, &prepared)
+                        .await;
+                    self.release_cluster_entity_gates(gate).await;
+                    return Err(Report::new(DomainAlterError::EntityGate {
+                        domain: domain.clone(),
+                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                        reason: format!(
+                            "timed out preparing {} '{}' from node '{}' on node '{}'",
+                            moved.entity.kind.as_str(),
+                            moved.entity.identifier.as_str(),
+                            moved.former_owner,
+                            moved.destination
+                        ),
+                    }));
+                }
+            }
+        }
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_ownership_handoff_after_preparation_if_armed(domain)
+            .await;
+        let handoff = PlannedOwnershipHandoff {
+            operation_id,
+            base_schedule_fingerprint,
+            target_schedule_fingerprint,
+            node_incarnations,
             gate,
             moves,
             started_at,
-        }))
+            deadline,
+        };
+        if let Err(reason) = self
+            .verify_planned_ownership_handoff_incarnations(&handoff)
+            .await
+        {
+            self.abort_planned_ownership_handoff(domain, handoff).await;
+            return Err(Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: reason.to_string(),
+            }));
+        }
+        if let Err(reason) = self.confirm_planned_ownership_handoff(&handoff).await {
+            self.abort_planned_ownership_handoff(domain, handoff).await;
+            return Err(Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: reason.to_string(),
+            }));
+        }
+        Ok(Some(handoff))
+    }
+
+    async fn capture_ownership_handoff_state(
+        &self,
+        operation_id: &str,
+        domain: &DomainName,
+        moved: &PlannedOwnershipMove,
+        source_incarnation: ClusterNodeIncarnation,
+        base_schedule_fingerprint: [u8; 32],
+    ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
+        Self::verify_ownership_handoff_node_incarnation(
+            &self.live_node_incarnations().await,
+            &moved.former_owner,
+            source_incarnation,
+            "source",
+        )?;
+        if moved.former_owner == *self.inner.consensus.local_node_id() {
+            let scheduled = self
+                .prepare_owner_control_request(
+                    domain,
+                    moved.entity.kind,
+                    moved.entity.identifier.clone(),
+                )
+                .await
+                .map_err(OwnershipHandoffError::participant)?;
+            if !scheduled.is_primary_on(self.inner.consensus.local_node_id()) {
+                return Err(OwnershipHandoffError::participant(format!(
+                    "{} '{}' is not owned by source node '{}'",
+                    moved.entity.kind.as_str(),
+                    moved.entity.identifier.as_str(),
+                    moved.former_owner
+                )));
+            }
+            return self
+                .inner
+                .runtime
+                .capture_ownership_handoff_state(domain, &moved.entity, base_schedule_fingerprint)
+                .await;
+        }
+        let response = self
+            .inner
+            .interconnect
+            .request(
+                &moved.former_owner,
+                RemoteCaptureOwnershipHandoffStateRequest {
+                    operation_id: operation_id.to_string(),
+                    source: moved.former_owner.clone(),
+                    source_incarnation,
+                    domain: domain.clone(),
+                    entity: moved.entity.clone(),
+                    base_schedule_fingerprint,
+                },
+            )
+            .await
+            .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
+        response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
+    }
+
+    async fn prepare_ownership_handoff_state(
+        &self,
+        operation_id: &str,
+        domain: &DomainName,
+        moved: &PlannedOwnershipMove,
+        source_incarnation: ClusterNodeIncarnation,
+        destination_incarnation: ClusterNodeIncarnation,
+        base_schedule_fingerprint: [u8; 32],
+        target_schedule_fingerprint: [u8; 32],
+        checkpoints: Vec<nervix_interconnect::OwnershipHandoffCheckpoint>,
+    ) -> OwnershipHandoffResult<()> {
+        let current_incarnations = self.live_node_incarnations().await;
+        Self::verify_ownership_handoff_node_incarnation(
+            &current_incarnations,
+            &moved.former_owner,
+            source_incarnation,
+            "source",
+        )?;
+        Self::verify_ownership_handoff_node_incarnation(
+            &current_incarnations,
+            &moved.destination,
+            destination_incarnation,
+            "destination",
+        )?;
+        let scheduled = self
+            .scheduled_model_node(domain, moved.entity.kind, moved.entity.identifier.clone())
+            .await
+            .ok_or_else(|| {
+                OwnershipHandoffError::schedule(format!(
+                    "{} '{}' is absent from the committed schedule",
+                    moved.entity.kind.as_str(),
+                    moved.entity.identifier.as_str()
+                ))
+            })?;
+        if scheduled.execution_node() != Some(&moved.former_owner) {
+            return Err(OwnershipHandoffError::participant(format!(
+                "{} '{}' is no longer owned by source node '{}'",
+                moved.entity.kind.as_str(),
+                moved.entity.identifier.as_str(),
+                moved.former_owner
+            )));
+        }
+        if moved.destination == *self.inner.consensus.local_node_id() {
+            return self
+                .inner
+                .runtime
+                .prepare_ownership_handoff_state(
+                    operation_id.to_string(),
+                    moved.former_owner.clone(),
+                    moved.destination.clone(),
+                    source_incarnation,
+                    destination_incarnation,
+                    domain,
+                    &moved.entity,
+                    base_schedule_fingerprint,
+                    target_schedule_fingerprint,
+                    checkpoints,
+                )
+                .await;
+        }
+        let response = self
+            .inner
+            .interconnect
+            .request(
+                &moved.destination,
+                RemotePrepareOwnershipHandoffStateRequest {
+                    operation_id: operation_id.to_string(),
+                    source: moved.former_owner.clone(),
+                    destination: moved.destination.clone(),
+                    source_incarnation,
+                    destination_incarnation,
+                    domain: domain.clone(),
+                    entity: moved.entity.clone(),
+                    base_schedule_fingerprint,
+                    target_schedule_fingerprint,
+                    checkpoints,
+                },
+            )
+            .await
+            .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
+        response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
+    }
+
+    async fn confirm_planned_ownership_handoff(
+        &self,
+        handoff: &PlannedOwnershipHandoff,
+    ) -> OwnershipHandoffResult<()> {
+        for moved in &handoff.moves {
+            tokio::task::consume_budget().await;
+            let request = RemoteConfirmOwnershipHandoffStateRequest {
+                operation_id: handoff.operation_id.clone(),
+                source: moved.former_owner.clone(),
+                destination: moved.destination.clone(),
+                source_incarnation: *handoff
+                    .node_incarnations
+                    .get(&moved.former_owner)
+                    .verified("every planned former owner has a bound incarnation"),
+                destination_incarnation: *handoff
+                    .node_incarnations
+                    .get(&moved.destination)
+                    .verified("every planned destination has a bound incarnation"),
+                domain: handoff.gate.domain.clone(),
+                entity: moved.entity.clone(),
+                base_schedule_fingerprint: handoff.base_schedule_fingerprint,
+                target_schedule_fingerprint: handoff.target_schedule_fingerprint,
+            };
+            self.confirm_ownership_handoff_on_node(
+                &moved.former_owner,
+                request.clone(),
+                handoff.deadline,
+            )
+            .await?;
+            tokio::task::consume_budget().await;
+            self.confirm_ownership_handoff_on_node(&moved.destination, request, handoff.deadline)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn confirm_ownership_handoff_on_node(
+        &self,
+        node: &ClusterNodeName,
+        request: RemoteConfirmOwnershipHandoffStateRequest,
+        deadline: tokio::time::Instant,
+    ) -> OwnershipHandoffResult<()> {
+        let confirmation = async {
+            if node == self.inner.consensus.local_node_id() {
+                return self.confirm_local_ownership_handoff_state(request).await;
+            }
+            loop {
+                tokio::task::consume_budget().await;
+                match self.inner.interconnect.request(node, request.clone()).await {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(failure)) => {
+                        return Err(OwnershipHandoffError::participant(failure.to_string()));
+                    }
+                    Err(error) => {
+                        debug!(
+                            %node,
+                            error = %error,
+                            "ownership handoff participant confirmation is waiting for interconnect"
+                        );
+                        sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL).await;
+                    }
+                }
+            }
+        };
+        match tokio::time::timeout_at(deadline, confirmation).await {
+            Ok(result) => result,
+            Err(_) => Err(OwnershipHandoffError::deadline(format!(
+                "timed out confirming ownership handoff participant node '{node}'"
+            ))),
+        }
+    }
+
+    async fn confirm_local_ownership_handoff_state(
+        &self,
+        request: RemoteConfirmOwnershipHandoffStateRequest,
+    ) -> OwnershipHandoffResult<()> {
+        let local_node = self.inner.consensus.local_node_id();
+        if local_node == &request.source {
+            Self::verify_ownership_handoff_node_incarnation(
+                &self.live_node_incarnations().await,
+                local_node,
+                request.source_incarnation,
+                "source",
+            )?;
+            let schedule = self.inner.consensus.current_schedule().await;
+            let current = schedule.domain(&request.domain).ok_or_else(|| {
+                OwnershipHandoffError::schedule(format!(
+                    "domain '{}' has no committed schedule while confirming ownership handoff",
+                    request.domain.as_str()
+                ))
+            })?;
+            if Runtime::ownership_handoff_schedule_fingerprint(current)?
+                != request.base_schedule_fingerprint
+            {
+                return Err(OwnershipHandoffError::schedule(format!(
+                    "domain '{}' changed schedule before ownership handoff publication",
+                    request.domain.as_str()
+                )));
+            }
+            let scheduled = current.nodes.get(&request.entity).ok_or_else(|| {
+                OwnershipHandoffError::schedule(format!(
+                    "{} '{}' is absent from the ownership handoff base schedule",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str()
+                ))
+            })?;
+            if !scheduled.is_primary_on(&request.source) {
+                return Err(OwnershipHandoffError::participant(format!(
+                    "{} '{}' is no longer owned by source node '{}'",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str(),
+                    request.source
+                )));
+            }
+            let entity = nervix_models::DomainNodeRef::node_in(
+                request.domain,
+                request.entity.kind,
+                request.entity.identifier,
+            );
+            if !self
+                .inner
+                .runtime
+                .ownership_handoff_entity_is_frozen(&entity)
+            {
+                return Err(OwnershipHandoffError::participant(format!(
+                    "source node '{}' no longer holds the ownership handoff freeze",
+                    request.source
+                )));
+            }
+            return Ok(());
+        }
+        if local_node == &request.destination {
+            Self::verify_ownership_handoff_node_incarnation(
+                &self.live_node_incarnations().await,
+                local_node,
+                request.destination_incarnation,
+                "destination",
+            )?;
+            return self.inner.runtime.verify_ownership_handoff_preparation(
+                &request.operation_id,
+                &request.source,
+                &request.destination,
+                request.source_incarnation,
+                request.destination_incarnation,
+                &request.domain,
+                &request.entity,
+                request.base_schedule_fingerprint,
+                request.target_schedule_fingerprint,
+            );
+        }
+        Err(OwnershipHandoffError::participant(format!(
+            "ownership handoff confirmation names nodes '{}' and '{}' but reached '{}'",
+            request.source, request.destination, local_node
+        )))
+    }
+
+    async fn discard_ownership_handoff_state(
+        &self,
+        operation_id: &str,
+        domain: &DomainName,
+        moves: &[PlannedOwnershipMove],
+    ) {
+        for moved in moves {
+            tokio::task::consume_budget().await;
+            if moved.destination == *self.inner.consensus.local_node_id() {
+                if let Err(error) = self.inner.runtime.discard_prepared_ownership_handoff_state(
+                    operation_id,
+                    domain,
+                    &moved.entity,
+                ) {
+                    warn!(
+                        domain = domain.as_str(),
+                        destination = %moved.destination,
+                        error = %error,
+                        "failed to discard abandoned ownership handoff state"
+                    );
+                }
+                continue;
+            }
+            let result = self
+                .inner
+                .interconnect
+                .request(
+                    &moved.destination,
+                    RemoteDiscardOwnershipHandoffStateRequest {
+                        operation_id: operation_id.to_string(),
+                        domain: domain.clone(),
+                        entity: moved.entity.clone(),
+                    },
+                )
+                .await;
+            let error = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(error) = error {
+                warn!(
+                    domain = domain.as_str(),
+                    destination = %moved.destination,
+                    error = %error,
+                    "failed to discard abandoned ownership handoff state"
+                );
+            }
+        }
+    }
+
+    async fn abort_planned_ownership_handoff(
+        &self,
+        domain: &DomainName,
+        handoff: PlannedOwnershipHandoff,
+    ) {
+        self.discard_ownership_handoff_state(&handoff.operation_id, domain, &handoff.moves)
+            .await;
+        self.release_cluster_entity_gates(handoff.gate).await;
+    }
+
+    async fn activate_planned_ownership_handoff(
+        &self,
+        domain: &DomainName,
+        handoff: &PlannedOwnershipHandoff,
+    ) -> OwnershipHandoffResult<()> {
+        self.verify_planned_ownership_handoff_incarnations(handoff)
+            .await?;
+        for moved in &handoff.moves {
+            tokio::task::consume_budget().await;
+            let source_incarnation = *handoff
+                .node_incarnations
+                .get(&moved.former_owner)
+                .verified("every planned former owner has a bound incarnation");
+            let destination_incarnation = *handoff
+                .node_incarnations
+                .get(&moved.destination)
+                .verified("every planned destination has a bound incarnation");
+            let activation = async {
+                if moved.destination == *self.inner.consensus.local_node_id() {
+                    return self.inner.runtime.verify_ownership_handoff_activation(
+                        &handoff.operation_id,
+                        &moved.former_owner,
+                        &moved.destination,
+                        source_incarnation,
+                        destination_incarnation,
+                        domain,
+                        &moved.entity,
+                        handoff.base_schedule_fingerprint,
+                        handoff.target_schedule_fingerprint,
+                    );
+                }
+                let response = self
+                    .inner
+                    .interconnect
+                    .request(
+                        &moved.destination,
+                        RemoteActivateOwnershipHandoffStateRequest {
+                            operation_id: handoff.operation_id.clone(),
+                            source: moved.former_owner.clone(),
+                            destination: moved.destination.clone(),
+                            source_incarnation,
+                            destination_incarnation,
+                            domain: domain.clone(),
+                            entity: moved.entity.clone(),
+                            base_schedule_fingerprint: handoff.base_schedule_fingerprint,
+                            target_schedule_fingerprint: handoff.target_schedule_fingerprint,
+                        },
+                    )
+                    .await
+                    .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
+                response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
+            };
+            match tokio::time::timeout_at(handoff.deadline, activation).await {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => return Err(reason),
+                Err(_) => {
+                    return Err(OwnershipHandoffError::deadline(format!(
+                        "timed out waiting for {} '{}' to activate on node '{}'",
+                        moved.entity.kind.as_str(),
+                        moved.entity.identifier.as_str(),
+                        moved.destination
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn finish_planned_ownership_handoff(
         &self,
         domain: &DomainName,
         handoff: PlannedOwnershipHandoff,
-    ) {
+    ) -> OwnershipHandoffResult<()> {
+        let activation = loop {
+            tokio::task::consume_budget().await;
+            match self
+                .activate_planned_ownership_handoff(domain, &handoff)
+                .await
+            {
+                Ok(()) => break Ok(()),
+                Err(error) if tokio::time::Instant::now() < handoff.deadline => {
+                    debug!(
+                        domain = domain.as_str(),
+                        error = %error,
+                        "planned ownership handoff activation will retry"
+                    );
+                    sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL).await;
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        if let Err(error) = activation {
+            let hold_duration = handoff.started_at.elapsed();
+            for moved in &handoff.moves {
+                warn!(
+                    domain = domain.as_str(),
+                    kind = moved.entity.kind.as_ref(),
+                    name = moved.entity.identifier.as_str(),
+                    former_owner = %moved.former_owner,
+                    destination = %moved.destination,
+                    hold_duration_millis = hold_duration.as_millis(),
+                    promoted_replica = moved.promoted_replica,
+                    error = %error,
+                    "planned ownership handoff destination did not confirm activation"
+                );
+            }
+            handoff.gate.defer_release_to_lease_deadline();
+            return Err(error);
+        }
         let hold_duration = handoff.started_at.elapsed();
         for moved in &handoff.moves {
             info!(
@@ -6692,7 +7666,10 @@ impl SessionServiceImpl {
                 );
             }
         }
+        self.discard_ownership_handoff_state(&handoff.operation_id, domain, &handoff.moves)
+            .await;
         self.release_cluster_entity_gates(handoff.gate).await;
+        Ok(())
     }
 
     fn defer_planned_ownership_handoff_release(
@@ -9276,7 +10253,7 @@ impl SessionServiceImpl {
                         .domain(domain_id)
                         .cloned();
                     let PreparedDomainSchedule {
-                        schedule,
+                        mut schedule,
                         relocations,
                     } = self
                         .prepare_domain_schedule(domain_id, graph, alter.policy)
@@ -9296,9 +10273,10 @@ impl SessionServiceImpl {
                     step_quiesce_level = Some(quiesce_level);
                     let mut next = previous.clone();
                     next.config.placement = alter.policy;
-                    let handoff = if let DomainStatus::Running = previous.status
-                        && relocations > 0
-                    {
+                    if let Some(schedule) = schedule.as_mut() {
+                        mark_complete_ownership_transitions(expected_schedule.as_ref(), schedule);
+                    }
+                    let handoff = if relocations > 0 {
                         self.begin_planned_ownership_handoff(
                             domain_id,
                             expected_schedule.as_ref(),
@@ -9506,7 +10484,8 @@ impl SessionServiceImpl {
             Ok(advanced) => advanced,
             Err(error) => {
                 if let Some(handoff) = ownership_handoff.take() {
-                    self.release_cluster_entity_gates(handoff.gate).await;
+                    self.abort_planned_ownership_handoff(domain_id, handoff)
+                        .await;
                 }
                 return Err(error);
             }
@@ -9525,9 +10504,17 @@ impl SessionServiceImpl {
             if let Some(handoff) = ownership_handoff.take() {
                 if let Some(error) = &activation_error {
                     self.defer_planned_ownership_handoff_release(domain_id, handoff, error);
-                } else {
-                    self.finish_planned_ownership_handoff(domain_id, handoff)
-                        .await;
+                } else if let Err(error) = self
+                    .finish_planned_ownership_handoff(domain_id, handoff)
+                    .await
+                {
+                    self.broadcast_error(format!(
+                        "failed to confirm ownership state activation after transaction '{}' step {}: {error}",
+                        transaction.id,
+                        statement_index
+                            .checked_add(1)
+                            .assured("the index names a statement of a transaction held in memory")
+                    ));
                 }
             }
             if let Some(StartedDomainClock {
@@ -9580,7 +10567,8 @@ impl SessionServiceImpl {
             }
         }
         if let Some(handoff) = ownership_handoff {
-            self.release_cluster_entity_gates(handoff.gate).await;
+            self.abort_planned_ownership_handoff(domain_id, handoff)
+                .await;
         }
         Ok(advanced)
     }
@@ -10073,7 +11061,7 @@ impl SessionServiceImpl {
             let mut ownership_handoff = None;
             let ScheduleTransition {
                 expected_schedule,
-                prepared_schedule,
+                mut prepared_schedule,
                 planned_relocations,
             } = if !is_noop {
                 #[cfg(feature = "testing")]
@@ -10134,6 +11122,9 @@ impl SessionServiceImpl {
                 base_classified_level
             };
             let requires_domain_pause = classified_level.requires_domain_pause();
+            if let Some(prepared_schedule) = prepared_schedule.as_mut() {
+                mark_complete_ownership_transitions(expected_schedule.as_ref(), prepared_schedule);
+            }
             let transaction_schedule = transaction_step
                 .is_some()
                 .then(|| (expected_schedule.clone(), prepared_schedule.clone()));
@@ -10206,10 +11197,7 @@ impl SessionServiceImpl {
                 }
                 cluster_entity_gate = Some(gate);
             }
-            if !is_noop
-                && matches!(domain_state.status, DomainStatus::Running)
-                && planned_relocations > 0
-            {
+            if !is_noop && planned_relocations > 0 {
                 ownership_handoff = match self
                     .begin_planned_ownership_handoff(
                         &domain,
@@ -10234,7 +11222,7 @@ impl SessionServiceImpl {
                     Ok(changes) => changes,
                     Err(err) => {
                         if let Some(handoff) = ownership_handoff.take() {
-                            self.release_cluster_entity_gates(handoff.gate).await;
+                            self.abort_planned_ownership_handoff(&domain, handoff).await;
                         }
                         if let Some(gate) = cluster_entity_gate.take() {
                             self.release_cluster_entity_gates(gate).await;
@@ -10318,8 +11306,15 @@ impl SessionServiceImpl {
                                         &domain, handoff, error,
                                     );
                                 } else {
-                                    self.finish_planned_ownership_handoff(&domain, handoff)
-                                        .await;
+                                    if let Err(error) = self
+                                        .finish_planned_ownership_handoff(&domain, handoff)
+                                        .await
+                                    {
+                                        self.broadcast_error(format!(
+                                            "failed to confirm ownership state activation for committed transaction model step in domain '{}': {error}",
+                                            domain.as_str()
+                                        ));
+                                    }
                                 }
                             }
                             if let Some(error) = activation_error {
@@ -10332,7 +11327,7 @@ impl SessionServiceImpl {
                         }
                         Err(error) => {
                             if let Some(handoff) = ownership_handoff.take() {
-                                self.release_cluster_entity_gates(handoff.gate).await;
+                                self.abort_planned_ownership_handoff(&domain, handoff).await;
                             }
                             if let Some(gate) = cluster_entity_gate.take() {
                                 self.release_cluster_entity_gates(gate).await;
@@ -10367,12 +11362,16 @@ impl SessionServiceImpl {
                     if let Err(error) = self
                         .inner
                         .consensus
-                        .replace_domain_schedule(domain.clone(), prepared_schedule.clone())
+                        .replace_domain_schedule(
+                            domain.clone(),
+                            expected_schedule.clone(),
+                            prepared_schedule.clone(),
+                        )
                         .await
                     {
                         let err = error.to_string();
                         if let Some(handoff) = ownership_handoff.take() {
-                            self.release_cluster_entity_gates(handoff.gate).await;
+                            self.abort_planned_ownership_handoff(&domain, handoff).await;
                         }
                         if let Some(gate) = cluster_entity_gate.take() {
                             self.release_cluster_entity_gates(gate).await;
@@ -10438,8 +11437,21 @@ impl SessionServiceImpl {
                         ));
                     }
                     if let Some(handoff) = ownership_handoff.take() {
-                        self.finish_planned_ownership_handoff(&domain, handoff)
-                            .await;
+                        if let Err(error) = self
+                            .finish_planned_ownership_handoff(&domain, handoff)
+                            .await
+                        {
+                            if let Some(gate) = cluster_entity_gate.take() {
+                                self.release_cluster_entity_gates(gate).await;
+                            }
+                            if requires_domain_pause {
+                                let _ = self.resume_domain_after_alter(&domain).await;
+                            }
+                            return command_error(format!(
+                                "committed models and schedule for domain '{}', but ownership state activation did not complete: {error}",
+                                domain.as_str()
+                            ));
+                        }
                     }
                 }
 
@@ -11362,7 +12374,7 @@ impl SessionServiceImpl {
             .consensus
             .schedulable_live_voter_ids(live_node_ids)
             .await;
-        let next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
+        let mut next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
             #[cfg(feature = "testing")]
             let mut schedule = graph.schedule_for_domain_with_mode(
                 domain,
@@ -11385,6 +12397,9 @@ impl SessionServiceImpl {
             );
             schedule
         });
+        if let Some(next_schedule) = next_schedule.as_mut() {
+            mark_complete_ownership_transitions(previous_schedule.as_ref(), next_schedule);
+        }
         let relocations =
             planned_relocation_count(previous_schedule.as_ref(), next_schedule.as_ref());
         let quiesce_level =
@@ -11407,9 +12422,7 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
-        let handoff = if let DomainStatus::Running = previous_state.status
-            && relocations > 0
-        {
+        let handoff = if relocations > 0 {
             self.begin_planned_ownership_handoff(
                 domain,
                 previous_schedule.as_ref(),
@@ -11426,11 +12439,16 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .put_domain_and_schedule(next_state, next_schedule)
+            .put_domain_and_schedule(
+                Some(previous_state),
+                previous_schedule,
+                next_state,
+                next_schedule,
+            )
             .await
         {
             if let Some(handoff) = handoff {
-                self.release_cluster_entity_gates(handoff.gate).await;
+                self.abort_planned_ownership_handoff(domain, handoff).await;
             }
             return self
                 .consensus_error_response(
@@ -11454,7 +12472,12 @@ impl SessionServiceImpl {
             ));
         }
         if let Some(handoff) = handoff {
-            self.finish_planned_ownership_handoff(domain, handoff).await;
+            if let Err(error) = self.finish_planned_ownership_handoff(domain, handoff).await {
+                return command_error(format!(
+                    "committed placement and schedule for domain '{}', but ownership state activation did not complete: {error}",
+                    domain.as_str()
+                ));
+            }
         }
 
         command_ok(format!(
@@ -12248,6 +13271,13 @@ impl SessionServiceImpl {
             .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
             .config
             .placement;
+        let expected_schedule = self
+            .inner
+            .consensus
+            .current_schedule()
+            .await
+            .domain(domain)
+            .cloned();
         let PreparedDomainSchedule {
             schedule,
             relocations,
@@ -12256,7 +13286,7 @@ impl SessionServiceImpl {
             .await?;
         self.inner
             .consensus
-            .replace_domain_schedule(domain.clone(), schedule)
+            .replace_domain_schedule(domain.clone(), expected_schedule, schedule)
             .await
             .map_err(|error| error.to_string())?;
         self.apply_current_cluster_state().await.map_err(|error| {
@@ -12403,7 +13433,11 @@ impl SessionServiceImpl {
             if let Err(error) = self
                 .inner
                 .consensus
-                .replace_domain_schedule(domain.clone(), Some(schedule))
+                .replace_domain_schedule(
+                    domain.clone(),
+                    current_schedule.domain(&domain).cloned(),
+                    Some(schedule),
+                )
                 .await
             {
                 return command_error(format!(
@@ -12571,7 +13605,7 @@ impl SessionServiceImpl {
                     if let Err(error) = self
                         .inner
                         .consensus
-                        .replace_domain_schedule(domain.clone(), Some(desired))
+                        .replace_domain_schedule(domain.clone(), None, Some(desired))
                         .await
                     {
                         if let ConsensusError::LeadershipLost { .. } = &error {
@@ -12626,6 +13660,7 @@ impl SessionServiceImpl {
                     continue;
                 };
                 let unit_key = (domain.clone(), drain_move.label.clone());
+                mark_complete_ownership_transitions(Some(current_domain), &mut next);
                 let planned_moves = planned_ownership_moves(Some(current_domain), Some(&next));
                 let mut handoff = match self
                     .begin_planned_ownership_handoff(&domain, Some(current_domain), Some(&next))
@@ -12657,11 +13692,15 @@ impl SessionServiceImpl {
                 if let Err(error) = self
                     .inner
                     .consensus
-                    .replace_domain_schedule(domain.clone(), Some(next))
+                    .replace_domain_schedule(
+                        domain.clone(),
+                        Some(current_domain.clone()),
+                        Some(next),
+                    )
                     .await
                 {
                     if let Some(handoff) = handoff.take() {
-                        self.release_cluster_entity_gates(handoff.gate).await;
+                        self.abort_planned_ownership_handoff(&domain, handoff).await;
                     }
                     if let ConsensusError::LeadershipLost { .. } = &error {
                         return self
@@ -12690,7 +13729,23 @@ impl SessionServiceImpl {
                 moved = moved
                     .checked_add(planned_moves.len())
                     .assured("the moves counted here are schedule entries held in memory");
-                let activation_error = self.apply_current_cluster_state().await.err();
+                let local_activation_error = self.apply_current_cluster_state().await.err();
+                let mut handoff_activation_error = None;
+                if let Some(handoff) = handoff {
+                    debug_assert_eq!(handoff.moves, planned_moves);
+                    if let Some(error) = &local_activation_error {
+                        self.defer_planned_ownership_handoff_release(&domain, handoff, error);
+                    } else if let Err(error) = self
+                        .finish_planned_ownership_handoff(&domain, handoff)
+                        .await
+                    {
+                        handoff_activation_error = Some(error.to_string());
+                    }
+                }
+                let activation_error = match local_activation_error {
+                    Some(error) => Some(error.to_string()),
+                    None => handoff_activation_error,
+                };
                 for ownership_move in &planned_moves {
                     if activation_error.is_none() {
                         outcomes.push(format_planned_ownership_move(ownership_move));
@@ -12704,15 +13759,6 @@ impl SessionServiceImpl {
                             ownership_move.former_owner,
                             ownership_move.destination
                         ));
-                    }
-                }
-                if let Some(handoff) = handoff {
-                    debug_assert_eq!(handoff.moves, planned_moves);
-                    if let Some(error) = &activation_error {
-                        self.defer_planned_ownership_handoff_release(&domain, handoff, error);
-                    } else {
-                        self.finish_planned_ownership_handoff(&domain, handoff)
-                            .await;
                     }
                 }
                 handled_this_iteration = true;
@@ -13177,6 +14223,14 @@ impl SessionServiceImpl {
                 "the early return above required every group member to resolve in this same \
                  schedule",
             );
+            if primary_changed && let Some(source) = old_primary.as_ref() {
+                node.ownership_transition = Some(relocation.ownership_transition(
+                    source.clone(),
+                    target.clone(),
+                    node,
+                    promoted_replica.is_some(),
+                ));
+            }
             node.primary_node = Some(target.clone());
             node.assigned_nodes = assigned_nodes;
         }
@@ -13271,6 +14325,14 @@ impl SessionServiceImpl {
         let primary_changed = old_primary.as_ref() != Some(&target);
         let promoted_replica =
             (primary_changed && node.assigned_nodes.contains(&target)).then_some(target.clone());
+        if primary_changed && let Some(source) = old_primary {
+            node.ownership_transition = Some(relocation.ownership_transition(
+                source,
+                target.clone(),
+                node,
+                promoted_replica.is_some(),
+            ));
+        }
         node.primary_node = Some(target.clone());
         node.assigned_nodes = assigned_nodes;
         Some(DrainMove {
@@ -13530,6 +14592,15 @@ impl SessionServiceImpl {
                 node.assigned_nodes = desired_assigned_nodes;
             }
         }
+
+        for node in schedule.nodes.values_mut() {
+            let Some(existing_node) = existing.nodes.get(&node.identity()) else {
+                continue;
+            };
+            if node.primary_node == existing_node.primary_node {
+                node.ownership_transition = existing_node.ownership_transition.clone();
+            }
+        }
     }
 
     fn scheduled_node_should_follow_desired_assignment(node: &ScheduledNode) -> bool {
@@ -13638,7 +14709,11 @@ impl SessionServiceImpl {
         ingestor_node.kafka_partition_schedule = Some(next_schedule);
         self.inner
             .consensus
-            .replace_domain_schedule(domain.clone(), Some(next_domain_schedule))
+            .replace_domain_schedule(
+                domain.clone(),
+                Some(existing_domain_schedule.clone()),
+                Some(next_domain_schedule),
+            )
             .await
             .map_err(|error| error.to_string())
     }
@@ -15867,6 +16942,26 @@ fn planned_ownership_moves(
     moves
 }
 
+fn mark_complete_ownership_transitions(
+    current: Option<&nervix_models::DomainSchedule>,
+    planned: &mut nervix_models::DomainSchedule,
+) {
+    let transition_id = uuid::Uuid::now_v7().to_string();
+    for moved in planned_ownership_moves(current, Some(planned)) {
+        let node = planned
+            .nodes
+            .get_mut(&moved.entity)
+            .verified("every planned ownership move was derived from this target schedule");
+        node.ownership_transition = Some(OwnershipTransition {
+            id: transition_id.clone(),
+            source: moved.former_owner,
+            destination: moved.destination,
+            state_recovery: OwnershipStateRecoveryOutcome::Complete,
+            resets: Vec::new(),
+        });
+    }
+}
+
 fn format_planned_ownership_move(moved: &PlannedOwnershipMove) -> String {
     let replicas = if moved.replicas.is_empty() {
         "none".to_string()
@@ -17399,11 +18494,12 @@ fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> V
                 None => "-",
             };
             lines.push(format!(
-                "- domain={} kind={} name={} owner={owner} replicas={}",
+                "- domain={} kind={} name={} owner={owner} replicas={}{}",
                 domain.domain.as_str(),
                 node.kind().as_str(),
                 node.identifier.as_str(),
-                format_schedule_status_replicas(node)
+                format_schedule_status_replicas(node),
+                format_ownership_transition(node)
             ));
         }
     }
@@ -17421,6 +18517,29 @@ fn format_schedule_status_replicas(node: &ScheduledNode) -> String {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+
+fn format_ownership_transition(node: &ScheduledNode) -> String {
+    let Some(transition) = node.ownership_transition.as_ref() else {
+        return String::new();
+    };
+    let mut rendered = format!(
+        " transition_from={} state_recovery={}",
+        transition.source,
+        transition.state_recovery.as_ref()
+    );
+    if !transition.resets.is_empty() {
+        rendered.push_str(" resets=");
+        rendered.push_str(
+            &transition
+                .resets
+                .iter()
+                .map(|reset| format!("{}:{}", reset.component.as_ref(), reset.cause.as_ref()))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    rendered
 }
 
 async fn reconcile_domain_clock_tasks(
@@ -17697,8 +18816,7 @@ async fn emit_domain_tick(
     }
 }
 
-const DEFAULT_TRACE_FILTER: &str =
-    "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
+const DEFAULT_TRACE_FILTER: &str = "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -18257,6 +19375,8 @@ impl Application {
         let administrator_for_reconcile = consensus.administrator();
         let registry_for_reconcile = registry.clone();
         let runtime_for_reconcile = runtime.clone();
+        let interconnect_for_reconcile = interconnect.clone();
+        let local_node_for_reconcile = node_id.clone();
         let reconcile_shutdown = shutdown.clone();
         let mut background_tasks = Vec::new();
         if let Some(controller) = memory_pressure_controller {
@@ -18433,6 +19553,12 @@ impl Application {
                         .filter(|node| !scheduling_gossip.dead_node_ids.contains(&node.node_id))
                         .map(|node| node.node_id.clone())
                         .collect::<Vec<_>>();
+                    let live_node_incarnations = scheduling_gossip
+                        .live_nodes
+                        .iter()
+                        .filter(|node| !scheduling_gossip.dead_node_ids.contains(&node.node_id))
+                        .map(|node| (node.node_id.clone(), node.incarnation))
+                        .collect::<BTreeMap<_, _>>();
                     let live_voters = consensus_for_reconcile
                         .live_voter_ids(live_node_ids.clone())
                         .await;
@@ -18486,9 +19612,18 @@ impl Application {
                                 );
                             }
                         }
+                        ForcedOwnershipRecoveryCoordinator {
+                            runtime: &runtime_for_reconcile,
+                            interconnect: &interconnect_for_reconcile,
+                            local_node_id: &local_node_for_reconcile,
+                            node_incarnations: &live_node_incarnations,
+                        }
+                        .prepare_schedule(domain_schedule, &mut failover_schedule)
+                        .await;
                         if let Err(err) = consensus_for_reconcile
                             .replace_domain_schedule(
                                 domain_schedule.domain.clone(),
+                                Some(domain_schedule.clone()),
                                 Some(failover_schedule),
                             )
                             .await
@@ -18559,8 +19694,22 @@ impl Application {
                         if current_domain == Some(&schedule) {
                             continue;
                         }
+                        if let Some(current_domain) = current_domain {
+                            ForcedOwnershipRecoveryCoordinator {
+                                runtime: &runtime_for_reconcile,
+                                interconnect: &interconnect_for_reconcile,
+                                local_node_id: &local_node_for_reconcile,
+                                node_incarnations: &live_node_incarnations,
+                            }
+                            .prepare_schedule(current_domain, &mut schedule)
+                            .await;
+                        }
                         if let Err(err) = consensus_for_reconcile
-                            .replace_domain_schedule(domain, Some(schedule))
+                            .replace_domain_schedule(
+                                domain,
+                                current_domain.cloned(),
+                                Some(schedule),
+                            )
                             .await
                         {
                             warn!(error = %err, "failed to republish domain schedule after membership or schedulability change");
@@ -18846,6 +19995,378 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
+        let capture_handoff_service = service.clone();
+        interconnect
+            .register_handler::<RemoteCaptureOwnershipHandoffStateRequest, _, _>(
+                move |_context, request| {
+                    let service = capture_handoff_service.clone();
+                    async move {
+                        let result: OwnershipHandoffResult<_> = async {
+                            if request.source != *service.inner.consensus.local_node_id() {
+                                return Err(OwnershipHandoffError::participant(format!(
+                                    "ownership handoff capture targets source node '{}' but reached '{}'",
+                                    request.source,
+                                    service.inner.consensus.local_node_id()
+                                )));
+                            }
+                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
+                                &service.live_node_incarnations().await,
+                                &request.source,
+                                request.source_incarnation,
+                                "source",
+                            )?;
+                            let scheduled = service
+                                .prepare_owner_control_request(
+                                    &request.domain,
+                                    request.entity.kind,
+                                    request.entity.identifier.clone(),
+                                )
+                                .await
+                                .map_err(OwnershipHandoffError::participant)?;
+                            if !scheduled.is_primary_on(service.inner.consensus.local_node_id()) {
+                                return Err(OwnershipHandoffError::participant(format!(
+                                    "{} '{}' is not owned by this source node",
+                                    request.entity.kind.as_str(),
+                                    request.entity.identifier.as_str()
+                                )));
+                            }
+                            service
+                                .inner
+                                .runtime
+                                .capture_ownership_handoff_state(
+                                    &request.domain,
+                                    &request.entity,
+                                    request.base_schedule_fingerprint,
+                                )
+                                .await
+                        }
+                        .await;
+                        match result {
+                            Ok(checkpoints) => Ok(checkpoints),
+                            Err(error) => {
+                                Err(OwnershipHandoffFailure::rejected(error.to_string()))
+                            }
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let prepare_handoff_service = service.clone();
+        interconnect
+            .register_handler::<RemotePrepareOwnershipHandoffStateRequest, _, _>(
+                move |_context, request| {
+                    let service = prepare_handoff_service.clone();
+                    async move {
+                        let result: OwnershipHandoffResult<_> = async {
+                            if request.destination != *service.inner.consensus.local_node_id() {
+                                return Err(OwnershipHandoffError::participant(format!(
+                                    "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                                    request.entity.kind.as_str(),
+                                    request.entity.identifier.as_str(),
+                                    request.destination,
+                                    service.inner.consensus.local_node_id()
+                                )));
+                            }
+                            let current_incarnations = service.live_node_incarnations().await;
+                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
+                                &current_incarnations,
+                                &request.source,
+                                request.source_incarnation,
+                                "source",
+                            )?;
+                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
+                                &current_incarnations,
+                                &request.destination,
+                                request.destination_incarnation,
+                                "destination",
+                            )?;
+                            service
+                                .prepare_control_request_domain(&request.domain)
+                                .await
+                                .map_err(OwnershipHandoffError::schedule)?;
+                            let scheduled = service
+                                .scheduled_model_node(
+                                    &request.domain,
+                                    request.entity.kind,
+                                    request.entity.identifier.clone(),
+                                )
+                                .await
+                                .ok_or_else(|| {
+                                    OwnershipHandoffError::schedule(format!(
+                                        "{} '{}' is absent from the committed schedule",
+                                        request.entity.kind.as_str(),
+                                        request.entity.identifier.as_str()
+                                    ))
+                                })?;
+                            if scheduled.execution_node() != Some(&request.source) {
+                                return Err(OwnershipHandoffError::participant(format!(
+                                    "{} '{}' is no longer owned by source node '{}'",
+                                    request.entity.kind.as_str(),
+                                    request.entity.identifier.as_str(),
+                                    request.source
+                                )));
+                            }
+                            service
+                                .inner
+                                .runtime
+                                .prepare_ownership_handoff_state(
+                                    request.operation_id,
+                                    request.source,
+                                    request.destination,
+                                    request.source_incarnation,
+                                    request.destination_incarnation,
+                                    &request.domain,
+                                    &request.entity,
+                                    request.base_schedule_fingerprint,
+                                    request.target_schedule_fingerprint,
+                                    request.checkpoints,
+                                )
+                                .await
+                        }
+                        .await;
+                        match result {
+                            Ok(()) => Ok(()),
+                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let forced_recovery_service = service.clone();
+        interconnect
+            .register_handler::<RemotePrepareForcedOwnershipRecoveryRequest, _, _>(
+                move |_context, request| {
+                    let service = forced_recovery_service.clone();
+                    async move {
+                        let result: OwnershipHandoffResult<_> = async {
+                            if request.destination != *service.inner.consensus.local_node_id() {
+                                return Err(OwnershipHandoffError::participant(format!(
+                                    "forced ownership recovery for {} '{}' targets node '{}' but reached '{}'",
+                                    request.entity.kind.as_str(),
+                                    request.entity.identifier.as_str(),
+                                    request.destination,
+                                    service.inner.consensus.local_node_id()
+                                )));
+                            }
+                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
+                                &service.live_node_incarnations().await,
+                                &request.destination,
+                                request.destination_incarnation,
+                                "destination",
+                            )?;
+                            let deadline = tokio::time::Instant::now()
+                                + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                            service
+                                .inner
+                                .runtime
+                                .prepare_forced_ownership_recovery(
+                                    request.operation_id,
+                                    &request.source,
+                                    &request.destination,
+                                    request.destination_incarnation,
+                                    &request.domain,
+                                    &request.entity,
+                                    request.base_schedule_fingerprint,
+                                    request.target_schedule_fingerprint,
+                                    deadline,
+                                )
+                                .await
+                        }
+                        .await;
+                        match result {
+                            Ok(preparation) => Ok(preparation),
+                            Err(error) => {
+                                Err(OwnershipHandoffFailure::rejected(error.to_string()))
+                            }
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let confirm_handoff_service = service.clone();
+        interconnect
+            .register_handler::<RemoteConfirmOwnershipHandoffStateRequest, _, _>(
+                move |_context, request| {
+                    let service = confirm_handoff_service.clone();
+                    async move {
+                        match service.confirm_local_ownership_handoff_state(request).await {
+                            Ok(()) => Ok(()),
+                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let activate_handoff_service = service.clone();
+        interconnect
+            .register_handler::<RemoteActivateOwnershipHandoffStateRequest, _, _>(
+                move |_context, request| {
+                    let service = activate_handoff_service.clone();
+                    async move {
+                        let result: OwnershipHandoffResult<_> = async {
+                            if request.destination != *service.inner.consensus.local_node_id() {
+                                return Err(OwnershipHandoffError::participant(format!(
+                                    "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                                    request.entity.kind.as_str(),
+                                    request.entity.identifier.as_str(),
+                                    request.destination,
+                                    service.inner.consensus.local_node_id()
+                                )));
+                            }
+                            let current_incarnations = service.live_node_incarnations().await;
+                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
+                                &current_incarnations,
+                                &request.source,
+                                request.source_incarnation,
+                                "source",
+                            )?;
+                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
+                                &current_incarnations,
+                                &request.destination,
+                                request.destination_incarnation,
+                                "destination",
+                            )?;
+                            let deadline = tokio::time::Instant::now()
+                                + service.inner.runtime.entity_gate_deadline();
+                            let target_schedule = loop {
+                                tokio::task::consume_budget().await;
+                                let schedule = service.inner.consensus.current_schedule().await;
+                                let current = schedule.domain(&request.domain).ok_or_else(|| {
+                                    OwnershipHandoffError::schedule(format!(
+                                        "domain '{}' has no committed schedule while activating ownership handoff",
+                                        request.domain.as_str()
+                                    ))
+                                })?;
+                                let fingerprint =
+                                    Runtime::ownership_handoff_schedule_fingerprint(current)?;
+                                if fingerprint == request.target_schedule_fingerprint {
+                                    let node = current.nodes.get(&request.entity).ok_or_else(|| {
+                                        OwnershipHandoffError::schedule(format!(
+                                            "{} '{}' is absent from the ownership handoff target schedule",
+                                            request.entity.kind.as_str(),
+                                            request.entity.identifier.as_str()
+                                        ))
+                                    })?;
+                                    if !node.is_primary_on(&request.destination) {
+                                        return Err(OwnershipHandoffError::participant(format!(
+                                            "{} '{}' is not owned by destination node '{}' in the committed target schedule",
+                                            request.entity.kind.as_str(),
+                                            request.entity.identifier.as_str(),
+                                            request.destination
+                                        )));
+                                    }
+                                    break current.clone();
+                                }
+                                if fingerprint != request.base_schedule_fingerprint {
+                                    return Err(OwnershipHandoffError::schedule(format!(
+                                        "domain '{}' advanced to a different schedule before ownership handoff activation",
+                                        request.domain.as_str()
+                                    )));
+                                }
+                                if tokio::time::Instant::now() >= deadline {
+                                    return Err(OwnershipHandoffError::deadline(format!(
+                                        "timed out waiting for the committed ownership handoff schedule in domain '{}'",
+                                        request.domain.as_str()
+                                    )));
+                                }
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                            };
+                            let activation_needed = service
+                                .inner
+                                .runtime
+                                .authorize_persisted_ownership_handoff_activation(
+                                    &request.operation_id,
+                                    &request.source,
+                                    &request.destination,
+                                    request.source_incarnation,
+                                    request.destination_incarnation,
+                                    &request.domain,
+                                    &request.entity,
+                                    request.base_schedule_fingerprint,
+                                    request.target_schedule_fingerprint,
+                                )?;
+                            service.apply_current_cluster_state().await.map_err(|error| {
+                                OwnershipHandoffError::state(error.to_string())
+                            })?;
+                            if activation_needed
+                                && service
+                                    .inner
+                                    .runtime
+                                    .verify_ownership_handoff_activation(
+                                        &request.operation_id,
+                                        &request.source,
+                                        &request.destination,
+                                        request.source_incarnation,
+                                        request.destination_incarnation,
+                                        &request.domain,
+                                        &request.entity,
+                                        request.base_schedule_fingerprint,
+                                        request.target_schedule_fingerprint,
+                                    )
+                                    .is_err()
+                            {
+                                service
+                                    .inner
+                                    .runtime
+                                    .rebuild_ownership_handoff_target(
+                                        service.inner.consensus.local_node_id(),
+                                        &request.domain,
+                                        target_schedule,
+                                    )
+                                    .await
+                                    .map_err(|error| {
+                                        OwnershipHandoffError::state(error.to_string())
+                                    })?;
+                            }
+                            service.inner.runtime.verify_ownership_handoff_activation(
+                                &request.operation_id,
+                                &request.source,
+                                &request.destination,
+                                request.source_incarnation,
+                                request.destination_incarnation,
+                                &request.domain,
+                                &request.entity,
+                                request.base_schedule_fingerprint,
+                                request.target_schedule_fingerprint,
+                            )
+                        }
+                        .await;
+                        match result {
+                            Ok(()) => Ok(()),
+                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let discard_handoff_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDiscardOwnershipHandoffStateRequest, _, _>(
+                move |_context, request| {
+                    let service = discard_handoff_service.clone();
+                    async move {
+                        let result = service
+                            .inner
+                            .runtime
+                            .discard_prepared_ownership_handoff_state(
+                                &request.operation_id,
+                                &request.domain,
+                                &request.entity,
+                            );
+                        match result {
+                            Ok(()) => Ok(()),
+                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
         let transaction_service = service.clone();
         let transaction_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
@@ -19104,13 +20625,29 @@ impl Application {
                                     request.placement,
                                 ) {
                                     Ok(placement) => {
-                                        service_for_interconnect
-                                            .inner.runtime
-                                            .handle_state_sync_request(
+                                        if service_for_interconnect
+                                            .inner
+                                            .runtime
+                                            .runtime_state_placement_is_assigned_locally(
                                                 &placement,
-                                                request.after_lsm,
                                             )
-                                            .await
+                                        {
+                                            service_for_interconnect
+                                                .inner
+                                                .runtime
+                                                .handle_state_sync_request(
+                                                    &placement,
+                                                    request.after_lsm,
+                                                )
+                                                .await
+                                        } else {
+                                            Err(format!(
+                                                "this node is not currently assigned {:?} state for {} '{}'",
+                                                placement.state,
+                                                placement.kind.as_str(),
+                                                placement.identifier.as_str()
+                                            ))
+                                        }
                                     }
                                     Err(error) => Err(error),
                                 };
@@ -19164,6 +20701,17 @@ impl Application {
                                         lsm: ack.lsm,
                                     },
                                 );
+                            }
+                            Envelope::Control(ControlEnvelope::StateCheckpointAvailable(
+                                checkpoint,
+                            )) => {
+                                service_for_interconnect
+                                    .inner
+                                    .runtime
+                                    .handle_state_checkpoint_available(
+                                        &message.peer_node_id,
+                                        checkpoint,
+                                    );
                             }
                             Envelope::Control(ControlEnvelope::DescribeRelayRequest(request)) => {
                                 let result = service_for_interconnect

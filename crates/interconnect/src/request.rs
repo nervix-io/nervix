@@ -26,8 +26,12 @@ use tracing::debug;
 use triomphe::Arc;
 
 use super::{
-    ConnectionHandle, ControlEnvelope, DescribeIngestorRequest, IngestorDescribeEnvelope,
-    Transport, TransportInner, unregister_connected_peer,
+    ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
+    ConfirmOwnershipHandoffStateRequest, ConnectionHandle, ControlEnvelope,
+    DescribeIngestorRequest, DiscardOwnershipHandoffStateRequest,
+    ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, OwnershipHandoffCheckpoint,
+    OwnershipHandoffResponse, PrepareForcedOwnershipRecoveryRequest,
+    PrepareOwnershipHandoffStateRequest, Transport, TransportInner, unregister_connected_peer,
 };
 
 #[doc(hidden)]
@@ -621,3 +625,89 @@ impl InterconnectRequest for DescribeIngestorRequest {
             })
     }
 }
+
+macro_rules! impl_rkyv_request {
+    ($request:ty, $response:ty, $name:literal) => {
+        impl InterconnectRequest for $request {
+            type Response = $response;
+
+            const NAME: &'static str = $name;
+            const TIMEOUT: Duration = Duration::from_secs(60);
+
+            fn encode_request(&self) -> Result<Vec<u8>, Report<RequestError>> {
+                rkyv::to_bytes::<rkyv::rancor::Error>(self)
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|error| {
+                        Report::new(RequestError::Encode {
+                            request: Self::NAME,
+                        })
+                        .attach_printable(error.to_string())
+                    })
+            }
+
+            fn decode_request(payload: &[u8]) -> Result<Self, Report<RequestError>> {
+                let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+                aligned.extend_from_slice(payload);
+                rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned).map_err(|error| {
+                    Report::new(RequestError::Decode {
+                        request: Self::NAME,
+                    })
+                    .attach_printable(error.to_string())
+                })
+            }
+
+            fn encode_response(response: &Self::Response) -> Result<Vec<u8>, Report<RequestError>> {
+                rkyv::to_bytes::<rkyv::rancor::Error>(response)
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|error| {
+                        Report::new(RequestError::Encode {
+                            request: Self::NAME,
+                        })
+                        .attach_printable(error.to_string())
+                    })
+            }
+
+            fn decode_response(payload: &[u8]) -> Result<Self::Response, Report<RequestError>> {
+                let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+                aligned.extend_from_slice(payload);
+                rkyv::from_bytes::<Self::Response, rkyv::rancor::Error>(&aligned).map_err(|error| {
+                    Report::new(RequestError::Decode {
+                        request: Self::NAME,
+                    })
+                    .attach_printable(error.to_string())
+                })
+            }
+        }
+    };
+}
+
+impl_rkyv_request!(
+    CaptureOwnershipHandoffStateRequest,
+    OwnershipHandoffResponse<Vec<OwnershipHandoffCheckpoint>>,
+    "capture_ownership_handoff_state"
+);
+impl_rkyv_request!(
+    PrepareOwnershipHandoffStateRequest,
+    OwnershipHandoffResponse<()>,
+    "prepare_ownership_handoff_state"
+);
+impl_rkyv_request!(
+    ConfirmOwnershipHandoffStateRequest,
+    OwnershipHandoffResponse<()>,
+    "confirm_ownership_handoff_state"
+);
+impl_rkyv_request!(
+    PrepareForcedOwnershipRecoveryRequest,
+    OwnershipHandoffResponse<ForcedOwnershipRecoveryPreparation>,
+    "prepare_forced_ownership_recovery"
+);
+impl_rkyv_request!(
+    ActivateOwnershipHandoffStateRequest,
+    OwnershipHandoffResponse<()>,
+    "activate_ownership_handoff_state"
+);
+impl_rkyv_request!(
+    DiscardOwnershipHandoffStateRequest,
+    OwnershipHandoffResponse<()>,
+    "discard_ownership_handoff_state"
+);

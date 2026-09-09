@@ -213,14 +213,9 @@ impl Runtime {
             Some(state) => state.start_version,
             None => 0,
         };
-        let reset_for_start = if let Some((_, existing)) = self.inner.executions.remove(domain) {
-            let reset_for_start =
-                existing.passive_only || existing.start_version != desired_start_version;
+        if let Some((_, existing)) = self.inner.executions.remove(domain) {
             self.stop_domain_execution(domain, existing).await;
-            reset_for_start
-        } else {
-            false
-        };
+        }
 
         let Some(schedule) = schedule else {
             self.clear_domain_ingestor_quiescence(domain);
@@ -231,14 +226,50 @@ impl Runtime {
             return Ok(());
         };
         self.install_state_schema_fingerprints(&schedule);
-        if self
+        let stopped = self
             .inner
             .domains
             .get(domain)
-            .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped))
-        {
+            .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
+        let schedule_fingerprint = Self::ownership_handoff_schedule_fingerprint(&schedule)
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: reason.to_string(),
+            })?;
+        for node in schedule.nodes.values() {
+            self.activate_prepared_forced_ownership_recovery_state(
+                domain,
+                node,
+                local_node_id,
+                schedule_fingerprint,
+                !stopped,
+            )
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "failed to activate forced recovery state for {} '{}': {error}",
+                    node.kind().as_str(),
+                    node.identifier.as_str()
+                ),
+            })?;
+            self.activate_prepared_ownership_handoff_state(
+                domain,
+                node,
+                local_node_id,
+                schedule_fingerprint,
+                !stopped,
+            )
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "failed to activate prepared state for {} '{}': {error}",
+                    node.kind().as_str(),
+                    node.identifier.as_str()
+                ),
+            })?;
+        }
+        if stopped {
             self.clear_domain_ingestor_quiescence(domain);
-            self.purge_stopped_domain_runtime_state(domain)?;
             self.clear_expiring_stream_states_for_domain(domain);
             let execution = self
                 .build_passive_execution_from_schedule(domain, &schedule)
@@ -247,10 +278,6 @@ impl Runtime {
             self.clear_domain_graph_handle(domain).await;
             return Ok(());
         }
-        if reset_for_start {
-            self.purge_stopped_domain_runtime_state(domain)?;
-        }
-
         let domain_graph = self.domain_graph_handle(domain).await;
         domain_graph.store(None);
         let (shutdown_tx, _) = watch::channel(false);
