@@ -10612,7 +10612,8 @@ impl SessionServiceImpl {
                     .await
                 {
                     self.broadcast_error(format!(
-                        "failed to confirm ownership state activation after transaction '{}' step {}: {error}",
+                        "failed to confirm ownership state activation after transaction '{}' step \
+                         {}: {error}",
                         transaction.id,
                         statement_index
                             .checked_add(1)
@@ -11417,7 +11418,9 @@ impl SessionServiceImpl {
                                         .await
                                     {
                                         self.broadcast_error(format!(
-                                            "failed to confirm ownership state activation for committed transaction model step in domain '{}': {error}",
+                                            "failed to confirm ownership state activation for \
+                                             committed transaction model step in domain '{}': \
+                                             {error}",
                                             domain.as_str()
                                         ));
                                     }
@@ -11575,7 +11578,8 @@ impl SessionServiceImpl {
                                 String::new()
                             };
                             return command_error(format!(
-                                "committed models and schedule for domain '{}', but ownership state activation did not complete: {error}{paused}",
+                                "committed models and schedule for domain '{}', but ownership \
+                                 state activation did not complete: {error}{paused}",
                                 domain.as_str(),
                             ));
                         }
@@ -12601,7 +12605,8 @@ impl SessionServiceImpl {
         if let Some(handoff) = handoff {
             if let Err(error) = self.finish_planned_ownership_handoff(domain, handoff).await {
                 return command_error(format!(
-                    "committed placement and schedule for domain '{}', but ownership state activation did not complete: {error}",
+                    "committed placement and schedule for domain '{}', but ownership state \
+                     activation did not complete: {error}",
                     domain.as_str()
                 ));
             }
@@ -18858,7 +18863,8 @@ async fn emit_domain_tick(
     }
 }
 
-const DEFAULT_TRACE_FILTER: &str = "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
+const DEFAULT_TRACE_FILTER: &str =
+    "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -20051,7 +20057,8 @@ impl Application {
                         let result: OwnershipHandoffResult<_> = async {
                             if request.source != *service.inner.consensus.local_node_id() {
                                 return Err(OwnershipHandoffError::participant(format!(
-                                    "ownership handoff capture targets source node '{}' but reached '{}'",
+                                    "ownership handoff capture targets source node '{}' but \
+                                     reached '{}'",
                                     request.source,
                                     service.inner.consensus.local_node_id()
                                 )));
@@ -20090,9 +20097,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(checkpoints) => Ok(checkpoints),
-                            Err(error) => {
-                                Err(OwnershipHandoffFailure::rejected(error.to_string()))
-                            }
+                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
                         }
                     }
                 },
@@ -20108,7 +20113,8 @@ impl Application {
                         let result: OwnershipHandoffResult<_> = async {
                             if request.destination != *service.inner.consensus.local_node_id() {
                                 return Err(OwnershipHandoffError::participant(format!(
-                                    "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                                    "ownership handoff for {} '{}' targets node '{}' but reached \
+                                     '{}'",
                                     request.entity.kind.as_str(),
                                     request.entity.identifier.as_str(),
                                     request.destination,
@@ -20190,7 +20196,8 @@ impl Application {
                         let result: OwnershipHandoffResult<_> = async {
                             if request.destination != *service.inner.consensus.local_node_id() {
                                 return Err(OwnershipHandoffError::participant(format!(
-                                    "forced ownership recovery for {} '{}' targets node '{}' but reached '{}'",
+                                    "forced ownership recovery for {} '{}' targets node '{}' but \
+                                     reached '{}'",
                                     request.entity.kind.as_str(),
                                     request.entity.identifier.as_str(),
                                     request.destination,
@@ -20203,8 +20210,8 @@ impl Application {
                                 request.destination_incarnation,
                                 "destination",
                             )?;
-                            let deadline = tokio::time::Instant::now()
-                                + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                            let deadline =
+                                tokio::time::Instant::now() + FORCED_OWNERSHIP_RECOVERY_BUDGET;
                             service
                                 .inner
                                 .runtime
@@ -20224,9 +20231,7 @@ impl Application {
                         .await;
                         match result {
                             Ok(preparation) => Ok(preparation),
-                            Err(error) => {
-                                Err(OwnershipHandoffFailure::rejected(error.to_string()))
-                            }
+                            Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
                         }
                     }
                 },
@@ -20257,7 +20262,8 @@ impl Application {
                         let result: OwnershipHandoffResult<_> = async {
                             if request.destination != *service.inner.consensus.local_node_id() {
                                 return Err(OwnershipHandoffError::participant(format!(
-                                    "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                                    "ownership handoff for {} '{}' targets node '{}' but reached \
+                                     '{}'",
                                     request.entity.kind.as_str(),
                                     request.entity.identifier.as_str(),
                                     request.destination,
@@ -20282,25 +20288,30 @@ impl Application {
                             let target_schedule = loop {
                                 tokio::task::consume_budget().await;
                                 let schedule = service.inner.consensus.current_schedule().await;
-                                let current = schedule.domain(&request.domain).ok_or_else(|| {
-                                    OwnershipHandoffError::schedule(format!(
-                                        "domain '{}' has no committed schedule while activating ownership handoff",
-                                        request.domain.as_str()
-                                    ))
-                                })?;
+                                let current =
+                                    schedule.domain(&request.domain).ok_or_else(|| {
+                                        OwnershipHandoffError::schedule(format!(
+                                            "domain '{}' has no committed schedule while \
+                                             activating ownership handoff",
+                                            request.domain.as_str()
+                                        ))
+                                    })?;
                                 let fingerprint =
                                     Runtime::ownership_handoff_schedule_fingerprint(current)?;
                                 if fingerprint == request.target_schedule_fingerprint {
-                                    let node = current.nodes.get(&request.entity).ok_or_else(|| {
-                                        OwnershipHandoffError::schedule(format!(
-                                            "{} '{}' is absent from the ownership handoff target schedule",
-                                            request.entity.kind.as_str(),
-                                            request.entity.identifier.as_str()
-                                        ))
-                                    })?;
+                                    let node =
+                                        current.nodes.get(&request.entity).ok_or_else(|| {
+                                            OwnershipHandoffError::schedule(format!(
+                                                "{} '{}' is absent from the ownership handoff \
+                                                 target schedule",
+                                                request.entity.kind.as_str(),
+                                                request.entity.identifier.as_str()
+                                            ))
+                                        })?;
                                     if !node.is_primary_on(&request.destination) {
                                         return Err(OwnershipHandoffError::participant(format!(
-                                            "{} '{}' is not owned by destination node '{}' in the committed target schedule",
+                                            "{} '{}' is not owned by destination node '{}' in the \
+                                             committed target schedule",
                                             request.entity.kind.as_str(),
                                             request.entity.identifier.as_str(),
                                             request.destination
@@ -20310,13 +20321,15 @@ impl Application {
                                 }
                                 if fingerprint != request.base_schedule_fingerprint {
                                     return Err(OwnershipHandoffError::schedule(format!(
-                                        "domain '{}' advanced to a different schedule before ownership handoff activation",
+                                        "domain '{}' advanced to a different schedule before \
+                                         ownership handoff activation",
                                         request.domain.as_str()
                                     )));
                                 }
                                 if tokio::time::Instant::now() >= deadline {
                                     return Err(OwnershipHandoffError::deadline(format!(
-                                        "timed out waiting for the committed ownership handoff schedule in domain '{}'",
+                                        "timed out waiting for the committed ownership handoff \
+                                         schedule in domain '{}'",
                                         request.domain.as_str()
                                     )));
                                 }
@@ -20336,9 +20349,10 @@ impl Application {
                                     request.base_schedule_fingerprint,
                                     request.target_schedule_fingerprint,
                                 )?;
-                            service.apply_current_cluster_state().await.map_err(|error| {
-                                OwnershipHandoffError::state(error.to_string())
-                            })?;
+                            service
+                                .apply_current_cluster_state()
+                                .await
+                                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
                             if activation_needed
                                 && service
                                     .inner
