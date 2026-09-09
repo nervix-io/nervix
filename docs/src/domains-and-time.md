@@ -88,9 +88,12 @@ Important runtime consequences:
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
 
-The lifecycle state and active paced-clock anchor are replicated with the domain. After leader
-failover, reconciliation reconstructs the running clock from that state; a completed transactional
-`START` therefore remains effective without re-executing its commit step.
+The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
+authority identifies a concrete incarnation of a named cluster node and carries a revision that
+advances whenever ownership changes or is revoked. After leader failover, reconciliation uses that
+committed state; a completed transactional `START` therefore remains effective without
+re-executing its commit step, and leadership transfer alone does not establish a new anchor or
+authority.
 
 Every live node installs that committed mapping before it builds executable work for the domain.
 The installed capability is bound to the domain name and `START` generation. A joining node uses
@@ -99,6 +102,15 @@ its join time. An unpaced domain receives actual UTC through the same domain-bou
 missing domain, stopped clock, uninstalled paced mapping, or task bound to an earlier generation is
 a lifecycle error and never selects wall time as a paced fallback. Reads on one node do not move
 backward within a generation.
+
+The authority begins producing only after every live node reports that it installed the consensus
+runtime revision containing the mapping and fence. Join, restart, owner loss, and membership change
+can select a new authority without changing the clock mapping. A progress report is accepted only
+when its `START` generation, authority revision, node incarnation, and authenticated peer match the
+committed authority. Duplicate, delayed, reordered, or superseded progress is ignored and cannot
+create a domain. `STOP` revokes the authority in the same replicated lifecycle transition; a later
+`START` commits a new generation and mapping. Automatic ALTER quiescing keeps the authority and
+clock running.
 
 An explicit `START AT` timestamp must fit exactly in signed Unix nanoseconds. The inclusive range
 is `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`; valid RFC 3339 values

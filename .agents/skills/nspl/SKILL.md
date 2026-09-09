@@ -93,9 +93,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `2262-04-11T23:47:16.854775807Z`. `TIME RATE` must be a positive finite `f64`; scientific notation
   is valid. Tick notifications report progress and never redefine the committed start mapping.
   The mapping is installed on every live node before domain execution and remains bound to its
-  `START` generation across joins and automatic ALTER pauses. Never describe a missing, stopped,
-  uninstalled, or stale paced clock as falling back to wall time. Unpaced domains receive actual
-  UTC through the same domain-time capability.
+  `START` generation across joins and automatic ALTER pauses. One replicated authority revision
+  identifies the producing node incarnation; owner changes preserve the mapping, and progress is
+  accepted only from the matching committed incarnation and authenticated peer after every live
+  node installs that revision. `STOP` revokes the authority, while automatic ALTER quiescing leaves
+  it running. Never describe a missing, stopped, uninstalled, or stale paced clock as falling back
+  to wall time. Unpaced domains receive actual UTC through the same domain-time capability.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every

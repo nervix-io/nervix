@@ -84,7 +84,9 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    subscriptions, uploads, and node administration remain outside the transaction.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
    paced `START` establishes one replicated clock generation that joining nodes install before
-   execution; automatic ALTER quiescing preserves that generation and its progress.
+   execution. One committed authority revision identifies the producing node incarnation; owner
+   changes preserve the mapping, `STOP` revokes the authority, and automatic ALTER quiescing keeps
+   the generation and authority running.
    Explicit start timestamps must fit the inclusive signed Unix-nanosecond range from
    `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, and `TIME RATE` must
    be positive and finite.

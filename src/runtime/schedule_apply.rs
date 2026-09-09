@@ -29,6 +29,7 @@ impl Runtime {
         local_node_id: &ClusterNodeName,
         revision: u64,
         domains: &BTreeMap<DomainName, DomainState>,
+        domain_clock_authorities: &BTreeMap<DomainName, DomainClockAuthority>,
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
         let _lock = self.inner.schedule_apply_lock.lock().await;
@@ -37,7 +38,7 @@ impl Runtime {
             return Ok(());
         }
 
-        self.sync_domains(domains);
+        self.sync_committed_domains(domains, domain_clock_authorities);
         self.apply_cluster_schedule_locked(local_node_id, schedule, false)
             .await?;
         self.inner
@@ -2025,6 +2026,7 @@ mod tests {
                 &ClusterNodeName::parse("node-1").expect("valid name"),
                 2,
                 &domains,
+                &BTreeMap::new(),
                 &current_schedule,
             )
             .await
@@ -2034,6 +2036,7 @@ mod tests {
                 &ClusterNodeName::parse("node-1").expect("valid name"),
                 1,
                 &domains,
+                &BTreeMap::new(),
                 &stale_schedule,
             )
             .await

@@ -6528,6 +6528,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "ciborium",
+ "error-stack",
  "fjall",
  "futures-util",
  "meticulous",
