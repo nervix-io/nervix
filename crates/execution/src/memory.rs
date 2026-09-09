@@ -32,6 +32,11 @@ pub enum AdmissionError {
     BudgetExhausted { class: &'static str, requested: u64 },
     #[error("the {class} memory budget was closed")]
     BudgetClosed { class: &'static str },
+    #[error("cannot merge a {first} reservation with a {second} reservation")]
+    DifferentBudget {
+        first: &'static str,
+        second: &'static str,
+    },
 }
 
 /// One class's ceiling, expressed as one permit per byte so that a reservation and its release are
@@ -166,6 +171,86 @@ impl Reservation {
 
     pub fn bytes(&self) -> u64 {
         self.bytes.into()
+    }
+
+    /// Divide one already admitted allocation plan without returning either part to the budget.
+    ///
+    /// This is used when an owner must admit a compound operation atomically, then hand the
+    /// encoded allocation and its decode/scratch overlap to different lifetimes. The two returned
+    /// reservations always add up to the original charge.
+    pub fn split(self, first_bytes: u64) -> Result<(Self, Self), Report<AdmissionError>> {
+        let first = u32::try_from(first_bytes).map_err(|_| {
+            Report::new(AdmissionError::ExceedsBudget {
+                class: self.class.as_str(),
+                requested: first_bytes,
+                capacity: self.bytes.into(),
+            })
+        })?;
+        if first > self.bytes {
+            return Err(Report::new(AdmissionError::ExceedsBudget {
+                class: self.class.as_str(),
+                requested: first_bytes,
+                capacity: self.bytes.into(),
+            }));
+        }
+
+        let Self {
+            class,
+            capacity,
+            bytes,
+            permits,
+            mut permit,
+        } = self;
+        let first_permit = permit
+            .split(first.arch_into())
+            .verified("the requested first part was checked against the reservation");
+        let second = bytes
+            .checked_sub(first)
+            .verified("the requested first part was checked against the reservation");
+        Ok((
+            Self {
+                class,
+                capacity,
+                bytes: first,
+                permits: StdArc::clone(&permits),
+                permit: first_permit,
+            },
+            Self {
+                class,
+                capacity,
+                bytes: second,
+                permits,
+                permit,
+            },
+        ))
+    }
+
+    /// Rejoin two charges from the same memory class and budget.
+    ///
+    /// Relay admission uses this after receiving its encoded body: the body allocation then owns
+    /// the decoded/scratch overlap reserved by its grant, so dropping the last body handle releases
+    /// the whole operation atomically.
+    pub fn merge(mut self, other: Self) -> Result<Self, Report<AdmissionError>> {
+        if self.class != other.class || !StdArc::ptr_eq(&self.permits, &other.permits) {
+            return Err(Report::new(AdmissionError::DifferentBudget {
+                first: self.class.as_str(),
+                second: other.class.as_str(),
+            }));
+        }
+        let requested = u64::from(self.bytes)
+            .checked_add(u64::from(other.bytes))
+            .assured("adding two u32 reservation sizes fits in u64");
+        let bytes = self.bytes.checked_add(other.bytes).ok_or_else(|| {
+            Report::new(AdmissionError::ExceedsBudget {
+                class: self.class.as_str(),
+                requested,
+                capacity: self.capacity.into(),
+            })
+        })?;
+        let Self { permit, .. } = other;
+        self.permit.merge(permit);
+        self.bytes = bytes;
+        Ok(self)
     }
 
     /// Charge the class for everything up to `bytes`, so an incremental writer knows it may grow

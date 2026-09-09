@@ -93,8 +93,6 @@ impl Runtime {
                     pending_acks: DashMap::default(),
                     pending_relay_admissions: DashMap::default(),
                 }),
-                next_state_sync_correlation_id: AtomicU64::new(1),
-                pending_state_syncs: DashMap::default(),
                 expiring_stream_states: DashMap::default(),
                 latest_resource_versions: DashMap::default(),
                 replicated_deduplicator_states: DashMap::default(),

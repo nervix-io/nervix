@@ -25,6 +25,11 @@ use lapin::{
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
+use nervix_execution::Executor;
+use nervix_interconnect::{
+    ControlEnvelope, Envelope, PeerTarget, RuntimeErrorEvent, TlsConfigBundle, Transport,
+    TransportOptions,
+};
 use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
 
@@ -46,6 +51,10 @@ use proto::{
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
     consumer::InitialPosition as PulsarInitialPosition,
+};
+use rcgen::{
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    SanType, date_time_ymd,
 };
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
@@ -121,8 +130,8 @@ static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
 ///
 /// A port leaves the set only once nothing can still dial it. Returning one while a peer holds it
 /// in gossip lets an unrelated scenario's node answer that peer, and because every scenario names
-/// its nodes `node-1`, `node-2` and `node-3`, the impostor passes the peer-identity check and is
-/// caught only at signature verification. Never releasing is not the alternative: eleven ports per
+/// its nodes `node-1`, `node-2` and `node-3`, the certificate identity alone cannot distinguish
+/// those separate test clusters. Never releasing is not the alternative: seven ports per
 /// node across the suite exceeds the ephemeral range, so teardown has to give them back.
 static RESERVED_TEST_PORTS: LazyLock<Mutex<BTreeSet<u16>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
@@ -435,9 +444,108 @@ pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions>
     }
 }
 
+struct InterconnectTestCa {
+    certificate: rcgen::Certificate,
+    key: KeyPair,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestCertificateValidity {
+    Current,
+    Expired,
+}
+
+impl std::fmt::Debug for InterconnectTestCa {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InterconnectTestCa")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InterconnectTestCa {
+    fn new(root: &TempDir) -> io::Result<Self> {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let key = KeyPair::generate().map_err(io::Error::other)?;
+        let certificate = params.self_signed(&key).map_err(io::Error::other)?;
+        let path = root.path().join("interconnect-ca.pem");
+        std::fs::write(&path, certificate.pem())?;
+        Ok(Self {
+            certificate,
+            key,
+            path,
+        })
+    }
+
+    fn issue_node(
+        &self,
+        node_id: &str,
+        directory: &std::path::Path,
+    ) -> io::Result<(PathBuf, PathBuf)> {
+        self.issue_node_with_identity(
+            "cucumber",
+            node_id,
+            TestCertificateValidity::Current,
+            directory,
+        )
+    }
+
+    fn issue_node_with_identity(
+        &self,
+        cluster_id: &str,
+        node_id: &str,
+        validity: TestCertificateValidity,
+        directory: &std::path::Path,
+    ) -> io::Result<(PathBuf, PathBuf)> {
+        let mut params = CertificateParams::new(vec!["localhost".to_string(), HOST.to_string()])
+            .map_err(io::Error::other)?;
+        params.subject_alt_names.push(SanType::URI(
+            format!("nervix://cluster/{cluster_id}/node/{node_id}")
+                .try_into()
+                .map_err(io::Error::other)?,
+        ));
+        if validity == TestCertificateValidity::Expired {
+            params.not_before = date_time_ymd(2000, 1, 1);
+            params.not_after = date_time_ymd(2001, 1, 1);
+        }
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let key = KeyPair::generate().map_err(io::Error::other)?;
+        let certificate = params
+            .signed_by(&key, &self.certificate, &self.key)
+            .map_err(io::Error::other)?;
+        let certificate_path = directory.join("interconnect.pem");
+        let key_path = directory.join("interconnect-key.pem");
+        std::fs::write(&certificate_path, certificate.pem())?;
+        std::fs::write(&key_path, key.serialize_pem())?;
+        Ok((certificate_path, key_path))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InterconnectCredentialFault {
+    UntrustedClient,
+    WrongClusterIdentity,
+    WrongNodeIdentity,
+    MismatchedEndpoint,
+    ExpiredCertificate,
+}
+
 #[derive(Debug)]
 pub(crate) struct Cluster {
     _root_dir: TempDir,
+    interconnect_ca: InterconnectTestCa,
     nodes: BTreeMap<String, NodeHandle>,
     fault_injection: FaultInjection,
     dependencies: DependencyEndpoints,
@@ -455,8 +563,6 @@ pub(crate) struct TestClusterConfig {
     pub transaction_max_source_bytes: u64,
     pub transaction_max_open: usize,
     pub grpc_mode: InternalTransportMode,
-    pub cluster_api_mode: InternalTransportMode,
-    pub interconnect_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
     pub drain_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
@@ -477,8 +583,6 @@ impl Default for TestClusterConfig {
             transaction_max_source_bytes: 1024 * 1024,
             transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
-            cluster_api_mode: InternalTransportMode::Http,
-            interconnect_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
             drain_timeout: Duration::from_secs(30),
             memory_pressure: None,
@@ -509,11 +613,12 @@ impl Cluster {
         truncate_test_log_once()?;
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
         let root_dir = tempdir()?;
+        let interconnect_ca = InterconnectTestCa::new(&root_dir)?;
         let mut nodes = BTreeMap::new();
 
         for index in 1..=node_count {
             let node_id = format!("node-{index}");
-            let spec = NodeSpec::new(&root_dir, &node_id, index == 1)?;
+            let spec = NodeSpec::new(&root_dir, &interconnect_ca, &node_id, index == 1)?;
             fault_injection
                 .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
@@ -524,6 +629,7 @@ impl Cluster {
 
         let mut cluster = Self {
             _root_dir: root_dir,
+            interconnect_ca,
             fault_injection,
             nodes,
             dependencies: config.dependencies,
@@ -548,7 +654,7 @@ impl Cluster {
             .get("node-1")
             .expect("bootstrap node exists")
             .spec
-            .cluster_addr();
+            .interconnect_addr();
         for (node_id, node) in &mut self.nodes {
             if node_id != "node-1" {
                 node.spec.bootstrap_host = Some(bootstrap_cluster_addr.clone());
@@ -660,7 +766,7 @@ impl Cluster {
             .nodes
             .values()
             .find(|node| node.task.is_some())
-            .map(|node| node.spec.cluster_addr())
+            .map(|node| node.spec.interconnect_addr())
             .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
         let config = self
             .nodes
@@ -669,7 +775,7 @@ impl Cluster {
             .expect("an existing cluster has at least one node")
             .config
             .clone();
-        let mut spec = NodeSpec::new(&self._root_dir, node_id, false)?;
+        let mut spec = NodeSpec::new(&self._root_dir, &self.interconnect_ca, node_id, false)?;
         spec.bootstrap_host = Some(bootstrap_host);
         self.fault_injection
             .set_syslog_ingestor_bind_ip(node_name(node_id), spec.syslog_ingestor_host);
@@ -727,6 +833,20 @@ impl Cluster {
         self.start_node(node_id).await
     }
 
+    pub(crate) async fn rotate_interconnect_certificates(&mut self) -> io::Result<()> {
+        let interconnect_ca = InterconnectTestCa::new(&self._root_dir)?;
+        for (node_id, node) in &mut self.nodes {
+            tokio::task::consume_budget().await;
+            let (certificate, key) = interconnect_ca.issue_node(node_id, &node.spec.base_dir)?;
+            node.spec.interconnect_tls_ca = interconnect_ca.path.clone();
+            node.spec.interconnect_tls_cert = certificate;
+            node.spec.interconnect_tls_key = key;
+        }
+        self.interconnect_ca = interconnect_ca;
+        sleep(Duration::from_secs(3)).await;
+        Ok(())
+    }
+
     pub(crate) async fn open_silent_interconnect_handshake(
         &self,
         node_id: &str,
@@ -734,23 +854,106 @@ impl Cluster {
         let handle = self.nodes.get(node_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
         })?;
-        if handle.config.interconnect_mode != InternalTransportMode::Http {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "the silent-handshake scenario requires the plain interconnect mode",
-            ));
-        }
-        let mut stream = TcpStream::connect(parse_addr(&handle.spec.interconnect_addr())?).await?;
-        let introduction_bytes: usize = stream.read_u32().await?.arch_into();
-        if introduction_bytes > 65_536 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("interconnect introduction is unexpectedly large: {introduction_bytes}"),
-            ));
-        }
-        let mut introduction = vec![0; introduction_bytes];
-        stream.read_exact(&mut introduction).await?;
-        Ok(stream)
+        TcpStream::connect(parse_addr(&handle.spec.interconnect_addr())?).await
+    }
+
+    pub(crate) async fn attempt_interconnect_with_invalid_credentials(
+        &self,
+        target_node_id: &str,
+        fault: InterconnectCredentialFault,
+    ) -> io::Result<()> {
+        let target = self.nodes.get(target_node_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("unknown node '{target_node_id}'"),
+            )
+        })?;
+        let target_addr = parse_addr(&target.spec.interconnect_addr())?;
+        let probe_directory = tempfile::tempdir_in(self._root_dir.path())?;
+        let untrusted_authority = if let InterconnectCredentialFault::UntrustedClient = fault {
+            Some(InterconnectTestCa::new(&probe_directory)?)
+        } else {
+            None
+        };
+        let certificate_authority = untrusted_authority
+            .as_ref()
+            .unwrap_or(&self.interconnect_ca);
+        let certificate_cluster_id =
+            if let InterconnectCredentialFault::WrongClusterIdentity = fault {
+                "another-cluster"
+            } else {
+                "cucumber"
+            };
+        let validity = if let InterconnectCredentialFault::ExpiredCertificate = fault {
+            TestCertificateValidity::Expired
+        } else {
+            TestCertificateValidity::Current
+        };
+        let probe_node_id = ClusterNodeName::parse("probe-node").map_err(io::Error::other)?;
+        let (certificate_path, key_path) = certificate_authority.issue_node_with_identity(
+            certificate_cluster_id,
+            probe_node_id.as_ref(),
+            validity,
+            probe_directory.path(),
+        )?;
+        let tls =
+            TlsConfigBundle::from_pem_files(&self.interconnect_ca.path, certificate_path, key_path)
+                .map_err(io::Error::other)?;
+        let options = TransportOptions {
+            connection_setup_timeout: Duration::from_millis(750),
+            request_timeout: Duration::from_millis(750),
+            reconnect_backoff: Duration::from_millis(25),
+            max_reconnect_backoff: Duration::from_millis(50),
+            shutdown_drain_timeout: Duration::from_millis(250),
+            ..TransportOptions::default()
+        };
+        let (transport, _incoming) = Transport::bind(
+            "127.0.0.1:0".parse().expect("probe address is valid"),
+            "localhost",
+            certificate_cluster_id,
+            probe_node_id,
+            tls,
+            options,
+            Executor::default(),
+        )
+        .await
+        .map_err(io::Error::other)?;
+        let server_name = if let InterconnectCredentialFault::MismatchedEndpoint = fault {
+            "mismatched.invalid"
+        } else {
+            "localhost"
+        };
+        let peer_target = PeerTarget::new(target_addr, server_name);
+        let attempt = if let InterconnectCredentialFault::WrongNodeIdentity = fault {
+            let addressed_node = ClusterNodeName::parse("node-254").map_err(io::Error::other)?;
+            transport
+                .register_outbound_target(addressed_node.clone(), peer_target)
+                .map_err(io::Error::other)?;
+            transport
+                .send(
+                    &addressed_node,
+                    Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
+                        message: "interconnect identity probe".to_string(),
+                    })),
+                )
+                .await
+                .map_err(io::Error::other)
+        } else {
+            match transport.bootstrap_target(peer_target).await {
+                Ok(peer_node_id) => transport
+                    .send(
+                        &peer_node_id,
+                        Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
+                            message: "interconnect credential probe".to_string(),
+                        })),
+                    )
+                    .await
+                    .map_err(io::Error::other),
+                Err(error) => Err(io::Error::other(error)),
+            }
+        };
+        transport.shutdown().await;
+        attempt
     }
 
     /// Signals a node to exit without waiting for the process. Scenarios that observe a
@@ -1859,10 +2062,7 @@ impl NodeHandle {
         if self.task.is_some() {
             return Ok(());
         }
-        if self.config.grpc_mode == InternalTransportMode::Https
-            || self.config.cluster_api_mode == InternalTransportMode::Https
-            || self.config.interconnect_mode == InternalTransportMode::Https
-        {
+        if self.config.grpc_mode == InternalTransportMode::Https {
             ensure_dev_tls_assets()?;
         }
 
@@ -1882,22 +2082,11 @@ impl NodeHandle {
             .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
-            .cluster_listen_addr(parse_addr(&self.spec.cluster_addr())?)
-            .cluster_advertise_addr(parse_addr(&self.spec.cluster_addr())?.into())
-            .cluster_api_mode(self.config.cluster_api_mode)
-            .cluster_api_listen_addr(parse_addr(&self.spec.cluster_api_addr())?)
-            .cluster_api_advertise_addr(parse_addr(&self.spec.cluster_api_addr())?.into())
-            .cluster_api_https_listen_addr(Some(parse_addr(&self.spec.cluster_api_https_addr())?))
-            .cluster_api_https_advertise_addr(Some(
-                parse_addr(&self.spec.cluster_api_https_addr())?.into(),
-            ))
-            .interconnect_mode(self.config.interconnect_mode)
             .interconnect_listen_addr(parse_addr(&self.spec.interconnect_addr())?)
             .interconnect_advertise_addr(parse_addr(&self.spec.interconnect_addr())?.into())
-            .interconnect_https_listen_addr(Some(parse_addr(&self.spec.interconnect_https_addr())?))
-            .interconnect_https_advertise_addr(Some(
-                parse_addr(&self.spec.interconnect_https_addr())?.into(),
-            ))
+            .interconnect_tls_ca(self.spec.interconnect_tls_ca.clone())
+            .interconnect_tls_cert(self.spec.interconnect_tls_cert.clone())
+            .interconnect_tls_key(self.spec.interconnect_tls_key.clone())
             .allow_bootstrap(self.spec.allow_bootstrap)
             .default_user(TEST_AUTH_USERNAME.to_string())
             .init_default_user_password(Some(TEST_AUTH_PASSWORD.to_string()))
@@ -2040,6 +2229,9 @@ impl NodeHandle {
 struct NodeSpec {
     node_id: String,
     base_dir: PathBuf,
+    interconnect_tls_ca: PathBuf,
+    interconnect_tls_cert: PathBuf,
+    interconnect_tls_key: PathBuf,
     syslog_ingestor_host: IpAddr,
     allow_bootstrap: bool,
     bootstrap_host: Option<String>,
@@ -2049,11 +2241,7 @@ struct NodeSpec {
     https_port: u16,
     observability_port: u16,
     web_console_port: u16,
-    cluster_port: u16,
-    cluster_api_port: u16,
-    cluster_api_https_port: u16,
     interconnect_port: u16,
-    interconnect_https_port: u16,
 }
 
 struct NodePorts {
@@ -2063,16 +2251,12 @@ struct NodePorts {
     https: u16,
     observability: u16,
     web_console: u16,
-    cluster: u16,
-    cluster_api: u16,
-    cluster_api_https: u16,
     interconnect: u16,
-    interconnect_https: u16,
 }
 
 impl NodePorts {
     fn allocate() -> io::Result<Self> {
-        let mut ports = next_ports(11)?.into_iter();
+        let mut ports = next_ports(7)?.into_iter();
         Ok(Self {
             grpc: ports.next().expect("allocated gRPC port"),
             grpc_https: ports.next().expect("allocated gRPC HTTPS port"),
@@ -2080,25 +2264,31 @@ impl NodePorts {
             https: ports.next().expect("allocated HTTPS port"),
             observability: ports.next().expect("allocated observability port"),
             web_console: ports.next().expect("allocated web console port"),
-            cluster: ports.next().expect("allocated cluster port"),
-            cluster_api: ports.next().expect("allocated cluster API port"),
-            cluster_api_https: ports.next().expect("allocated cluster API HTTPS port"),
             interconnect: ports.next().expect("allocated interconnect port"),
-            interconnect_https: ports.next().expect("allocated interconnect HTTPS port"),
         })
     }
 }
 
 impl NodeSpec {
-    fn new(root: &TempDir, node_id: &str, allow_bootstrap: bool) -> io::Result<Self> {
+    fn new(
+        root: &TempDir,
+        interconnect_ca: &InterconnectTestCa,
+        node_id: &str,
+        allow_bootstrap: bool,
+    ) -> io::Result<Self> {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
+        let (interconnect_tls_cert, interconnect_tls_key) =
+            interconnect_ca.issue_node(node_id, &base_dir)?;
         let ports = NodePorts::allocate()?;
         let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
         Ok(Self {
             node_id: node_id.to_string(),
             base_dir,
+            interconnect_tls_ca: interconnect_ca.path.clone(),
+            interconnect_tls_cert,
+            interconnect_tls_key,
             syslog_ingestor_host,
             allow_bootstrap,
             bootstrap_host: None,
@@ -2108,11 +2298,7 @@ impl NodeSpec {
             https_port: ports.https,
             observability_port: ports.observability,
             web_console_port: ports.web_console,
-            cluster_port: ports.cluster,
-            cluster_api_port: ports.cluster_api,
-            cluster_api_https_port: ports.cluster_api_https,
             interconnect_port: ports.interconnect,
-            interconnect_https_port: ports.interconnect_https,
         })
     }
 
@@ -2139,11 +2325,7 @@ impl NodeSpec {
         self.https_port = ports.https;
         self.observability_port = ports.observability;
         self.web_console_port = ports.web_console;
-        self.cluster_port = ports.cluster;
-        self.cluster_api_port = ports.cluster_api;
-        self.cluster_api_https_port = ports.cluster_api_https;
         self.interconnect_port = ports.interconnect;
-        self.interconnect_https_port = ports.interconnect_https;
         Ok(())
     }
 
@@ -2160,15 +2342,11 @@ impl NodeSpec {
     /// enough to fail the scenario. Only this call site retires ports, and only a few times per
     /// run, so keeping them costs a handful of entries.
     fn reallocate_interconnect_ports(&mut self) -> io::Result<()> {
-        let mut ports = next_ports(2)?.into_iter();
+        let mut ports = next_ports(1)?.into_iter();
         let interconnect_port = ports
             .next()
             .ok_or_else(|| io::Error::other("interconnect port allocation returned no port"))?;
-        let interconnect_https_port = ports.next().ok_or_else(|| {
-            io::Error::other("interconnect HTTPS port allocation returned only one port")
-        })?;
         self.interconnect_port = interconnect_port;
-        self.interconnect_https_port = interconnect_https_port;
         Ok(())
     }
 
@@ -2185,11 +2363,7 @@ impl NodeSpec {
             self.https_port,
             self.observability_port,
             self.web_console_port,
-            self.cluster_port,
-            self.cluster_api_port,
-            self.cluster_api_https_port,
             self.interconnect_port,
-            self.interconnect_https_port,
         ] {
             reserved.remove(&port);
         }
@@ -2260,24 +2434,8 @@ impl NodeSpec {
         format!("{HOST}:{}", self.web_console_port)
     }
 
-    fn cluster_addr(&self) -> String {
-        format!("{HOST}:{}", self.cluster_port)
-    }
-
-    fn cluster_api_addr(&self) -> String {
-        format!("{HOST}:{}", self.cluster_api_port)
-    }
-
-    fn cluster_api_https_addr(&self) -> String {
-        format!("{HOST}:{}", self.cluster_api_https_port)
-    }
-
     fn interconnect_addr(&self) -> String {
         format!("{HOST}:{}", self.interconnect_port)
-    }
-
-    fn interconnect_https_addr(&self) -> String {
-        format!("{HOST}:{}", self.interconnect_https_port)
     }
 
     fn db_path(&self) -> io::Result<PathBuf> {

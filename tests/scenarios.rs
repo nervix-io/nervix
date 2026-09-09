@@ -73,8 +73,9 @@ use uuid::Uuid;
 
 use crate::common::{
     cluster::{
-        BrokerObserver, Cluster, StallableTcpProxy, TEST_AUTH_USERNAME, TestClusterConfig,
-        TestSession, WebsocketExchangeAction, client_connect_options,
+        BrokerObserver, Cluster, InterconnectCredentialFault, StallableTcpProxy,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
+        client_connect_options,
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
@@ -156,6 +157,7 @@ struct ScenarioWorld {
         Option<AbortOnDropHandle<std::io::Result<nervix_proto::CommandResult>>>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
+    last_interconnect_attempt_error: Option<String>,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -235,6 +237,10 @@ impl fmt::Debug for ScenarioWorld {
             .field(
                 "silent_interconnect_peer_count",
                 &self.silent_interconnect_peers.len(),
+            )
+            .field(
+                "last_interconnect_attempt_error",
+                &self.last_interconnect_attempt_error,
             )
             .finish()
     }
@@ -2251,23 +2257,6 @@ async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
     world.cluster_config.graceful_shutdown_drain = true;
 }
 
-#[given(
-    expr = "cluster internal transports are configured with cluster api mode {string} and \
-            interconnect mode {string}"
-)]
-async fn given_cluster_internal_transports_are_configured(
-    world: &mut ScenarioWorld,
-    cluster_api_mode: String,
-    interconnect_mode: String,
-) {
-    assert!(
-        world.cluster.is_none(),
-        "internal transport modes must be configured before cluster startup"
-    );
-    world.cluster_config.cluster_api_mode = parse_internal_transport_mode(&cluster_api_mode);
-    world.cluster_config.interconnect_mode = parse_internal_transport_mode(&interconnect_mode);
-}
-
 #[given(expr = "client grpc transport is configured with mode {string}")]
 async fn given_client_grpc_transport_is_configured(world: &mut ScenarioWorld, grpc_mode: String) {
     assert!(
@@ -2997,6 +2986,46 @@ async fn when_node_is_restarted_with_new_interconnect_addresses(
             .await
             .expect("failed to restart node with a new interconnect address");
     }
+}
+
+#[when("interconnect certificates are rotated to a new certificate authority")]
+async fn when_interconnect_certificates_are_rotated(world: &mut ScenarioWorld) {
+    world
+        .cluster_mut()
+        .rotate_interconnect_certificates()
+        .await
+        .expect("failed to rotate interconnect certificates");
+}
+
+#[when(
+    expr = "an interconnect peer with {string} credentials attempts to connect to node {string}"
+)]
+async fn when_interconnect_peer_with_invalid_credentials_attempts_to_connect(
+    world: &mut ScenarioWorld,
+    fault: String,
+    node_id: String,
+) {
+    let fault = match fault.as_str() {
+        "untrusted client" => InterconnectCredentialFault::UntrustedClient,
+        "wrong cluster identity" => InterconnectCredentialFault::WrongClusterIdentity,
+        "wrong node identity" => InterconnectCredentialFault::WrongNodeIdentity,
+        "mismatched endpoint" => InterconnectCredentialFault::MismatchedEndpoint,
+        "expired certificate" => InterconnectCredentialFault::ExpiredCertificate,
+        other => panic!("unknown interconnect credential fault '{other}'"),
+    };
+    let result = world
+        .cluster()
+        .attempt_interconnect_with_invalid_credentials(&node_id, fault)
+        .await;
+    world.last_interconnect_attempt_error = result.err().map(|error| error.to_string());
+}
+
+#[then("the interconnect peer is rejected")]
+fn then_interconnect_peer_is_rejected(world: &mut ScenarioWorld) {
+    assert!(
+        world.last_interconnect_attempt_error.is_some(),
+        "the invalid interconnect peer unexpectedly connected"
+    );
 }
 
 #[when(expr = "a silent peer starts an interconnect handshake with node {string}")]

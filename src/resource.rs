@@ -10,7 +10,7 @@
 
 use std::{
     fs,
-    io::Read,
+    io::{Read, Seek as _, SeekFrom},
     path::{Component, Path, PathBuf},
 };
 
@@ -21,7 +21,7 @@ use async_tar::{
 use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
-use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, StorageClass};
 use nervix_models::{ClusterNodeName, ResourceId, ResourceVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -68,6 +68,13 @@ pub struct ResourceStore {
     /// The node's bounded execution and memory admission. Walking, reading and hashing a version's
     /// contents is bulk work, so it is admitted and charged rather than run on an async worker.
     executor: Executor,
+}
+
+/// One bounded read from a resource archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceArchiveChunk {
+    pub bytes: Vec<u8>,
+    pub eof: bool,
 }
 
 /// Where one resource version is installed: the directory it will finally occupy, the staging
@@ -212,11 +219,55 @@ impl ResourceStore {
         Ok(())
     }
 
-    pub fn read_archive_bytes(
+    /// Read one configured bulk-sized piece of an installed archive on a filesystem worker.
+    pub async fn read_archive_chunk(
         &self,
         id: &ResourceId,
-    ) -> Result<Vec<u8>, Report<ResourceStoreError>> {
-        fs::read(self.archive_path(id)).map_err(|_| Report::new(ResourceStoreError::ReadArchive))
+        offset: u64,
+    ) -> Result<ResourceArchiveChunk, Report<ResourceStoreError>> {
+        let chunk_bytes = self.executor.limits().bulk_chunk_bytes.as_u64();
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, chunk_bytes)
+            .await
+            .change_context(ResourceStoreError::BulkAdmission)?;
+        let archive_path = self.archive_path(id);
+        self.executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| {
+                    if cancellation.is_cancelled() {
+                        return Err(Report::new(ResourceStoreError::Cancelled));
+                    }
+                    let mut file = fs::File::open(archive_path)
+                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                    let archive_bytes = file
+                        .metadata()
+                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                        .len();
+                    file.seek(SeekFrom::Start(offset))
+                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                    let chunk_size = usize::try_from(chunk_bytes)
+                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                    let mut bytes = vec![0_u8; chunk_size];
+                    let read = file
+                        .read(&mut bytes)
+                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                    bytes.truncate(read);
+                    let read = u64::try_from(read)
+                        .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                    let end = offset
+                        .checked_add(read)
+                        .ok_or_else(|| Report::new(ResourceStoreError::ReadArchive))?;
+                    Ok(ResourceArchiveChunk {
+                        bytes,
+                        eof: end >= archive_bytes,
+                    })
+                },
+            )
+            .await
+            .change_context(ResourceStoreError::JoinBlockingTask)?
     }
 
     pub fn read_manifest(
@@ -632,6 +683,27 @@ mod tests {
         )
     }
 
+    async fn read_archive(store: &ResourceStore, id: &ResourceId) -> Vec<u8> {
+        let mut archive = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let chunk = store
+                .read_archive_chunk(id, offset)
+                .await
+                .expect("archive chunk should be readable");
+            let chunk_len = u64::try_from(chunk.bytes.len())
+                .expect("a resource test archive chunk length fits in u64");
+            archive.extend_from_slice(&chunk.bytes);
+            if chunk.eof {
+                return archive;
+            }
+            assert_ne!(chunk_len, 0, "a non-final archive chunk must make progress");
+            offset = offset
+                .checked_add(chunk_len)
+                .expect("a resource test archive length fits in u64");
+        }
+    }
+
     #[tokio::test]
     async fn install_from_directory_writes_manifest_and_preserves_tree() {
         let source = tempdir().expect("source tempdir");
@@ -710,9 +782,7 @@ mod tests {
             )
             .await
             .expect("resource should install");
-        let archive_bytes = store
-            .read_archive_bytes(&source_id)
-            .expect("archive should be readable");
+        let archive_bytes = read_archive(&store, &source_id).await;
 
         let temp_archive = NamedTempFile::new().expect("temp archive should be created");
         std::fs::write(temp_archive.path(), &archive_bytes)
@@ -776,9 +846,7 @@ mod tests {
             )
             .await
             .expect("resource should install");
-        let archive_bytes = store
-            .read_archive_bytes(&source_id)
-            .expect("archive should be readable");
+        let archive_bytes = read_archive(&store, &source_id).await;
 
         let temp_archive = NamedTempFile::new().expect("temp archive should be created");
         std::fs::write(temp_archive.path(), &archive_bytes)

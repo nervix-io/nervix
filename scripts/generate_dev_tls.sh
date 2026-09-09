@@ -16,6 +16,8 @@ tls_assets_are_valid() {
     [[ -f "${ca_cert}" && -f "${ca_key}" && -f "${node_cert}" && -f "${node_key}" && -f "${node_bundle}" && -f "${kafka_keystore}" && -f "${kafka_keystore_password_file}" && -f "${kafka_key_password_file}" ]] || return 1
     openssl x509 -in "${ca_cert}" -noout >/dev/null 2>&1 || return 1
     openssl x509 -in "${node_cert}" -noout >/dev/null 2>&1 || return 1
+    openssl x509 -in "${node_cert}" -noout -ext subjectAltName 2>/dev/null \
+        | grep -Fq 'URI:nervix://cluster/default/node/node-1' || return 1
     openssl pkey -in "${node_key}" -noout >/dev/null 2>&1 || return 1
     openssl verify -CAfile "${ca_cert}" "${node_cert}" >/dev/null 2>&1 || return 1
     openssl pkcs12 -in "${kafka_keystore}" -passin "pass:${kafka_keystore_password}" -nokeys >/dev/null 2>&1 || return 1
@@ -73,6 +75,7 @@ subjectAltName = @alt_names
 [ alt_names ]
 DNS.1 = localhost
 IP.1 = 127.0.0.1
+URI.1 = nervix://cluster/default/node/node-1
 EOF
 
 rm -f "${ca_cert}" "${ca_key}" "${node_cert}" "${node_key}" "${node_bundle}" \

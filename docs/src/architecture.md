@@ -62,24 +62,24 @@ One concrete example is `VHOST` TLS:
 - a `VHOST` can bind one of those resources, optionally pinned to an explicit version
 - the data plane serves HTTPS and WSS from a dedicated HTTPS listener using the local replicated resource files
 
-Internal node-to-node networking is also split explicitly:
+All node-to-node traffic uses one authenticated HTTP/2 interconnect listener. TLS 1.3 is mandatory.
+Every node certificate carries its cluster and node identity in a
+`nervix://cluster/<cluster>/node/<node>` URI SAN and names its advertised DNS name or IP address in
+an endpoint SAN. A connection is accepted only when its CA trust, cluster identity, node identity,
+advertised endpoint, and HTTP/2 ALPN all agree.
 
-- gossip membership remains on its own cluster transport
-- the cluster API carries Raft and resource-transfer traffic and can run in plain HTTP or HTTPS mode
-- the interconnect carries runtime payloads and control envelopes and can run in plain or TLS mode
+Each peer has independent HTTP/2 pools for membership and management events, commands, Raft
+replication, Arrow relay batches, and bulk transfers. Management capacity is reserved so relay or
+bulk backpressure cannot prevent gossip, heartbeats, or elections. Gossip exchanges, Raft records,
+resource chunks, and other non-Arrow messages use bounded, validated rkyv records. Relay payloads
+remain Arrow IPC end to end. Resource archives and Raft snapshots cross the bulk pool as bounded
+chunks rather than one whole in-memory wire message.
 
-The interconnect connection driver owns socket read and write progress independently. Timer events,
-traffic in the opposite direction, and cancellation of an application request cannot restart a
-partially transferred frame on the same connection. Connection setup and send-queue admission each
-have a five-second deadline. An outbound driver is bound to the node identity it expects to
-authenticate, so another trusted node at that address cannot consume its queued data. Failed
-connections reconnect with jittered exponential backoff from 200 milliseconds up to five seconds.
-When gossip removes a peer or replaces its advertised address, the old connection and reconnect
-work is retired before its permit can be reused. Node shutdown stops new admission, drains queued
-connection work for up to ten seconds, and then closes anything still active; an incomplete
-handshake cannot extend that bound.
-
-For both cluster API and interconnect, plain and TLS listeners use separate addresses. The selected
-mode is an explicit process-level configuration choice.
+Connection setup, request progress, and whole-request deadlines are bounded. Failed pool slots
+reconnect with exponential backoff. When membership removes a peer or changes its advertised
+address, its prior slots are retired. Replacing credentials starts HTTP/2 graceful shutdown on old
+inbound connections and creates new pools with the replacement certificate. Node shutdown stops
+new admission, drains active streams for the configured interval, and then closes anything still
+active; an incomplete TLS handshake cannot extend that bound.
 
 The rest of this section splits control-plane semantics from data-plane semantics because that distinction is fundamental to how Nervix behaves.

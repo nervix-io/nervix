@@ -3,8 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The log store, the state machine over the replicated state, snapshotting, leadership
-//!   observation, granting operation capabilities, and the HTTP network between peers.
-//! - **Depends on.** The vocabulary for the state it replicates, and `fjall` for storage.
+//!   observation, granting operation capabilities, and the rkyv Raft protocol carried between
+//!   peers.
+//! - **Depends on.** The vocabulary for the state it replicates, `fjall` for storage, and the
+//!   authenticated interconnect for peer transport.
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
@@ -13,13 +15,18 @@ use std::{
     io::{self, Cursor},
     ops::RangeBounds,
     path::Path,
-    sync::Arc as StdArc,
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
+use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures_util::StreamExt;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_interconnect::Transport;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainClockState, DomainName, DomainSchedule,
     DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
@@ -45,7 +52,7 @@ use openraft::{
     },
 };
 use parking_lot::Mutex;
-use reqwest::{Client as HttpClient, StatusCode};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::{
@@ -57,6 +64,7 @@ use tracing::{error, info};
 use triomphe::Arc;
 
 mod transaction;
+mod wire;
 
 pub use transaction::{
     FinishedTransaction, ReplicatedTransaction, TransactionCommandResult, TransactionCommitAdvance,
@@ -65,7 +73,9 @@ pub use transaction::{
     TransactionStatement, TransactionStepEffect, TransactionStepResult,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum ConsensusCommand {
     ReplaceDomainSchedule {
         domain: DomainName,
@@ -163,13 +173,17 @@ pub enum ConsensusCommand {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum ConsensusResponse {
     Applied,
     Transaction(Box<TransactionMutationResponse>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct UserCredentials {
     pub name: UserName,
     pub password_hash: String,
@@ -290,19 +304,6 @@ pub type StoredMembershipOf =
 pub type SnapshotOf =
     Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, Cursor<Vec<u8>>>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SnapshotRelayHeader {
-    pub vote: VoteOf,
-    pub meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
-}
-
-pub const RAFT_APPEND_ENTRIES_PATH: &str = "/raft/append-entries";
-pub const RAFT_VOTE_PATH: &str = "/raft/vote";
-pub const RAFT_INSTALL_SNAPSHOT_PATH: &str = "/raft/install-snapshot";
-pub const RAFT_TRANSFER_LEADER_PATH: &str = "/raft/transfer-leader";
-pub const RAFT_CONTENT_TYPE_CBOR: &str = "application/cbor";
-pub const RAFT_CONTENT_TYPE_RELAY: &str = "application/vnd.nervix.raft-snapshot-stream";
-
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
@@ -312,13 +313,14 @@ const KEY_CLUSTER_SCHEDULE: &[u8] = b"cluster_schedule";
 const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// How many consensus transitions a session can fall behind before the bus drops the oldest.
 const CONSENSUS_EVENT_CAPACITY: usize = 256;
+const SNAPSHOT_CHUNK_BYTES: usize = 64 * 1024;
+static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct ConsensusSettings {
     pub cluster_name: String,
     pub node_id: ClusterNodeName,
-    pub cluster_api_advertise_url: String,
-    pub cluster_api_http_client: HttpClient,
+    pub interconnect: Transport,
     pub node_unavailability_timeout: Duration,
     pub raft_heartbeat_interval: Duration,
     pub raft_election_timeout_min: Duration,
@@ -328,12 +330,9 @@ pub struct ConsensusSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
     pub node_id: ClusterNodeName,
-    pub cluster_api_advertise_addr: String,
     pub grpc_advertise_addr: String,
     pub web_console_advertise_addr: String,
     pub interconnect_advertise_addr: String,
-    pub interconnect_mode: String,
-    pub interconnect_public_key: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -402,6 +401,131 @@ struct PeerHealth {
     last_reported_unavailable_at: Option<Instant>,
 }
 
+struct IncomingSnapshotTransfer {
+    transfer_id: u64,
+    vote: VoteOf,
+    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+    total_bytes: u64,
+    snapshot: Vec<u8>,
+}
+
+struct CompletedSnapshotTransfer {
+    vote: VoteOf,
+    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+    snapshot: Vec<u8>,
+}
+
+impl IncomingSnapshotTransfer {
+    fn new(
+        transfer_id: u64,
+        vote: VoteOf,
+        meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+        total_bytes: u64,
+    ) -> Result<Self, Report<SnapshotTransferError>> {
+        usize::try_from(total_bytes)
+            .map_err(|_| Report::new(SnapshotTransferError::UnaddressableLength { total_bytes }))?;
+        Ok(Self {
+            transfer_id,
+            vote,
+            meta,
+            total_bytes,
+            snapshot: Vec::new(),
+        })
+    }
+
+    fn verify_id(&self, transfer_id: u64) -> Result<(), Report<SnapshotTransferError>> {
+        if self.transfer_id != transfer_id {
+            return Err(Report::new(SnapshotTransferError::Superseded {
+                expected: self.transfer_id,
+                actual: transfer_id,
+            }));
+        }
+        Ok(())
+    }
+
+    fn append_chunk(
+        &mut self,
+        transfer_id: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), Report<SnapshotTransferError>> {
+        self.verify_id(transfer_id)?;
+        if bytes.len() > SNAPSHOT_CHUNK_BYTES {
+            return Err(Report::new(SnapshotTransferError::ChunkTooLarge {
+                actual: bytes.len(),
+                limit: SNAPSHOT_CHUNK_BYTES,
+            }));
+        }
+        let expected_offset = u64::try_from(self.snapshot.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        if offset != expected_offset {
+            return Err(Report::new(SnapshotTransferError::WrongOffset {
+                expected: expected_offset,
+                actual: offset,
+            }));
+        }
+        let chunk_bytes = u64::try_from(bytes.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        let end = expected_offset.checked_add(chunk_bytes).ok_or_else(|| {
+            Report::new(SnapshotTransferError::ExceedsDeclaredLength {
+                declared: self.total_bytes,
+            })
+        })?;
+        if end > self.total_bytes {
+            return Err(Report::new(SnapshotTransferError::ExceedsDeclaredLength {
+                declared: self.total_bytes,
+            }));
+        }
+        self.snapshot
+            .try_reserve(bytes.len())
+            .map_err(|_| Report::new(SnapshotTransferError::Allocation { requested: end }))?;
+        self.snapshot.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    fn complete(
+        self,
+        transfer_id: u64,
+    ) -> Result<CompletedSnapshotTransfer, Report<SnapshotTransferError>> {
+        self.verify_id(transfer_id)?;
+        let actual = u64::try_from(self.snapshot.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        if actual != self.total_bytes {
+            return Err(Report::new(SnapshotTransferError::Incomplete {
+                expected: self.total_bytes,
+                actual,
+            }));
+        }
+        Ok(CompletedSnapshotTransfer {
+            vote: self.vote,
+            meta: self.meta,
+            snapshot: self.snapshot,
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+enum SnapshotTransferError {
+    #[error("node '{peer}' has no active snapshot transfer")]
+    Missing { peer: ClusterNodeName },
+    #[error("snapshot transfer {actual} superseded transfer {expected}")]
+    Superseded { expected: u64, actual: u64 },
+    #[error("snapshot transfer declares an unaddressable {total_bytes}-byte length")]
+    UnaddressableLength { total_bytes: u64 },
+    #[error("snapshot chunk offset {actual} differs from expected offset {expected}")]
+    WrongOffset { expected: u64, actual: u64 },
+    #[error("snapshot chunk contains {actual} bytes, exceeding the {limit}-byte limit")]
+    ChunkTooLarge { actual: usize, limit: usize },
+    #[error("snapshot transfer would exceed its declared {declared}-byte length")]
+    ExceedsDeclaredLength { declared: u64 },
+    #[error("snapshot transfer ended at {actual} bytes, expected {expected}")]
+    Incomplete { expected: u64, actual: u64 },
+    #[error("snapshot transfer could not allocate its first {requested} bytes")]
+    Allocation { requested: u64 },
+    #[error("raft rejected the completed snapshot: {0}")]
+    Install(String),
+}
+
 #[derive(Debug, Error)]
 pub enum ConsensusError {
     #[error("failed to open raft database")]
@@ -433,6 +557,34 @@ pub enum ConsensusError {
         operation: String,
         timeout: Duration,
     },
+}
+
+#[derive(Debug, Error)]
+enum ProtocolOriginError {
+    #[error(
+        "authenticated node '{authenticated}' cannot submit {operation} for declared origin \
+         '{declared}'"
+    )]
+    Mismatch {
+        operation: &'static str,
+        authenticated: ClusterNodeName,
+        declared: ClusterNodeName,
+    },
+}
+
+fn validate_protocol_origin(
+    authenticated: &ClusterNodeName,
+    declared: &ClusterNodeName,
+    operation: &'static str,
+) -> Result<(), Report<ProtocolOriginError>> {
+    if authenticated == declared {
+        return Ok(());
+    }
+    Err(Report::new(ProtocolOriginError::Mismatch {
+        operation,
+        authenticated: authenticated.clone(),
+        declared: declared.clone(),
+    }))
 }
 
 impl From<RaftError<TypeConfig, ClientWriteError<TypeConfig>>> for ConsensusError {
@@ -602,10 +754,10 @@ struct ConsensusState {
     // The Raft runtime independently owns the store as both log storage and state machine.
     store: StdArc<FjallStore>,
     local_node_id: ClusterNodeName,
-    cluster_api_advertise_url: String,
-    cluster_api_http_client: HttpClient,
+    interconnect: Transport,
     node_unavailability_timeout: Duration,
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
+    incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -705,9 +857,8 @@ impl Consensus {
             .map_err(|_| ConsensusError::Startup)?,
         );
 
-        let cluster_api_http_client = settings.cluster_api_http_client.clone();
         let network = NetworkFactory {
-            http_client: cluster_api_http_client.clone(),
+            interconnect: settings.interconnect.clone(),
         };
         let raft = Raft::new(
             settings.node_id.clone(),
@@ -757,19 +908,180 @@ impl Consensus {
             }
         });
 
-        Ok(Self {
+        let consensus = Self {
             inner: Arc::new(ConsensusState {
                 raft,
                 store,
                 local_node_id: settings.node_id,
-                cluster_api_advertise_url: settings.cluster_api_advertise_url,
-                cluster_api_http_client,
+                interconnect: settings.interconnect,
                 node_unavailability_timeout: settings.node_unavailability_timeout,
                 peer_health: RwLock::new(BTreeMap::new()),
+                incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
                 metrics_task: Mutex::new(Some(metrics_task)),
             }),
-        })
+        };
+        consensus.register_protocol_handlers()?;
+        Ok(consensus)
+    }
+
+    fn register_protocol_handlers(&self) -> Result<(), ConsensusError> {
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::HeartbeatRequest, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    validate_protocol_origin(
+                        context.peer_node_id(),
+                        request.0.origin_node_id(),
+                        "a heartbeat",
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let request = match request.0.into_request() {
+                        Ok(request) => request,
+                        Err(error) => return Err(error.to_string()),
+                    };
+                    receiver
+                        .append_entries(request)
+                        .await
+                        .map(wire::AppendEntriesResponseRecord::from)
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|_| ConsensusError::Startup)?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::ReplicateRequest, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    validate_protocol_origin(
+                        context.peer_node_id(),
+                        request.0.origin_node_id(),
+                        "replication",
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let request = match request.0.into_request() {
+                        Ok(request) => request,
+                        Err(error) => return Err(error.to_string()),
+                    };
+                    receiver
+                        .append_entries(request)
+                        .await
+                        .map(wire::AppendEntriesResponseRecord::from)
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|_| ConsensusError::Startup)?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::RequestVote, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    validate_protocol_origin(
+                        context.peer_node_id(),
+                        request.0.origin_node_id(),
+                        "a vote request",
+                    )
+                    .map_err(|error| error.to_string())?;
+                    receiver
+                        .vote(request.0.into_request())
+                        .await
+                        .map(wire::VoteResponseRecord::from)
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|_| ConsensusError::Startup)?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::BeginSnapshotTransfer, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    validate_protocol_origin(
+                        context.peer_node_id(),
+                        request.origin_node_id(),
+                        "a snapshot transfer",
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let transfer = request.into_start().map_err(|error| error.to_string())?;
+                    receiver
+                        .begin_snapshot_transfer(
+                            context.peer_node_id().clone(),
+                            transfer.transfer_id,
+                            transfer.vote,
+                            transfer.meta,
+                            transfer.total_bytes,
+                        )
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|_| ConsensusError::Startup)?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::SnapshotChunk, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    receiver
+                        .append_snapshot_chunk(
+                            context.peer_node_id(),
+                            request.transfer_id,
+                            request.offset,
+                            request.bytes,
+                        )
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|_| ConsensusError::Startup)?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::FinishSnapshotTransfer, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    receiver
+                        .finish_snapshot_transfer(context.peer_node_id(), request.transfer_id)
+                        .await
+                        .map(wire::SnapshotResponseRecord::from)
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|_| ConsensusError::Startup)?;
+
+        let receiver = self.protocol_receiver();
+        self.inner
+            .interconnect
+            .register_handler::<wire::TransferLeadership, _, _>(move |context, request| {
+                let receiver = receiver.clone();
+                async move {
+                    validate_protocol_origin(
+                        context.peer_node_id(),
+                        request.origin_node_id(),
+                        "a leadership transfer",
+                    )
+                    .map_err(|error| error.to_string())?;
+                    receiver
+                        .transfer_leader(request.into_request())
+                        .await
+                        .map(wire::TransferLeadershipResponse::from)
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|_| ConsensusError::Startup)?;
+
+        self.inner
+            .interconnect
+            .register_handler::<wire::HealthCheck, _, _>(|_, _| async {})
+            .map_err(|_| ConsensusError::Startup)?;
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -1397,7 +1709,7 @@ impl Administrator {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
-            BasicNode::new(self.inner.cluster_api_advertise_url.clone()),
+            BasicNode::new(self.inner.local_node_id.to_string()),
         );
         self.inner
             .raft
@@ -1429,7 +1741,7 @@ impl Administrator {
 
         for node in gossip.admission_candidates() {
             tokio::task::consume_budget().await;
-            if node.cluster_api_advertise_addr.is_empty() {
+            if node.interconnect_advertise_addr.is_empty() {
                 continue;
             }
 
@@ -1440,17 +1752,17 @@ impl Administrator {
                 .cloned();
             if known_node.is_none()
                 || known_node.as_ref().map(|known| &known.addr)
-                    != Some(&node.cluster_api_advertise_addr)
+                    != Some(&node.interconnect_advertise_addr)
             {
                 let add_message = if known_node.is_some() {
                     format!(
                         "raft refreshing learner {} address to {}",
-                        node.node_id, node.cluster_api_advertise_addr
+                        node.node_id, node.interconnect_advertise_addr
                     )
                 } else {
                     format!(
                         "raft adding learner {} at {}",
-                        node.node_id, node.cluster_api_advertise_addr
+                        node.node_id, node.interconnect_advertise_addr
                     )
                 };
                 self.inner.events.report(add_message);
@@ -1458,7 +1770,7 @@ impl Administrator {
                     .raft
                     .add_learner(
                         node.node_id.clone(),
-                        BasicNode::new(node.cluster_api_advertise_addr.clone()),
+                        BasicNode::new(node.interconnect_advertise_addr.clone()),
                         true,
                     )
                     .await
@@ -1482,12 +1794,12 @@ impl Administrator {
                 continue;
             }
 
-            let Some(addr) = membership_nodes.get(node_id) else {
+            let Some(_) = membership_nodes.get(node_id) else {
                 continue;
             };
 
             let chitchat_unavailable = gossip.dead_node_ids.contains(node_id);
-            let healthcheck_unavailable = self.ping_peer(addr).await.is_err();
+            let healthcheck_unavailable = self.ping_peer(node_id).await.is_err();
             unavailable.push((
                 node_id.clone(),
                 chitchat_unavailable || healthcheck_unavailable,
@@ -1558,19 +1870,12 @@ impl Administrator {
         Ok(())
     }
 
-    async fn ping_peer(&self, target_addr: &str) -> Result<(), ConsensusError> {
-        let response = self
-            .inner
-            .cluster_api_http_client
-            .get(format!("{target_addr}/raft/ping"))
-            .send()
+    async fn ping_peer(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
+        self.inner
+            .interconnect
+            .request(node_id, wire::HealthCheck)
             .await
-            .map_err(|_| ConsensusError::Transport)?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(ConsensusError::Transport)
-        }
+            .map_err(|_| ConsensusError::Transport)
     }
 
     pub async fn drop_node(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
@@ -1662,7 +1967,57 @@ impl ProtocolReceiver {
         self.inner.raft.handle_transfer_leader(req).await
     }
 
-    pub async fn install_full_snapshot(
+    fn begin_snapshot_transfer(
+        &self,
+        peer: ClusterNodeName,
+        transfer_id: u64,
+        vote: VoteOf,
+        meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+        total_bytes: u64,
+    ) -> Result<(), Report<SnapshotTransferError>> {
+        let transfer = IncomingSnapshotTransfer::new(transfer_id, vote, meta, total_bytes)?;
+        self.inner.incoming_snapshots.lock().insert(peer, transfer);
+        Ok(())
+    }
+
+    fn append_snapshot_chunk(
+        &self,
+        peer: &ClusterNodeName,
+        transfer_id: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), Report<SnapshotTransferError>> {
+        let mut transfers = self.inner.incoming_snapshots.lock();
+        let transfer = transfers
+            .get_mut(peer)
+            .ok_or_else(|| Report::new(SnapshotTransferError::Missing { peer: peer.clone() }))?;
+        transfer.append_chunk(transfer_id, offset, bytes)
+    }
+
+    async fn finish_snapshot_transfer(
+        &self,
+        peer: &ClusterNodeName,
+        transfer_id: u64,
+    ) -> Result<SnapshotResponse<TypeConfig>, Report<SnapshotTransferError>> {
+        let transfer = {
+            let mut transfers = self.inner.incoming_snapshots.lock();
+            let Some(current) = transfers.get(peer) else {
+                return Err(Report::new(SnapshotTransferError::Missing {
+                    peer: peer.clone(),
+                }));
+            };
+            current.verify_id(transfer_id)?;
+            transfers
+                .remove(peer)
+                .verified("the transfer was found for this peer immediately above")
+        };
+        let transfer = transfer.complete(transfer_id)?;
+        self.install_full_snapshot(transfer.vote, transfer.meta, transfer.snapshot)
+            .await
+            .map_err(|error| Report::new(SnapshotTransferError::Install(error.to_string())))
+    }
+
+    async fn install_full_snapshot(
         &self,
         vote: VoteOf,
         meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
@@ -1683,22 +2038,22 @@ impl ProtocolReceiver {
 
 #[derive(Clone)]
 struct NetworkFactory {
-    http_client: HttpClient,
+    interconnect: Transport,
 }
 
 #[derive(Clone)]
 struct NetworkClient {
-    target: String,
-    http_client: HttpClient,
+    target: ClusterNodeName,
+    interconnect: Transport,
 }
 
 impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     type Network = NetworkClient;
 
-    async fn new_client(&mut self, _target: ClusterNodeName, node: &Node) -> Self::Network {
+    async fn new_client(&mut self, target: ClusterNodeName, _node: &Node) -> Self::Network {
         Self::Network {
-            target: node.addr.clone(),
-            http_client: self.http_client.clone(),
+            target,
+            interconnect: self.interconnect.clone(),
         }
     }
 }
@@ -1707,50 +2062,35 @@ fn io_error(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(err.to_string())
 }
 
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, io::Error> {
+fn next_snapshot_transfer_id() -> io::Result<u64> {
+    NEXT_SNAPSHOT_TRANSFER_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| io::Error::other("snapshot transfer id space is exhausted"))
+}
+
+fn snapshot_request_timeout(deadline: Instant) -> io::Result<Duration> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "snapshot deadline elapsed"))?;
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "snapshot deadline elapsed",
+        ));
+    }
+    Ok(remaining)
+}
+
+fn storage_encode<T: Serialize>(value: &T) -> Result<Vec<u8>, io::Error> {
     let mut out = Vec::new();
     ciborium::into_writer(value, &mut out).map_err(io_error)?;
     Ok(out)
 }
 
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
+fn storage_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
     ciborium::from_reader(Cursor::new(bytes)).map_err(io_error)
-}
-
-fn encode_stream_frame(bytes: &[u8]) -> Result<Vec<u8>, io::Error> {
-    let encoded_len = u32::try_from(bytes.len()).map_err(|_| {
-        io_error(format!(
-            "stream frame length {} exceeds u32::MAX",
-            bytes.len()
-        ))
-    })?;
-    let mut frame = Vec::with_capacity(4 + bytes.len());
-    frame.extend_from_slice(&encoded_len.to_be_bytes());
-    frame.extend_from_slice(bytes);
-    Ok(frame)
-}
-
-async fn read_response_bytes(
-    response: reqwest::Response,
-    context: &str,
-) -> Result<Vec<u8>, io::Error> {
-    let status = response.status();
-    let bytes = response.bytes().await.map_err(io_error)?;
-    if !status.is_success() {
-        let body = String::from_utf8_lossy(&bytes);
-        return Err(io_error(format!("{context} failed with {status}: {body}")));
-    }
-    Ok(bytes.to_vec())
-}
-
-async fn read_response_bytes_with_timeout(
-    response: reqwest::Response,
-    context: &str,
-    timeout_duration: Duration,
-) -> Result<Vec<u8>, io::Error> {
-    timeout(timeout_duration, read_response_bytes(response, context))
-        .await
-        .map_err(|_| io_error(format!("{context} timed out after {timeout_duration:?}")))?
 }
 
 fn unreachable_err<E: std::error::Error + Send + Sync + 'static>(
@@ -1768,20 +2108,21 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
         let rpc_timeout = option.hard_ttl();
-        let body = encode(&rpc).map_err(unreachable_err)?;
-        let response = self
-            .http_client
-            .post(format!("{}{}", self.target, RAFT_APPEND_ENTRIES_PATH))
-            .timeout(rpc_timeout)
-            .header(reqwest::header::CONTENT_TYPE, RAFT_CONTENT_TYPE_CBOR)
-            .body(body)
-            .send()
-            .await
-            .map_err(unreachable_err)?;
-        let body = read_response_bytes_with_timeout(response, "append_entries", rpc_timeout)
-            .await
-            .map_err(unreachable_err)?;
-        Ok(decode(&body).map_err(unreachable_err)?)
+        let record = wire::AppendEntriesRecord::from_request(rpc);
+        let response = if record.is_heartbeat() {
+            self.interconnect
+                .request_with_timeout(&self.target, wire::HeartbeatRequest(record), rpc_timeout)
+                .await
+        } else {
+            self.interconnect
+                .request_with_timeout(&self.target, wire::ReplicateRequest(record), rpc_timeout)
+                .await
+        }
+        .map_err(io_error)
+        .map_err(unreachable_err)?
+        .map_err(io_error)
+        .map_err(unreachable_err)?;
+        Ok(response.into_response())
     }
 
     async fn vote(
@@ -1790,20 +2131,18 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         option: RPCOption,
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         let rpc_timeout = option.hard_ttl();
-        let body = encode(&rpc).map_err(unreachable_err)?;
         let response = self
-            .http_client
-            .post(format!("{}{}", self.target, RAFT_VOTE_PATH))
-            .timeout(rpc_timeout)
-            .header(reqwest::header::CONTENT_TYPE, RAFT_CONTENT_TYPE_CBOR)
-            .body(body)
-            .send()
+            .interconnect
+            .request_with_timeout(
+                &self.target,
+                wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
+                rpc_timeout,
+            )
             .await
+            .map_err(io_error)
             .map_err(unreachable_err)?;
-        let body = read_response_bytes_with_timeout(response, "vote", rpc_timeout)
-            .await
-            .map_err(unreachable_err)?;
-        Ok(decode(&body).map_err(unreachable_err)?)
+        let response = response.map_err(io_error).map_err(unreachable_err)?;
+        Ok(response.into_response())
     }
 
     async fn full_snapshot(
@@ -1816,78 +2155,75 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
         let rpc_timeout = option.hard_ttl();
-        std::mem::drop(cancel);
-        let bytes = snapshot.snapshot.into_inner();
-        let chunk_size = option.snapshot_chunk_size().unwrap_or(256 * 1024).max(1);
-        let header = SnapshotRelayHeader {
-            vote,
-            meta: snapshot.meta,
-        };
-        let header = encode_stream_frame(
-            &encode(&header)
-                .map_err(unreachable_err)
-                .map_err(StreamingError::from)?,
-        )
-        .map_err(unreachable_err)
-        .map_err(StreamingError::from)?;
-        /// How far the snapshot relay body has been written: the framed header until it is sent,
-        /// the encoded snapshot, and the offset the next chunk starts at.
-        struct SnapshotRelayProgress {
-            header: Option<Vec<u8>>,
-            bytes: Vec<u8>,
-            offset: usize,
-            chunk_size: usize,
-        }
+        let deadline = Instant::now().checked_add(rpc_timeout).ok_or_else(|| {
+            StreamingError::from(unreachable_err(io::Error::other(
+                "snapshot deadline exceeds the monotonic clock range",
+            )))
+        })?;
+        let transfer_id = next_snapshot_transfer_id()
+            .map_err(unreachable_err)
+            .map_err(StreamingError::from)?;
+        let Snapshot { meta, snapshot } = snapshot;
+        let snapshot = snapshot.into_inner();
+        let total_bytes = u64::try_from(snapshot.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        let transfer = async {
+            self.interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::BeginSnapshotTransfer::from_parts(transfer_id, vote, meta, total_bytes),
+                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                )
+                .await
+                .map_err(io_error)
+                .map_err(unreachable_err)?
+                .map_err(io_error)
+                .map_err(unreachable_err)?;
 
-        let stream = futures_util::stream::unfold(
-            SnapshotRelayProgress {
-                header: Some(header),
-                bytes,
-                offset: 0,
-                chunk_size,
-            },
-            |progress| async move {
-                if let Some(header) = progress.header {
-                    return Some((
-                        Ok::<Vec<u8>, io::Error>(header),
-                        SnapshotRelayProgress {
-                            header: None,
-                            ..progress
+            let mut offset = 0_u64;
+            for chunk in snapshot.chunks(SNAPSHOT_CHUNK_BYTES) {
+                tokio::task::consume_budget().await;
+                self.interconnect
+                    .request_with_timeout(
+                        &self.target,
+                        wire::SnapshotChunk {
+                            transfer_id,
+                            offset,
+                            bytes: chunk.to_vec(),
                         },
-                    ));
-                }
-                if progress.offset >= progress.bytes.len() {
-                    return None;
-                }
+                        snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                    )
+                    .await
+                    .map_err(io_error)
+                    .map_err(unreachable_err)?
+                    .map_err(io_error)
+                    .map_err(unreachable_err)?;
+                let chunk_bytes = u64::try_from(chunk.len())
+                    .assured("supported targets have a pointer width no larger than u64");
+                offset = offset
+                    .checked_add(chunk_bytes)
+                    .assured("snapshot chunks are slices of one Vec whose length fits in u64");
+            }
 
-                let end = (progress.offset + progress.chunk_size).min(progress.bytes.len());
-                let chunk = progress.bytes[progress.offset..end].to_vec();
-                Some((
-                    Ok::<Vec<u8>, io::Error>(chunk),
-                    SnapshotRelayProgress {
-                        offset: end,
-                        ..progress
-                    },
-                ))
-            },
-        );
-        let response = self
-            .http_client
-            .post(format!("{}{}", self.target, RAFT_INSTALL_SNAPSHOT_PATH))
-            .timeout(rpc_timeout)
-            .header(reqwest::header::CONTENT_TYPE, RAFT_CONTENT_TYPE_RELAY)
-            .body(reqwest::Body::wrap_stream(stream))
-            .send()
-            .await
-            .map_err(unreachable_err)
-            .map_err(StreamingError::from)?;
-        let body = read_response_bytes_with_timeout(response, "install_snapshot", rpc_timeout)
-            .await
-            .map_err(unreachable_err)
-            .map_err(StreamingError::from)?;
-        decode(&body)
-            .map_err(unreachable_err)
-            .map_err(StreamingError::from)
+            self.interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::FinishSnapshotTransfer { transfer_id },
+                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                )
+                .await
+                .map_err(io_error)
+                .map_err(unreachable_err)?
+                .map(wire::SnapshotResponseRecord::into_response)
+                .map_err(io_error)
+                .map_err(unreachable_err)
+        };
+        tokio::pin!(transfer);
+        tokio::pin!(cancel);
+        tokio::select! {
+            closed = &mut cancel => Err(StreamingError::Closed(closed)),
+            result = &mut transfer => result.map_err(StreamingError::from),
+        }
     }
 
     async fn transfer_leader(
@@ -1896,35 +2232,20 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         option: RPCOption,
     ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
         let rpc_timeout = option.hard_ttl();
-        let body = encode(&req).map_err(unreachable_err)?;
         let response = self
-            .http_client
-            .post(format!("{}{}", self.target, RAFT_TRANSFER_LEADER_PATH))
-            .timeout(rpc_timeout)
-            .header(reqwest::header::CONTENT_TYPE, RAFT_CONTENT_TYPE_CBOR)
-            .body(body)
-            .send()
+            .interconnect
+            .request_with_timeout(
+                &self.target,
+                wire::TransferLeadership::from_request(req),
+                rpc_timeout,
+            )
             .await
+            .map_err(io_error)
             .map_err(unreachable_err)?;
-        let status = response.status();
-        if status != StatusCode::OK {
-            let received = match timeout(rpc_timeout, response.bytes()).await {
-                Ok(received) => received.map_err(io_error),
-                Err(_) => Err(io_error(format!(
-                    "transfer_leader response timed out after {rpc_timeout:?}"
-                ))),
-            };
-            let body = received.map_err(unreachable_err)?;
-            return Err(RPCError::Unreachable(unreachable_err(io_error(format!(
-                "transfer_leader failed with {}: {}",
-                status,
-                String::from_utf8_lossy(&body)
-            )))));
-        }
-        let body = read_response_bytes_with_timeout(response, "transfer_leader", rpc_timeout)
-            .await
-            .map_err(unreachable_err)?;
-        Ok(decode(&body).map_err(unreachable_err)?)
+        Ok(response
+            .map(wire::TransferLeadershipResponse::into_response)
+            .map_err(io_error)
+            .map_err(unreachable_err)?)
     }
 }
 
@@ -1959,7 +2280,7 @@ impl StoreInner {
             if !range.contains(&index) {
                 continue;
             }
-            out.push(decode::<EntryOf<TypeConfig>>(value.as_ref())?);
+            out.push(storage_decode::<EntryOf<TypeConfig>>(value.as_ref())?);
         }
         out.sort_by_key(|entry| entry.log_id.index);
         Ok(out)
@@ -2108,7 +2429,7 @@ impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
         let mut last_log_id = last_purged_log_id.clone();
         for item in self.inner.logs.iter() {
             let (_, value) = item.into_inner().map_err(io_error)?;
-            let entry: EntryOf<TypeConfig> = decode(value.as_ref())?;
+            let entry: EntryOf<TypeConfig> = storage_decode(value.as_ref())?;
             last_log_id = Some(entry.log_id);
         }
 
@@ -2145,7 +2466,7 @@ impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
     {
         for entry in entries {
             let key = StoreInner::log_key(entry.log_id.index)?;
-            let bytes = encode(&entry)?;
+            let bytes = storage_encode(&entry)?;
             self.inner.logs.insert(key, bytes).map_err(io_error)?;
         }
         callback.io_completed(Ok(()));
@@ -2265,7 +2586,7 @@ impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
         snapshot: Cursor<Vec<u8>>,
     ) -> Result<(), io::Error> {
         let bytes = snapshot.into_inner();
-        let stored: StateMachineData = decode(&bytes)?;
+        let stored: StateMachineData = storage_decode(&bytes)?;
         {
             let mut state = self.inner.state_machine.write().await;
             *state = stored.clone();
@@ -2308,7 +2629,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StdArc<FjallStore> {
             last_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
         };
-        let data = encode(&state)?;
+        let data = storage_encode(&state)?;
         let stored_snapshot = StoredSnapshotData {
             meta: meta.clone(),
             data: data.clone(),
@@ -3003,7 +3324,7 @@ fn load_value<T: DeserializeOwned>(
     else {
         return Ok(None);
     };
-    decode(bytes.as_ref())
+    storage_decode(bytes.as_ref())
         .map(Some)
         .map_err(|_| ConsensusError::Deserialize)
 }
@@ -3012,11 +3333,13 @@ fn read_key<T: DeserializeOwned>(keyspace: &Keyspace, key: &[u8]) -> io::Result<
     let Some(bytes) = keyspace.get(key).map_err(io_error)? else {
         return Ok(None);
     };
-    decode(bytes.as_ref())
+    storage_decode(bytes.as_ref())
 }
 
 fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Result<()> {
-    keyspace.insert(key, encode(value)?).map_err(io_error)?;
+    keyspace
+        .insert(key, storage_encode(value)?)
+        .map_err(io_error)?;
     Ok(())
 }
 
@@ -3024,7 +3347,6 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 mod tests {
     use std::{io::Cursor, ops::RangeInclusive, sync::Arc as StdArc};
 
-    use arch_into::ArchInto as _;
     use fjall::Database;
     use meticulous::OptionExt as _;
     use nervix_models::{
@@ -3034,7 +3356,6 @@ mod tests {
         Statement,
     };
     use openraft::{
-        SnapshotMeta,
         entry::RaftEntry,
         storage::{
             RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftSnapshotBuilder, RaftStateMachine,
@@ -3046,11 +3367,11 @@ mod tests {
 
     use super::{
         ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
-        GossipNode, GossipState, KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, SnapshotRelayHeader,
-        StateMachineData, StoredMembershipOf, TransactionCommandResult, TransactionMutationError,
-        TransactionOutcome, TransactionStatement, TransactionStepEffect, TransactionStepResult,
-        TypeConfig, UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame,
-        io_error, load_value, read_key, write_key,
+        GossipNode, GossipState, KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, ProtocolOriginError,
+        StateMachineData, TransactionCommandResult, TransactionMutationError, TransactionOutcome,
+        TransactionStatement, TransactionStepEffect, TransactionStepResult, TypeConfig,
+        UserCredentials, apply_consensus_command, io_error, load_value, read_key, storage_decode,
+        storage_encode, validate_protocol_origin, write_key,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
@@ -3059,6 +3380,26 @@ mod tests {
 
     fn domain(raw: &str) -> DomainName {
         DomainName::try_from(raw).expect("valid domain")
+    }
+
+    #[test]
+    fn raft_request_origin_must_match_the_authenticated_peer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let authenticated = ClusterNodeName::parse("node-1")?;
+        let declared = ClusterNodeName::parse("node-2")?;
+        validate_protocol_origin(&authenticated, &authenticated, "replication")?;
+
+        let error = validate_protocol_origin(&authenticated, &declared, "replication")
+            .expect_err("a peer must not submit Raft work for another node");
+        assert!(matches!(
+            error.current_context(),
+            ProtocolOriginError::Mismatch {
+                operation: "replication",
+                authenticated: actual_authenticated,
+                declared: actual_declared,
+            } if actual_authenticated == &authenticated && actual_declared == &declared
+        ));
+        Ok(())
     }
 
     #[test]
@@ -3123,21 +3464,15 @@ mod tests {
             live_nodes: vec![
                 GossipNode {
                     node_id: ClusterNodeName::parse("node-2").expect("valid name"),
-                    cluster_api_advertise_addr: "http://node-2".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
                     interconnect_advertise_addr: String::new(),
-                    interconnect_mode: String::new(),
-                    interconnect_public_key: String::new(),
                 },
                 GossipNode {
                     node_id: ClusterNodeName::parse("node-3").expect("valid name"),
-                    cluster_api_advertise_addr: "http://node-3".to_string(),
                     grpc_advertise_addr: String::new(),
                     web_console_advertise_addr: String::new(),
                     interconnect_advertise_addr: String::new(),
-                    interconnect_mode: String::new(),
-                    interconnect_public_key: String::new(),
                 },
             ],
             dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
@@ -3246,36 +3581,13 @@ mod tests {
             schedule: Some(Box::new(domain_schedule("tenant"))),
         };
 
-        let bytes = encode(&command).expect("command should encode");
-        let decoded: ConsensusCommand = decode(&bytes).expect("command should decode");
+        let bytes = storage_encode(&command).expect("command should encode");
+        let decoded: ConsensusCommand = storage_decode(&bytes).expect("command should decode");
         assert_eq!(decoded, command);
 
-        let err = decode::<ConsensusCommand>(b"not-cbor").expect_err("invalid bytes must fail");
+        let err =
+            storage_decode::<ConsensusCommand>(b"not-cbor").expect_err("invalid bytes must fail");
         assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
-    fn snapshot_relay_header_roundtrips_in_length_delimited_cbor_frame() {
-        let header = SnapshotRelayHeader {
-            vote: VoteOf::new(7, ClusterNodeName::parse("node-1").expect("valid name")),
-            meta: SnapshotMeta {
-                last_log_id: None,
-                last_membership: StoredMembershipOf::default(),
-            },
-        };
-
-        let payload = encode(&header).expect("snapshot relay header should encode");
-        let frame = encode_stream_frame(&payload).expect("snapshot relay frame should encode");
-        let length = u32::from_be_bytes(
-            frame[..4]
-                .try_into()
-                .expect("snapshot relay frame has a length prefix"),
-        )
-        .arch_into();
-        assert_eq!(length, payload.len());
-        let decoded: SnapshotRelayHeader =
-            decode(&frame[4..]).expect("snapshot relay header should decode");
-        assert_eq!(decoded, header);
     }
 
     #[test]

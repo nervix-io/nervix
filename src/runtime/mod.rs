@@ -54,8 +54,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
-    EntityGatePurpose, Envelope, RelayPayload, RelayPayloadKind, Transport,
-    TransportMode as InterconnectTransportMode,
+    EntityGatePurpose, Envelope, InterconnectRequest, RelayPayload, RelayPayloadKind, Transport,
 };
 use nervix_models::{
     AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
@@ -447,10 +446,7 @@ use scheduled_node::{
 };
 use service_url::ServiceUrl;
 pub(crate) use state_replication::StateSyncAck;
-use state_replication::{
-    DEFAULT_STATE_REPLICATION_POLL_INTERVAL, DEFAULT_STATE_SNAPSHOT_INTERVAL,
-    PendingStateSyncSender,
-};
+use state_replication::{DEFAULT_STATE_REPLICATION_POLL_INTERVAL, DEFAULT_STATE_SNAPSHOT_INTERVAL};
 pub(crate) use state_store::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind,
     RuntimeStateOperationError, RuntimeStatePlacement, RuntimeStateStore, StateAssignmentAuthority,
@@ -702,8 +698,6 @@ struct RuntimeInner {
     /// Also held by the attached `RemoteDispatcher`, which must allocate correlation ids from the
     /// same registry the runtime resolves incoming acknowledgements against.
     remote_dispatch: Arc<RemoteDispatchRegistry>,
-    next_state_sync_correlation_id: AtomicU64,
-    pending_state_syncs: DashMap<u64, PendingStateSyncSender, RandomState>,
     expiring_stream_states: DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>,
     latest_resource_versions: DashMap<DomainResourceKey, u64, RandomState>,
     replicated_deduplicator_states:

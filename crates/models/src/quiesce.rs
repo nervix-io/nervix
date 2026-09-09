@@ -1,5 +1,6 @@
 use std::num::NonZeroUsize;
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, IntoStaticStr};
 
@@ -20,6 +21,9 @@ use crate::{
     Ord,
     Serialize,
     Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
     AsRefStr,
     IntoStaticStr,
 )]

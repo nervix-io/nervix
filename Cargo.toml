@@ -54,7 +54,6 @@ clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 clickhouse = { workspace = true, features = ["inserter", "chrono"] }
 dashmap = { workspace = true }
-ed25519-dalek = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
@@ -308,7 +307,6 @@ console_error_panic_hook = "0.1"
 criterion = "0.5"
 cucumber = "0.22"
 dashmap = "6"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
 error-stack = "0.5"
 fastrand = "2.4.1"
 fjall = "3.0.4"
@@ -319,7 +317,9 @@ futures-channel = "0.3"
 futures-util = "0.3"
 gloo-net = "0.7"
 governor = "0.10.4"
+h2 = "0.4"
 hdrhistogram = "7.5.4"
+http = "1"
 http-body-util = "0.1"
 humantime = "2"
 hyper = "1"
@@ -400,6 +400,7 @@ otel-tonic = { package = "tonic", version = "0.14", features = [
 ] }
 otel-tonic-types = { package = "tonic-types", version = "0.14" }
 parking_lot = "0.12"
+percent-encoding = "2"
 # Match Iceberg's Arrow 58 major so RecordBatch and writer types are identical.
 parquet = { version = "58", features = ["async"] }
 petgraph = "0.8"
@@ -434,7 +435,7 @@ redis = { version = "1.1.0", default-features = false, features = [
 reedline = "0.36"
 regex = "1"
 reqwest = "0.13"
-rkyv = "0.8"
+rkyv = { version = "0.8", features = ["indexmap-2"] }
 # The fork raises Roto's Cranelift floor from 0.127 to 0.136, which carries the x86_64 JIT fixes
 # the workspace previously supplied by patching Cranelift itself.
 # https://codeberg.org/glebpom/roto/src/branch/cranelift-upgrade-0.136
@@ -508,6 +509,7 @@ wasmtime = { version = "48.0.0", default-features = false, features = [
 ] }
 web-sys = "0.3"
 webpki-roots = "1"
+x509-parser = "0.18"
 zeromq = "0.4"
 
 [patch.crates-io]

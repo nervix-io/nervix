@@ -1,556 +1,2451 @@
-//! The lifetime and I/O driver for one interconnect connection.
+//! HTTP/2 connection pools and stream-level operation dispatch.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Connection setup deadlines, reconnect cadence, full-frame I/O, and connection task
-//!   retirement.
-//! - **Depends on.** The interconnect transport's authenticated wire envelopes and peer identity.
-//! - **Must not know.** Runtime graph semantics or why an envelope is exchanged.
+//! - **Owns.** TLS/H2 connection lifetime, pool isolation, stream leases, flow control, and relay
+//!   grant redemption.
+//! - **Depends on.** Certificate identity, bounded rkyv codecs, and execution admission.
+//! - **Must not know.** Runtime graphs, scheduling decisions, or connector behavior.
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::poll_fn,
+    hash::RandomState,
+    io::Write as _,
+    net::SocketAddr,
+    ops::Deref,
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use error_stack::Report;
+use bytes::Bytes;
+use dashmap::{DashMap, mapref::entry::Entry};
+use h2::{Reason, RecvStream, SendStream, client, server};
+use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::ClusterNodeName;
+use nervix_execution::{
+    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+};
+use nervix_models::{ClusterNodeName, RemoteAckOutcome};
+use rand_core::{OsRng, RngCore as _};
 use rustls::pki_types::ServerName;
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
-    sync::{OwnedSemaphorePermit, mpsc},
-    time::{MissedTickBehavior, interval, sleep, timeout},
+    net::{TcpListener, TcpStream},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},
+    time::{Instant, sleep, sleep_until, timeout},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
 use super::{
-    ConnectionHandle, ConnectionKey, Envelope, PING_INTERVAL, PING_TIMEOUT, ReceivedEnvelope,
-    TransportError, TransportInner, TransportMode, configure_socket,
+    ControlEnvelope, Envelope, PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope,
+    RelayPayload, TlsConfigBundle, TransportError, TransportOptions, wire,
+};
+use crate::{
+    identity::CertificateIdentity,
     wire::{
-        QueuedFrame, WireEnvelope, WireFrame, decode_frame, encode_frame,
-        read_and_verify_introduction, read_frame_bytes, write_wire_envelope,
+        ConnectionAccepted, ConnectionHello, RelayGrantRequest, RelayGrantResponse,
+        WIRE_CONTRACT_FINGERPRINT,
     },
 };
 
-pub(super) fn spawn_outbound_connection(
-    inner: Arc<TransportInner>,
-    key: ConnectionKey,
-    handle: ConnectionHandle,
+const CONNECT_PATH: &str = "/v1/connect";
+const CONTROL_PATH: &str = "/v1/control";
+const ACK_PATH: &str = "/v1/ack";
+const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
+const RELAY_PATH_PREFIX: &str = "/v1/relay/";
+const RESPONSE_LIMIT: u64 = 1024 * 1024;
+const BODY_CHUNK_BYTES: usize = 16 * 1024;
+const RESET_LIMIT: usize = 128;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct ConnectionSlotKey {
+    node_id: ClusterNodeName,
+    target: PeerTarget,
+    class: PoolClass,
+    slot: usize,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct InboundPoolKey {
+    node_id: ClusterNodeName,
+    class: PoolClass,
+}
+
+#[derive(Clone)]
+struct InboundPeer {
+    addr: SocketAddr,
+    node_id: ClusterNodeName,
+    advertised_host: String,
+    process_epoch: u64,
+    class: PoolClass,
+}
+
+struct SlotControl {
     cancel: CancellationToken,
-    rx: mpsc::Receiver<QueuedFrame>,
-    permit: OwnedSemaphorePermit,
-) {
-    let tasks = inner.tasks.clone();
-    tasks.spawn(async move {
-        run_outbound_connection(inner.clone(), key.clone(), handle, cancel.clone(), rx).await;
-        retire_outbound_connection(&inner, &key, &cancel);
-        drop(permit);
-    });
 }
 
-async fn run_outbound_connection(
-    inner: Arc<TransportInner>,
-    key: ConnectionKey,
-    handle: ConnectionHandle,
+struct CancelOnDrop {
+    token: CancellationToken,
+    armed: bool,
+}
+
+impl CancelOnDrop {
+    fn new(token: CancellationToken) -> Self {
+        Self { token, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+struct ActiveTls {
+    generation: u64,
+    bundle: TlsConfigBundle,
+}
+
+struct ClientConnection {
+    key: ConnectionSlotKey,
+    sender: client::SendRequest<Bytes>,
+    stream_slots: StdArc<Semaphore>,
+    peer_epoch: u64,
+    retiring: CancellationToken,
     cancel: CancellationToken,
-    mut rx: mpsc::Receiver<QueuedFrame>,
-) {
-    let mut pending = None;
-    let mut backoff = ReconnectBackoff::new(
-        inner.options.reconnect_backoff,
-        inner.options.max_reconnect_backoff,
-    );
+    closed: CancellationToken,
+}
 
-    loop {
-        tokio::task::consume_budget().await;
-        if cancel.is_cancelled()
-            || inner.draining.is_cancelled()
-            || inner.force_close.is_cancelled()
-        {
-            return;
-        }
+struct StreamLease {
+    connection: Arc<ClientConnection>,
+    _slot: OwnedSemaphorePermit,
+}
 
-        let established = match establish_outbound_connection(&inner, &key, &cancel).await {
-            Ok(established) => established,
-            Err(connect_err) => {
-                if cancel.is_cancelled()
-                    || inner.draining.is_cancelled()
-                    || inner.force_close.is_cancelled()
-                {
-                    return;
-                }
-                debug!(?connect_err, target = %key.addr, "outbound interconnect reconnect failed");
-                if !wait_for_reconnect(&inner, &cancel, backoff.next_delay()).await {
-                    return;
-                }
-                continue;
-            }
-        };
+struct RawRequest<'a> {
+    path: &'a str,
+    body: Option<ChargedBytes>,
+    response_class: PoolClass,
+    response_limit: u64,
+    timeout: Duration,
+    headers: &'a [(&'a str, &'a str)],
+}
 
-        if !outbound_generation_is_current(&inner, &key, &cancel) {
-            return;
-        }
-        backoff.reset();
-        register_connected_peer(&inner, &established.peer_node_id, &handle);
-        let peer_node_id = established.peer_node_id.clone();
-        let result = drive_connection(
-            inner.clone(),
-            key.addr,
-            handle.clone(),
-            established,
-            &cancel,
-            &mut rx,
-            &mut pending,
-        )
-        .await;
-        unregister_connected_peer(&inner, &peer_node_id, &handle);
+struct ConnectionPermits {
+    _connection: OwnedSemaphorePermit,
+    _class: Option<OwnedSemaphorePermit>,
+}
 
-        if let Err(err) = result {
-            debug!(?err, target = %key.addr, "outbound interconnect connection closed");
-            if cancel.is_cancelled()
-                || inner.draining.is_cancelled()
-                || inner.force_close.is_cancelled()
-            {
-                return;
-            }
-            if !wait_for_reconnect(&inner, &cancel, backoff.next_delay()).await {
-                return;
-            }
-        } else {
-            return;
-        }
+struct PeerConnections {
+    count: usize,
+    _permit: OwnedSemaphorePermit,
+}
+
+struct InboundConnectionRegistration {
+    state: TransportState,
+    key: InboundPoolKey,
+}
+
+impl Drop for InboundConnectionRegistration {
+    fn drop(&mut self) {
+        self.state.decrement_inbound_pool(&self.key);
+        self.state.decrement_peer(&self.key.node_id);
     }
 }
 
-pub(super) type BoxedIo = Box<dyn AsyncReadWrite>;
-
-pub(super) trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
-
-type BoxedReader = tokio::io::ReadHalf<BoxedIo>;
-type BoxedWriter = tokio::io::WriteHalf<BoxedIo>;
-
-pub(super) struct EstablishedConnection {
-    pub(super) peer_node_id: ClusterNodeName,
-    reader: BoxedReader,
-    writer: BoxedWriter,
-}
-
-pub(super) struct ReconnectBackoff {
-    initial: Duration,
-    next: Duration,
-    max: Duration,
-}
-
-impl ReconnectBackoff {
-    pub(super) fn new(initial: Duration, max: Duration) -> Self {
-        Self {
-            initial,
-            next: initial,
-            max,
-        }
-    }
-
-    pub(super) fn reset(&mut self) {
-        self.next = self.initial;
-    }
-
-    pub(super) fn next_delay(&mut self) -> Duration {
-        let nominal = self.next;
-        self.next = match self.next.checked_mul(2) {
-            Some(doubled) => doubled.min(self.max),
-            None => self.max,
-        };
-        let nominal_millis = u64::try_from(nominal.as_millis())
-            .assured("transport option validation guarantees reconnect delays fit in milliseconds");
-        let jitter_floor = nominal_millis / 2;
-        Duration::from_millis(fastrand::u64(jitter_floor..=nominal_millis))
-    }
-}
-
-pub(super) async fn run_inbound_connection(
-    inner: Arc<TransportInner>,
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-) -> Result<(), Report<TransportError>> {
-    let cancel = CancellationToken::new();
-    let (tx, mut rx) = mpsc::channel(inner.options.send_queue_capacity);
-    let handle = ConnectionHandle::new(
-        peer_addr,
-        tx,
-        inner.executor.clone(),
-        cancel.clone(),
-        inner.admission_closed.clone(),
-        inner.options.queue_admission_timeout,
-    );
-    let established = establish_inbound_connection(&inner, stream, peer_addr, &cancel).await?;
-    let peer_node_id = established.peer_node_id.clone();
-    register_connected_peer(&inner, &peer_node_id, &handle);
-    let mut pending = None;
-    let result = drive_connection(
-        inner.clone(),
-        peer_addr,
-        handle.clone(),
-        established,
-        &cancel,
-        &mut rx,
-        &mut pending,
-    )
-    .await;
-    unregister_connected_peer(&inner, &peer_node_id, &handle);
-    result
-}
-
-async fn establish_inbound_connection(
-    inner: &Arc<TransportInner>,
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-    cancel: &CancellationToken,
-) -> Result<EstablishedConnection, Report<TransportError>> {
-    let setup_timeout = inner.options.connection_setup_timeout;
-    tokio::select! {
-        biased;
-        _ = inner.force_close.cancelled() => Err(Report::new(TransportError::ShuttingDown)),
-        _ = inner.draining.cancelled() => Err(Report::new(TransportError::ShuttingDown)),
-        _ = cancel.cancelled() => Err(Report::new(TransportError::Closed(peer_addr))),
-        result = timeout(setup_timeout, async {
-            let io_stream = accept_inbound_stream(inner, stream, peer_addr).await?;
-            exchange_introductions(inner, io_stream).await
-        }) => {
-            result.map_err(|_| Report::new(TransportError::ConnectionSetupTimeout {
-                peer: peer_addr,
-                timeout: setup_timeout,
-            }))?
-        }
-    }
-}
-
-pub(super) async fn establish_outbound_connection(
-    inner: &Arc<TransportInner>,
-    key: &ConnectionKey,
-    cancel: &CancellationToken,
-) -> Result<EstablishedConnection, Report<TransportError>> {
-    let setup_timeout = inner.options.connection_setup_timeout;
-    let established = tokio::select! {
-        biased;
-        _ = inner.force_close.cancelled() => Err(Report::new(TransportError::ShuttingDown)),
-        _ = inner.draining.cancelled() => Err(Report::new(TransportError::ShuttingDown)),
-        _ = cancel.cancelled() => Err(Report::new(TransportError::Closed(key.addr))),
-        result = timeout(setup_timeout, async {
-            let io_stream = connect_outbound_stream(inner, key).await?;
-            exchange_introductions(inner, io_stream).await
-        }) => {
-            result.map_err(|_| Report::new(TransportError::ConnectionSetupTimeout {
-                peer: key.addr,
-                timeout: setup_timeout,
-            }))?
-        }
-    }?;
-    if established.peer_node_id != key.peer_node_id {
-        return Err(Report::new(TransportError::InvalidHandshake(format!(
-            "expected node '{}' but authenticated '{}'",
-            key.peer_node_id, established.peer_node_id
-        ))));
-    }
-    Ok(established)
-}
-
-pub(super) async fn exchange_introductions(
-    inner: &TransportInner,
-    io_stream: BoxedIo,
-) -> Result<EstablishedConnection, Report<TransportError>> {
-    let (mut reader, mut writer) = tokio::io::split(io_stream);
-    let introduction = encode_frame(
-        &inner.executor,
-        WireEnvelope::Introduction(inner.identity.signed_introduction()),
-    )
-    .await?;
-    write_wire_envelope(&mut writer, &introduction).await?;
-    let peer_node_id = read_and_verify_introduction(
-        &mut reader,
-        &inner.executor,
-        inner.options.max_frame_bytes,
-        &inner.peer_verifier,
-    )
-    .await?;
-    Ok(EstablishedConnection {
-        peer_node_id,
-        reader,
-        writer,
-    })
-}
-
-async fn accept_inbound_stream(
-    inner: &Arc<TransportInner>,
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-) -> Result<BoxedIo, Report<TransportError>> {
-    match inner.mode {
-        TransportMode::Plain => Ok(Box::new(stream)),
-        TransportMode::Tls => {
-            let acceptor = TlsAcceptor::from(
-                inner
-                    .server_config
-                    .clone()
-                    .ok_or(TransportError::MissingTlsConfig)?,
-            );
-            acceptor
-                .accept(stream)
-                .await
-                .map(|stream| -> BoxedIo { Box::new(stream) })
-                .map_err(|err| {
-                    warn!(?err, %peer_addr, "failed to accept interconnect tls connection");
-                    Report::new(TransportError::Io(io::Error::other(err.to_string())))
-                })
-        }
-    }
-}
-
-pub(super) async fn connect_outbound_stream(
-    inner: &Arc<TransportInner>,
-    key: &ConnectionKey,
-) -> Result<BoxedIo, Report<TransportError>> {
-    let tcp = TcpStream::connect(key.addr).await.map_err(|err| {
-        debug!(?err, target = %key.addr, "outbound interconnect connect failed");
-        Report::new(TransportError::Io(err))
-    })?;
-    configure_socket(&tcp)
-        .map_err(TransportError::Io)
-        .map_err(Report::new)?;
-
-    match key.mode {
-        TransportMode::Plain => Ok(Box::new(tcp)),
-        TransportMode::Tls => {
-            let server_name = ServerName::try_from(key.server_name.clone())
-                .map_err(|_| TransportError::InvalidServerName(key.server_name.clone()))?;
-            let connector = TlsConnector::from(
-                inner
-                    .client_config
-                    .clone()
-                    .ok_or(TransportError::MissingTlsConfig)?,
-            );
-            connector
-                .connect(server_name, tcp)
-                .await
-                .map(|stream| -> BoxedIo { Box::new(stream) })
-                .map_err(|err| {
-                    debug!(?err, target = %key.addr, "outbound interconnect tls connect failed");
-                    Report::new(TransportError::Io(io::Error::other(err.to_string())))
-                })
-        }
-    }
-}
-
-pub(super) async fn drive_connection(
-    inner: Arc<TransportInner>,
-    peer_addr: SocketAddr,
-    reply_handle: ConnectionHandle,
-    established: EstablishedConnection,
-    cancel: &CancellationToken,
-    rx: &mut mpsc::Receiver<QueuedFrame>,
-    retry_payload: &mut Option<QueuedFrame>,
-) -> Result<(), Report<TransportError>> {
-    let mut pending = retry_payload.take();
-    // The keepalive is the same fixed frame every time, so it is serialized once for the whole
-    // connection instead of on every tick.
-    let keepalive = encode_frame(&inner.executor, WireEnvelope::Ping).await?;
-    let result = {
-        let read = read_connection(
-            inner.clone(),
-            peer_addr,
-            established.peer_node_id,
-            reply_handle,
-            established.reader,
-        );
-        let write = write_connection(
-            established.writer,
-            rx,
-            &mut pending,
-            &inner.draining,
-            keepalive,
-        );
-        tokio::pin!(read);
-        tokio::pin!(write);
-        tokio::select! {
-            biased;
-            _ = inner.force_close.cancelled() => Ok(()),
-            _ = cancel.cancelled() => Ok(()),
-            result = &mut read => result,
-            result = &mut write => result,
-        }
-    };
-    // A frame that never reached the socket is retried as it stands. It is already encoded, so a
-    // retry costs no second serialization and no second copy of its body.
-    *retry_payload = pending;
-    result
-}
-
-async fn read_connection(
-    inner: Arc<TransportInner>,
-    peer_addr: SocketAddr,
+struct RelayGrant {
     peer_node_id: ClusterNodeName,
-    reply_handle: ConnectionHandle,
-    mut reader: BoxedReader,
-) -> Result<(), Report<TransportError>> {
-    loop {
-        tokio::task::consume_budget().await;
-        // The liveness deadline covers waiting for bytes on the socket, not the admitted work that
-        // turns them into an envelope. Decoding behind a busy class must not be read as a dead peer.
-        let frame = timeout(
-            PING_TIMEOUT,
-            read_frame_bytes(&mut reader, &inner.executor, inner.options.max_frame_bytes),
-        )
-        .await
-        .map_err(|_| Report::new(TransportError::Closed(peer_addr)))??;
-        let envelope = decode_frame(&inner.executor, frame).await?;
-        match envelope {
-            WireEnvelope::Introduction(_) => {
-                return Err(Report::new(TransportError::InvalidHandshake(
-                    "received duplicate introduction".to_string(),
+    sender_epoch: u64,
+    receiver_epoch: u64,
+    attempt: u64,
+    body_bytes: u64,
+    expires_at: Instant,
+    metadata: wire::RelayMetadata,
+    reservation: Reservation,
+    admission_key: RelayAdmissionKey,
+    _expiry: CancelOnDrop,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RelayAdmissionKey {
+    peer_node_id: ClusterNodeName,
+    ack_id: u64,
+}
+
+struct RelayAdmissionCapacity {
+    _item: OwnedSemaphorePermit,
+    _terminal: OwnedSemaphorePermit,
+}
+
+struct RelayAdmissionCleanup {
+    state: TransportState,
+    key: RelayAdmissionKey,
+    armed: bool,
+}
+
+impl RelayAdmissionCleanup {
+    fn new(state: TransportState, key: RelayAdmissionKey) -> Self {
+        Self {
+            state,
+            key,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RelayAdmissionCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.relay_admissions.remove(&self.key);
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TransportState {
+    inner: Arc<TransportStateInner>,
+}
+
+pub(crate) struct TransportStateInner {
+    executor: Executor,
+    options: TransportOptions,
+    cluster_id: String,
+    node_id: ClusterNodeName,
+    advertised_host: String,
+    process_epoch: u64,
+    local_addr: SocketAddr,
+    tls: parking_lot::RwLock<ActiveTls>,
+    tls_changed: Notify,
+    targets: DashMap<ClusterNodeName, PeerTarget, RandomState>,
+    slots: DashMap<ConnectionSlotKey, SlotControl, RandomState>,
+    connections: DashMap<ConnectionSlotKey, Arc<ClientConnection>, RandomState>,
+    peer_connections: DashMap<ClusterNodeName, PeerConnections, RandomState>,
+    inbound_pool_connections: DashMap<InboundPoolKey, usize, RandomState>,
+    peer_permits: StdArc<Semaphore>,
+    next_connection: AtomicUsize,
+    connection_changed: Notify,
+    connection_permits: StdArc<Semaphore>,
+    non_management_connection_permits: StdArc<Semaphore>,
+    handshake_permits: StdArc<Semaphore>,
+    incoming_tx: mpsc::Sender<ReceivedEnvelope>,
+    requests: super::RequestState,
+    grants: DashMap<u64, RelayGrant, RandomState>,
+    relay_admissions: DashMap<RelayAdmissionKey, RelayAdmissionCapacity, RandomState>,
+    relay_items: StdArc<Semaphore>,
+    terminal_outcomes: StdArc<Semaphore>,
+    admission_closed: CancellationToken,
+    force_close: CancellationToken,
+    tasks: TaskTracker,
+}
+
+impl Deref for TransportState {
+    type Target = TransportStateInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl TransportState {
+    pub(crate) async fn bind(
+        listen_addr: SocketAddr,
+        advertised_host: String,
+        cluster_id: String,
+        node_id: ClusterNodeName,
+        tls: TlsConfigBundle,
+        options: TransportOptions,
+        executor: Executor,
+    ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
+        options.validate()?;
+        tls.certificate
+            .validate_local(&cluster_id, &node_id, &advertised_host)
+            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+        ensure_current(&tls.certificate)
+            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+
+        let listener = TcpListener::bind(listen_addr).await?;
+        let local_addr = listener.local_addr()?;
+        let (incoming_tx, incoming_rx) = mpsc::channel(options.incoming_queue_capacity);
+        let process_epoch = OsRng.next_u64();
+        let management_connection_reserve = options
+            .max_peers
+            .checked_mul(2)
+            .verified("transport options validated the inbound and outbound management reserve");
+        let state = Self {
+            inner: Arc::new(TransportStateInner {
+                executor,
+                cluster_id,
+                node_id,
+                advertised_host,
+                process_epoch,
+                local_addr,
+                tls: parking_lot::RwLock::new(ActiveTls {
+                    generation: 1,
+                    bundle: tls,
+                }),
+                tls_changed: Notify::new(),
+                targets: DashMap::default(),
+                slots: DashMap::default(),
+                connections: DashMap::default(),
+                peer_connections: DashMap::default(),
+                inbound_pool_connections: DashMap::default(),
+                peer_permits: StdArc::new(Semaphore::new(options.max_peers)),
+                next_connection: AtomicUsize::new(0),
+                connection_changed: Notify::new(),
+                connection_permits: StdArc::new(Semaphore::new(options.max_connections)),
+                non_management_connection_permits: StdArc::new(Semaphore::new(
+                    options
+                        .max_connections
+                        .checked_sub(management_connection_reserve)
+                        .verified(
+                            "transport options reserve fewer management connections than the total",
+                        ),
+                )),
+                handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
+                requests: super::RequestState::new(options.incoming_queue_capacity),
+                grants: DashMap::default(),
+                relay_admissions: DashMap::default(),
+                relay_items: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
+                terminal_outcomes: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
+                admission_closed: CancellationToken::new(),
+                force_close: CancellationToken::new(),
+                tasks: TaskTracker::new(),
+                options,
+                incoming_tx,
+            }),
+        };
+        let accept_state = state.clone();
+        state.tasks.spawn(async move {
+            accept_state.accept_loop(listener).await;
+        });
+        Ok((state, incoming_rx))
+    }
+
+    pub(crate) fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub(crate) fn node_id(&self) -> &ClusterNodeName {
+        &self.node_id
+    }
+
+    pub(crate) fn requests(&self) -> &super::RequestState {
+        &self.requests
+    }
+
+    pub(crate) fn executor(&self) -> &Executor {
+        &self.executor
+    }
+
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.admission_closed.is_cancelled()
+    }
+
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.admission_closed.clone()
+    }
+
+    pub(crate) fn active_outbound_connections(&self) -> usize {
+        self.connections.len()
+    }
+
+    pub(crate) fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
+        self.peer_connections
+            .get(node_id)
+            .is_some_and(|connections| connections.count > 0)
+    }
+
+    pub(crate) fn replace_outbound_targets(
+        &self,
+        targets: &BTreeMap<ClusterNodeName, BTreeSet<PeerTarget>>,
+    ) {
+        let accepted = targets
+            .iter()
+            .take(self.options.max_peers)
+            .filter_map(|(node, choices)| {
+                choices.first().map(|target| (node.clone(), target.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let removed = self
+            .targets
+            .iter()
+            .filter(|entry| accepted.get(entry.key()) != Some(entry.value()))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for node in removed {
+            self.targets.remove(&node);
+            self.cancel_slots_for_node(&node);
+        }
+
+        for (node, target) in accepted {
+            let changed = self
+                .targets
+                .get(&node)
+                .is_none_or(|current| *current != target);
+            if changed {
+                self.cancel_slots_for_node(&node);
+                self.targets.insert(node.clone(), target.clone());
+            }
+            self.ensure_class_slots(&node, &target, PoolClass::Management);
+        }
+    }
+
+    pub(crate) fn register_outbound_target(
+        &self,
+        node_id: ClusterNodeName,
+        target: PeerTarget,
+    ) -> Result<(), TransportError> {
+        if !self.targets.contains_key(&node_id) && self.targets.len() >= self.options.max_peers {
+            return Err(TransportError::PoolExhausted);
+        }
+        let changed = self
+            .targets
+            .get(&node_id)
+            .is_none_or(|current| *current != target);
+        if changed {
+            self.cancel_slots_for_node(&node_id);
+            self.targets.insert(node_id.clone(), target.clone());
+        }
+        self.ensure_class_slots(&node_id, &target, PoolClass::Management);
+        Ok(())
+    }
+
+    pub(crate) async fn bootstrap_target(
+        &self,
+        target: PeerTarget,
+    ) -> Result<ClusterNodeName, TransportError> {
+        if self.admission_closed.is_cancelled() {
+            return Err(TransportError::ShuttingDown);
+        }
+        let peer_addr = target.addr;
+        let setup = async {
+            let cancel = CancellationToken::new();
+            let _connection_permits = self
+                .acquire_connection_permits(PoolClass::Management, &cancel)
+                .await
+                .ok_or(TransportError::ShuttingDown)?;
+            let _handshake_permit = tokio::select! {
+                _ = self.admission_closed.cancelled() => {
+                    return Err(TransportError::ShuttingDown);
+                }
+                permit = StdArc::clone(&self.handshake_permits).acquire_owned() => {
+                    permit.map_err(|_| TransportError::ShuttingDown)?
+                }
+            };
+            let tcp = TcpStream::connect(target.addr).await?;
+            tcp.set_nodelay(true)?;
+            let tls = self.tls.read().bundle.clone();
+            ensure_current(&tls.certificate)
+                .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            let server_name = ServerName::try_from(target.server_name.clone())
+                .map_err(|_| TransportError::InvalidServerName(target.server_name.clone()))?;
+            let stream = TlsConnector::from(tls.client_config.clone())
+                .connect(server_name, tcp)
+                .await?;
+            let identity = validate_tls_session(
+                stream.get_ref().1.alpn_protocol(),
+                stream.get_ref().1.peer_certificates(),
+                &self.cluster_id,
+                None,
+            )?;
+            if !identity.matches_endpoint(&target.server_name) {
+                return Err(TransportError::InvalidHandshake(format!(
+                    "peer certificate does not identify bootstrap endpoint '{}'",
+                    target.server_name
                 )));
             }
-            WireEnvelope::Ping => {}
-            WireEnvelope::Payload(envelope) => {
-                let envelope = match envelope {
-                    Envelope::Control(control) => {
-                        let Some(control) = inner.requests.route_control(
-                            &inner,
-                            &peer_node_id,
-                            &reply_handle,
-                            control,
-                        ) else {
-                            continue;
-                        };
-                        Envelope::Control(control)
-                    }
-                    envelope => envelope,
-                };
-                inner
-                    .incoming_tx
-                    .send(ReceivedEnvelope {
-                        peer_addr,
-                        peer_node_id: peer_node_id.clone(),
-                        envelope,
-                        reply: reply_handle.clone(),
-                    })
-                    .await
-                    .map_err(|_| TransportError::ShuttingDown)?;
+            let node_id = identity.node_id;
+            self.register_outbound_target(node_id.clone(), target)?;
+            Ok(node_id)
+        };
+        match timeout(self.options.connection_setup_timeout, setup).await {
+            Ok(result) => result,
+            Err(_) => Err(TransportError::ConnectionSetupTimeout {
+                peer: peer_addr,
+                timeout: self.options.connection_setup_timeout,
+            }),
+        }
+    }
+
+    pub(crate) fn retire_departed_connections(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
+        let departed = self
+            .targets
+            .iter()
+            .filter(|target| !live_nodes.contains(target.key()))
+            .map(|target| target.key().clone())
+            .collect::<Vec<_>>();
+        for node in departed {
+            self.targets.remove(&node);
+            self.cancel_slots_for_node(&node);
+        }
+    }
+
+    fn ensure_class_slots(&self, node_id: &ClusterNodeName, target: &PeerTarget, class: PoolClass) {
+        for slot in 0..class.connections_per_peer() {
+            let key = ConnectionSlotKey {
+                node_id: node_id.clone(),
+                target: target.clone(),
+                class,
+                slot,
+            };
+            self.ensure_slot(key);
+        }
+    }
+
+    fn ensure_slot(&self, key: ConnectionSlotKey) {
+        if self.admission_closed.is_cancelled() {
+            return;
+        }
+        match self.slots.entry(key.clone()) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(entry) => {
+                let cancel = CancellationToken::new();
+                entry.insert(SlotControl {
+                    cancel: cancel.clone(),
+                });
+                let state = self.clone();
+                self.tasks.spawn(async move {
+                    state.run_slot(key, cancel).await;
+                });
             }
         }
     }
-}
 
-async fn write_connection(
-    mut writer: BoxedWriter,
-    rx: &mut mpsc::Receiver<QueuedFrame>,
-    pending: &mut Option<QueuedFrame>,
-    draining: &CancellationToken,
-    keepalive_frame: WireFrame,
-) -> Result<(), Report<TransportError>> {
-    let mut keepalive = interval(PING_INTERVAL);
-    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut drain_queue = draining.is_cancelled();
-    loop {
-        tokio::task::consume_budget().await;
-        if pending.is_none() {
-            if drain_queue {
-                match rx.try_recv() {
-                    Ok(frame) => *pending = Some(frame),
-                    Err(
-                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
-                    ) => {
-                        return Ok(());
+    fn cancel_slots_for_node(&self, node_id: &ClusterNodeName) {
+        let slots = self
+            .slots
+            .iter()
+            .filter(|slot| &slot.key().node_id == node_id)
+            .map(|slot| (slot.key().clone(), slot.cancel.clone()))
+            .collect::<Vec<_>>();
+        for (key, cancel) in slots {
+            self.retire_slot(&key, &cancel);
+        }
+    }
+
+    fn retire_slot(&self, key: &ConnectionSlotKey, cancel: &CancellationToken) {
+        cancel.cancel();
+        let connection = self
+            .connections
+            .remove_if(key, |_, connection| connection.retiring == *cancel);
+        if connection.is_some() {
+            self.decrement_peer(&key.node_id);
+        }
+        if self
+            .slots
+            .get(key)
+            .is_some_and(|slot| slot.cancel == *cancel)
+        {
+            self.slots.remove(key);
+        }
+        self.connection_changed.notify_waiters();
+    }
+
+    async fn run_slot(self, key: ConnectionSlotKey, slot_cancel: CancellationToken) {
+        let mut backoff = self.options.reconnect_backoff;
+        loop {
+            tokio::task::consume_budget().await;
+            if slot_cancel.is_cancelled() || self.admission_closed.is_cancelled() {
+                break;
+            }
+            let permits = self
+                .acquire_connection_permits(key.class, &slot_cancel)
+                .await;
+            let permits = match permits {
+                Some(permits) => permits,
+                None => break,
+            };
+            let connected = tokio::select! {
+                _ = slot_cancel.cancelled() => break,
+                _ = self.admission_closed.cancelled() => break,
+                connected = self.connect(&key, &slot_cancel) => connected,
+            };
+            match connected {
+                Ok(connection) => {
+                    backoff = self.options.reconnect_backoff;
+                    match self.register_connection(connection.clone()) {
+                        Ok(()) => {
+                            tokio::select! {
+                                _ = slot_cancel.cancelled() => {}
+                                _ = self.admission_closed.cancelled() => {}
+                                _ = connection.closed.cancelled() => {}
+                            }
+                            self.unregister_connection(&key, &connection);
+                            self.drain_outbound_connection(&connection).await;
+                            connection.cancel.cancel();
+                        }
+                        Err(error) => {
+                            debug!(
+                                ?error,
+                                node = %key.node_id,
+                                class = ?key.class,
+                                "interconnect peer capacity refused an outbound connection"
+                            );
+                            connection.cancel.cancel();
+                        }
                     }
                 }
-            } else {
+                Err(error) => {
+                    debug!(
+                        ?error,
+                        node = %key.node_id,
+                        target = %key.target.addr,
+                        class = ?key.class,
+                        slot = key.slot,
+                        "interconnect pool connection failed"
+                    );
+                }
+            }
+            drop(permits);
+            tokio::select! {
+                _ = slot_cancel.cancelled() => break,
+                _ = self.admission_closed.cancelled() => break,
+                _ = sleep(backoff) => {}
+            }
+            backoff = backoff
+                .checked_mul(2)
+                .unwrap_or(self.options.max_reconnect_backoff)
+                .min(self.options.max_reconnect_backoff);
+        }
+        self.unregister_slot(&key, &slot_cancel);
+    }
+
+    async fn acquire_connection_permits(
+        &self,
+        class: PoolClass,
+        cancel: &CancellationToken,
+    ) -> Option<ConnectionPermits> {
+        let class_permit = if class == PoolClass::Management {
+            None
+        } else {
+            let acquired = tokio::select! {
+                _ = cancel.cancelled() => return None,
+                _ = self.admission_closed.cancelled() => return None,
+                acquired = StdArc::clone(&self.non_management_connection_permits).acquire_owned() => acquired,
+            };
+            match acquired {
+                Ok(permit) => Some(permit),
+                Err(_) => return None,
+            }
+        };
+        let acquired = tokio::select! {
+            _ = cancel.cancelled() => return None,
+            _ = self.admission_closed.cancelled() => return None,
+            acquired = StdArc::clone(&self.connection_permits).acquire_owned() => acquired,
+        };
+        let connection = match acquired {
+            Ok(permit) => permit,
+            Err(_) => return None,
+        };
+        Some(ConnectionPermits {
+            _connection: connection,
+            _class: class_permit,
+        })
+    }
+
+    fn unregister_slot(&self, key: &ConnectionSlotKey, cancel: &CancellationToken) {
+        let remove = self
+            .slots
+            .get(key)
+            .is_some_and(|slot| slot.cancel == *cancel);
+        if remove {
+            self.slots.remove(key);
+        }
+    }
+
+    fn register_connection(&self, connection: Arc<ClientConnection>) -> Result<(), TransportError> {
+        let key = connection.key.clone();
+        let Entry::Vacant(entry) = self.connections.entry(key.clone()) else {
+            return Err(TransportError::PoolExhausted);
+        };
+        self.increment_peer(&key.node_id)?;
+        entry.insert(connection);
+        self.connection_changed.notify_waiters();
+        Ok(())
+    }
+
+    fn unregister_connection(&self, key: &ConnectionSlotKey, connection: &Arc<ClientConnection>) {
+        let remove = self
+            .connections
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current.value(), connection));
+        if !remove {
+            return;
+        }
+        self.connections.remove(key);
+        self.decrement_peer(&key.node_id);
+        self.connection_changed.notify_waiters();
+    }
+
+    async fn drain_outbound_connection(&self, connection: &ClientConnection) {
+        if connection.closed.is_cancelled() {
+            return;
+        }
+        let stream_slots = u32::try_from(connection.key.class.stream_slots_per_connection())
+            .assured("every class has far fewer stream slots than u32::MAX");
+        let drained = StdArc::clone(&connection.stream_slots).acquire_many_owned(stream_slots);
+        tokio::select! {
+            _ = self.force_close.cancelled() => {}
+            _ = sleep(self.options.shutdown_drain_timeout) => {}
+            permit = drained => {
+                if let Ok(permit) = permit {
+                    drop(permit);
+                }
+            }
+        }
+    }
+
+    async fn connect(
+        &self,
+        key: &ConnectionSlotKey,
+        slot_cancel: &CancellationToken,
+    ) -> Result<Arc<ClientConnection>, TransportError> {
+        let setup = async {
+            let tcp = TcpStream::connect(key.target.addr).await?;
+            tcp.set_nodelay(true)?;
+            let (generation, tls) = {
+                let active = self.tls.read();
+                (active.generation, active.bundle.clone())
+            };
+            ensure_current(&tls.certificate)
+                .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            let server_name = ServerName::try_from(key.target.server_name.clone())
+                .map_err(|_| TransportError::InvalidServerName(key.target.server_name.clone()))?;
+            let stream = TlsConnector::from(tls.client_config.clone())
+                .connect(server_name, tcp)
+                .await?;
+            let peer_identity = validate_tls_session(
+                stream.get_ref().1.alpn_protocol(),
+                stream.get_ref().1.peer_certificates(),
+                &self.cluster_id,
+                Some(&key.node_id),
+            )?;
+            let certificate_expires_at =
+                certificate_expiration_deadline([&tls.certificate, &peer_identity])?;
+
+            let mut builder = client::Builder::new();
+            configure_client_builder(&mut builder, &self.options, key.class)?;
+            let (sender, connection) = builder.handshake(stream).await?;
+            let cancel = CancellationToken::new();
+            let closed = CancellationToken::new();
+            let driver_cancel = cancel.clone();
+            let driver_closed = closed.clone();
+            let force_close = self.force_close.clone();
+            self.tasks.spawn(async move {
                 tokio::select! {
-                    biased;
-                    _ = draining.cancelled() => {
-                        drain_queue = true;
+                    result = connection => {
+                        if let Err(error) = result {
+                            debug!(?error, "outbound HTTP/2 connection closed");
+                        }
+                    }
+                    _ = driver_cancel.cancelled() => {}
+                    _ = force_close.cancelled() => {}
+                    _ = sleep_until(certificate_expires_at) => {}
+                }
+                driver_closed.cancel();
+            });
+            let driver_setup_guard = CancelOnDrop::new(cancel.clone());
+            let connection = Arc::new(ClientConnection {
+                key: key.clone(),
+                sender,
+                stream_slots: StdArc::new(Semaphore::new(key.class.stream_slots_per_connection())),
+                peer_epoch: 0,
+                retiring: slot_cancel.clone(),
+                cancel,
+                closed,
+            });
+            let hello = ConnectionHello {
+                fingerprint: WIRE_CONTRACT_FINGERPRINT,
+                class: key.class,
+                process_epoch: self.process_epoch,
+                node_id: self.node_id.clone(),
+                advertised_host: self.advertised_host.clone(),
+            };
+            let body = wire::encode_rkyv(
+                &self.executor,
+                MemoryClass::Management,
+                CpuClass::Control,
+                self.executor.limits().management_event_bytes.as_u64(),
+                hello,
+            )
+            .await?;
+            let accepted = connection
+                .request_raw(
+                    self,
+                    RawRequest {
+                        path: CONNECT_PATH,
+                        body: Some(body),
+                        response_class: PoolClass::Management,
+                        response_limit: self.executor.limits().management_event_bytes.as_u64(),
+                        timeout: self.options.connection_setup_timeout,
+                        headers: &[],
+                    },
+                )
+                .await?;
+            let accepted = wire::decode_rkyv::<ConnectionAccepted>(
+                &self.executor,
+                MemoryClass::Management,
+                CpuClass::Control,
+                accepted,
+            )
+            .await?
+            .into_value();
+            if accepted.fingerprint != WIRE_CONTRACT_FINGERPRINT || accepted.node_id != key.node_id
+            {
+                return Err(TransportError::InvalidHandshake(
+                    "wire fingerprint or addressed node identity differs".to_string(),
+                ));
+            }
+            let connection = Arc::new(ClientConnection {
+                key: connection.key.clone(),
+                sender: connection.sender.clone(),
+                stream_slots: connection.stream_slots.clone(),
+                peer_epoch: accepted.process_epoch,
+                retiring: connection.retiring.clone(),
+                cancel: connection.cancel.clone(),
+                closed: connection.closed.clone(),
+            });
+            let current_generation = self.tls.read().generation;
+            if current_generation != generation || slot_cancel.is_cancelled() {
+                connection.cancel.cancel();
+                return Err(TransportError::Closed(key.target.addr));
+            }
+            driver_setup_guard.disarm();
+            Ok(connection)
+        };
+        match timeout(self.options.connection_setup_timeout, setup).await {
+            Ok(result) => result,
+            Err(_) => Err(TransportError::ConnectionSetupTimeout {
+                peer: key.target.addr,
+                timeout: self.options.connection_setup_timeout,
+            }),
+        }
+    }
+
+    async fn lease(
+        &self,
+        node_id: &ClusterNodeName,
+        class: PoolClass,
+        deadline: Instant,
+    ) -> Result<StreamLease, TransportError> {
+        loop {
+            tokio::task::consume_budget().await;
+            let notified = self.connection_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.admission_closed.is_cancelled() {
+                return Err(TransportError::ShuttingDown);
+            }
+            let target = if let Some(target) = self.targets.get(node_id) {
+                target.value().clone()
+            } else {
+                return Err(TransportError::MissingTarget(node_id.clone()));
+            };
+            self.ensure_class_slots(node_id, &target, class);
+
+            let count = class.connections_per_peer();
+            let start = self
+                .next_connection
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.checked_add(1).unwrap_or_default())
+                })
+                .assured("the round-robin cursor update always returns a value")
+                % count;
+            for offset in 0..count {
+                let index = (start + offset) % count;
+                let key = ConnectionSlotKey {
+                    node_id: node_id.clone(),
+                    target: target.clone(),
+                    class,
+                    slot: index,
+                };
+                let Some(connection) = self.connections.get(&key).map(|item| item.clone()) else {
+                    continue;
+                };
+                let permit = match StdArc::clone(&connection.stream_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => continue,
+                };
+                if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
+                    continue;
+                }
+                return Ok(StreamLease {
+                    connection,
+                    _slot: permit,
+                });
+            }
+
+            tokio::select! {
+                _ = self.admission_closed.cancelled() => {
+                    return Err(TransportError::ShuttingDown);
+                }
+                _ = sleep_until(deadline) => {
+                    return Err(TransportError::RequestTimeout {
+                        peer: node_id.clone(),
+                        timeout: self.options.request_timeout,
+                    });
+                }
+                _ = &mut notified => {}
+            }
+        }
+    }
+
+    pub(crate) async fn send(
+        &self,
+        node_id: &ClusterNodeName,
+        envelope: Envelope,
+    ) -> Result<(), TransportError> {
+        if let Envelope::RelayPayload(payload) = envelope {
+            return self.send_relay(node_id, payload).await;
+        }
+        let completed_admission = if let Envelope::Ack(ack) = &envelope {
+            if let RemoteAckOutcome::Alive = &ack.outcome {
+                None
+            } else {
+                Some(RelayAdmissionKey {
+                    peer_node_id: node_id.clone(),
+                    ack_id: ack.ack_id,
+                })
+            }
+        } else {
+            None
+        };
+        let result = async {
+            let class = envelope.pool_class();
+            let timeout_duration = self.options.request_timeout;
+            let deadline = Instant::now()
+                .checked_add(timeout_duration)
+                .ok_or_else(|| TransportError::InvalidOptions {
+                    reason: "request deadline exceeds the monotonic clock range".to_string(),
+                })?;
+            let lease = self.lease(node_id, class, deadline).await?;
+            match envelope {
+                Envelope::Ack(ack) => {
+                    let bytes = wire::encode_rkyv(
+                        &self.executor,
+                        class.memory_class(),
+                        CpuClass::Data,
+                        class.control_body_limit(&self.executor),
+                        ack,
+                    )
+                    .await?;
+                    lease
+                        .request_raw(
+                            self,
+                            RawRequest {
+                                path: ACK_PATH,
+                                body: Some(bytes),
+                                response_class: class,
+                                response_limit: RESPONSE_LIMIT,
+                                timeout: deadline.saturating_duration_since(Instant::now()),
+                                headers: &[],
+                            },
+                        )
+                        .await?;
+                }
+                Envelope::Control(control) => {
+                    if let ControlEnvelope::Request(_) | ControlEnvelope::Response(_) = &control {
+                        return Err(TransportError::Decode(
+                            "typed request envelopes cannot be sent as one-way controls"
+                                .to_string(),
+                        ));
+                    }
+                    let bytes = wire::encode_rkyv(
+                        &self.executor,
+                        class.memory_class(),
+                        class.cpu_class(),
+                        class.control_body_limit(&self.executor),
+                        control,
+                    )
+                    .await?;
+                    lease
+                        .request_raw(
+                            self,
+                            RawRequest {
+                                path: CONTROL_PATH,
+                                body: Some(bytes),
+                                response_class: class,
+                                response_limit: class.control_body_limit(&self.executor),
+                                timeout: deadline.saturating_duration_since(Instant::now()),
+                                headers: &[],
+                            },
+                        )
+                        .await?;
+                }
+                Envelope::RelayPayload(_) => {
+                    return Err(TransportError::RelayGrant(
+                        "relay payload escaped relay admission".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Some(key) = completed_admission {
+            self.relay_admissions.remove(&key);
+        }
+        result
+    }
+
+    pub(crate) async fn round_trip_control(
+        &self,
+        node_id: &ClusterNodeName,
+        control: ControlEnvelope,
+        timeout_duration: Duration,
+    ) -> Result<wire::Decoded<ControlEnvelope>, TransportError> {
+        let class = control.pool_class();
+        let deadline = Instant::now()
+            .checked_add(timeout_duration)
+            .ok_or_else(|| TransportError::InvalidOptions {
+                reason: "request deadline exceeds the monotonic clock range".to_string(),
+            })?;
+        let lease = self.lease(node_id, class, deadline).await?;
+        let bytes = wire::encode_rkyv(
+            &self.executor,
+            class.memory_class(),
+            class.cpu_class(),
+            class.control_body_limit(&self.executor),
+            control,
+        )
+        .await?;
+        let response = lease
+            .request_raw(
+                self,
+                RawRequest {
+                    path: CONTROL_PATH,
+                    body: Some(bytes),
+                    response_class: class,
+                    response_limit: class.control_body_limit(&self.executor),
+                    timeout: timeout_duration,
+                    headers: &[],
+                },
+            )
+            .await?;
+        wire::decode_rkyv::<ControlEnvelope>(
+            &self.executor,
+            class.memory_class(),
+            class.cpu_class(),
+            response,
+        )
+        .await
+    }
+
+    async fn send_relay(
+        &self,
+        node_id: &ClusterNodeName,
+        payload: RelayPayload,
+    ) -> Result<(), TransportError> {
+        let timeout_duration = self.options.request_timeout;
+        let deadline = Instant::now()
+            .checked_add(timeout_duration)
+            .ok_or_else(|| TransportError::InvalidOptions {
+                reason: "request deadline exceeds the monotonic clock range".to_string(),
+            })?;
+        // The relay connection and local stream slot are leased before receiver memory is asked
+        // for, so a saturated pool never holds a remote application grant.
+        let relay = self.lease(node_id, PoolClass::Relay, deadline).await?;
+        let attempt = OsRng.next_u64();
+        let grant = RelayGrantRequest {
+            sender_epoch: self.process_epoch,
+            attempt,
+            body_bytes: payload
+                .batch_ipc
+                .len()
+                .try_into()
+                .assured("an in-memory allocation length fits in u64"),
+            metadata: wire::RelayMetadata::from_payload(&payload),
+        };
+        let metadata = wire::encode_rkyv(
+            &self.executor,
+            MemoryClass::Relay,
+            CpuClass::Data,
+            self.executor.limits().relay_encoded_bytes.as_u64(),
+            grant,
+        )
+        .await?;
+        let management = self.lease(node_id, PoolClass::Management, deadline).await?;
+        let grant_response = management
+            .request_raw(
+                self,
+                RawRequest {
+                    path: RELAY_GRANT_PATH,
+                    body: Some(metadata),
+                    response_class: PoolClass::Management,
+                    response_limit: self.executor.limits().management_event_bytes.as_u64(),
+                    timeout: deadline.saturating_duration_since(Instant::now()),
+                    headers: &[],
+                },
+            )
+            .await?;
+        let grant = wire::decode_rkyv::<RelayGrantResponse>(
+            &self.executor,
+            MemoryClass::Management,
+            CpuClass::Control,
+            grant_response,
+        )
+        .await?
+        .into_value();
+        if grant.receiver_epoch != management.connection.peer_epoch {
+            return Err(TransportError::RelayGrant(
+                "receiver process epoch changed before transfer".to_string(),
+            ));
+        }
+        let path = format!("{RELAY_PATH_PREFIX}{}", grant.grant_id);
+        let sender_epoch = self.process_epoch.to_string();
+        let receiver_epoch = grant.receiver_epoch.to_string();
+        let attempt = attempt.to_string();
+        relay
+            .request_raw(
+                self,
+                RawRequest {
+                    path: &path,
+                    body: Some(payload.batch_ipc),
+                    response_class: PoolClass::Relay,
+                    response_limit: RESPONSE_LIMIT,
+                    timeout: deadline.saturating_duration_since(Instant::now()),
+                    headers: &[
+                        ("x-nervix-sender-epoch", sender_epoch.as_str()),
+                        ("x-nervix-receiver-epoch", receiver_epoch.as_str()),
+                        ("x-nervix-attempt", attempt.as_str()),
+                    ],
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn deliver_incoming(
+        &self,
+        peer_addr: SocketAddr,
+        peer_node_id: ClusterNodeName,
+        envelope: Envelope,
+        decoded: Option<Reservation>,
+    ) -> Result<(), TransportError> {
+        self.incoming_tx
+            .try_send(ReceivedEnvelope::new(
+                peer_addr,
+                peer_node_id,
+                envelope,
+                decoded,
+            ))
+            .map_err(|_| TransportError::IncomingQueueFull)
+    }
+
+    async fn accept_loop(self, listener: TcpListener) {
+        loop {
+            tokio::task::consume_budget().await;
+            let accepted = tokio::select! {
+                _ = self.admission_closed.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            let (tcp, peer_addr) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    warn!(?error, "interconnect listener accept failed");
+                    continue;
+                }
+            };
+            let handshake_permit = match StdArc::clone(&self.handshake_permits).try_acquire_owned()
+            {
+                Ok(permit) => permit,
+                Err(_) => {
+                    debug!(%peer_addr, "interconnect handshake quota is full");
+                    continue;
+                }
+            };
+            let connection_permit =
+                match StdArc::clone(&self.connection_permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        debug!(%peer_addr, "interconnect connection quota is full");
                         continue;
                     }
-                    maybe_frame = rx.recv() => {
-                        let Some(frame) = maybe_frame else {
-                            return Ok(());
-                        };
-                        *pending = Some(frame);
+                };
+            let state = self.clone();
+            self.tasks.spawn(async move {
+                tokio::select! {
+                    _ = state.admission_closed.cancelled() => {}
+                    _ = state.force_close.cancelled() => {}
+                    result = state.clone().accept_connection(
+                        tcp,
+                        peer_addr,
+                        handshake_permit,
+                        connection_permit,
+                    ) => {
+                        if let Err(error) = result {
+                            debug!(?error, %peer_addr, "interconnect connection rejected");
+                        }
                     }
-                    _ = keepalive.tick() => *pending = Some(QueuedFrame::keepalive(&keepalive_frame)),
+                }
+            });
+        }
+    }
+
+    async fn accept_connection(
+        self,
+        tcp: TcpStream,
+        peer_addr: SocketAddr,
+        handshake_permit: OwnedSemaphorePermit,
+        _connection_permit: OwnedSemaphorePermit,
+    ) -> Result<(), TransportError> {
+        tcp.set_nodelay(true)?;
+        let (generation, tls) = {
+            let active = self.tls.read();
+            (active.generation, active.bundle.clone())
+        };
+        ensure_current(&tls.certificate)
+            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+        let stream = timeout(
+            self.options.connection_setup_timeout,
+            TlsAcceptor::from(tls.server_config.clone()).accept(tcp),
+        )
+        .await
+        .map_err(|_| TransportError::ConnectionSetupTimeout {
+            peer: peer_addr,
+            timeout: self.options.connection_setup_timeout,
+        })??;
+        let peer_identity = validate_tls_session(
+            stream.get_ref().1.alpn_protocol(),
+            stream.get_ref().1.peer_certificates(),
+            &self.cluster_id,
+            None,
+        )?;
+        let certificate_expires_at =
+            certificate_expiration_deadline([&tls.certificate, &peer_identity])?;
+        let mut builder = server::Builder::new();
+        configure_server_builder(&mut builder, &self.options)?;
+        let mut connection = timeout(
+            self.options.connection_setup_timeout,
+            builder.handshake(stream),
+        )
+        .await
+        .map_err(|_| TransportError::ConnectionSetupTimeout {
+            peer: peer_addr,
+            timeout: self.options.connection_setup_timeout,
+        })??;
+        let first = timeout(self.options.connection_setup_timeout, connection.accept())
+            .await
+            .map_err(|_| TransportError::ConnectionSetupTimeout {
+                peer: peer_addr,
+                timeout: self.options.connection_setup_timeout,
+            })?
+            .ok_or_else(|| {
+                TransportError::InvalidHandshake(
+                    "connection closed before its class binding".to_string(),
+                )
+            })??;
+        let (request, respond) = first;
+        if request.method() != Method::POST || request.uri().path() != CONNECT_PATH {
+            return Err(TransportError::InvalidHandshake(
+                "first HTTP/2 stream must POST the connection binding".to_string(),
+            ));
+        }
+        let hello_bytes = read_body(
+            &self.executor,
+            MemoryClass::Management,
+            self.executor.limits().management_event_bytes.as_u64(),
+            self.options.progress_timeout,
+            request.into_body(),
+        )
+        .await?;
+        let hello = wire::decode_rkyv::<ConnectionHello>(
+            &self.executor,
+            MemoryClass::Management,
+            CpuClass::Control,
+            hello_bytes,
+        )
+        .await?
+        .into_value();
+        if hello.fingerprint != WIRE_CONTRACT_FINGERPRINT
+            || hello.node_id != peer_identity.node_id
+            || !peer_identity.matches_endpoint(&hello.advertised_host)
+        {
+            return Err(TransportError::InvalidHandshake(
+                "wire fingerprint, certificate identity, or advertised endpoint differs"
+                    .to_string(),
+            ));
+        }
+        let _class_permit = if hello.class == PoolClass::Management {
+            None
+        } else {
+            match StdArc::clone(&self.non_management_connection_permits).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    return Err(TransportError::PoolExhausted);
                 }
             }
+        };
+        drop(handshake_permit);
+        let _registration =
+            self.register_inbound_pool(peer_identity.node_id.clone(), hello.class)?;
+        let accepted = ConnectionAccepted {
+            fingerprint: WIRE_CONTRACT_FINGERPRINT,
+            process_epoch: self.process_epoch,
+            node_id: self.node_id.clone(),
+        };
+        let accepted = wire::encode_rkyv(
+            &self.executor,
+            MemoryClass::Management,
+            CpuClass::Control,
+            self.executor.limits().management_event_bytes.as_u64(),
+            accepted,
+        )
+        .await?;
+        send_response(
+            respond,
+            StatusCode::OK,
+            Some(accepted),
+            self.options.progress_timeout,
+        )
+        .await?;
+
+        self.drive_inbound(
+            connection,
+            InboundPeer {
+                addr: peer_addr,
+                node_id: peer_identity.node_id.clone(),
+                advertised_host: hello.advertised_host,
+                process_epoch: hello.process_epoch,
+                class: hello.class,
+            },
+            generation,
+            certificate_expires_at,
+        )
+        .await
+    }
+
+    async fn drive_inbound<T>(
+        &self,
+        mut connection: server::Connection<T, Bytes>,
+        peer: InboundPeer,
+        generation: u64,
+        certificate_expires_at: Instant,
+    ) -> Result<(), TransportError>
+    where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let stream_slots = StdArc::new(Semaphore::new(peer.class.stream_slots_per_connection()));
+        let connection_force_close = CancellationToken::new();
+        let _connection_force_close_guard = CancelOnDrop::new(connection_force_close.clone());
+        let mut draining = false;
+        let mut drain_deadline = None;
+        loop {
+            tokio::task::consume_budget().await;
+            let accepted = if draining {
+                let deadline = drain_deadline
+                    .verified("entering drain always records its force-close deadline");
+                tokio::select! {
+                    _ = self.force_close.cancelled() => break,
+                    _ = sleep_until(deadline) => break,
+                    accepted = connection.accept() => accepted,
+                }
+            } else {
+                let changed = self.tls_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.tls.read().generation != generation {
+                    connection.graceful_shutdown();
+                    draining = true;
+                    drain_deadline = Some(
+                        Instant::now()
+                            .checked_add(self.options.shutdown_drain_timeout)
+                            .assured(
+                                "a configured transport drain timeout fits the monotonic clock",
+                            ),
+                    );
+                    continue;
+                }
+                tokio::select! {
+                    _ = self.admission_closed.cancelled() => {
+                        connection.graceful_shutdown();
+                        draining = true;
+                        drain_deadline = Some(
+                            Instant::now()
+                                .checked_add(self.options.shutdown_drain_timeout)
+                                .assured("a configured transport drain timeout fits the monotonic clock"),
+                        );
+                        continue;
+                    }
+                    _ = self.force_close.cancelled() => break,
+                    _ = sleep_until(certificate_expires_at) => {
+                        connection.graceful_shutdown();
+                        draining = true;
+                        drain_deadline = Some(
+                            Instant::now()
+                                .checked_add(self.options.shutdown_drain_timeout)
+                                .assured("a configured transport drain timeout fits the monotonic clock"),
+                        );
+                        continue;
+                    }
+                    _ = &mut changed => {
+                        if self.tls.read().generation != generation {
+                            connection.graceful_shutdown();
+                            draining = true;
+                            drain_deadline = Some(
+                                Instant::now()
+                                    .checked_add(self.options.shutdown_drain_timeout)
+                                    .assured("a configured transport drain timeout fits the monotonic clock"),
+                            );
+                        }
+                        continue;
+                    }
+                    accepted = connection.accept() => accepted,
+                }
+            };
+            let Some(accepted) = accepted else {
+                break;
+            };
+            let (request, mut response) = accepted?;
+            let stream_slot = match StdArc::clone(&stream_slots).try_acquire_owned() {
+                Ok(stream_slot) => stream_slot,
+                Err(_) => {
+                    response.send_reset(Reason::REFUSED_STREAM);
+                    continue;
+                }
+            };
+            let state = self.clone();
+            let peer = peer.clone();
+            let stream_force_close = connection_force_close.clone();
+            let transport_force_close = self.force_close.clone();
+            self.tasks.spawn(async move {
+                let _stream_slot = stream_slot;
+                let handled = state.clone().handle_stream(peer.clone(), request, response);
+                tokio::select! {
+                    _ = stream_force_close.cancelled() => {}
+                    _ = transport_force_close.cancelled() => {}
+                    result = handled => {
+                        if let Err(error) = result {
+                            debug!(?error, peer_addr = %peer.addr, class = ?peer.class, "HTTP/2 operation failed");
+                        }
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+
+    async fn handle_stream(
+        self,
+        peer: InboundPeer,
+        request: Request<RecvStream>,
+        mut respond: server::SendResponse<Bytes>,
+    ) -> Result<(), TransportError> {
+        if request.method() != Method::POST {
+            send_static_error(
+                &mut respond,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "POST required",
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+        let path = request.uri().path().to_string();
+        if path == CONTROL_PATH {
+            return self
+                .handle_control(
+                    peer.addr,
+                    peer.node_id,
+                    peer.advertised_host,
+                    peer.class,
+                    request.into_body(),
+                    respond,
+                )
+                .await;
+        }
+        if path == ACK_PATH {
+            if peer.class != PoolClass::Replication {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::FORBIDDEN,
+                    "wrong pool class",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+            let bytes = read_body(
+                &self.executor,
+                MemoryClass::Relay,
+                peer.class.control_body_limit(&self.executor),
+                self.options.progress_timeout,
+                request.into_body(),
+            )
+            .await?;
+            let decoded =
+                wire::decode_rkyv(&self.executor, MemoryClass::Relay, CpuClass::Data, bytes)
+                    .await?;
+            let (ack, reservation) = decoded.into_parts();
+            self.deliver_incoming(
+                peer.addr,
+                peer.node_id,
+                Envelope::Ack(ack),
+                Some(reservation),
+            )?;
+            send_response(
+                respond,
+                StatusCode::NO_CONTENT,
+                None,
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+        if path == RELAY_GRANT_PATH {
+            if peer.class != PoolClass::Management {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::FORBIDDEN,
+                    "wrong pool class",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+            return self
+                .handle_relay_grant(
+                    peer.node_id,
+                    peer.process_epoch,
+                    request.into_body(),
+                    respond,
+                )
+                .await;
+        }
+        if let Some(grant_id) = path.strip_prefix(RELAY_PATH_PREFIX) {
+            if peer.class != PoolClass::Relay {
+                respond.send_reset(Reason::REFUSED_STREAM);
+                return Ok(());
+            }
+            let grant_id = grant_id.parse::<u64>().map_err(|error| {
+                TransportError::RelayGrant(format!("invalid grant id: {error}"))
+            })?;
+            return self
+                .handle_relay_body(
+                    peer.addr,
+                    peer.node_id,
+                    peer.process_epoch,
+                    grant_id,
+                    request,
+                    respond,
+                )
+                .await;
         }
 
-        let frame = pending
-            .as_ref()
-            .assured("the writer fills its pending frame before attempting socket I/O");
-        write_wire_envelope(&mut writer, frame.frame()).await?;
-        *pending = None;
+        send_static_error(
+            &mut respond,
+            StatusCode::NOT_FOUND,
+            "unknown interconnect operation",
+            self.options.progress_timeout,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn handle_control(
+        &self,
+        peer_addr: SocketAddr,
+        peer_node_id: ClusterNodeName,
+        peer_advertised_host: String,
+        class: PoolClass,
+        body: RecvStream,
+        mut respond: server::SendResponse<Bytes>,
+    ) -> Result<(), TransportError> {
+        let bytes = read_body(
+            &self.executor,
+            class.memory_class(),
+            class.control_body_limit(&self.executor),
+            self.options.progress_timeout,
+            body,
+        )
+        .await?;
+        let decoded = wire::decode_rkyv::<ControlEnvelope>(
+            &self.executor,
+            class.memory_class(),
+            class.cpu_class(),
+            bytes,
+        )
+        .await?;
+        let (control, reservation) = decoded.into_parts();
+        if control.pool_class() != class {
+            send_response(
+                respond,
+                StatusCode::FORBIDDEN,
+                None,
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        if let ControlEnvelope::Request(request) = control {
+            let response = tokio::select! {
+                response = self.requests.handle(
+                    &self.executor,
+                    peer_node_id,
+                    peer_advertised_host,
+                    request,
+                ) => response,
+                reset = poll_fn(|context| respond.poll_reset(context)) => {
+                    reset?;
+                    return Ok(());
+                }
+            };
+            let (response, _payload_reservation) = response.into_parts();
+            let response = wire::encode_rkyv(
+                &self.executor,
+                class.memory_class(),
+                class.cpu_class(),
+                class.control_body_limit(&self.executor),
+                ControlEnvelope::Response(response),
+            )
+            .await?;
+            send_response(
+                respond,
+                StatusCode::OK,
+                Some(response),
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        if let ControlEnvelope::Response(_) = control {
+            send_response(
+                respond,
+                StatusCode::BAD_REQUEST,
+                None,
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        self.deliver_incoming(
+            peer_addr,
+            peer_node_id,
+            Envelope::Control(control),
+            Some(reservation),
+        )?;
+        send_response(
+            respond,
+            StatusCode::NO_CONTENT,
+            None,
+            self.options.progress_timeout,
+        )
+        .await
+    }
+
+    async fn handle_relay_grant(
+        &self,
+        peer_node_id: ClusterNodeName,
+        peer_epoch: u64,
+        body: RecvStream,
+        mut respond: server::SendResponse<Bytes>,
+    ) -> Result<(), TransportError> {
+        let encoded = read_body(
+            &self.executor,
+            MemoryClass::Relay,
+            self.executor.limits().relay_encoded_bytes.as_u64(),
+            self.options.progress_timeout,
+            body,
+        )
+        .await?;
+        let grant = wire::decode_rkyv::<RelayGrantRequest>(
+            &self.executor,
+            MemoryClass::Relay,
+            CpuClass::Data,
+            encoded,
+        )
+        .await?
+        .into_value();
+        if grant.sender_epoch != peer_epoch
+            || grant.body_bytes > self.executor.limits().relay_encoded_bytes.as_u64()
+        {
+            send_response(
+                respond,
+                StatusCode::BAD_REQUEST,
+                None,
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+        let Some(admission) = grant.metadata.admission.as_ref() else {
+            send_response(
+                respond,
+                StatusCode::BAD_REQUEST,
+                None,
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        };
+        if admission.reply_node_id != peer_node_id {
+            send_response(
+                respond,
+                StatusCode::FORBIDDEN,
+                None,
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+        let admission_key = RelayAdmissionKey {
+            peer_node_id: peer_node_id.clone(),
+            ack_id: admission.ack_id,
+        };
+        let operation_bytes = grant
+            .body_bytes
+            .checked_add(self.executor.limits().relay_decoded_bytes.as_u64())
+            .ok_or_else(|| {
+                TransportError::RelayGrant("relay operation limits overflow".to_string())
+            })?;
+        let operation_bytes = operation_bytes
+            .checked_add(self.executor.limits().relay_scratch_bytes.as_u64())
+            .ok_or_else(|| {
+                TransportError::RelayGrant("relay operation limits overflow".to_string())
+            })?;
+        let reservation = match self
+            .executor
+            .try_reserve(MemoryClass::Relay, operation_bytes)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "relay admission is full",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                debug!(?error, "relay grant refused by memory admission");
+                return Ok(());
+            }
+        };
+        let item = match StdArc::clone(&self.relay_items).try_acquire_owned() {
+            Ok(item) => item,
+            Err(_) => {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "relay item admission is full",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let terminal = match StdArc::clone(&self.terminal_outcomes).try_acquire_owned() {
+            Ok(terminal) => terminal,
+            Err(_) => {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "relay terminal-outcome admission is full",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        match self.relay_admissions.entry(admission_key.clone()) {
+            Entry::Occupied(_) => {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "relay admission is already active",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(RelayAdmissionCapacity {
+                    _item: item,
+                    _terminal: terminal,
+                });
+            }
+        }
+        let grant_id = self.next_grant_id();
+        let receiver_epoch = self.process_epoch;
+        let expiry = CancellationToken::new();
+        self.grants.insert(
+            grant_id,
+            RelayGrant {
+                peer_node_id,
+                sender_epoch: peer_epoch,
+                receiver_epoch,
+                attempt: grant.attempt,
+                body_bytes: grant.body_bytes,
+                expires_at: Instant::now()
+                    .checked_add(RELAY_GRANT_LIFETIME)
+                    .assured("the fixed relay grant lifetime fits the monotonic clock"),
+                metadata: grant.metadata,
+                reservation,
+                admission_key,
+                _expiry: CancelOnDrop::new(expiry.clone()),
+            },
+        );
+        let grants = self.clone();
+        self.tasks.spawn(async move {
+            tokio::select! {
+                _ = expiry.cancelled() => {}
+                _ = sleep(RELAY_GRANT_LIFETIME) => {
+                    let expired = grants
+                        .grants
+                        .remove_if(&grant_id, |_, grant| Instant::now() >= grant.expires_at);
+                    if let Some((_, grant)) = expired {
+                        grants.relay_admissions.remove(&grant.admission_key);
+                    }
+                }
+            }
+        });
+        let response = wire::encode_rkyv(
+            &self.executor,
+            MemoryClass::Management,
+            CpuClass::Control,
+            self.executor.limits().management_event_bytes.as_u64(),
+            RelayGrantResponse {
+                grant_id,
+                receiver_epoch,
+            },
+        )
+        .await?;
+        send_response(
+            respond,
+            StatusCode::OK,
+            Some(response),
+            self.options.progress_timeout,
+        )
+        .await
+    }
+
+    fn next_grant_id(&self) -> u64 {
+        loop {
+            let id = OsRng.next_u64();
+            if id != 0 && !self.grants.contains_key(&id) {
+                return id;
+            }
+        }
+    }
+
+    async fn handle_relay_body(
+        &self,
+        peer_addr: SocketAddr,
+        peer_node_id: ClusterNodeName,
+        peer_epoch: u64,
+        grant_id: u64,
+        request: Request<RecvStream>,
+        mut respond: server::SendResponse<Bytes>,
+    ) -> Result<(), TransportError> {
+        let sender_epoch = header_u64(&request, "x-nervix-sender-epoch")?;
+        let receiver_epoch = header_u64(&request, "x-nervix-receiver-epoch")?;
+        let attempt = header_u64(&request, "x-nervix-attempt")?;
+        let claimed = self.grants.remove_if(&grant_id, |_, grant| {
+            grant.peer_node_id == peer_node_id
+                && grant.sender_epoch == sender_epoch
+                && grant.sender_epoch == peer_epoch
+                && grant.receiver_epoch == receiver_epoch
+                && grant.attempt == attempt
+                && Instant::now() < grant.expires_at
+        });
+        let Some((_, grant)) = claimed else {
+            respond.send_reset(Reason::REFUSED_STREAM);
+            return Ok(());
+        };
+        drop(grant._expiry);
+        let admission_cleanup =
+            RelayAdmissionCleanup::new(self.clone(), grant.admission_key.clone());
+
+        let encoded_limit = self.executor.limits().relay_encoded_bytes.as_u64();
+        let encoded_bytes = grant.body_bytes;
+        let (encoded_reservation, overlap) = grant
+            .reservation
+            .split(encoded_bytes)
+            .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
+        let mut buffer = BudgetedBuffer::with_limit(encoded_reservation, encoded_limit);
+        read_body_into(
+            &mut buffer,
+            self.options.progress_timeout,
+            request.into_body(),
+        )
+        .await?;
+        let actual: u64 = buffer
+            .len()
+            .try_into()
+            .assured("an in-memory allocation length fits in u64");
+        if actual != grant.body_bytes {
+            respond.send_reset(Reason::ENHANCE_YOUR_CALM);
+            return Err(TransportError::RelayGrant(format!(
+                "relay body length {actual} differs from granted length {}",
+                grant.body_bytes
+            )));
+        }
+        let (body, body_reservation) = buffer.into_parts();
+        let operation_reservation = body_reservation
+            .merge(overlap)
+            .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
+        let body = ChargedBytes::from_owned(body, operation_reservation);
+        let payload = grant.metadata.into_payload(body);
+        self.deliver_incoming(
+            peer_addr,
+            peer_node_id,
+            Envelope::RelayPayload(payload),
+            None,
+        )?;
+        admission_cleanup.disarm();
+        send_response(
+            respond,
+            StatusCode::NO_CONTENT,
+            None,
+            self.options.progress_timeout,
+        )
+        .await
+    }
+
+    fn increment_peer(&self, node_id: &ClusterNodeName) -> Result<(), TransportError> {
+        match self.peer_connections.entry(node_id.clone()) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().count = entry
+                    .get()
+                    .count
+                    .checked_add(1)
+                    .assured("a peer has a bounded number of inbound and outbound connections");
+            }
+            Entry::Vacant(entry) => {
+                let permit = StdArc::clone(&self.peer_permits)
+                    .try_acquire_owned()
+                    .map_err(|_| TransportError::PoolExhausted)?;
+                entry.insert(PeerConnections {
+                    count: 1,
+                    _permit: permit,
+                });
+            }
+        }
+        self.connection_changed.notify_waiters();
+        Ok(())
+    }
+
+    fn register_inbound_pool(
+        &self,
+        node_id: ClusterNodeName,
+        class: PoolClass,
+    ) -> Result<InboundConnectionRegistration, TransportError> {
+        let key = InboundPoolKey { node_id, class };
+        match self.inbound_pool_connections.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                if *entry.get() >= class.connections_per_peer() {
+                    return Err(TransportError::PoolExhausted);
+                }
+                *entry.get_mut() = entry
+                    .get()
+                    .checked_add(1)
+                    .assured("an inbound class pool is capped by its declared slot count");
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(1);
+            }
+        }
+        if let Err(error) = self.increment_peer(&key.node_id) {
+            self.decrement_inbound_pool(&key);
+            return Err(error);
+        }
+        Ok(InboundConnectionRegistration {
+            state: self.clone(),
+            key,
+        })
+    }
+
+    fn decrement_inbound_pool(&self, key: &InboundPoolKey) {
+        if let Some(mut count) = self.inbound_pool_connections.get_mut(key) {
+            if *count <= 1 {
+                drop(count);
+                self.inbound_pool_connections.remove(key);
+            } else {
+                *count = count
+                    .checked_sub(1)
+                    .verified("the branch above handled the final inbound class connection");
+            }
+        }
+    }
+
+    fn decrement_peer(&self, node_id: &ClusterNodeName) {
+        if let Some(mut connections) = self.peer_connections.get_mut(node_id) {
+            if connections.count <= 1 {
+                drop(connections);
+                self.peer_connections.remove(node_id);
+            } else {
+                connections.count = connections
+                    .count
+                    .checked_sub(1)
+                    .verified("the branch above handled the final peer connection");
+            }
+        }
+        self.connection_changed.notify_waiters();
+    }
+
+    pub(crate) async fn replace_tls(&self, tls: TlsConfigBundle) -> Result<(), TransportError> {
+        tls.certificate
+            .validate_local(&self.cluster_id, &self.node_id, &self.advertised_host)
+            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+        ensure_current(&tls.certificate)
+            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+        let next_generation = self.tls.read().generation.checked_add(1).ok_or_else(|| {
+            TransportError::InvalidOptions {
+                reason: "TLS configuration generation is exhausted".to_string(),
+            }
+        })?;
+        self.cancel_all_slots();
+        *self.tls.write() = ActiveTls {
+            generation: next_generation,
+            bundle: tls,
+        };
+        self.tls_changed.notify_waiters();
+        let peers = self
+            .targets
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        for (node, target) in peers {
+            self.ensure_class_slots(&node, &target, PoolClass::Management);
+        }
+        Ok(())
+    }
+
+    fn cancel_all_slots(&self) {
+        let slots = self
+            .slots
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.cancel.clone()))
+            .collect::<Vec<_>>();
+        for (key, cancel) in slots {
+            self.retire_slot(&key, &cancel);
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.admission_closed.cancel();
+        self.requests.shutdown();
+        self.cancel_all_slots();
+        self.grants.clear();
+        self.relay_admissions.clear();
+        self.tasks.close();
+        if timeout(self.options.shutdown_drain_timeout, self.tasks.wait())
+            .await
+            .is_err()
+        {
+            self.force_close.cancel();
+            self.tasks.wait().await;
+        }
     }
 }
 
-async fn wait_for_reconnect(
-    inner: &TransportInner,
-    cancel: &CancellationToken,
-    delay: Duration,
-) -> bool {
-    tokio::select! {
-        biased;
-        _ = inner.force_close.cancelled() => false,
-        _ = inner.draining.cancelled() => false,
-        _ = cancel.cancelled() => false,
-        _ = sleep(delay) => true,
+impl ClientConnection {
+    async fn request_raw(
+        &self,
+        state: &TransportState,
+        request: RawRequest<'_>,
+    ) -> Result<ChargedBytes, TransportError> {
+        if self.closed.is_cancelled() {
+            return Err(TransportError::Closed(self.key.target.addr));
+        }
+        let RawRequest {
+            path,
+            body,
+            response_class,
+            response_limit,
+            timeout: timeout_duration,
+            headers,
+        } = request;
+        let operation = async {
+            let sender = self.sender.clone().ready().await?;
+            let mut request_url = url::Url::parse("https://localhost/")
+                .assured("the fixed HTTPS request base is a valid URL");
+            request_url
+                .set_host(Some(&self.key.target.server_name))
+                .map_err(|_| {
+                    TransportError::InvalidServerName(self.key.target.server_name.clone())
+                })?;
+            request_url.set_path(path);
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .version(Version::HTTP_2)
+                .uri(request_url.as_str());
+            for (name, value) in headers {
+                builder = builder.header(*name, *value);
+            }
+            let request = builder
+                .body(())
+                .map_err(|error| TransportError::Http(error.to_string()))?;
+            let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
+            let (response, mut stream) = {
+                let mut sender = sender;
+                sender.send_request(request, end_stream)?
+            };
+            if let Some(body) = body
+                && !body.is_empty()
+            {
+                send_body(&mut stream, body).await?;
+            }
+            let response = response.await?;
+            let status = response.status();
+            let response = read_body(
+                &state.executor,
+                response_class.memory_class(),
+                response_limit,
+                state.options.progress_timeout,
+                response.into_body(),
+            )
+            .await?;
+            if !status.is_success() {
+                return Err(TransportError::RemoteRejected {
+                    status: status.as_u16(),
+                    message: String::from_utf8_lossy(response.as_ref()).into_owned(),
+                });
+            }
+            Ok(response)
+        };
+        match timeout(timeout_duration, operation).await {
+            Ok(result) => result,
+            Err(_) => Err(TransportError::RequestTimeout {
+                peer: self.key.node_id.clone(),
+                timeout: timeout_duration,
+            }),
+        }
     }
 }
 
-fn outbound_generation_is_current(
-    inner: &TransportInner,
-    key: &ConnectionKey,
-    cancel: &CancellationToken,
-) -> bool {
-    let Some(entry) = inner.outbound.get(key) else {
-        return false;
+impl StreamLease {
+    async fn request_raw(
+        &self,
+        state: &TransportState,
+        request: RawRequest<'_>,
+    ) -> Result<ChargedBytes, TransportError> {
+        self.connection.request_raw(state, request).await
+    }
+}
+
+fn configure_client_builder(
+    builder: &mut client::Builder,
+    options: &TransportOptions,
+    class: PoolClass,
+) -> Result<(), TransportError> {
+    let stream_slots = class.stream_slots_per_connection();
+    let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
+        reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
+    })?;
+    builder
+        .initial_window_size(options.initial_stream_window_bytes)
+        .initial_connection_window_size(options.initial_connection_window_bytes)
+        .max_header_list_size(options.max_header_bytes)
+        .max_concurrent_streams(streams)
+        .initial_max_send_streams(stream_slots)
+        .max_local_error_reset_streams(Some(RESET_LIMIT))
+        .max_pending_accept_reset_streams(RESET_LIMIT)
+        .max_send_buffer_size(BODY_CHUNK_BYTES);
+    Ok(())
+}
+
+fn configure_server_builder(
+    builder: &mut server::Builder,
+    options: &TransportOptions,
+) -> Result<(), TransportError> {
+    let streams =
+        u32::try_from(PoolClass::Management.stream_slots_per_connection()).map_err(|_| {
+            TransportError::InvalidOptions {
+                reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
+            }
+        })?;
+    builder
+        .initial_window_size(options.initial_stream_window_bytes)
+        .initial_connection_window_size(options.initial_connection_window_bytes)
+        .max_header_list_size(options.max_header_bytes)
+        .max_concurrent_streams(streams)
+        .max_local_error_reset_streams(Some(RESET_LIMIT))
+        .max_pending_accept_reset_streams(RESET_LIMIT)
+        .max_send_buffer_size(BODY_CHUNK_BYTES);
+    Ok(())
+}
+
+async fn send_body(
+    stream: &mut SendStream<Bytes>,
+    body: ChargedBytes,
+) -> Result<(), TransportError> {
+    let mut offset = 0;
+    while offset < body.len() {
+        tokio::task::consume_budget().await;
+        let remaining = body
+            .len()
+            .checked_sub(offset)
+            .verified("the send offset never advances beyond the body");
+        let wanted = remaining.min(BODY_CHUNK_BYTES);
+        stream.reserve_capacity(wanted);
+        let assigned = poll_fn(|context| stream.poll_capacity(context))
+            .await
+            .ok_or_else(|| {
+                TransportError::Decode(
+                    "HTTP/2 stream closed while assigning send capacity".to_string(),
+                )
+            })??;
+        let ready = assigned.min(wanted);
+        if ready == 0 {
+            continue;
+        }
+        let end = offset
+            .checked_add(ready)
+            .verified("assigned capacity is bounded by the remaining body");
+        let chunk = body
+            .slice(offset, end)
+            .verified("the chunk bounds were checked against the body");
+        offset = end;
+        let end_stream = offset == body.len();
+        stream.send_data(Bytes::from_owner(chunk), end_stream)?;
+        if end_stream {
+            break;
+        }
+    }
+    stream.reserve_capacity(0);
+    Ok(())
+}
+
+async fn send_response(
+    mut respond: server::SendResponse<Bytes>,
+    status: StatusCode,
+    body: Option<ChargedBytes>,
+    progress_timeout: Duration,
+) -> Result<(), TransportError> {
+    let response = Response::builder()
+        .status(status)
+        .version(Version::HTTP_2)
+        .body(())
+        .map_err(|error| TransportError::Http(error.to_string()))?;
+    let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
+    let mut stream = respond.send_response(response, end_stream)?;
+    if let Some(body) = body
+        && !body.is_empty()
+    {
+        timeout(progress_timeout, send_body(&mut stream, body))
+            .await
+            .map_err(|_| TransportError::ProgressTimeout {
+                timeout: progress_timeout,
+            })??;
+    }
+    Ok(())
+}
+
+async fn send_static_error(
+    respond: &mut server::SendResponse<Bytes>,
+    status: StatusCode,
+    message: &'static str,
+    progress_timeout: Duration,
+) -> Result<(), TransportError> {
+    let response = Response::builder()
+        .status(status)
+        .version(Version::HTTP_2)
+        .body(())
+        .map_err(|error| TransportError::Http(error.to_string()))?;
+    let mut stream = respond.send_response(response, false)?;
+    timeout(progress_timeout, async {
+        let body = Bytes::from_static(message.as_bytes());
+        let mut offset = 0;
+        while offset < body.len() {
+            tokio::task::consume_budget().await;
+            let remaining = body
+                .len()
+                .checked_sub(offset)
+                .verified("the send offset never advances beyond the static error body");
+            let wanted = remaining.min(BODY_CHUNK_BYTES);
+            stream.reserve_capacity(wanted);
+            let assigned = poll_fn(|context| stream.poll_capacity(context))
+                .await
+                .ok_or_else(|| {
+                    TransportError::Decode(
+                        "HTTP/2 stream closed while assigning send capacity".to_string(),
+                    )
+                })??;
+            let ready = assigned.min(wanted);
+            if ready == 0 {
+                continue;
+            }
+            let end = offset
+                .checked_add(ready)
+                .verified("assigned capacity is bounded by the remaining static error body");
+            let chunk = body.slice(offset..end);
+            offset = end;
+            let end_stream = offset == body.len();
+            stream.send_data(chunk, end_stream)?;
+            if end_stream {
+                break;
+            }
+        }
+        stream.reserve_capacity(0);
+        Ok::<(), TransportError>(())
+    })
+    .await
+    .map_err(|_| TransportError::ProgressTimeout {
+        timeout: progress_timeout,
+    })?
+}
+
+async fn read_body(
+    executor: &Executor,
+    class: MemoryClass,
+    limit: u64,
+    progress_timeout: Duration,
+    body: RecvStream,
+) -> Result<ChargedBytes, TransportError> {
+    let initial = limit.min(4 * 1024);
+    let reservation = executor
+        .reserve(class, initial)
+        .await
+        .map_err(|error| TransportError::Decode(error.to_string()))?;
+    let mut buffer = BudgetedBuffer::with_limit(reservation, limit);
+    read_body_into(&mut buffer, progress_timeout, body).await?;
+    Ok(ChargedBytes::from_buffer(buffer))
+}
+
+async fn read_body_into(
+    buffer: &mut BudgetedBuffer,
+    progress_timeout: Duration,
+    mut body: RecvStream,
+) -> Result<(), TransportError> {
+    loop {
+        tokio::task::consume_budget().await;
+        let chunk = timeout(progress_timeout, body.data()).await.map_err(|_| {
+            TransportError::ProgressTimeout {
+                timeout: progress_timeout,
+            }
+        })?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk?;
+        buffer
+            .write_all(&chunk)
+            .map_err(|error| TransportError::Decode(error.to_string()))?;
+        body.flow_control().release_capacity(chunk.len())?;
+    }
+    Ok(())
+}
+
+fn validate_tls_session(
+    alpn: Option<&[u8]>,
+    certificates: Option<&[rustls::pki_types::CertificateDer<'static>]>,
+    cluster_id: &str,
+    expected_node: Option<&ClusterNodeName>,
+) -> Result<CertificateIdentity, TransportError> {
+    if alpn != Some(b"h2".as_slice()) {
+        return Err(TransportError::InvalidHandshake(
+            "TLS did not negotiate ALPN h2".to_string(),
+        ));
+    }
+    let Some(certificates) = certificates else {
+        return Err(TransportError::InvalidHandshake(
+            "peer did not present a certificate".to_string(),
+        ));
     };
-    entry.cancel == *cancel && !cancel.is_cancelled()
-}
-
-pub(super) fn retire_outbound_connection(
-    inner: &TransportInner,
-    key: &ConnectionKey,
-    cancel: &CancellationToken,
-) {
-    cancel.cancel();
-    inner
-        .outbound
-        .remove_if(key, |_, connection| connection.cancel == *cancel);
-}
-
-pub(super) fn register_connected_peer(
-    inner: &TransportInner,
-    peer_node_id: &ClusterNodeName,
-    connection: &ConnectionHandle,
-) {
-    inner
-        .connected_peers
-        .entry(peer_node_id.clone())
-        .or_default()
-        .insert(connection.cancellation().clone(), connection.clone());
-    inner.requests.connection_changed();
-}
-
-pub(super) fn unregister_connected_peer(
-    inner: &TransportInner,
-    peer_node_id: &ClusterNodeName,
-    connection: &ConnectionHandle,
-) {
-    let Some(mut connections) = inner.connected_peers.get_mut(peer_node_id) else {
-        return;
+    let Some(certificate) = certificates.first() else {
+        return Err(TransportError::InvalidHandshake(
+            "peer did not present a certificate".to_string(),
+        ));
     };
-    connections.remove(connection.cancellation());
-    drop(connections);
-    inner
-        .connected_peers
-        .remove_if(peer_node_id, |_, connections| connections.is_empty());
-    inner.requests.connection_changed();
+    let identity = CertificateIdentity::from_certificate(certificate)
+        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+    ensure_current(&identity)
+        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+    if identity.cluster_id != cluster_id {
+        return Err(TransportError::InvalidHandshake(format!(
+            "peer certificate identifies cluster '{}', expected '{}'",
+            identity.cluster_id, cluster_id
+        )));
+    }
+    if let Some(expected_node) = expected_node
+        && &identity.node_id != expected_node
+    {
+        return Err(TransportError::InvalidHandshake(format!(
+            "peer certificate identifies node '{}', expected '{}'",
+            identity.node_id, expected_node
+        )));
+    }
+    Ok(identity)
+}
+
+fn certificate_expiration_deadline<'a>(
+    identities: impl IntoIterator<Item = &'a CertificateIdentity>,
+) -> Result<Instant, TransportError> {
+    let expires_at = identities
+        .into_iter()
+        .map(|identity| identity.not_after_unix_seconds)
+        .min()
+        .ok_or_else(|| {
+            TransportError::InvalidHandshake(
+                "a connection has no certificate expiration".to_string(),
+            )
+        })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+    let now = i64::try_from(now.as_secs())
+        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+    let remaining = expires_at
+        .checked_sub(now)
+        .ok_or_else(|| TransportError::InvalidHandshake("certificate has expired".to_string()))?;
+    if remaining <= 0 {
+        return Err(TransportError::InvalidHandshake(
+            "certificate has expired".to_string(),
+        ));
+    }
+    let remaining = u64::try_from(remaining)
+        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+    Instant::now()
+        .checked_add(Duration::from_secs(remaining))
+        .ok_or_else(|| {
+            TransportError::InvalidHandshake(
+                "certificate expiration exceeds the monotonic clock range".to_string(),
+            )
+        })
+}
+
+fn ensure_current(identity: &CertificateIdentity) -> Result<(), super::TlsConfigError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| super::TlsConfigError::InvalidCertificate(error.to_string()))?;
+    let now = i64::try_from(now.as_secs())
+        .map_err(|error| super::TlsConfigError::InvalidCertificate(error.to_string()))?;
+    if identity.not_before_unix_seconds > now {
+        return Err(super::TlsConfigError::NotYetValid);
+    }
+    if identity.not_after_unix_seconds <= now {
+        return Err(super::TlsConfigError::Expired);
+    }
+    Ok(())
+}
+
+fn header_u64(request: &Request<RecvStream>, name: &'static str) -> Result<u64, TransportError> {
+    let value = request
+        .headers()
+        .get(name)
+        .ok_or_else(|| TransportError::RelayGrant(format!("missing {name} header")))?;
+    let value = value
+        .to_str()
+        .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
+    value
+        .parse()
+        .map_err(|error| TransportError::RelayGrant(format!("invalid {name} header: {error}")))
 }

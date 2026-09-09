@@ -80,6 +80,21 @@ impl RemoteDispatcher {
         self.registry.pending_relay_admissions.remove(&admission_id);
     }
 
+    pub(super) async fn request_with_timeout<M>(
+        &self,
+        node_id: &ClusterNodeName,
+        message: M,
+        timeout: Duration,
+    ) -> Result<M::Response, String>
+    where
+        M: InterconnectRequest,
+    {
+        self.interconnect
+            .request_with_timeout(node_id, message, timeout)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub(super) async fn dispatch_admitted_relay_payload(
         &self,
         node_id: &ClusterNodeName,
@@ -212,47 +227,32 @@ impl RemoteDispatcher {
         node_id: &ClusterNodeName,
         envelope: Envelope,
     ) -> Result<(), String> {
-        let deadline = Instant::now() + Self::DISPATCH_TIMEOUT;
+        let deadline = Instant::now()
+            .checked_add(Self::DISPATCH_TIMEOUT)
+            .assured("the fixed remote dispatch timeout fits the monotonic clock");
         loop {
             tokio::task::consume_budget().await;
-            let result = async {
-                let node = self
-                    .cluster
-                    .gossip_state()
-                    .await
-                    .live_nodes
-                    .into_iter()
-                    .find(|node| node.node_id == node_id.clone())
-                    .ok_or_else(|| {
-                        format!("remote node '{node_id}' is not present in gossip membership")
-                    })?;
-                let target_addr = node.interconnect_advertise_addr.parse().map_err(|error| {
-                    format!("invalid interconnect address for '{node_id}': {error}")
-                })?;
-                let mode = match node.interconnect_mode.as_str() {
-                    "https" => InterconnectTransportMode::Tls,
-                    _ => InterconnectTransportMode::Plain,
-                };
-                let connection = self
-                    .interconnect
-                    .connection_for(node_id, target_addr, "localhost", mode)
-                    .map_err(|error| {
-                        format!("failed to connect interconnect for '{node_id}': {error}")
-                    })?;
-                connection
-                    .send(envelope.clone())
-                    .await
-                    .map_err(|error| format!("failed to send remote relay payload: {error}"))
-            }
+            let result = tokio::time::timeout_at(
+                deadline,
+                self.interconnect.send(node_id, envelope.clone()),
+            )
             .await;
             let error = match result {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(error)) => format!("failed to send remote relay payload: {error}"),
+                Err(_) => {
+                    return Err(format!(
+                        "timed out dispatching remote relay payload to '{node_id}'"
+                    ));
+                }
             };
             if Instant::now() >= deadline {
                 return Err(error);
             }
-            sleep(Self::DISPATCH_RETRY_INTERVAL).await;
+            tokio::select! {
+                _ = sleep_until(deadline) => return Err(error),
+                _ = sleep(Self::DISPATCH_RETRY_INTERVAL) => {}
+            }
         }
     }
 }

@@ -43,9 +43,11 @@ just kube-app
 ```
 
 to install a three-node Nervix StatefulSet into the `nervix` namespace on top of
-the dependency stack. Each pod has its own PVC and advertises its stable
-StatefulSet FQDN through the `nervix-headless` service for internal gossip,
-cluster API, and interconnect traffic. For local client redirects, each pod
+the dependency stack. cert-manager provisions a distinct mutual-TLS identity for every pod, with
+the pod's stable StatefulSet FQDN and its `nervix-kube` cluster/node URI in the certificate. Each
+pod has its own PVC and advertises that FQDN through the `nervix-headless` service for all internal
+HTTP/2 traffic. Nervix reloads renewed cert-manager secrets in place and gracefully drains the
+HTTP/2 connections using the prior certificate. For local client redirects, each pod
 advertises a host-reachable gRPC NodePort address. The server image used by the
 manifest must include hostname/FQDN advertise-address support.
 
