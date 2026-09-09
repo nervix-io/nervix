@@ -328,10 +328,9 @@ pub(super) fn paced_domain_state(raw: &str) -> DomainState {
     }
 }
 
-pub(super) fn test_domain_clock(domain: &DomainName) -> super::DomainClock {
-    let lifecycle = super::DomainClockLifecycle::new(domain.clone());
-    lifecycle.synchronize(&DomainState {
-        id: domain.clone(),
+pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
+    DomainState {
+        id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
             period: "1s".to_string(),
@@ -342,7 +341,12 @@ pub(super) fn test_domain_clock(domain: &DomainName) -> super::DomainClock {
         start_version: 0,
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
-    });
+    }
+}
+
+pub(super) fn test_domain_clock(domain: &DomainName) -> super::DomainClock {
+    let lifecycle = super::DomainClockLifecycle::new(domain.clone());
+    lifecycle.synchronize(&unpaced_domain_state(domain.as_str()));
     lifecycle
         .bind()
         .expect("the fixture installs an unpaced domain clock")

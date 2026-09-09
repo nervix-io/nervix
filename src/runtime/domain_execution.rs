@@ -818,6 +818,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::runtime::domain_clock::DomainClockAccessError;
 
     #[test]
     fn sync_domains_clears_ticks_when_paced_domain_stops() {
@@ -960,5 +961,31 @@ mod tests {
             reason.contains("not installed"),
             "unexpected error: {reason}"
         );
+    }
+
+    #[tokio::test]
+    async fn passive_execution_keeps_a_stopped_clock_unreadable() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("stopped");
+        let mut stopped = unpaced_domain_state(clock_domain.as_str());
+        stopped.status = DomainStatus::Stopped;
+        runtime.sync_domains(&BTreeMap::from([(clock_domain.clone(), stopped)]));
+        let schedule = DomainSchedule::new(clock_domain.clone(), Vec::new(), Vec::new());
+
+        let execution = runtime
+            .build_passive_execution_from_schedule(&clock_domain, &schedule)
+            .await
+            .expect("stopped domains retain passive model execution");
+        let error = execution
+            .domain_clock
+            .snapshot()
+            .expect_err("passive execution must not make a stopped clock readable");
+
+        assert!(execution.passive_only);
+        assert!(matches!(
+            error.current_context(),
+            DomainClockAccessError::Stopped { domain, generation: 0 }
+                if domain == &clock_domain
+        ));
     }
 }

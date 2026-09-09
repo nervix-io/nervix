@@ -2055,6 +2055,10 @@ mod tests {
     async fn branch_preserving_processors_build_standalone_schedule_nodes() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let order_schema = named::<SchemaName>("order_event");
         let order_relay = |name: &str| {
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
@@ -2143,6 +2147,10 @@ mod tests {
         *runtime.inner.remote_dispatch.local_node_id.write() =
             Some(ClusterNodeName::parse("node-1").expect("valid name"));
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let event_schema = named::<SchemaName>("event");
         let processor = named::<DeduplicatorName>("deduplicate_events");
         let schedule = DomainSchedule::new(
@@ -2246,6 +2254,10 @@ mod tests {
         *runtime.inner.remote_dispatch.local_node_id.write() =
             Some(ClusterNodeName::parse("node-1").expect("valid name"));
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let event_schema = named::<SchemaName>("event");
         let processor = named::<DeduplicatorName>("deduplicate_events");
         let schedule = DomainSchedule::new(

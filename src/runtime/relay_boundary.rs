@@ -2128,6 +2128,10 @@ mod tests {
     async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let schema = named::<SchemaName>("notification");
         let relay = named::<RelayName>("notifications");
 

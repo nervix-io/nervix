@@ -436,10 +436,16 @@ mod tests {
         flush_policy: RuntimeFlushPolicy,
         fanout: RelayBoundaryFanout,
     ) -> (MessageErrorRouteTask, RelayOwnerTask) {
+        let runtime = Runtime::default();
+        let domain = DomainName::try_from("test").expect("valid domain");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let task = MessageErrorRouteTask {
-            runtime: Runtime::default(),
+            runtime,
             route: MessageErrorRouteKey {
-                domain: DomainName::try_from("test").expect("valid domain"),
+                domain,
                 node: NodeRef::new(ModelKind::Emitter, named::<ModelName>("notifications")),
                 source_route: None,
                 error_relay: named("emitter_errors"),

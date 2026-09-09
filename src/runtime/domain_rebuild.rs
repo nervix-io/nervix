@@ -230,19 +230,13 @@ impl Runtime {
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         };
-        let domain_clock =
-            self.bind_domain_clock(domain)
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
-        self.install_state_schema_fingerprints(&schedule);
         if self
             .inner
             .domains
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped))
         {
+            self.install_state_schema_fingerprints(&schedule);
             self.clear_domain_ingestor_quiescence(domain);
             self.purge_stopped_domain_runtime_state(domain)?;
             self.clear_expiring_stream_states_for_domain(domain);
@@ -253,6 +247,13 @@ impl Runtime {
             self.clear_domain_graph_handle(domain).await;
             return Ok(());
         }
+        let domain_clock =
+            self.bind_domain_clock(domain)
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+        self.install_state_schema_fingerprints(&schedule);
         if reset_for_start {
             self.purge_stopped_domain_runtime_state(domain)?;
         }
@@ -1093,12 +1094,12 @@ impl Runtime {
         domain: &DomainName,
         schedule: &DomainSchedule,
     ) -> Result<DomainExecution, RuntimeError> {
-        let domain_clock =
-            self.bind_domain_clock(domain)
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
+        let domain_clock = self.bind_passive_domain_clock(domain).map_err(|error| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: error.to_string(),
+            }
+        })?;
         let udf_executor = self
             .compile_domain_udfs(
                 domain,

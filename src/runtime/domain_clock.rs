@@ -129,6 +129,12 @@ enum DomainClockInstallation {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainClockBinding {
+    Active,
+    Passive,
+}
+
 impl DomainClockInstallation {
     const fn generation(&self) -> Option<u64> {
         match self {
@@ -237,6 +243,19 @@ impl DomainClockLifecycle {
     }
 
     pub fn bind(&self) -> DomainClockAccessResult<DomainClock> {
+        self.bind_for(DomainClockBinding::Active)
+    }
+
+    /// Binds the generation carried by a passive execution for a stopped domain.
+    ///
+    /// Passive executions own model and routing state but run no domain work. Their clock handle
+    /// therefore preserves domain and generation identity while every attempted read continues to
+    /// return the typed `Stopped` outcome.
+    pub(super) fn bind_passive(&self) -> DomainClockAccessResult<DomainClock> {
+        self.bind_for(DomainClockBinding::Passive)
+    }
+
+    fn bind_for(&self, binding: DomainClockBinding) -> DomainClockAccessResult<DomainClock> {
         let shared = self.inner.state.lock();
         let generation = match shared.installation {
             DomainClockInstallation::Missing => {
@@ -244,12 +263,15 @@ impl DomainClockLifecycle {
                     domain: self.inner.domain.clone(),
                 }));
             }
-            DomainClockInstallation::Stopped { generation } => {
+            DomainClockInstallation::Stopped { generation }
+                if binding == DomainClockBinding::Active =>
+            {
                 return Err(Report::new(DomainClockAccessError::Stopped {
                     domain: self.inner.domain.clone(),
                     generation,
                 }));
             }
+            DomainClockInstallation::Stopped { generation } => generation,
             DomainClockInstallation::Uninstalled { generation } => {
                 return Err(Report::new(DomainClockAccessError::Uninstalled {
                     domain: self.inner.domain.clone(),
@@ -495,12 +517,6 @@ pub struct LogicalDeadline {
     due_at: Timestamp,
 }
 
-impl LogicalDeadline {
-    pub const fn due_at(&self) -> Timestamp {
-        self.due_at
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalDeadlineReached {
     due_at: Timestamp,
@@ -723,6 +739,18 @@ impl Runtime {
             }));
         };
         entry.clock.bind()
+    }
+
+    pub(super) fn bind_passive_domain_clock(
+        &self,
+        domain: &DomainName,
+    ) -> DomainClockAccessResult<DomainClock> {
+        let Some(entry) = self.inner.domains.get(domain) else {
+            return Err(Report::new(DomainClockAccessError::Missing {
+                domain: domain.clone(),
+            }));
+        };
+        entry.clock.bind_passive()
     }
 
     pub(crate) fn current_paced_domain_time(
