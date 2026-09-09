@@ -702,7 +702,9 @@ impl Runtime {
             .pending_relay_admissions
             .remove(&ack.ack_id)
         {
-            let _ = admission.send(ack.outcome);
+            admission
+                .send(ack.outcome)
+                .means_peer_left("relay admission requester");
             return;
         }
 

@@ -30,6 +30,7 @@ use nervix_models::{
     BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
     Timestamp,
 };
+use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use prometheus::{
     Encoder, Gauge, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
@@ -41,6 +42,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 use triomphe::Arc;
+
+/// Why withdrawing a label set discards its outcome. See [`PrometheusMetrics::remove`].
+const WITHDRAWN_SERIES_MAY_NOT_EXIST: &str =
+    "an entity torn down before its first observation has no series to withdraw";
 
 const MESSAGES_TOTAL: &str = "messages_total";
 const BATCHES_TOTAL: &str = "batches_total";
@@ -1589,27 +1594,40 @@ impl PrometheusMetrics {
     ///
     /// Removal reports an error when the label set was never registered, which happens whenever an
     /// entity is torn down before it produced its first observation of that metric. There is
-    /// nothing to withdraw and nothing to report, so each removal below discards that outcome.
+    /// nothing to withdraw and nothing to report, which is what
+    /// [`WITHDRAWN_SERIES_MAY_NOT_EXIST`] states at each removal below.
     fn remove(&self, key: &MetricKey) {
         let labels = prometheus_label_values(key);
         match key.metric {
             MESSAGES_TOTAL => {
-                let _ = self.messages_total.remove_label_values(&labels);
+                self.messages_total
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
             }
             BATCHES_TOTAL => {
-                let _ = self.batches_total.remove_label_values(&labels);
+                self.batches_total
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
             }
             BYTES_TOTAL => {
-                let _ = self.bytes_total.remove_label_values(&labels);
+                self.bytes_total
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
             }
             MESSAGES_PER_BATCH => {
-                let _ = self.messages_per_batch.remove_label_values(&labels);
+                self.messages_per_batch
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
             }
             DELIVERY_LATENCY_SECONDS => {
-                let _ = self.delivery_latency_seconds.remove_label_values(&labels);
+                self.delivery_latency_seconds
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
             }
             RELAY_BUFFER_LEN => {
-                let _ = self.relay_buffer_len.remove_label_values(&labels);
+                self.relay_buffer_len
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
             }
             _ => {}
         }
@@ -3416,17 +3434,30 @@ fn instant_from_series_elapsed(series_started_at: Instant, elapsed_seconds: f64)
         .unwrap_or(series_started_at)
 }
 
+/// The wall clock as Unix nanoseconds, or `None` when it cannot be expressed as one.
+///
+/// A host clock set before 1970, or past the year 2262, has no `i64` nanosecond reading. Rates and
+/// ages derived from it are simply not reported for as long as that holds.
 fn current_wall_unix_nanos() -> Option<i64> {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     i64::try_from(duration.as_nanos()).ok()
 }
 
+/// The wall-clock reading of a monotonic `instant`, or `None` when the wall clock has none.
+///
+/// The conversion inherits [`current_wall_unix_nanos`]'s range, and it also declines an instant so
+/// far in the past that its offset does not fit. Both mean the same thing to the caller: this
+/// sample carries no wall-clock timestamp.
 fn wall_unix_nanos_from_instant(instant: Instant) -> Option<i64> {
     let now = current_wall_unix_nanos()?;
     let elapsed = i64::try_from(instant.elapsed().as_nanos()).ok()?;
     now.checked_sub(elapsed)
 }
 
+/// The monotonic instant a wall-clock reading corresponds to, or `None` when it has none.
+///
+/// It has none when the wall clock is out of range, and when the reading is older than the process
+/// itself, which is what a persisted timestamp restored on a freshly started node looks like.
 fn instant_from_wall_unix_nanos(wall_unix_nanos: i64) -> Option<Instant> {
     let now = current_wall_unix_nanos()?;
     let elapsed = now.checked_sub(wall_unix_nanos)?;
@@ -3515,6 +3546,12 @@ fn optional_histogram_capacity(value: &AtomicU64) -> Option<u64> {
     (value != NO_HISTOGRAM_CAPACITY).then_some(value)
 }
 
+/// The per-second rate `value` was observed at on a domain clock, or `None` when there is no rate
+/// to report yet.
+///
+/// A domain clock that has not moved, or has moved backwards because a paced domain restarted, has
+/// no elapsed span to divide by. The metric is left unreported rather than shown as zero, which
+/// would read as a domain that stopped.
 fn domain_rate(value: u64, started_at_nanos: &AtomicI64, last_at_nanos: &AtomicI64) -> Option<f64> {
     let started_at_nanos = started_at_nanos.load(AtomicOrdering::Relaxed);
     let last_at_nanos = last_at_nanos.load(AtomicOrdering::Relaxed);

@@ -2137,7 +2137,7 @@ impl RelayProcessorNode {
                 return;
             }
             let output_key = branch.key.clone();
-            let _ = dispatch_wasm_output_envelopes(
+            dispatch_wasm_output_envelopes(
                 WasmOutputContext {
                     graph,
                     branch,
@@ -2154,7 +2154,10 @@ impl RelayProcessorNode {
                 outputs,
                 ack_map,
             )
-            .await;
+            .await
+            .discarded(
+                "the processor error policy already handled every failure this dispatch produced",
+            );
         })
     }
 

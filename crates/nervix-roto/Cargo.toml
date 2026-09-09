@@ -20,6 +20,7 @@ fastrand = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
 nervix-vm = { workspace = true }
 parking_lot = { workspace = true }
 regex = { workspace = true }

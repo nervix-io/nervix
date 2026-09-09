@@ -752,7 +752,8 @@ impl Runtime {
     /// the ingestor's general error policy, which is what decides whether the messages are logged,
     /// routed to a dead-letter relay, or dropped. The returned error is a second copy of the first
     /// such failure, for callers that need to stop rather than continue collecting. A caller that
-    /// only continues is therefore right to discard it, and discarding it loses no report.
+    /// only continues is therefore right to discard it, and discarding it loses no report. Such
+    /// a caller names [`INGEST_FLUSH_FAILURES_ARE_HANDLED`] as its reason.
     pub(in crate::runtime) async fn flush_ingest_collector(
         &self,
         domain: &DomainName,

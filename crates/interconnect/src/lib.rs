@@ -34,6 +34,7 @@ use nervix_models::{
     RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
     ResourceName, SubscriptionBinding,
 };
+use nervix_recovery::{Discarded as _, Reported as _};
 use rand_core::OsRng;
 use rkyv::{Archive, Deserialize, Serialize};
 use rustls::{
@@ -1126,11 +1127,12 @@ impl Transport {
             for reconnect in reconnects {
                 reconnect.cancel();
             }
-            let _ = timeout(
+            timeout(
                 self.inner.options.connection_setup_timeout,
                 self.inner.tasks.wait(),
             )
-            .await;
+            .await
+            .reported("waiting for cancelled interconnect tasks to finish");
         }
         self.inner.outbound.clear();
         self.inner.connected_peers.clear();
@@ -1215,7 +1217,12 @@ fn introduction_message(node_id: &ClusterNodeName) -> Vec<u8> {
 pub fn install_rustls_crypto_provider() {
     static PROVIDER: OnceLock<()> = OnceLock::new();
     PROVIDER.get_or_init(|| {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .discarded(
+                "a provider the host installed first is the one this transport would have \
+                 installed",
+            );
     });
 }
 

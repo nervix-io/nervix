@@ -26,6 +26,7 @@ use bytes::Bytes;
 use flatbuffers::{Allocator, FlatBufferBuilder};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
+use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -1751,7 +1752,9 @@ impl WasmBranchInstance {
             let batch = WasmEnvelope::decode_owned(self.read_guest_buffer(size).await?)
                 .map_err(|error| WasmProcessorError::GuestGlobalError(error.to_string()))?;
             if let Some(sender) = self.store.data().emitted_batch_sender.as_ref() {
-                let _ = sender.send(batch.clone());
+                sender
+                    .send(batch.clone())
+                    .means_peer_left("emitted batch observer");
             }
             batches.push(batch);
         }
@@ -1802,6 +1805,9 @@ where
     Params: wasmtime::WasmParams,
     Results: wasmtime::WasmResults,
 {
+    // A guest that does not define the export, and one that defines it with another signature,
+    // are the same thing to the host: this optional capability is not available on this module.
+    // The host has no second reading to give the error, and every caller answers both the same.
     match instance.get_typed_func(&mut *store, name) {
         Ok(export) => Ok(Some(export)),
         Err(_) => Ok(None),

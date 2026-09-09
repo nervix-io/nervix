@@ -126,10 +126,10 @@ pub(super) async fn evaluate_filter_map_on_batch(
     let mut successful_output_rows = Vec::new();
     let mut successful_input_rows = Vec::new();
     for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
-        let (Some(slot), Some(metadata)) = (
-            outcomes.get_mut(input_row),
-            record_metadata.get(input_row).cloned(),
-        ) else {
+        // The metadata entry is read only to prove the selected row is inside the input; the
+        // outcome slot is what this loop writes.
+        let (Some(slot), Some(_)) = (outcomes.get_mut(input_row), record_metadata.get(input_row))
+        else {
             return Err(format!(
                 "FILTER-MAP selected row {input_row} outside its {row_count}-record input"
             ));
@@ -151,7 +151,6 @@ pub(super) async fn evaluate_filter_map_on_batch(
             };
             continue;
         }
-        let _ = metadata;
         successful_output_rows.push(output_row);
         successful_input_rows.push(input_row);
     }

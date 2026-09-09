@@ -736,7 +736,10 @@ impl IcebergEmitter {
     }
 
     pub(super) fn finish_rejected_record(&mut self) {
-        let _ = self.rejected_records.pop_front();
+        self.rejected_records.pop_front().discarded(
+            "the caller is finishing the record it read from the front, so an empty queue means \
+             it read none",
+        );
         self.update_buffered_messages();
     }
 

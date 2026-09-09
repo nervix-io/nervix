@@ -85,6 +85,7 @@ use nervix_models::{
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use nervix_roto::UdfExecutor;
 #[cfg(test)]
 use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
@@ -291,6 +292,13 @@ pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
 use relay_batch::build_stream_record_batch_preserving_acks;
 type RelayDispatchResult = Result<(), Box<RelayRecordBatch>>;
+
+/// Why an ingestor that keeps running discards the summary a flush returns.
+///
+/// See [`Runtime::flush_ingest_collector`], which routes every failure through the ingestor's
+/// error policy before returning that summary.
+const INGEST_FLUSH_FAILURES_ARE_HANDLED: &str =
+    "the ingestor's error policy already handled every failure this flush produced";
 pub(crate) use relay_channel::{
     RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease,
     RelayReceiver as RelaySubscriptionReceiver,

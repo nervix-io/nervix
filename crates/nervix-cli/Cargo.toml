@@ -18,6 +18,7 @@ error-stack = { workspace = true }
 nervix-client-core = { workspace = true, features = ["autocomplete"] }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
+nervix-recovery = { workspace = true }
 reedline = { workspace = true, features = ["external_printer"] }
 rpassword = { workspace = true }
 thiserror = { workspace = true }

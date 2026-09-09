@@ -10,8 +10,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, completion_context, domain_name,
-        into_parse_error, kw, lex_input, suggestions_from_errors, tok,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        domain_name, into_parse_error, kw, lex_input, suggestions_from_errors, tok,
     },
 };
 
@@ -292,9 +292,8 @@ fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let LexedInput { tokens, .. } = match lex_input(&source) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
 
     if starts_with_server_command_keyword(&tokens) {

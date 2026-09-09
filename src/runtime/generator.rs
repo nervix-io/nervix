@@ -957,6 +957,9 @@ impl Runtime {
                         {
                             match wall_duration_until_logical_target(clock, execution_now, next) {
                                 Ok(duration) => duration,
+                                // A time rate the registry accepted but that no longer parses is
+                                // not something this generator can repair, so it waits a fixed
+                                // step and looks again rather than spinning.
                                 Err(_) => Duration::from_millis(100),
                             }
                         } else {

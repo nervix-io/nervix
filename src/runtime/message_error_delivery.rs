@@ -120,7 +120,7 @@ impl MessageErrorRouteRuntime {
     }
 
     async fn shutdown(&self) {
-        let _ = self.shutdown.send(true);
+        self.shutdown.send_replace(true);
         let task = self.task.lock().take();
         if let Some(task) = task {
             task.join_after_shutdown("message error delivery").await;
@@ -297,8 +297,9 @@ impl MessageErrorRouteTask {
             };
             tokio::select! {
                 biased;
-                changed = shutdown_rx.changed() => {
-                    let _ = changed;
+                // A signalled stop and a dropped sender both mean the owner is gone, and this
+                // arm drains and finishes either way, so the outcome carries nothing to read.
+                _ = shutdown_rx.changed() => {
                     input.close();
                     while let Some(delivery) = input.recv().await {
                         tokio::task::consume_budget().await;

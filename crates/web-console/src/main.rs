@@ -21,6 +21,7 @@ use nervix_models::{ClusterNodeName, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
+use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_web_console::graph::{
     graph_layout_edge, graph_layout_item,
     layout::{GroupRegion, Layout, Rect},
@@ -320,7 +321,9 @@ fn App() -> impl IntoView {
         };
         let queued = QueuedRequest::SetActiveDomain { request };
         if let Some(request_tx) = active_domain_session.request_tx.get_untracked() {
-            let _ = request_tx.unbounded_send(queued);
+            request_tx
+                .unbounded_send(queued)
+                .means_shutdown("web console session");
         }
     });
     let suggestion_session = web_console_session.clone();
@@ -555,7 +558,9 @@ fn App() -> impl IntoView {
             )),
         };
         if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked() {
-            let _ = request_tx.unbounded_send(QueuedRequest::SubscriptionStop { request });
+            request_tx
+                .unbounded_send(QueuedRequest::SubscriptionStop { request })
+                .means_shutdown("web console session");
         }
     };
 
@@ -975,15 +980,28 @@ async fn wait_for_websocket_open(socket: &WebSocket) {
 async fn wait_for_websocket_reconnect(delay: Duration) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                &resolve,
-                i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
-            );
+            window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    &resolve,
+                    i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
+                )
+                .discarded(
+                    "a timer the browser refuses to schedule leaves the promise pending until the \
+                     caller is dropped",
+                );
         } else {
-            let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
+            resolve.call0(&wasm_bindgen::JsValue::UNDEFINED).discarded(
+                "a resolve callback that throws leaves the promise pending until the caller is \
+                 dropped",
+            );
         }
     });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .discarded(
+            "the wait is over either way: this promise carries no value and rejects only if the \
+             timer threw",
+        );
 }
 
 async fn send_pending_websocket_commands(
@@ -1007,6 +1025,12 @@ async fn send_pending_websocket_commands(
     true
 }
 
+/// The session token the console was opened with, or `None` when the page carries none.
+///
+/// The console runs in a browser it does not control, so every step here can legitimately come up
+/// empty: a document rendered without a window, a location the URL grammar does not accept, and an
+/// address with no `auth` query all mean the same thing to the caller, which is that the console
+/// has to ask the operator to sign in.
 fn web_console_auth_token_from_location() -> Option<String> {
     let href = web_sys::window()?.location().href().ok()?;
     let url = Url::parse(&href).ok()?;
@@ -1014,6 +1038,11 @@ fn web_console_auth_token_from_location() -> Option<String> {
         .find_map(|(key, value)| (key == "auth").then(|| value.into_owned()))
 }
 
+/// The session websocket address derived from the page's own location.
+///
+/// A browser that refuses to hand over its protocol or host leaves the console with no address to
+/// connect to, which is why absence is the answer rather than a failure: the caller retries once
+/// the document is ready.
 fn web_console_websocket_url(auth_token: &str) -> Option<String> {
     let location = web_sys::window()?.location();
     let protocol = match location.protocol().ok()?.as_str() {
@@ -1027,6 +1056,8 @@ fn web_console_websocket_url(auth_token: &str) -> Option<String> {
     ))
 }
 
+/// The origin the console makes its HTTP requests against, or `None` before the document has a
+/// readable location.
 fn web_console_http_base_url() -> Option<String> {
     let location = web_sys::window()?.location();
     let protocol = location.protocol().ok()?;
@@ -1034,6 +1065,10 @@ fn web_console_http_base_url() -> Option<String> {
     Some(format!("{protocol}//{host}"))
 }
 
+/// The session websocket address for an explicitly configured base URL.
+///
+/// `None` says the base URL is not one a session can be opened on: it is not a URL, or its scheme
+/// has no websocket counterpart. The caller falls back to the page's own location.
 fn web_console_websocket_url_from_base(base_url: &str, auth_token: &str) -> Option<String> {
     let mut url = Url::parse(base_url).ok()?;
     let websocket_scheme = match url.scheme() {
@@ -1639,6 +1674,10 @@ fn resource_file_summary(file: &ResourceFileView) -> String {
     parts.join(" | ")
 }
 
+/// The domain the first `CREATE DOMAIN` in `query` declares, or `None` when there is none.
+///
+/// The query is whatever the operator has typed so far, so text that does not parse is the
+/// ordinary case rather than a failure; it simply names no domain yet.
 fn first_created_domain_from_query(query: &str) -> Option<String> {
     parse_client_statements(query)
         .ok()?
@@ -2193,7 +2232,8 @@ fn request_resource_describe(
         )),
     };
     if let Some(tx) = request_tx.get_untracked() {
-        let _ = tx.unbounded_send(QueuedRequest::ResourceDescribe { resource, request });
+        tx.unbounded_send(QueuedRequest::ResourceDescribe { resource, request })
+            .means_shutdown("web console session");
     }
 }
 
@@ -2292,7 +2332,11 @@ fn ResourceDialog(
                         disabled=move || uploading.get()
                         on:click=move |_| {
                             if let Some(input) = directory_input.get() {
-                                let _ = input.set_attribute("webkitdirectory", "");
+                                input.set_attribute("webkitdirectory", "")
+                                .discarded(
+                                    "a browser that rejects the attribute opens a file picker \
+                                     instead of a directory picker",
+                                );
                                 input.click();
                             }
                         }

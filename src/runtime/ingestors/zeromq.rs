@@ -154,14 +154,15 @@ impl ZeroMqIngestor {
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                let _ = task_runtime
+                                task_runtime
                                     .flush_ingest_collector(
                                         &task_domain,
                                         &task_ingestor,
                                         &branched_senders,
                                         &mut collector,
                                     )
-                                    .await;
+                                    .await
+                                    .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                                 break 'outer;
                             }
                         }
@@ -249,14 +250,15 @@ impl ZeroMqIngestor {
                                     }
                                 }
                                 Err(error) => {
-                                    let _ = task_runtime
+                                    task_runtime
                                         .flush_ingest_collector(
                                             &task_domain,
                                             &task_ingestor,
                                             &branched_senders,
                                             &mut collector,
                                         )
-                                        .await;
+                                        .await
+                                        .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                                     task_runtime.record_ingestor_transient_error(
                                         &task_domain,
                                         &task_ingestor,

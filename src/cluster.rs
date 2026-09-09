@@ -26,6 +26,7 @@ use chitchat::{
 use meticulous::ResultExt as _;
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_models::ClusterNodeName;
+use nervix_recovery::Discarded as _;
 use parking_lot::{Mutex, RwLock};
 use tokio::{net::lookup_host, sync::broadcast, task::JoinHandle};
 use tokio_stream::StreamExt;
@@ -47,14 +48,47 @@ const KEY_INTERCONNECT_PUBLIC_KEY: &str = "interconnect_public_key";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
+/// How many cluster changes a session can fall behind before the bus drops the oldest.
+const CLUSTER_EVENT_CAPACITY: usize = 256;
 
 pub struct ClusterHandle {
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
     chitchat_server: Mutex<Option<ChitchatHandle>>,
-    events: broadcast::Sender<String>,
+    events: ClusterEvents,
     interconnect_state: RwLock<BTreeMap<ClusterNodeName, InterconnectPeerState>>,
     node_unavailability_timeout: Duration,
     membership_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// The gossip event bus, and the one way a membership or peer-connectivity change reaches a
+/// session attached to this node.
+///
+/// Offering goes through [`Self::offer`] rather than through the sender directly. Each caller
+/// records the change in its own `info` line first, with the node and address as fields, and that
+/// line is the record: it is written whether or not anyone is attached. Subscribers here are live
+/// sessions only, so a node serving none is the ordinary case rather than a failure, and an
+/// undelivered offer costs the operator nothing.
+#[derive(Clone)]
+struct ClusterEvents {
+    sender: broadcast::Sender<String>,
+}
+
+impl ClusterEvents {
+    fn new() -> Self {
+        let (sender, _) = broadcast::channel(CLUSTER_EVENT_CAPACITY);
+        Self { sender }
+    }
+
+    /// Offer an already-recorded change in this node's view of the cluster to attached sessions.
+    fn offer(&self, message: String) {
+        self.sender
+            .send(message)
+            .discarded("the caller logged this change before offering it to attached sessions");
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.sender.subscribe()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +274,9 @@ pub async fn start_cluster_with_transport(
                 .into_iter()
                 .map(|addr| addr.to_string())
                 .collect(),
+            // A seed the address grammar does not accept is handed to gossip verbatim: the
+            // operator configured it, gossip is the component that resolves it, and rejecting it
+            // here would drop the only seed the node was given.
             Err(_) => vec![seed.to_string()],
         },
         None => Vec::new(),
@@ -319,7 +356,7 @@ pub async fn start_cluster_with_transport(
         .await
         .map_err(|err| io::Error::other(format!("failed to start chitchat: {err}")))?;
 
-    let (events, _) = broadcast::channel(256);
+    let events = ClusterEvents::new();
     let chitchat_state = chitchat.chitchat();
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
     let event_tx = events.clone();
@@ -328,7 +365,7 @@ pub async fn start_cluster_with_transport(
             tokio::task::consume_budget().await;
             let report = membership_report(&nodes);
             info!(members = ?report, "cluster membership updated");
-            let _ = event_tx.send(format!("cluster membership updated: {}", report.join(", ")));
+            event_tx.offer(format!("cluster membership updated: {}", report.join(", ")));
         }
     });
 
@@ -557,12 +594,12 @@ impl ClusterHandle {
 
         if !was_connected {
             info!(%node_id, target_addr, "interconnect connection established");
-            let _ = self.events.send(format!(
+            self.events.offer(format!(
                 "interconnect connection established: {node_id}@{target_addr}"
             ));
         } else if was_unavailable {
             info!(%node_id, target_addr, "interconnect connection restored");
-            let _ = self.events.send(format!(
+            self.events.offer(format!(
                 "interconnect connection restored: {node_id}@{target_addr}"
             ));
         }
@@ -754,6 +791,11 @@ fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
         .collect()
 }
 
+/// The peer `state` describes, or `None` while it is still incomplete.
+///
+/// Gossip converges field by field, so a peer that has not yet published every address, or has
+/// published a node identity this build does not accept, is one to skip and read again on the next
+/// round rather than one to report.
 fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode> {
     let cluster_api_advertise_addr = state.get(KEY_CLUSTER_API_ADVERTISE_ADDR)?.to_string();
     let grpc_advertise_addr = state.get(KEY_GRPC_ADVERTISE_ADDR).unwrap_or("").to_string();

@@ -6,7 +6,7 @@ use crate::{
     lexer::Token,
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, boxed_choice, completion_context,
-        filter_by_prefix, into_parse_error, lex_input, suggestions_from_errors,
+        completion_tokens, filter_by_prefix, into_parse_error, lex_input, suggestions_from_errors,
     },
 };
 
@@ -155,9 +155,8 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
 pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let LexedInput { tokens, .. } = match lex_input(&source) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
 
     let out = statement_parser()

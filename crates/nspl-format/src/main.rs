@@ -10,6 +10,7 @@ use std::{
 use clap::Parser;
 use ignore::WalkBuilder;
 use nervix_nspl_format::{FormatError, diagnostics, format_source};
+use nervix_recovery::{Discarded as _, Reported as _};
 
 /// The name standard input reports as, in both listings and diagnostics.
 const STDIN_ORIGIN: &str = "<stdin>";
@@ -162,7 +163,10 @@ fn format_stdin(check: bool) -> Outcome {
         }
         Ok(formatted) => {
             print!("{formatted}");
-            let _ = std::io::stdout().flush();
+            std::io::stdout().flush().discarded(
+                "the formatted output is written before this flush, and the exit status reports \
+                 the outcome",
+            );
             Outcome::Settled
         }
         Err(error) => {
@@ -199,7 +203,10 @@ fn format_path(path: &Path, args: &Args, unformatted: &mut Vec<PathBuf>) -> Outc
 
     if args.stdout {
         print!("{formatted}");
-        let _ = std::io::stdout().flush();
+        std::io::stdout().flush().discarded(
+            "the formatted output is written before this flush, and the exit status reports the \
+             outcome",
+        );
         return Outcome::Settled;
     }
 
@@ -232,7 +239,9 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     // A temporary file is created private to its owner, so the target's own permissions are
     // carried over before it takes the target's place.
     if let Ok(metadata) = fs::metadata(path) {
-        let _ = file.as_file().set_permissions(metadata.permissions());
+        file.as_file()
+            .set_permissions(metadata.permissions())
+            .reported("carrying the formatted file's permissions over from the original");
     }
 
     file.persist(path)?;

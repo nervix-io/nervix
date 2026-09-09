@@ -401,6 +401,13 @@ impl IngestFilterMapMetadata {
         }
     }
 
+    /// The header names and values carried for `row`, or `None` when this batch carries none.
+    ///
+    /// Ingestion metadata is optional per connector, so a batch whose header columns are absent or
+    /// hold another Arrow type simply has no headers to read, and a row past the end of the
+    /// selection is not part of this view. The offsets are Arrow list offsets, which are
+    /// non-negative by construction; a negative one would mean a corrupt array, and reading no
+    /// headers is the only answer this view can give for it.
     pub(super) fn header_row(&self, row: usize) -> Option<IngestHeaderRow<'_>> {
         let physical_row = *self.rows.get(row)?;
         let names = self
