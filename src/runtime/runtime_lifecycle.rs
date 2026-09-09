@@ -114,6 +114,7 @@ impl Runtime {
                 domain_drain_timeout,
                 entity_gate_deadline,
                 temp_dir,
+                executor: Executor::default(),
                 metrics: RuntimeMetrics::default(),
             }),
         })
@@ -121,6 +122,11 @@ impl Runtime {
 
     pub fn metrics(&self) -> RuntimeMetrics {
         self.inner.metrics.clone()
+    }
+
+    /// The node's bounded execution and transient-memory admission.
+    pub fn executor(&self) -> &Executor {
+        &self.inner.executor
     }
 
     /// The directory connectors stage local files in before they publish them.

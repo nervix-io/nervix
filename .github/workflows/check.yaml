@@ -36,7 +36,7 @@ jobs:
 
   checks:
     name: checks
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - name: Setup Rust
@@ -161,7 +161,7 @@ jobs:
 
   tests:
     name: tests
-    runs-on: blacksmith-16vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 60
     permissions:
       contents: read

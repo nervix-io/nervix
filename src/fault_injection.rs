@@ -11,14 +11,15 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 
 use ahash::RandomState;
 use dashmap::DashMap;
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::{Notify, broadcast};
 use triomphe::Arc;
 
@@ -46,6 +47,7 @@ struct FaultInjectionState {
     unavailable_otel_clients: DashMap<String, (), RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
+    bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     command_pauses: DashMap<CommandPausePoint, Arc<CommandPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -56,6 +58,13 @@ struct FaultInjectionState {
     entity_gate_deadline: RwLock<Option<Duration>>,
     scheduler_mode: RwLock<SchedulerMode>,
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
+}
+
+#[derive(Debug)]
+struct NodeBulkExecution {
+    executor: Executor,
+    /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
+    holders: Arc<Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -100,6 +109,7 @@ impl Default for FaultInjection {
                 unavailable_otel_clients: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
+                bulk_executions: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
                 syslog_ingestor_bind_ips: DashMap::default(),
@@ -170,6 +180,58 @@ impl FaultInjection {
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
         self.inner.transaction_binding_drops.insert(node_id, ());
+    }
+
+    /// Fill every bulk worker on `node_id` and return once every occupying job is running.
+    pub async fn occupy_bulk_execution(&self, node_id: &ClusterNodeName) {
+        let node = self
+            .inner
+            .bulk_executions
+            .get(node_id)
+            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"));
+        let executor = node.executor.clone();
+        let holders = node.holders.clone();
+        drop(node);
+        let workers = executor.snapshot().bulk_cpu.workers;
+        let started = Arc::new(AtomicUsize::new(0));
+        for _ in 0..workers {
+            let reservation = executor
+                .try_reserve(MemoryClass::Bulk, 0)
+                .unwrap_or_else(|error| {
+                    panic!("bulk admission must accept a zero charge: {error}")
+                });
+            let (holder, held) = std::sync::mpsc::channel();
+            holders.lock().push(holder);
+            let executor = executor.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                let _ = executor
+                    .run_cpu(
+                        CpuClass::Bulk,
+                        reservation,
+                        move |_charge, _cancellation| {
+                            started.fetch_add(1, Ordering::AcqRel);
+                            // Park until the scenario drops the holder so occupancy consumes no CPU.
+                            let _ = held.recv();
+                        },
+                    )
+                    .await;
+            });
+        }
+        while started.load(Ordering::Acquire) < workers {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub fn release_bulk_execution(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .bulk_executions
+            .get(node_id)
+            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
+            .holders
+            .lock()
+            .clear();
     }
 
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
@@ -319,6 +381,17 @@ impl FaultInjection {
             .transaction_binding_drops
             .remove(node_id)
             .is_some()
+    }
+
+    /// Record the executor whose bulk workers a scenario may fill.
+    pub(crate) fn register_bulk_executor(&self, node_id: ClusterNodeName, executor: Executor) {
+        self.inner.bulk_executions.insert(
+            node_id,
+            NodeBulkExecution {
+                executor,
+                holders: Arc::default(),
+            },
+        );
     }
 
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(

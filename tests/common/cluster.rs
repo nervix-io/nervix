@@ -113,6 +113,17 @@ const TEST_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TEST_AUTH_USERNAME: &str = "default";
 pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
+/// Every port any scenario in this process has claimed. Scenarios run concurrently in one test
+/// binary, and `next_ports` drops its probe listener as soon as it has read the port number, so the
+/// operating system does not stop a second scenario from binding the same port. This set is the
+/// only thing that does. Startup still retries on a fresh allocation, because the pool is shared
+/// with sibling worktrees running the same suite, and their binds are invisible here.
+///
+/// A port leaves the set only once nothing can still dial it. Returning one while a peer holds it
+/// in gossip lets an unrelated scenario's node answer that peer, and because every scenario names
+/// its nodes `node-1`, `node-2` and `node-3`, the impostor passes the peer-identity check and is
+/// caught only at signature verification. Never releasing is not the alternative: eleven ports per
+/// node across the suite exceeds the ephemeral range, so teardown has to give them back.
 static RESERVED_TEST_PORTS: LazyLock<Mutex<BTreeSet<u16>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
@@ -2136,6 +2147,18 @@ impl NodeSpec {
         Ok(())
     }
 
+    /// Move this node to a fresh interconnect address, leaving the address it is giving up
+    /// reserved for the rest of the run.
+    ///
+    /// The reservation set is shared by every scenario running concurrently, and `next_ports`
+    /// releases its probe listener as soon as it has read the port number, so the set is the only
+    /// thing stopping two scenarios from landing on the same port. Returning this node's old port
+    /// to it lets another scenario bind the address a peer is still dialling: every scenario names
+    /// its nodes `node-1`, `node-2`, `node-3`, so the impostor passes the peer-identity check and
+    /// is only caught when its introduction fails to verify against the expected key. The dialling
+    /// node then reports its peer unavailable until gossip carries the new address, which is long
+    /// enough to fail the scenario. Only this call site retires ports, and only a few times per
+    /// run, so keeping them costs a handful of entries.
     fn reallocate_interconnect_ports(&mut self) -> io::Result<()> {
         let mut ports = next_ports(2)?.into_iter();
         let interconnect_port = ports
@@ -2144,14 +2167,15 @@ impl NodeSpec {
         let interconnect_https_port = ports.next().ok_or_else(|| {
             io::Error::other("interconnect HTTPS port allocation returned only one port")
         })?;
-        let mut reserved = RESERVED_TEST_PORTS.lock();
-        reserved.remove(&self.interconnect_port);
-        reserved.remove(&self.interconnect_https_port);
         self.interconnect_port = interconnect_port;
         self.interconnect_https_port = interconnect_https_port;
         Ok(())
     }
 
+    /// Return this node's ports to the pool. Every caller reaches here with the node down: two
+    /// teardown paths, and the startup retry for a node that never bound them. That is what makes
+    /// the release safe, not the stop itself, so a caller that releases while a peer may still dial
+    /// the address belongs elsewhere.
     fn release_ports(&mut self) {
         let mut reserved = RESERVED_TEST_PORTS.lock();
         for port in [
