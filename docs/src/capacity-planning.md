@@ -37,6 +37,39 @@ maximum number of concurrent UDF-bearing paths are blocking-pool sizing inputs. 
 never returns permanently occupies one worker. See the
 [UDF watchdog consequences](udfs.md#nulls-errors-and-volatility).
 
+## Bounded Execution And Transient Memory
+
+Every variable-size encode, decode, validation and hash a node performs is admitted into one of
+five bounded classes rather than run on the asynchronous runtime, and is charged against a reserved
+byte budget before it allocates. Each class has its own admission, so work saturating one cannot
+take the slots another is entitled to.
+
+| Class | Concurrent jobs | Work |
+| --- | --- | --- |
+| Control | 1 | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
+| Data | available CPUs − 1 | Per-message relay body encoding, decoding and validation |
+| Bulk | available CPUs − 1 | Whole-transfer work: resource archives and large read results |
+| Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
+| Filesystem storage | 2 | Every other synchronous filesystem and database operation |
+
+These counts bound admission, not threads. Jobs run on the process-wide blocking pool that the
+node's other blocking work also uses, so a class's count is the number of its jobs that may be on
+that pool at once. A class is guaranteed its share of admission; it is not guaranteed an idle
+thread. Size the blocking pool for the sum of these counts plus whatever else the node offloads —
+connector flushes, model inference and UDF execution among them.
+
+Transient memory is 256 MiB per node, divided into ceilings that cannot borrow from each other:
+8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work and 32 MiB for
+bulk buffers. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
+and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
+once so one blocked channel cannot exhaust the capacity another needs.
+
+These budgets cover work in flight between nodes. They are separate from the process memory a
+running graph holds, which the [memory-pressure watermarks](metrics-and-observability.md) govern.
+The limits are checked against each other when a node starts: a budget that could not hold the
+largest operation of its class is reported with that class and size rather than discovered by
+stalling on the first such operation.
+
 Two multipliers usually dominate:
 
 1. live branch count × per-branch buffered depth;

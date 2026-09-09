@@ -90,6 +90,7 @@ nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
@@ -221,6 +222,7 @@ members = [
   "crates/client-core",
   "crates/consensus",
   "crates/dataflow-graph",
+  "crates/execution",
   "crates/expiry-map",
   "crates/interconnect",
   "crates/nervix-wasm",
@@ -356,6 +358,7 @@ nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-int
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
+nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-models = { package = "nervix-models", path = "crates/models" }

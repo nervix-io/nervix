@@ -3,12 +3,13 @@
 use std::net::SocketAddr;
 use std::{
     net::IpAddr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 
 use ahash::RandomState;
 use dashmap::DashMap;
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 #[cfg(feature = "testing")]
 use nervix_models::DomainName;
 use nervix_models::{ClusterNodeName, EmitterName, IngestorName};
@@ -40,6 +41,25 @@ pub struct SchedulePublicationFaultInjector {
 #[derive(Debug, Default)]
 pub(crate) struct SyslogIngestorBindAddressOverrides {
     hosts: DashMap<ClusterNodeName, IpAddr, RandomState>,
+}
+
+/// Fills every bulk worker on a node and holds them until a scenario releases them, so a scenario
+/// can prove that management work is admitted while bulk work is not.
+///
+/// Each node registers its executor here as it starts, and the scenario submits the occupying jobs
+/// itself. Registering a handle costs one map insert and is the same in every build, so the node's
+/// own startup path does not differ between them.
+#[derive(Debug, Default)]
+pub struct BulkExecutionOccupancy {
+    nodes: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
+}
+
+#[derive(Debug)]
+struct NodeBulkExecution {
+    executor: Executor,
+    /// One holder per occupying job. Dropping them releases every job at once, and while they are
+    /// held each job parks rather than spinning, so an occupied class costs no CPU.
+    holders: Arc<parking_lot::Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
 }
 
 /// Drops a node's leader-local transaction session bindings on its next transaction command, so
@@ -109,6 +129,7 @@ pub struct RuntimeTestHooks {
     pub otel_client_faults: Arc<OtelClientFaultInjector>,
     pub schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     pub transaction_binding_drops: Arc<TransactionBindingDropInjector>,
+    pub bulk_execution_occupancy: Arc<BulkExecutionOccupancy>,
     pub(crate) command_pauses: Arc<CommandPauseInjector>,
     pub(crate) runtime_pauses: Arc<RuntimePauseInjectors>,
     pub(crate) syslog_ingestor_bind_address_overrides: Arc<SyslogIngestorBindAddressOverrides>,
@@ -133,6 +154,7 @@ impl Default for RuntimeTestHooks {
             otel_client_faults: Arc::default(),
             schedule_publication_faults: Arc::default(),
             transaction_binding_drops: Arc::default(),
+            bulk_execution_occupancy: Arc::default(),
             command_pauses: Arc::default(),
             runtime_pauses: Arc::default(),
             syslog_ingestor_bind_address_overrides: Arc::default(),
@@ -363,6 +385,70 @@ impl CommandPauseInjector {
             notified.await;
         }
         self.pauses.remove(&key);
+    }
+}
+
+impl BulkExecutionOccupancy {
+    /// Record the executor whose bulk workers a scenario may fill.
+    pub(crate) fn register(&self, node_id: ClusterNodeName, executor: Executor) {
+        self.nodes.insert(
+            node_id,
+            NodeBulkExecution {
+                executor,
+                holders: Arc::default(),
+            },
+        );
+    }
+
+    /// Fill every bulk worker on `node_id` and return once they are all actually running.
+    pub async fn occupy(&self, node_id: &ClusterNodeName) {
+        let node = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"));
+        let executor = node.executor.clone();
+        let holders = node.holders.clone();
+        drop(node);
+        let workers = executor.snapshot().bulk_cpu.workers;
+        let started = Arc::new(AtomicUsize::new(0));
+        for _ in 0..workers {
+            let reservation = executor
+                .try_reserve(MemoryClass::Bulk, 0)
+                .unwrap_or_else(|error| {
+                    panic!("bulk admission must accept a zero charge: {error}")
+                });
+            let (holder, held) = std::sync::mpsc::channel();
+            holders.lock().push(holder);
+            let executor = executor.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                let _ = executor
+                    .run_cpu(
+                        CpuClass::Bulk,
+                        reservation,
+                        move |_charge, _cancellation| {
+                            started.fetch_add(1, Ordering::AcqRel);
+                            // Parks until the scenario drops the holder, so the worker is occupied
+                            // without burning the CPU the scenario is measuring.
+                            let _ = held.recv();
+                        },
+                    )
+                    .await;
+            });
+        }
+        while started.load(Ordering::Acquire) < workers {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub fn release(&self, node_id: &ClusterNodeName) {
+        self.nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
+            .holders
+            .lock()
+            .clear();
     }
 }
 

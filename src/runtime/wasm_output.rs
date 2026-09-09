@@ -1519,10 +1519,10 @@ mod tests {
     use super::*;
     use crate::runtime_ack::{AckOutcome, AckSet};
 
-    #[test]
-    fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
+    #[tokio::test]
+    async fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (_, ack_map) = wasm_input_for_values(&schema, &[10]);
+        let (_, ack_map) = wasm_input_for_values(&schema, &[10]).await;
         let outputs = validate_wasm_test_outputs(
             &schema,
             &schema,
@@ -1578,12 +1578,12 @@ mod tests {
         assert!(outputs[0].uninitialized_columns.contains(&0));
     }
 
-    #[test]
-    fn wasm_mixed_input_and_generated_columns_match_destination_schema() {
+    #[tokio::test]
+    async fn wasm_mixed_input_and_generated_columns_match_destination_schema() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let output_schema =
             test_schema(&[("value", ParseAsType::I32), ("bucket", ParseAsType::String)]);
-        let (input, ack_map) = wasm_input_for_values(&input_schema, &[2, 4]);
+        let (input, ack_map) = wasm_input_for_values(&input_schema, &[2, 4]).await;
         let field = output_schema.arrow_schema().field(1).clone();
         let ipc = wasm_guest_column(field, StdArc::new(StringArray::from(vec!["EVEN", "EVEN"])));
         let outputs = validate_wasm_test_outputs(
@@ -1608,8 +1608,8 @@ mod tests {
         assert_eq!(outputs[0].batch.batch().num_rows(), 2);
     }
 
-    #[test]
-    fn wasm_shared_generated_column_reuses_one_array_across_routes_and_fields() {
+    #[tokio::test]
+    async fn wasm_shared_generated_column_reuses_one_array_across_routes_and_fields() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let enriched_schema = test_schema(&[
             ("value", ParseAsType::I32),
@@ -1620,7 +1620,7 @@ mod tests {
             ("value", ParseAsType::I32),
             ("classification", ParseAsType::String),
         ]);
-        let (input, ack_map) = wasm_input_for_values(&input_schema, &[2, 4]);
+        let (input, ack_map) = wasm_input_for_values(&input_schema, &[2, 4]).await;
         let rows = wasm_input_acks(&input).rows.clone();
         let generated_arrow_ipc_batch = wasm_guest_column(
             enriched_schema.arrow_schema().field(1).clone(),
@@ -1868,7 +1868,7 @@ mod tests {
     #[tokio::test]
     async fn wasm_routed_output_fanout_waits_for_every_downstream_ack() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, mut ack_map) = wasm_input_for_values(&schema, &[2]);
+        let (input, mut ack_map) = wasm_input_for_values(&schema, &[2]).await;
         let (root_acks, completion) = AckSet::root();
         ack_map.get_mut(&1).expect("token must exist").acks = root_acks;
         let row = wasm_input_acks(&input).rows[0].clone();
@@ -1969,11 +1969,11 @@ mod tests {
         assert_eq!(outputs[0].batch.batch().num_rows(), 1);
     }
 
-    #[test]
-    fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
+    #[tokio::test]
+    async fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let output_schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, ack_map) = wasm_input_for_values(&input_schema, &[2]);
+        let (input, ack_map) = wasm_input_for_values(&input_schema, &[2]).await;
         let rows = wasm_input_acks(&input).rows.clone();
         let destination_field = output_schema.arrow_schema().field(0).clone();
         let validate_ipc = |ipc| {
@@ -2074,8 +2074,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
+    #[tokio::test]
+    async fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let renamed_schema = test_schema(&[("renamed_value", ParseAsType::I32)]);
         let string_schema = test_schema(&[("value", ParseAsType::String)]);
@@ -2084,7 +2084,7 @@ mod tests {
             ty: ParseAsType::I32,
             optional: true,
         }]);
-        let (input, ack_map) = wasm_input_for_values(&input_schema, &[10]);
+        let (input, ack_map) = wasm_input_for_values(&input_schema, &[10]).await;
         let rows = wasm_input_acks(&input).rows.clone();
 
         validate_wasm_test_outputs(
@@ -2196,10 +2196,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn wasm_callback_rejects_tokens_that_are_both_carried_and_terminal() {
+    #[tokio::test]
+    async fn wasm_callback_rejects_tokens_that_are_both_carried_and_terminal() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, ack_map) = wasm_input_for_values(&schema, &[10]);
+        let (input, ack_map) = wasm_input_for_values(&schema, &[10]).await;
         let output = WasmEnvelope::output(
             Vec::new(),
             vec![WasmRoutedOutput::new(
@@ -2262,10 +2262,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn wasm_reference_to_terminally_removed_or_other_branch_token_is_rejected() {
+    #[tokio::test]
+    async fn wasm_reference_to_terminally_removed_or_other_branch_token_is_rejected() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, _) = wasm_input_for_values(&schema, &[10]);
+        let (input, _) = wasm_input_for_values(&schema, &[10]).await;
         let empty_ack_map = WasmAckMap::default();
 
         let error = validate_wasm_test_outputs(
@@ -2287,7 +2287,7 @@ mod tests {
     #[tokio::test]
     async fn wasm_callback_validation_is_all_or_nothing_for_terminal_decisions() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
-        let (input, mut ack_map) = wasm_input_for_values(&schema, &[10]);
+        let (input, mut ack_map) = wasm_input_for_values(&schema, &[10]).await;
         let (acks, completion) = AckSet::root();
         ack_map.get_mut(&1).expect("token must exist").acks = acks;
         let output_group = WasmEnvelope::output(
