@@ -79,8 +79,8 @@ pub(super) fn current_window_emit_high_watermark(
     domain: &DomainName,
 ) -> Result<Timestamp, String> {
     runtime
-        .current_stream_expiration_time(domain)?
-        .ok_or_else(|| format!("domain '{}' has no current timestamp", domain.as_str()))
+        .current_stream_expiration_time(domain)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn window_output_metadata(

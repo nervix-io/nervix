@@ -227,7 +227,6 @@ pub(super) async fn run_processor_node_runtime(
         let now = runtime_handle
             .current_stream_expiration_time(&domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         let mut did_scheduled_work = false;
         if Instant::now() >= next_expiration_scan {
@@ -592,7 +591,6 @@ pub(super) async fn run_processor_branch_task(
         let now = runtime_handle
             .current_stream_expiration_time(&domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         if branch
             .next_deadline()
@@ -604,7 +602,18 @@ pub(super) async fn run_processor_branch_task(
         }
         let sleep_duration = match branch.next_deadline() {
             Some(deadline) => {
-                wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline)
+                match wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline) {
+                    Ok(duration) => duration,
+                    Err(error) => {
+                        runtime_handle.events().report_error(format!(
+                            "processor '{}' in domain '{}' lost its clock: {error}",
+                            processor.as_str(),
+                            domain.as_str(),
+                        ));
+                        stop_mode = Some(ProcessorBranchStopMode::Detach);
+                        break;
+                    }
+                }
             }
             None => PROCESSOR_BRANCH_TASK_IDLE_SLEEP,
         };
@@ -685,7 +694,6 @@ pub(super) async fn run_processor_branch_task(
             let now = runtime_handle
                 .current_stream_expiration_time(&domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp);
             branch.force_flush(&graph, now).await;
             Some(now)

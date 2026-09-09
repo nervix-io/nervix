@@ -69,8 +69,10 @@ an endpoint SAN. A connection is accepted only when its CA trust, cluster identi
 advertised endpoint, and HTTP/2 ALPN all agree.
 
 Each peer has independent HTTP/2 pools for membership and management events, commands, Raft
-replication, Arrow relay batches, and bulk transfers. Management capacity is reserved so relay or
-bulk backpressure cannot prevent gossip, heartbeats, or elections. Gossip exchanges, Raft records,
+replication, Arrow relay batches and their acknowledgements, and bulk transfers. Every pool except
+bulk is connected before a peer is reported ready, with capacity reserved in both directions. This
+keeps gossip, heartbeats, elections, administrative operations, and the first remote batch and its
+acknowledgement from waiting behind another traffic class. Gossip exchanges, Raft records,
 resource chunks, and other non-Arrow messages use bounded, validated rkyv records. Relay payloads
 remain Arrow IPC end to end. Resource archives and Raft snapshots cross the bulk pool as bounded
 chunks rather than one whole in-memory wire message.

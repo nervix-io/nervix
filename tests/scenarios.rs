@@ -95,6 +95,7 @@ static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
+const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
     ["Web console NSPL REPL", "Web console execution graph"];
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
@@ -9817,12 +9818,34 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
 #[given(expr = "ZeroMQ emission endpoint {string} is observed")]
 async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     let addr = expand_placeholders(world, &addr);
-    world.broker_observer = Some(
-        world
-            .cluster()
-            .observe_zeromq(&addr)
-            .await
-            .expect("failed to observe zeromq endpoint"),
+    match world.cluster().observe_zeromq(&addr).await {
+        Ok(observer) => {
+            world.broker_observer = Some(observer);
+            return;
+        }
+        Err(error) if addr != world.zeromq_emit_addr => {
+            panic!("failed to observe zeromq endpoint '{addr}': {error}");
+        }
+        Err(_) => {}
+    }
+
+    for _ in 0..ZEROMQ_OBSERVER_BIND_ATTEMPTS {
+        tokio::task::consume_budget().await;
+        let replacement = format!(
+            "tcp://127.0.0.1:{}",
+            crate::common::cluster::next_port()
+                .expect("failed to allocate replacement ZeroMQ emit port")
+        );
+        if let Ok(observer) = world.cluster().observe_zeromq(&replacement).await {
+            world.zeromq_emit_addr = replacement;
+            world.broker_observer = Some(observer);
+            return;
+        }
+    }
+
+    panic!(
+        "failed to observe a generated ZeroMQ endpoint after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
+         fresh port allocations"
     );
 }
 
@@ -12484,6 +12507,28 @@ async fn then_timestamp_placeholder_is_not_before(
     assert!(
         later_timestamp >= earlier_timestamp,
         "timestamp moved backwards from {earlier_timestamp} to {later_timestamp}"
+    );
+}
+
+#[then(expr = "timestamp placeholder {string} is before {string}")]
+async fn then_timestamp_placeholder_is_before(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+    upper_bound: String,
+) {
+    let value = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{placeholder}' is not defined"));
+    let value = chrono::DateTime::parse_from_rfc3339(value).unwrap_or_else(|error| {
+        panic!("timestamp placeholder '{placeholder}' is invalid: {error}")
+    });
+    let upper_bound = chrono::DateTime::parse_from_rfc3339(&upper_bound)
+        .unwrap_or_else(|error| panic!("timestamp upper bound is invalid: {error}"));
+
+    assert!(
+        value < upper_bound,
+        "timestamp placeholder '{placeholder}' was {value}, expected a value before {upper_bound}"
     );
 }
 

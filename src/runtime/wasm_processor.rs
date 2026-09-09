@@ -372,10 +372,21 @@ pub(super) async fn ensure_wasm_processor_instance(
                 .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
                 .collect(),
         };
-        let clock = RuntimeWasmDomainClock {
-            runtime: branch.runtime.clone(),
-            domain: branch.domain.clone(),
-        };
+        let domain_clock = branch
+            .runtime
+            .bind_domain_clock(&branch.domain)
+            .map_err(|error| {
+                format!(
+                    "failed to bind WASM processor '{}' to domain clock: {error}",
+                    processor.as_str(),
+                )
+            })?;
+        let clock = RuntimeWasmDomainClock::new(domain_clock).map_err(|error| {
+            format!(
+                "failed to snapshot WASM processor '{}' domain clock: {error}",
+                processor.as_str(),
+            )
+        })?;
         let restored_guest_state = replicated_state.restore_guest_state();
         *instance = Some(Box::new(
             compiled

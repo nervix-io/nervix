@@ -311,6 +311,13 @@ impl Runtime {
                 Self::scheduled_node(&execution.schedule, entity)
                     .is_some_and(|existing| existing.executes_on(local_node_id))
             });
+            let previous_owner = if let Some(execution) = self.inner.executions.get(domain)
+                && let Some(existing) = Self::scheduled_node(&execution.schedule, entity)
+            {
+                existing.execution_node().cloned()
+            } else {
+                None
+            };
             let executes_locally = desired_node.executes_on(local_node_id);
             let relay_runtime = if entity.kind == ModelKind::Relay
                 && let Some(execution) = self.inner.executions.get(domain)
@@ -372,6 +379,62 @@ impl Runtime {
             } else {
                 None
             };
+            if executes_locally
+                && !was_local
+                && let Some(relay) = materialized_relay.as_ref()
+                && let Some(previous_owner) = previous_owner.as_ref()
+            {
+                let state_placement = self.state_placement(
+                    domain,
+                    RuntimeStateKind::MaterializedRelay,
+                    ModelKind::Relay,
+                    relay,
+                    None,
+                );
+                let local_replica = self
+                    .inner
+                    .replicated_materialized_stream_states
+                    .get(&state_placement)
+                    .map(|state| state.clone());
+                if let Some(local_replica) = local_replica {
+                    let after_lsm =
+                        ReplicatedMaterializedRelayState::read(&local_replica).current_lsm();
+                    let snapshot = self
+                        .request_state_sync(previous_owner, &state_placement, after_lsm)
+                        .await
+                        .map_err(|reason| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "failed to refresh promoted materialized relay replica '{}': \
+                                 {reason}",
+                                relay.as_str()
+                            ),
+                        })?;
+                    if let Some(snapshot) = snapshot {
+                        let installer =
+                            ReplicatedMaterializedRelayState::current_installer(&local_replica)
+                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "materialized relay '{}' is no longer a replica while \
+                                         refreshing its ownership handoff snapshot",
+                                        relay.as_str()
+                                    ),
+                                })?;
+                        installer
+                            .install_snapshot(snapshot.lsm, &snapshot.payload)
+                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "failed to install ownership handoff snapshot for \
+                                     materialized relay '{}': {error}",
+                                    relay.as_str()
+                                ),
+                            })?;
+                        self.inner.materialized_state_changed.notify_waiters();
+                    }
+                }
+            }
             let placement = self.build_scheduled_node_placement(
                 domain,
                 &shutdown,
@@ -2055,6 +2118,10 @@ mod tests {
     async fn branch_preserving_processors_build_standalone_schedule_nodes() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let order_schema = named::<SchemaName>("order_event");
         let order_relay = |name: &str| {
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
@@ -2143,6 +2210,10 @@ mod tests {
         *runtime.inner.remote_dispatch.local_node_id.write() =
             Some(ClusterNodeName::parse("node-1").expect("valid name"));
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let event_schema = named::<SchemaName>("event");
         let processor = named::<DeduplicatorName>("deduplicate_events");
         let schedule = DomainSchedule::new(
@@ -2246,6 +2317,10 @@ mod tests {
         *runtime.inner.remote_dispatch.local_node_id.write() =
             Some(ClusterNodeName::parse("node-1").expect("valid name"));
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let event_schema = named::<SchemaName>("event");
         let processor = named::<DeduplicatorName>("deduplicate_events");
         let schedule = DomainSchedule::new(

@@ -6873,6 +6873,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "bytes",
+ "error-stack",
  "flatbuffers",
  "meticulous",
  "nervix-models",

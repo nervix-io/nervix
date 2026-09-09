@@ -4908,9 +4908,17 @@ impl SessionServiceImpl {
 
     fn handle_domain_clock_start(&self, start: DomainClockStart) {
         let domain_id = start.domain_id.clone();
-        self.inner
+        if let Err(error) = self
+            .inner
             .runtime
-            .handle_domain_clock_start(&domain_id, start.clock.clone());
+            .handle_domain_clock_start(&domain_id, start.clock.clone())
+        {
+            self.broadcast_error(format!(
+                "failed to install domain clock for '{}': {error}",
+                domain_id.as_str(),
+            ));
+            return;
+        }
         if start.owner_node_id != self.inner.consensus.local_node_id().clone() {
             self.inner.domain_clock_events.notify_waiters();
             return;
@@ -4931,15 +4939,28 @@ impl SessionServiceImpl {
     }
 
     fn handle_domain_clock_stop(&self, stop: DomainClockStop) {
-        self.inner.runtime.handle_domain_clock_stop(&stop.domain_id);
+        if let Err(error) = self.inner.runtime.handle_domain_clock_stop(&stop.domain_id) {
+            self.broadcast_error(format!(
+                "failed to stop domain clock for '{}': {error}",
+                stop.domain_id.as_str(),
+            ));
+            return;
+        }
         self.inner.domain_clocks.remove(&stop.domain_id);
         self.inner.domain_clock_events.notify_waiters();
     }
 
     fn handle_domain_tick(&self, tick: DomainTickEnvelope) {
-        self.inner
+        if let Err(error) = self
+            .inner
             .runtime
-            .handle_domain_tick(&tick.domain_id, &tick.tick);
+            .handle_domain_tick(&tick.domain_id, &tick.tick)
+        {
+            self.broadcast_error(format!(
+                "failed to apply domain clock progress for '{}': {error}",
+                tick.domain_id.as_str(),
+            ));
+        }
     }
 
     async fn domain_clock_owner(&self, domain_id: &DomainName) -> Option<ClusterNodeName> {
@@ -8856,9 +8877,16 @@ impl SessionServiceImpl {
                 start_version,
             }) = start_clock
             {
-                self.inner
+                if let Err(error) = self
+                    .inner
                     .runtime
-                    .handle_domain_clock_start(&domain_id, clock.clone());
+                    .handle_domain_clock_start(&domain_id, clock.clone())
+                {
+                    self.broadcast_error(format!(
+                        "failed to install domain clock for '{}': {error}",
+                        domain_id.as_str(),
+                    ));
+                }
                 if let Err(error) = self
                     .start_domain_clock(domain_id.clone(), clock, period)
                     .await
@@ -8886,7 +8914,12 @@ impl SessionServiceImpl {
                         },
                     );
                 }
-                self.inner.runtime.handle_domain_clock_stop(&domain_id);
+                if let Err(error) = self.inner.runtime.handle_domain_clock_stop(&domain_id) {
+                    self.broadcast_error(format!(
+                        "failed to stop domain clock for '{}': {error}",
+                        domain_id.as_str(),
+                    ));
+                }
             }
         }
         if let Some(handoff) = ownership_handoff {
@@ -11020,10 +11053,17 @@ impl SessionServiceImpl {
                         domain_id.as_str()
                     ));
                 }
-                if let DomainPace::Paced = domain.config.pace {
-                    self.inner
+                if let DomainPace::Paced = domain.config.pace
+                    && let Err(error) = self
+                        .inner
                         .runtime
-                        .handle_domain_clock_start(domain_id, clock.clone());
+                        .handle_domain_clock_start(domain_id, clock.clone())
+                {
+                    let rollback = self.roll_back_started_domain(domain_id).await;
+                    return command_error(format!(
+                        "failed to install domain clock for '{}': {error}{rollback}",
+                        domain_id.as_str(),
+                    ));
                 }
                 if let DomainPace::Paced = domain.config.pace {
                     let period = domain_clock_period(&domain.config)
@@ -11076,7 +11116,12 @@ impl SessionServiceImpl {
             return command_error(message);
         }
         if let DomainPace::Paced = domain.config.pace {
-            self.inner.runtime.handle_domain_clock_stop(domain_id);
+            if let Err(error) = self.inner.runtime.handle_domain_clock_stop(domain_id) {
+                return command_error(format!(
+                    "failed to stop domain clock for '{}': {error}",
+                    domain_id.as_str(),
+                ));
+            }
             self.inner.domain_clock_reconciliations.insert(
                 domain_id.clone(),
                 DomainClockReconciliation {
@@ -17621,6 +17666,7 @@ impl Application {
         let interconnect_for_membership = interconnect.clone();
         let cluster_for_interconnect = cluster.clone();
         let local_node_id = node_id;
+        let mut awaiting_initial_bootstrap_peer = cluster_bootstrap_host.is_some();
         let interconnect_membership_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;
@@ -17635,8 +17681,6 @@ impl Application {
                     .iter()
                     .map(|node| node.node_id.clone())
                     .collect::<std::collections::BTreeSet<_>>();
-                interconnect_for_membership.replace_live_nodes(&live_node_ids);
-                cluster_for_interconnect.retain_interconnect_live_set(&live_node_ids);
                 struct PeerConnectionPlan {
                     node_id: ClusterNodeName,
                     target_label: String,
@@ -17675,7 +17719,14 @@ impl Application {
                         target_label,
                     });
                 }
-                interconnect_for_membership.replace_outbound_targets(&outbound_targets);
+                if !outbound_targets.is_empty() {
+                    awaiting_initial_bootstrap_peer = false;
+                }
+                if !awaiting_initial_bootstrap_peer {
+                    interconnect_for_membership.replace_live_nodes(&live_node_ids);
+                    cluster_for_interconnect.retain_interconnect_live_set(&live_node_ids);
+                    interconnect_for_membership.replace_outbound_targets(&outbound_targets);
+                }
 
                 for plan in plans {
                     tokio::task::consume_budget().await;

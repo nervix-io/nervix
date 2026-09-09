@@ -172,8 +172,8 @@ Feature: Prometheus ingestion
       """
     Then within "5s" the relay subscription receives payloads
       """
-      "timestamp":"2026-04-07T00:00:00.
-      "timestamp":"2026-04-07T00:00:01.
+      "source":"local","timestamp":"2026-04-07T00:00:
+      "source":"local","timestamp":"2026-04-07T00:00:
       """
 
     Examples:

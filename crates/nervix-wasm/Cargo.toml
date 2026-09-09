@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 arch-into = { workspace = true }
 bytes = { workspace = true }
+error-stack = { workspace = true }
 flatbuffers = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }

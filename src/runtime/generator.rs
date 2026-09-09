@@ -530,7 +530,7 @@ impl Runtime {
                         .get(&task_domain)
                         .map(|domain_state| PacedDomainState {
                             pace: domain_state.config.pace,
-                            clock: domain_state.clock.clone(),
+                            clock: domain_state.clock.paced_mapping(),
                         });
                 let is_paced = paced_state
                     .as_ref()

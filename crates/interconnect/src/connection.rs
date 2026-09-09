@@ -23,6 +23,7 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::{DashMap, mapref::entry::Entry};
+use error_stack::Report;
 use h2::{Reason, RecvStream, SendStream, client, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -130,7 +131,15 @@ struct ClientConnection {
 
 struct StreamLease {
     connection: Arc<ClientConnection>,
-    _slot: OwnedSemaphorePermit,
+    slot: Option<OwnedSemaphorePermit>,
+    state: TransportState,
+}
+
+impl Drop for StreamLease {
+    fn drop(&mut self) {
+        drop(self.slot.take());
+        self.state.inner.connection_changed.notify_one();
+    }
 }
 
 struct RawRequest<'a> {
@@ -144,7 +153,8 @@ struct RawRequest<'a> {
 
 struct ConnectionPermits {
     _connection: OwnedSemaphorePermit,
-    _class: Option<OwnedSemaphorePermit>,
+    _non_management: Option<OwnedSemaphorePermit>,
+    _non_preconnected: Option<OwnedSemaphorePermit>,
 }
 
 struct PeerConnections {
@@ -155,6 +165,13 @@ struct PeerConnections {
 struct InboundConnectionRegistration {
     state: TransportState,
     key: InboundPoolKey,
+}
+
+struct BoundInboundConnection {
+    peer: InboundPeer,
+    _registration: InboundConnectionRegistration,
+    _non_management: Option<OwnedSemaphorePermit>,
+    _non_preconnected: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for InboundConnectionRegistration {
@@ -241,6 +258,7 @@ pub(crate) struct TransportStateInner {
     connection_changed: Notify,
     connection_permits: StdArc<Semaphore>,
     non_management_connection_permits: StdArc<Semaphore>,
+    non_preconnected_connection_permits: StdArc<Semaphore>,
     handshake_permits: StdArc<Semaphore>,
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
     requests: super::RequestState,
@@ -286,6 +304,9 @@ impl TransportState {
             .max_peers
             .checked_mul(2)
             .verified("transport options validated the inbound and outbound management reserve");
+        let preconnected_connection_reserve = management_connection_reserve
+            .checked_mul(PoolClass::preconnected_connections_per_peer())
+            .verified("transport options validated every inbound and outbound preconnected slot");
         let state = Self {
             inner: Arc::new(TransportStateInner {
                 executor,
@@ -314,6 +335,15 @@ impl TransportState {
                         .checked_sub(management_connection_reserve)
                         .verified(
                             "transport options reserve fewer management connections than the total",
+                        ),
+                )),
+                non_preconnected_connection_permits: StdArc::new(Semaphore::new(
+                    options
+                        .max_connections
+                        .checked_sub(preconnected_connection_reserve)
+                        .verified(
+                            "transport options reserve fewer preconnected connections than the \
+                             total",
                         ),
                 )),
                 handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
@@ -365,9 +395,23 @@ impl TransportState {
     }
 
     pub(crate) fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
-        self.peer_connections
-            .get(node_id)
-            .is_some_and(|connections| connections.count > 0)
+        let Some(target) = self.targets.get(node_id).map(|target| target.clone()) else {
+            return false;
+        };
+        for class in PoolClass::PRECONNECTED {
+            for slot in 0..class.connections_per_peer() {
+                let key = ConnectionSlotKey {
+                    node_id: node_id.clone(),
+                    target: target.clone(),
+                    class,
+                    slot,
+                };
+                if !self.connections.contains_key(&key) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub(crate) fn replace_outbound_targets(
@@ -402,7 +446,7 @@ impl TransportState {
                 self.cancel_slots_for_node(&node);
                 self.targets.insert(node.clone(), target.clone());
             }
-            self.ensure_class_slots(&node, &target, PoolClass::Management);
+            self.ensure_preconnected_slots(&node, &target);
         }
     }
 
@@ -422,7 +466,7 @@ impl TransportState {
             self.cancel_slots_for_node(&node_id);
             self.targets.insert(node_id.clone(), target.clone());
         }
-        self.ensure_class_slots(&node_id, &target, PoolClass::Management);
+        self.ensure_preconnected_slots(&node_id, &target);
         Ok(())
     }
 
@@ -505,6 +549,12 @@ impl TransportState {
                 slot,
             };
             self.ensure_slot(key);
+        }
+    }
+
+    fn ensure_preconnected_slots(&self, node_id: &ClusterNodeName, target: &PeerTarget) {
+        for class in PoolClass::PRECONNECTED {
+            self.ensure_class_slots(node_id, target, class);
         }
     }
 
@@ -631,13 +681,26 @@ impl TransportState {
         class: PoolClass,
         cancel: &CancellationToken,
     ) -> Option<ConnectionPermits> {
-        let class_permit = if class == PoolClass::Management {
+        let non_management = if class == PoolClass::Management {
             None
         } else {
             let acquired = tokio::select! {
                 _ = cancel.cancelled() => return None,
                 _ = self.admission_closed.cancelled() => return None,
                 acquired = StdArc::clone(&self.non_management_connection_permits).acquire_owned() => acquired,
+            };
+            match acquired {
+                Ok(permit) => Some(permit),
+                Err(_) => return None,
+            }
+        };
+        let non_preconnected = if class.is_preconnected() {
+            None
+        } else {
+            let acquired = tokio::select! {
+                _ = cancel.cancelled() => return None,
+                _ = self.admission_closed.cancelled() => return None,
+                acquired = StdArc::clone(&self.non_preconnected_connection_permits).acquire_owned() => acquired,
             };
             match acquired {
                 Ok(permit) => Some(permit),
@@ -655,7 +718,8 @@ impl TransportState {
         };
         Some(ConnectionPermits {
             _connection: connection,
-            _class: class_permit,
+            _non_management: non_management,
+            _non_preconnected: non_preconnected,
         })
     }
 
@@ -887,7 +951,8 @@ impl TransportState {
                 }
                 return Ok(StreamLease {
                     connection,
-                    _slot: permit,
+                    slot: Some(permit),
+                    state: self.clone(),
                 });
             }
 
@@ -1203,8 +1268,8 @@ impl TransportState {
         peer_addr: SocketAddr,
         handshake_permit: OwnedSemaphorePermit,
         _connection_permit: OwnedSemaphorePermit,
-    ) -> Result<(), TransportError> {
-        tcp.set_nodelay(true)?;
+    ) -> Result<(), Report<TransportError>> {
+        tcp.set_nodelay(true).map_err(TransportError::from)?;
         let (generation, tls) = {
             let active = self.tls.read();
             (active.generation, active.bundle.clone())
@@ -1219,7 +1284,8 @@ impl TransportState {
         .map_err(|_| TransportError::ConnectionSetupTimeout {
             peer: peer_addr,
             timeout: self.options.connection_setup_timeout,
-        })??;
+        })?
+        .map_err(TransportError::from)?;
         let peer_identity = validate_tls_session(
             stream.get_ref().1.alpn_protocol(),
             stream.get_ref().1.peer_certificates(),
@@ -1238,7 +1304,8 @@ impl TransportState {
         .map_err(|_| TransportError::ConnectionSetupTimeout {
             peer: peer_addr,
             timeout: self.options.connection_setup_timeout,
-        })??;
+        })?
+        .map_err(TransportError::from)?;
         let first = timeout(self.options.connection_setup_timeout, connection.accept())
             .await
             .map_err(|_| TransportError::ConnectionSetupTimeout {
@@ -1249,85 +1316,143 @@ impl TransportState {
                 TransportError::InvalidHandshake(
                     "connection closed before its class binding".to_string(),
                 )
-            })??;
+            })?
+            .map_err(TransportError::from)?;
         let (request, respond) = first;
-        if request.method() != Method::POST || request.uri().path() != CONNECT_PATH {
-            return Err(TransportError::InvalidHandshake(
-                "first HTTP/2 stream must POST the connection binding".to_string(),
-            ));
-        }
-        let hello_bytes = read_body(
-            &self.executor,
-            MemoryClass::Management,
-            self.executor.limits().management_event_bytes.as_u64(),
-            self.options.progress_timeout,
-            request.into_body(),
-        )
-        .await?;
-        let hello = wire::decode_rkyv::<ConnectionHello>(
-            &self.executor,
-            MemoryClass::Management,
-            CpuClass::Control,
-            hello_bytes,
-        )
-        .await?
-        .into_value();
-        if hello.fingerprint != WIRE_CONTRACT_FINGERPRINT
-            || hello.node_id != peer_identity.node_id
-            || !peer_identity.matches_endpoint(&hello.advertised_host)
-        {
-            return Err(TransportError::InvalidHandshake(
-                "wire fingerprint, certificate identity, or advertised endpoint differs"
-                    .to_string(),
-            ));
-        }
-        let _class_permit = if hello.class == PoolClass::Management {
-            None
-        } else {
-            match StdArc::clone(&self.non_management_connection_permits).try_acquire_owned() {
-                Ok(permit) => Some(permit),
-                Err(_) => {
-                    return Err(TransportError::PoolExhausted);
-                }
-            }
-        };
-        drop(handshake_permit);
-        let _registration =
-            self.register_inbound_pool(peer_identity.node_id.clone(), hello.class)?;
-        let accepted = ConnectionAccepted {
-            fingerprint: WIRE_CONTRACT_FINGERPRINT,
-            process_epoch: self.process_epoch,
-            node_id: self.node_id.clone(),
-        };
-        let accepted = wire::encode_rkyv(
-            &self.executor,
-            MemoryClass::Management,
-            CpuClass::Control,
-            self.executor.limits().management_event_bytes.as_u64(),
-            accepted,
-        )
-        .await?;
-        send_response(
-            respond,
-            StatusCode::OK,
-            Some(accepted),
-            self.options.progress_timeout,
-        )
-        .await?;
+        let bound = self
+            .complete_inbound_binding(
+                &mut connection,
+                peer_addr,
+                peer_identity,
+                request,
+                respond,
+                handshake_permit,
+            )
+            .await?;
 
         self.drive_inbound(
             connection,
-            InboundPeer {
-                addr: peer_addr,
-                node_id: peer_identity.node_id.clone(),
-                advertised_host: hello.advertised_host,
-                process_epoch: hello.process_epoch,
-                class: hello.class,
-            },
+            bound.peer.clone(),
             generation,
             certificate_expires_at,
         )
-        .await
+        .await?;
+        Ok(())
+    }
+
+    async fn complete_inbound_binding<T>(
+        &self,
+        connection: &mut server::Connection<T, Bytes>,
+        peer_addr: SocketAddr,
+        peer_identity: CertificateIdentity,
+        request: Request<RecvStream>,
+        respond: server::SendResponse<Bytes>,
+        handshake_permit: OwnedSemaphorePermit,
+    ) -> Result<BoundInboundConnection, Report<TransportError>>
+    where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let binding = async {
+            if request.method() != Method::POST || request.uri().path() != CONNECT_PATH {
+                return Err(Report::new(TransportError::InvalidHandshake(
+                    "first HTTP/2 stream must POST the connection binding".to_string(),
+                )));
+            }
+            let hello_bytes = read_body(
+                &self.executor,
+                MemoryClass::Management,
+                self.executor.limits().management_event_bytes.as_u64(),
+                self.options.progress_timeout,
+                request.into_body(),
+            )
+            .await?;
+            let hello = wire::decode_rkyv::<ConnectionHello>(
+                &self.executor,
+                MemoryClass::Management,
+                CpuClass::Control,
+                hello_bytes,
+            )
+            .await?
+            .into_value();
+            if hello.fingerprint != WIRE_CONTRACT_FINGERPRINT
+                || hello.node_id != peer_identity.node_id
+                || !peer_identity.matches_endpoint(&hello.advertised_host)
+            {
+                return Err(Report::new(TransportError::InvalidHandshake(
+                    "wire fingerprint, certificate identity, or advertised endpoint differs"
+                        .to_string(),
+                )));
+            }
+            let non_management = if hello.class == PoolClass::Management {
+                None
+            } else {
+                match StdArc::clone(&self.non_management_connection_permits).try_acquire_owned() {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        return Err(Report::new(TransportError::PoolExhausted));
+                    }
+                }
+            };
+            let non_preconnected = if hello.class.is_preconnected() {
+                None
+            } else {
+                match StdArc::clone(&self.non_preconnected_connection_permits).try_acquire_owned() {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        return Err(Report::new(TransportError::PoolExhausted));
+                    }
+                }
+            };
+            drop(handshake_permit);
+            let registration =
+                self.register_inbound_pool(peer_identity.node_id.clone(), hello.class)?;
+            let accepted = ConnectionAccepted {
+                fingerprint: WIRE_CONTRACT_FINGERPRINT,
+                process_epoch: self.process_epoch,
+                node_id: self.node_id.clone(),
+            };
+            let accepted = wire::encode_rkyv(
+                &self.executor,
+                MemoryClass::Management,
+                CpuClass::Control,
+                self.executor.limits().management_event_bytes.as_u64(),
+                accepted,
+            )
+            .await?;
+            send_response(
+                respond,
+                StatusCode::OK,
+                Some(accepted),
+                self.options.progress_timeout,
+            )
+            .await?;
+            Ok(BoundInboundConnection {
+                peer: InboundPeer {
+                    addr: peer_addr,
+                    node_id: peer_identity.node_id.clone(),
+                    advertised_host: hello.advertised_host,
+                    process_epoch: hello.process_epoch,
+                    class: hello.class,
+                },
+                _registration: registration,
+                _non_management: non_management,
+                _non_preconnected: non_preconnected,
+            })
+        };
+
+        // Request and response flow-control windows advance only while the h2 connection is polled.
+        let connection_closed = poll_fn(|context| connection.poll_closed(context));
+        tokio::pin!(binding);
+        tokio::pin!(connection_closed);
+        tokio::select! {
+            result = &mut binding => result,
+            result = &mut connection_closed => {
+                result.map_err(TransportError::from)?;
+                Err(Report::new(TransportError::InvalidHandshake(
+                    "connection closed before its class binding completed".to_string(),
+                )))
+            }
+        }
     }
 
     async fn drive_inbound<T>(
@@ -1470,7 +1595,7 @@ impl TransportState {
                 .await;
         }
         if path == ACK_PATH {
-            if peer.class != PoolClass::Replication {
+            if peer.class != PoolClass::Relay {
                 send_static_error(
                     &mut respond,
                     StatusCode::FORBIDDEN,
@@ -2023,7 +2148,7 @@ impl TransportState {
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect::<Vec<_>>();
         for (node, target) in peers {
-            self.ensure_class_slots(&node, &target, PoolClass::Management);
+            self.ensure_preconnected_slots(&node, &target);
         }
         Ok(())
     }

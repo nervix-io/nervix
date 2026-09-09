@@ -402,13 +402,7 @@ impl GossipSocket for InterconnectGossipSocket {
             },
         };
         let node_id = match route.node_id {
-            Some(node_id) => {
-                self.transport
-                    .inner
-                    .interconnect
-                    .register_outbound_target(node_id.clone(), route.target.clone())?;
-                node_id
-            }
+            Some(node_id) => node_id,
             None => {
                 let node_id = self
                     .transport

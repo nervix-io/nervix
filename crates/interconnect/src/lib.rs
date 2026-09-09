@@ -42,7 +42,7 @@ pub use request::{
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
 const DEFAULT_MAX_PEERS: usize = 64;
-const DEFAULT_MAX_CONNECTIONS: usize = 512;
+const DEFAULT_MAX_CONNECTIONS: usize = 768;
 const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 32;
 const DEFAULT_INCOMING_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_STREAM_WINDOW_BYTES: u32 = 64 * 1024;
@@ -77,6 +77,30 @@ impl PoolClass {
         Self::Relay,
         Self::Bulk,
     ];
+
+    pub(crate) const PRECONNECTED: [Self; 4] = [
+        Self::Management,
+        Self::Commands,
+        Self::Replication,
+        Self::Relay,
+    ];
+
+    pub(crate) const fn is_preconnected(self) -> bool {
+        matches!(
+            self,
+            Self::Management | Self::Commands | Self::Replication | Self::Relay
+        )
+    }
+
+    pub(crate) fn preconnected_connections_per_peer() -> usize {
+        let mut connections = 0usize;
+        for class in Self::PRECONNECTED {
+            connections = connections
+                .checked_add(class.connections_per_peer())
+                .assured("the fixed set of preconnected pool slots fits in usize");
+        }
+        connections
+    }
 
     pub const fn connections_per_peer(self) -> usize {
         match self {
@@ -200,18 +224,26 @@ impl TransportOptions {
                 reason: "HTTP/2 windows and header limit must be greater than zero".to_string(),
             });
         }
-        let management_connections =
-            self.max_peers
-                .checked_mul(2)
-                .ok_or_else(|| TransportError::InvalidOptions {
-                    reason: "max_peers cannot be represented as inbound and outbound management \
+        let preconnected_connections = self
+            .max_peers
+            .checked_mul(PoolClass::preconnected_connections_per_peer())
+            .ok_or_else(|| TransportError::InvalidOptions {
+                reason: "max_peers cannot be represented for every preconnected pool slot"
+                    .to_string(),
+            })?;
+        let preconnected_connections =
+            preconnected_connections.checked_mul(2).ok_or_else(|| {
+                TransportError::InvalidOptions {
+                    reason: "max_peers cannot be represented as inbound and outbound preconnected \
                              pools"
                         .to_string(),
-                })?;
-        if self.max_connections <= management_connections {
+                }
+            })?;
+        if self.max_connections <= preconnected_connections {
             return Err(TransportError::InvalidOptions {
-                reason: "max_connections must reserve inbound and outbound management capacity \
-                         for every peer and at least one non-management connection"
+                reason: "max_connections must reserve inbound and outbound management, command, \
+                         replication, and relay capacity for every peer and at least one \
+                         on-demand connection"
                     .to_string(),
             });
         }
@@ -772,8 +804,8 @@ impl Transport {
         self.inner.replace_outbound_targets(targets);
     }
 
-    /// Authenticate an endpoint whose node identity is not known yet, then add its management
-    /// pool target. Bootstrap discovery uses the identity in the peer certificate as the result.
+    /// Authenticate an endpoint whose node identity is not known yet, then add its pool target.
+    /// Bootstrap discovery uses the identity in the peer certificate as the result.
     pub async fn bootstrap_target(
         &self,
         target: PeerTarget,
@@ -791,6 +823,7 @@ impl Transport {
         self.inner.register_outbound_target(node_id, target)
     }
 
+    /// Reports whether every outbound pool except bulk is ready for node traffic.
     pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
         self.inner.is_connected_to(node_id)
     }
@@ -812,7 +845,7 @@ impl Envelope {
     pub(crate) fn pool_class(&self) -> PoolClass {
         match self {
             Self::RelayPayload(_) => PoolClass::Relay,
-            Self::Ack(_) => PoolClass::Replication,
+            Self::Ack(_) => PoolClass::Relay,
             Self::Control(control) => control.pool_class(),
         }
     }
@@ -1073,6 +1106,22 @@ mod tests {
     }
 
     #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct ReplicationRequest {
+        wait: bool,
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct ReplicationResponse;
+
+    impl InterconnectRequest for ReplicationRequest {
+        type Response = ReplicationResponse;
+
+        const NAME: &'static str = "test_replication";
+        const CLASS: PoolClass = PoolClass::Replication;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
     struct ManagementRequest;
 
     #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -1183,10 +1232,10 @@ mod tests {
     }
 
     #[test]
-    fn connection_limit_reserves_both_management_directions() {
+    fn connection_limit_reserves_both_preconnected_directions() {
         let mut options = TransportOptions {
             max_peers: 2,
-            max_connections: 4,
+            max_connections: 20,
             ..TransportOptions::default()
         };
         assert!(matches!(
@@ -1194,10 +1243,49 @@ mod tests {
             Err(TransportError::InvalidOptions { .. })
         ));
 
-        options.max_connections = 5;
+        options.max_connections = 21;
         options
             .validate()
-            .expect("one non-management connection should fit after both management directions");
+            .expect("one on-demand connection should fit after both preconnected directions");
+    }
+
+    #[test]
+    fn relay_acknowledgements_use_the_relay_pool() {
+        let envelope = Envelope::Ack(RemoteAckResolution {
+            ack_id: 1,
+            outcome: RemoteAckOutcome::Ack,
+        });
+
+        assert_eq!(envelope.pool_class(), PoolClass::Relay);
+    }
+
+    #[tokio::test]
+    async fn connection_binding_drives_response_flow_control() {
+        let options = TransportOptions {
+            initial_stream_window_bytes: 1,
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports_with_options(options).await;
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if transport_a.is_connected_to(&node_b) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("binding responses should advance beyond the one-byte stream window");
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
     }
 
     #[test]
@@ -1234,6 +1322,23 @@ mod tests {
             })
             .expect("echo handler should register");
 
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if transport_a.is_connected_to(&node_b) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the target should become ready");
+        assert_eq!(
+            transport_a.active_outbound_connections().await,
+            5,
+            "readiness must include management, command, replication, and both relay connections"
+        );
+
         for value in ["first", "second"] {
             let response = transport_a
                 .request(
@@ -1253,7 +1358,88 @@ mod tests {
                 }
             );
         }
-        assert_eq!(transport_a.active_outbound_connections().await, 2);
+        assert_eq!(transport_a.active_outbound_connections().await, 5);
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(Notify::new());
+        let release = StdArc::new(Notify::new());
+        transport_b
+            .register_handler::<ReplicationRequest, _, _>({
+                let started = StdArc::clone(&started);
+                let release = StdArc::clone(&release);
+                move |_context, request| {
+                    let started = StdArc::clone(&started);
+                    let release = StdArc::clone(&release);
+                    async move {
+                        if request.wait {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        ReplicationResponse
+                    }
+                }
+            })
+            .expect("replication handler should register");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if transport_a.is_connected_to(&node_b) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the target should become ready");
+
+        let first_requester = transport_a.clone();
+        let first_target = node_b.clone();
+        let first = tokio::spawn(async move {
+            first_requester
+                .request(&first_target, ReplicationRequest { wait: true })
+                .await
+        });
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the first replication request should hold the only stream slot");
+
+        let second_requester = transport_a.clone();
+        let second_target = node_b.clone();
+        let second_started = StdArc::new(Notify::new());
+        let second_started_in_task = StdArc::clone(&second_started);
+        let second = tokio::spawn(async move {
+            second_started_in_task.notify_one();
+            second_requester
+                .request(&second_target, ReplicationRequest { wait: false })
+                .await
+        });
+        second_started.notified().await;
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        timeout(Duration::from_secs(2), async {
+            first
+                .await
+                .expect("first replication request task should join")
+                .expect("first replication request should succeed");
+            second
+                .await
+                .expect("second replication request task should join")
+                .expect("queued replication request should wake and succeed");
+        })
+        .await
+        .expect("queued replication work should advance without connection churn");
 
         transport_a.shutdown().await;
         transport_b.shutdown().await;

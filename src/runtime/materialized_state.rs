@@ -135,6 +135,19 @@ impl ReplicatedMaterializedRelayState {
             state: state.clone(),
         }
     }
+
+    pub(super) fn current_installer(
+        state: &Arc<Self>,
+    ) -> Option<MaterializedRelaySnapshotInstaller> {
+        let assignment = state
+            .assignment
+            .current_binding()
+            .token_for(StateCapability::InstallSnapshot)?;
+        Some(MaterializedRelaySnapshotInstaller {
+            read: Self::read(state),
+            assignment,
+        })
+    }
 }
 
 impl MaterializedRelayStateRead {
