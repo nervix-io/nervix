@@ -75,8 +75,19 @@ pub(crate) struct CommandPauseInjector {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct EntityGatePauseInjector {
+struct EntityGatePauseInjector {
     pauses: DashMap<String, Arc<EntityGatePause>, RandomState>,
+}
+
+#[derive(Debug, Default)]
+struct DomainClockProgressPauseInjector {
+    pauses: DashMap<String, Arc<DomainClockProgressPause>, RandomState>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RuntimePauseInjectors {
+    entity_gates: EntityGatePauseInjector,
+    domain_clock_progress: DomainClockProgressPauseInjector,
 }
 
 #[derive(Debug, Default)]
@@ -95,6 +106,16 @@ struct EntityGatePause {
     release_notify: Notify,
 }
 
+#[derive(Debug, Default)]
+struct DomainClockProgressPause {
+    reached: AtomicBool,
+    released: AtomicBool,
+    delivered: AtomicBool,
+    reached_notify: Notify,
+    release_notify: Notify,
+    delivered_notify: Notify,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterFaultMode {
     Fail,
@@ -110,7 +131,7 @@ pub struct RuntimeTestHooks {
     pub transaction_binding_drops: Arc<TransactionBindingDropInjector>,
     pub bulk_execution_occupancy: Arc<BulkExecutionOccupancy>,
     pub(crate) command_pauses: Arc<CommandPauseInjector>,
-    pub(crate) entity_gate_pauses: Arc<EntityGatePauseInjector>,
+    pub(crate) runtime_pauses: Arc<RuntimePauseInjectors>,
     pub(crate) syslog_ingestor_bind_address_overrides: Arc<SyslogIngestorBindAddressOverrides>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub domain_drain_timeout: Option<Duration>,
@@ -135,7 +156,7 @@ impl Default for RuntimeTestHooks {
             transaction_binding_drops: Arc::default(),
             bulk_execution_occupancy: Arc::default(),
             command_pauses: Arc::default(),
-            entity_gate_pauses: Arc::default(),
+            runtime_pauses: Arc::default(),
             syslog_ingestor_bind_address_overrides: Arc::default(),
             branch_instance_expiration_scan_interval: None,
             domain_drain_timeout: None,
@@ -196,7 +217,7 @@ impl RuntimeTestHooks {
     }
 
     pub fn pause_entity_gate(&self, domain: impl Into<String>) {
-        self.entity_gate_pauses.pauses.insert(
+        self.runtime_pauses.entity_gates.pauses.insert(
             domain.into().to_ascii_lowercase(),
             Arc::new(EntityGatePause::default()),
         );
@@ -205,7 +226,8 @@ impl RuntimeTestHooks {
     pub async fn wait_for_entity_gate_pause(&self, domain: &str) {
         let key = domain.to_ascii_lowercase();
         let pause = self
-            .entity_gate_pauses
+            .runtime_pauses
+            .entity_gates
             .pauses
             .get(&key)
             .unwrap_or_else(|| panic!("entity gate pause for domain '{domain}' is not armed"))
@@ -223,13 +245,38 @@ impl RuntimeTestHooks {
     pub fn release_entity_gate_pause(&self, domain: &str) {
         let key = domain.to_ascii_lowercase();
         let pause = self
-            .entity_gate_pauses
+            .runtime_pauses
+            .entity_gates
             .pauses
             .get(&key)
             .unwrap_or_else(|| panic!("entity gate pause for domain '{domain}' is not armed"))
             .clone();
         pause.released.store(true, Ordering::Release);
         pause.release_notify.notify_waiters();
+    }
+
+    pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
+        self.runtime_pauses
+            .domain_clock_progress
+            .arm(domain.into().to_ascii_lowercase());
+    }
+
+    pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
+        self.runtime_pauses
+            .domain_clock_progress
+            .wait_for_pause(&domain.to_ascii_lowercase())
+            .await;
+    }
+
+    pub async fn release_domain_clock_progress(&self, domain: &str) {
+        self.runtime_pauses
+            .domain_clock_progress
+            .release_and_wait(&domain.to_ascii_lowercase())
+            .await;
+    }
+
+    pub fn release_all_domain_clock_progress(&self) {
+        self.runtime_pauses.domain_clock_progress.release_all();
     }
 
     pub async fn wait_for_transaction_commit_pause(
@@ -423,6 +470,122 @@ impl EntityGatePauseInjector {
             notified.await;
         }
         self.pauses.remove(&key);
+    }
+}
+
+#[cfg(feature = "testing")]
+impl RuntimePauseInjectors {
+    pub(crate) async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {
+        self.entity_gates.pause_if_armed(domain).await;
+    }
+
+    pub(crate) async fn pause_domain_clock_progress_if_armed(&self, domain: &DomainName) -> bool {
+        self.domain_clock_progress.pause_if_armed(domain).await
+    }
+
+    pub(crate) fn mark_domain_clock_progress_delivered(&self, domain: &DomainName) {
+        self.domain_clock_progress.mark_delivered(domain);
+    }
+}
+
+impl DomainClockProgressPause {
+    async fn wait_until_reached(&self) {
+        while !self.reached.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = self.reached_notify.notified();
+            if self.reached.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    async fn wait_until_released(&self) {
+        while !self.released.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = self.release_notify.notified();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_until_delivered(&self) {
+        while !self.delivered.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = self.delivered_notify.notified();
+            if self.delivered.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release_notify.notify_waiters();
+    }
+
+    #[cfg(feature = "testing")]
+    fn mark_delivered(&self) {
+        self.delivered.store(true, Ordering::Release);
+        self.delivered_notify.notify_waiters();
+    }
+}
+
+impl DomainClockProgressPauseInjector {
+    fn arm(&self, domain: String) {
+        self.pauses
+            .insert(domain, Arc::new(DomainClockProgressPause::default()));
+    }
+
+    async fn wait_for_pause(&self, domain: &str) {
+        let pause = self
+            .pauses
+            .get(domain)
+            .unwrap_or_else(|| panic!("domain clock progress pause for '{domain}' is not armed"))
+            .clone();
+        pause.wait_until_reached().await;
+    }
+
+    async fn release_and_wait(&self, domain: &str) {
+        let pause = self
+            .pauses
+            .get(domain)
+            .unwrap_or_else(|| panic!("domain clock progress pause for '{domain}' is not armed"))
+            .clone();
+        pause.release();
+        pause.wait_until_delivered().await;
+        self.pauses.remove(domain);
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_if_armed(&self, domain: &DomainName) -> bool {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self.pauses.get(&key).map(|pause| pause.clone()) else {
+            return false;
+        };
+        pause.reached.store(true, Ordering::Release);
+        pause.reached_notify.notify_waiters();
+        pause.wait_until_released().await;
+        true
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn mark_delivered(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        if let Some(pause) = self.pauses.get(&key) {
+            pause.mark_delivered();
+        }
+    }
+
+    fn release_all(&self) {
+        for pause in &self.pauses {
+            pause.release();
+        }
+        self.pauses.clear();
     }
 }
 

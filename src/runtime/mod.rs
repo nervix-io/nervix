@@ -666,7 +666,7 @@ struct RuntimeInner {
     #[cfg(feature = "testing")]
     command_pauses: Arc<test_hooks::CommandPauseInjector>,
     #[cfg(feature = "testing")]
-    entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
+    runtime_pauses: Arc<test_hooks::RuntimePauseInjectors>,
     #[cfg(feature = "testing")]
     syslog_ingestor_bind_address_overrides: Arc<test_hooks::SyslogIngestorBindAddressOverrides>,
     resource_store: RwLock<Option<Arc<ResourceStore>>>,

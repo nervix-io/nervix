@@ -78,7 +78,7 @@ impl Runtime {
                 #[cfg(feature = "testing")]
                 command_pauses: hooks.command_pauses,
                 #[cfg(feature = "testing")]
-                entity_gate_pauses: hooks.entity_gate_pauses,
+                runtime_pauses: hooks.runtime_pauses,
                 #[cfg(feature = "testing")]
                 syslog_ingestor_bind_address_overrides: hooks
                     .syslog_ingestor_bind_address_overrides,
