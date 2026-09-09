@@ -1483,7 +1483,24 @@ impl Runtime {
             if execution.passive_only {
                 return Ok(None);
             }
-            if let Some(entrypoints) = execution.branched_entrypoints.get(&entity.identifier) {
+            if entity.kind == ModelKind::Ingestor {
+                drop(execution);
+                let key = DomainNodeRef::node_in(
+                    domain.clone(),
+                    ModelKind::Ingestor,
+                    entity.identifier.clone(),
+                );
+                if let Some(ingestor) = self.inner.ingestors.get(&key) {
+                    ingestor
+                        .branch_runtimes()
+                        .iter()
+                        .map(|entrypoint| entrypoint.branch_runtime.clone())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            } else if let Some(entrypoints) = execution.branched_entrypoints.get(&entity.identifier)
+            {
                 entrypoints
                     .iter()
                     .map(|entrypoint| entrypoint.branch_runtime.clone())

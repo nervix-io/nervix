@@ -419,7 +419,8 @@ struct PlannedOwnershipHandoff {
     gate: ClusterEntityGate,
     moves: Vec<PlannedOwnershipMove>,
     started_at: tokio::time::Instant,
-    deadline: tokio::time::Instant,
+    preparation_deadline: tokio::time::Instant,
+    activation_deadline: tokio::time::Instant,
 }
 
 struct InterconnectRelayPayloadLane {
@@ -7063,14 +7064,34 @@ impl SessionServiceImpl {
             .into_iter()
             .collect::<Vec<_>>();
         let started_at = tokio::time::Instant::now();
-        let deadline = started_at + self.inner.runtime.entity_gate_deadline();
+        let phase_budget = self.inner.runtime.entity_gate_deadline();
+        let preparation_deadline = started_at.checked_add(phase_budget).ok_or_else(|| {
+            Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: "ownership handoff preparation deadline exceeds the runtime instant range"
+                    .to_string(),
+            })
+        })?;
+        let activation_deadline =
+            preparation_deadline
+                .checked_add(phase_budget)
+                .ok_or_else(|| {
+                    Report::new(DomainAlterError::EntityGate {
+                        domain: domain.clone(),
+                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                        reason: "ownership handoff activation deadline exceeds the runtime \
+                                 instant range"
+                            .to_string(),
+                    })
+                })?;
         let gate = self
             .engage_cluster_entity_gates(
                 domain,
                 &relays,
                 &affected_entities,
                 EntityGatePurpose::OwnershipHandoff,
-                deadline,
+                activation_deadline,
             )
             .await?;
         #[cfg(feature = "testing")]
@@ -7082,7 +7103,7 @@ impl SessionServiceImpl {
                 &affected_entities,
                 EntityGatePurpose::OwnershipHandoff,
                 &former_owners,
-                deadline,
+                preparation_deadline,
             )
             .await
         {
@@ -7092,7 +7113,7 @@ impl SessionServiceImpl {
         let mut prepared = Vec::new();
         for moved in &moves {
             tokio::task::consume_budget().await;
-            let result = tokio::time::timeout_at(deadline, async {
+            let result = tokio::time::timeout_at(preparation_deadline, async {
                 let checkpoints = self
                     .capture_ownership_handoff_state(
                         &operation_id,
@@ -7172,7 +7193,8 @@ impl SessionServiceImpl {
             gate,
             moves,
             started_at,
-            deadline,
+            preparation_deadline,
+            activation_deadline,
         };
         if let Err(reason) = self
             .verify_planned_ownership_handoff_incarnations(&handoff)
@@ -7334,12 +7356,16 @@ impl SessionServiceImpl {
             self.confirm_ownership_handoff_on_node(
                 &moved.former_owner,
                 request.clone(),
-                handoff.deadline,
+                handoff.preparation_deadline,
             )
             .await?;
             tokio::task::consume_budget().await;
-            self.confirm_ownership_handoff_on_node(&moved.destination, request, handoff.deadline)
-                .await?;
+            self.confirm_ownership_handoff_on_node(
+                &moved.destination,
+                request,
+                handoff.preparation_deadline,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -7562,7 +7588,7 @@ impl SessionServiceImpl {
                     .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
                 response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
             };
-            match tokio::time::timeout_at(handoff.deadline, activation).await {
+            match tokio::time::timeout_at(handoff.activation_deadline, activation).await {
                 Ok(Ok(())) => {}
                 Ok(Err(reason)) => return Err(reason),
                 Err(_) => {
@@ -7590,7 +7616,7 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(()) => break Ok(()),
-                Err(error) if tokio::time::Instant::now() < handoff.deadline => {
+                Err(error) if tokio::time::Instant::now() < handoff.activation_deadline => {
                     debug!(
                         domain = domain.as_str(),
                         error = %error,
@@ -19442,6 +19468,8 @@ impl Application {
                     for domain_schedule in current_schedule.domains.values() {
                         if active_domains.contains(&domain_schedule.domain)
                             || committing_domains.contains(&domain_schedule.domain)
+                            || runtime_for_reconcile
+                                .domain_alter_is_active(&domain_schedule.domain)
                         {
                             continue;
                         }
@@ -19495,7 +19523,9 @@ impl Application {
                         }
                     }
                     for (domain, graph) in active_graphs {
-                        if committing_domains.contains(&domain) {
+                        if committing_domains.contains(&domain)
+                            || runtime_for_reconcile.domain_alter_is_active(&domain)
+                        {
                             continue;
                         }
                         let Some(domain_state) =
