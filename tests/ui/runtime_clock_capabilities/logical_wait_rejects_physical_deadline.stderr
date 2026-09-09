@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/runtime_clock_capabilities/logical_wait_rejects_physical_deadline.rs:7:27
+  |
+7 |     drop(clock.wait_until(deadline, &CancellationToken::new()).await);
+  |                ---------- ^^^^^^^^ expected `LogicalDeadline`, found `PhysicalDeadline`
+  |                |
+  |                arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/runtime/domain_clock.rs
+  |
+  |     pub async fn wait_until(
+  |                  ^^^^^^^^^^
