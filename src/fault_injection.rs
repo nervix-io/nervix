@@ -54,8 +54,12 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     entity_gate_pauses: DashMap<String, Arc<EntityGatePause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
+    ownership_handoff_preparation_pauses:
+        DashMap<String, Arc<OwnershipHandoffPreparationPause>, RandomState>,
+    /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<DomainClockProgressPause>, RandomState>,
+    state_replica_polling_paused: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
@@ -81,6 +85,14 @@ struct CommandPause {
 
 #[derive(Debug, Default)]
 struct EntityGatePause {
+    reached: AtomicBool,
+    released: AtomicBool,
+    reached_notify: Notify,
+    release_notify: Notify,
+}
+
+#[derive(Debug, Default)]
+struct OwnershipHandoffPreparationPause {
     reached: AtomicBool,
     released: AtomicBool,
     reached_notify: Notify,
@@ -132,7 +144,9 @@ impl Default for FaultInjection {
                 bulk_executions: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
+                ownership_handoff_preparation_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
+                state_replica_polling_paused: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
@@ -336,6 +350,32 @@ impl FaultInjection {
         pause.release_notify.notify_waiters();
     }
 
+    pub fn pause_ownership_handoff_after_preparation(&self, domain: impl Into<String>) {
+        self.inner.ownership_handoff_preparation_pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(OwnershipHandoffPreparationPause::default()),
+        );
+    }
+
+    pub async fn wait_for_ownership_handoff_preparation_pause(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self.ownership_handoff_preparation_pause(&key);
+        while !pause.reached.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = pause.reached_notify.notified();
+            if pause.reached.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn release_ownership_handoff_preparation_pause(&self, domain: &str) {
+        let pause = self.ownership_handoff_preparation_pause(&domain.to_ascii_lowercase());
+        pause.released.store(true, Ordering::Release);
+        pause.release_notify.notify_waiters();
+    }
+
     pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
         self.inner.domain_clock_progress_pauses.insert(
             DomainClockProgressPausePoint {
@@ -354,6 +394,12 @@ impl FaultInjection {
             },
             Arc::new(DomainClockProgressPause::default()),
         );
+    }
+
+    pub fn pause_state_replica_polling(&self) {
+        self.inner
+            .state_replica_polling_paused
+            .store(true, Ordering::Release);
     }
 
     pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
@@ -534,6 +580,32 @@ impl FaultInjection {
         self.inner.entity_gate_pauses.remove(&key);
     }
 
+    pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
+        &self,
+        domain: &DomainName,
+    ) {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self
+            .inner
+            .ownership_handoff_preparation_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reached.store(true, Ordering::Release);
+        pause.reached_notify.notify_waiters();
+        while !pause.released.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = pause.release_notify.notified();
+            if pause.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        self.inner.ownership_handoff_preparation_pauses.remove(&key);
+    }
+
     pub(crate) async fn pause_domain_clock_progress_if_armed(
         &self,
         domain: &DomainName,
@@ -611,6 +683,12 @@ impl FaultInjection {
         *self.inner.domain_drain_timeout.read()
     }
 
+    pub(crate) fn state_replica_polling_is_paused(&self) -> bool {
+        self.inner
+            .state_replica_polling_paused
+            .load(Ordering::Acquire)
+    }
+
     pub(crate) fn entity_gate_deadline(&self) -> Option<Duration> {
         *self.inner.entity_gate_deadline.read()
     }
@@ -681,6 +759,16 @@ impl FaultInjection {
     fn entity_gate_pause(&self, key: &str) -> Arc<EntityGatePause> {
         let Some(pause) = self.inner.entity_gate_pauses.get(key) else {
             panic!("entity gate pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn ownership_handoff_preparation_pause(
+        &self,
+        key: &str,
+    ) -> Arc<OwnershipHandoffPreparationPause> {
+        let Some(pause) = self.inner.ownership_handoff_preparation_pauses.get(key) else {
+            panic!("ownership handoff preparation pause for domain '{key}' is not armed");
         };
         pause.value().clone()
     }

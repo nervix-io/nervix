@@ -57,7 +57,8 @@ use nervix_server::{
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs};
 use nervix_wasm::{
-    WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
+    WasmAckSidecar, WasmAckToken, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow,
+    WasmRoutedOutput,
 };
 use playwright_rs::{
     FilePayload, LaunchOptions, Playwright, Viewport, WaitForOptions, WaitForState,
@@ -2098,6 +2099,15 @@ async fn given_runtime_replication_is_configured(
         .expect("snapshot interval must be a valid duration");
 }
 
+#[given("runtime state replica polling is paused")]
+async fn given_runtime_state_replica_polling_is_paused(world: &mut ScenarioWorld) {
+    assert!(
+        world.cluster.is_none(),
+        "replica polling must be paused before cluster startup"
+    );
+    world.fault_injection.pause_state_replica_polling();
+}
+
 #[given(expr = "the transaction idle timeout is configured as {string}")]
 async fn given_transaction_idle_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
     assert!(
@@ -2578,6 +2588,23 @@ async fn given_node_has_trapping_wasm_processor_fixture_resource_directory(
 }
 
 #[given(
+    expr = "node {string} has state-rejecting WASM processor fixture resource directory {string}"
+)]
+async fn given_node_has_state_rejecting_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        state_rejecting_wasm_fixture("restored_events"),
+    )
+    .await;
+}
+
+#[given(
     expr = "node {string} has {string} limit-exhausting WASM processor fixture resource directory \
             {string}"
 )]
@@ -2740,6 +2767,73 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
     )"#
+}
+
+fn state_rejecting_wasm_fixture(output_relay: &str) -> Vec<u8> {
+    let encoded = WasmEnvelope::output(
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![WasmOutputColumnRef::input(0)],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow {
+                    tokens: vec![WasmAckToken(1)],
+                    source_token: Some(WasmAckToken(1)),
+                }],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("state-rejecting WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+
+    format!(
+        r#"(module
+          (memory (export "memory") 2)
+          (global $emitted (mut i32) (i32.const 0))
+          (global $read_ptr (mut i32) (i32.const 0))
+          (data (i32.const 16) "\2a")
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
+          (func (export "nervix_alloc") (param i32) (result i32)
+            i32.const 0
+            global.set $read_ptr
+            i32.const 0)
+          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+          (func (export "nervix_process_batch") (param i32 i32) (result i32)
+            i32.const 1
+            global.set $emitted
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+          (func (export "nervix_flush") (result i32) (i32.const 0))
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const 32768
+              global.set $read_ptr
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32)
+            i32.const 16
+            global.set $read_ptr
+            i32.const 1)
+          (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const -1))
+          (func (export "nervix_reset_state") (result i32) (i32.const 0))
+        )"#
+    )
+    .into_bytes()
 }
 
 fn limit_exhausting_wasm_fixture(limit: &str, output_relay: &str) -> Vec<u8> {
@@ -3158,6 +3252,14 @@ async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     world.fault_injection.pause_entity_gate(domain);
 }
 
+#[given(expr = "ownership handoff for domain {string} pauses after preparation")]
+async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .pause_ownership_handoff_after_preparation(domain);
+}
+
 /// How long a gated cluster operation is given to engage its entity gates.
 ///
 /// The wait also ends the moment the command it gates finishes, so a command that failed before
@@ -3210,6 +3312,58 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
 async fn when_entity_gate_pause_is_released(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.release_entity_gate_pause(&domain);
+}
+
+#[then(expr = "the ownership handoff preparation pause for domain {string} is reached")]
+async fn then_ownership_handoff_preparation_pause_is_reached(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let fault_injection = world.fault_injection.clone();
+    let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        if tokio::time::timeout(
+            Duration::from_millis(50),
+            fault_injection.wait_for_ownership_handoff_preparation_pause(&domain),
+        )
+        .await
+        .is_ok()
+        {
+            return;
+        }
+        if let Some(background) = world.background_nspl.as_ref()
+            && background.is_finished()
+        {
+            let outcome = world
+                .background_nspl
+                .take()
+                .verified("the branch above already observed the background execution")
+                .await
+                .expect("background NSPL task must not panic");
+            panic!(
+                "ownership handoff did not reach the armed preparation pause for domain \
+                 '{domain}': the command finished first with {outcome:?}"
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ownership handoff did not reach the armed preparation pause for domain '{domain}' \
+             within {ENTITY_GATE_PAUSE_TIMEOUT:?}; the command is still running"
+        );
+    }
+}
+
+#[when(expr = "the ownership handoff preparation pause for domain {string} is released")]
+async fn when_ownership_handoff_preparation_pause_is_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_ownership_handoff_preparation_pause(&domain);
 }
 
 #[given(expr = "domain clock progress for domain {string} is paused before delivery")]

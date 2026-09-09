@@ -16,6 +16,14 @@ pub(super) enum IngestorRuntime {
     },
 }
 
+impl IngestorRuntime {
+    pub(super) fn branch_runtimes(&self) -> &[Arc<IngestorRouteRuntime>] {
+        match self {
+            Self::Background { branched, .. } | Self::Endpoint { branched, .. } => branched,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 pub(crate) enum IngestorQuiesceCause {
     #[strum(serialize = "entity hold")]

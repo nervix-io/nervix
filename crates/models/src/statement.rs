@@ -291,6 +291,19 @@ impl ModelKind {
     pub fn as_str(self) -> &'static str {
         self.into()
     }
+
+    pub fn is_processor(self) -> bool {
+        matches!(
+            self,
+            Self::Inferencer
+                | Self::WasmProcessor
+                | Self::Junction
+                | Self::Deduplicator
+                | Self::Correlator
+                | Self::Reorderer
+                | Self::WindowProcessor
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3890,6 +3903,91 @@ pub struct KafkaPartitionSchedule {
     pub instance_assignments: Vec<Vec<i32>>,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum OwnershipStateComponent {
+    BranchAggregated,
+    BranchLifecycle,
+    Deduplicator,
+    KafkaOffsets,
+    MaterializedRelay,
+    WasmProcessor,
+    WindowProcessor,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum OwnershipStateRecoveryOutcome {
+    Complete,
+    Unverified,
+    Reset,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum OwnershipStateResetCause {
+    MissingCheckpoint,
+    InvalidCheckpoint,
+    ConflictingCheckpoint,
+    ExpiredBranchMetadata,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+pub struct OwnershipStateReset {
+    pub component: OwnershipStateComponent,
+    pub cause: OwnershipStateResetCause,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipTransition {
+    pub id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub state_recovery: OwnershipStateRecoveryOutcome,
+    pub resets: Vec<OwnershipStateReset>,
+}
+
 impl KafkaPartitionSchedule {
     pub fn new(instances: NonZeroU64, observed_partitions: Vec<i32>, rebalance_epoch: u64) -> Self {
         let shard_count = usize::try_from(instances.get()).unwrap_or(usize::MAX);
@@ -3930,6 +4028,7 @@ pub struct ScheduledNode {
     pub primary_node: Option<ClusterNodeName>,
     #[serde(default)]
     pub assigned_nodes: Vec<ClusterNodeName>,
+    pub ownership_transition: Option<OwnershipTransition>,
 }
 
 impl ScheduledNode {
@@ -3944,6 +4043,7 @@ impl ScheduledNode {
             kafka_partition_schedule: None,
             primary_node: None,
             assigned_nodes: Vec::new(),
+            ownership_transition: None,
         }
     }
 
@@ -3988,6 +4088,52 @@ impl ScheduledNode {
     /// The kind of runtime node this entry configures.
     pub fn kind(&self) -> ModelKind {
         self.config.kind()
+    }
+
+    pub fn wasm_processor(&self) -> Option<&CreateWasmProcessor> {
+        let Model::WasmProcessor(processor) = self.config.as_ref() else {
+            return None;
+        };
+        Some(processor)
+    }
+
+    pub fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {
+        let mut components = Vec::new();
+        if self.kind() != ModelKind::Relay {
+            components.push(OwnershipStateComponent::BranchAggregated);
+        }
+        if let Model::Relay(relay) = self.config.as_ref()
+            && relay.materialized_state.is_some()
+        {
+            components.push(OwnershipStateComponent::MaterializedRelay);
+        }
+        if let Model::Ingestor(ingestor) = self.config.as_ref()
+            && let IngestSource::Kafka {
+                offset_mode: KafkaOffsetMode::Domain,
+                ..
+            } = &ingestor.source
+        {
+            components.push(OwnershipStateComponent::KafkaOffsets);
+        }
+        if self.kind().is_processor()
+            || matches!(self.kind(), ModelKind::Ingestor | ModelKind::Reingestor)
+        {
+            components.push(OwnershipStateComponent::BranchLifecycle);
+        }
+        match self.kind() {
+            ModelKind::Deduplicator => {
+                components.push(OwnershipStateComponent::Deduplicator);
+            }
+            ModelKind::WasmProcessor => {
+                components.push(OwnershipStateComponent::WasmProcessor);
+            }
+            ModelKind::WindowProcessor => {
+                components.push(OwnershipStateComponent::WindowProcessor);
+            }
+            _ => {}
+        }
+        components.sort();
+        components
     }
 
     /// The runtime node this scheduled entry configures. Kind and identifier together name a node

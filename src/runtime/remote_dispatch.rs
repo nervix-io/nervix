@@ -12,6 +12,7 @@ pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100
 /// interconnect, and both answer questions about which node they are running on.
 pub(super) struct RemoteDispatchRegistry {
     pub(super) local_node_id: RwLock<Option<ClusterNodeName>>,
+    pub(super) local_node_incarnation: RwLock<Option<ClusterNodeIncarnation>>,
     pub(super) next_ack_id: AtomicU64,
     pub(super) pending_acks: DashMap<u64, AckSet, RandomState>,
     pub(super) pending_relay_admissions:
@@ -296,6 +297,8 @@ impl Runtime {
         interconnect: Transport,
     ) {
         *self.inner.remote_dispatch.local_node_id.write() = Some(local_node_id);
+        *self.inner.remote_dispatch.local_node_incarnation.write() =
+            Some(cluster.local_incarnation());
         *self.inner.remote_dispatcher.write() = Some(Arc::new(RemoteDispatcher {
             cluster,
             interconnect,

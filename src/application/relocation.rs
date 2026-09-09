@@ -15,8 +15,8 @@ use nervix_models::{
 
 use super::{
     CommandResult, DomainAlterError, SessionServiceImpl, command_error, command_ok,
-    format_millis_duration, format_placement_runtime_node, placement_claim_owner,
-    quiesce_level_message,
+    format_millis_duration, format_placement_runtime_node, mark_complete_ownership_transitions,
+    placement_claim_owner, quiesce_level_message,
 };
 use crate::{
     registry::{ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit},
@@ -146,7 +146,7 @@ impl SessionServiceImpl {
         };
         let total = plan.members.len();
         let moved = plan.moved_count();
-        let Some(planned_schedule) = plan.schedule.clone() else {
+        let Some(mut planned_schedule) = plan.schedule.clone() else {
             return command_ok(format!(
                 "relocated 0 of {total} runtime node(s) onto node '{}'\n{}",
                 plan.destination,
@@ -155,12 +155,16 @@ impl SessionServiceImpl {
         };
 
         let current_schedule = self.inner.consensus.current_schedule().await;
-        let current_domain_schedule = current_schedule.domain(domain);
-        let mut handoff = if let QuiesceLevel::EntityPause = plan.level {
+        let current_domain_schedule = current_schedule.domain(domain).cloned();
+        mark_complete_ownership_transitions(
+            current_domain_schedule.as_ref(),
+            &mut planned_schedule,
+        );
+        let mut handoff = if moved > 0 {
             match self
                 .begin_planned_ownership_handoff(
                     domain,
-                    current_domain_schedule,
+                    current_domain_schedule.as_ref(),
                     Some(&planned_schedule),
                 )
                 .await
@@ -174,11 +178,15 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .replace_domain_schedule(domain.clone(), Some(planned_schedule))
+            .replace_domain_schedule(
+                domain.clone(),
+                current_domain_schedule,
+                Some(planned_schedule),
+            )
             .await
         {
             if let Some(handoff) = handoff.take() {
-                self.release_cluster_entity_gates(handoff.gate).await;
+                self.abort_planned_ownership_handoff(domain, handoff).await;
             }
             return command_error(format!(
                 "failed to commit the relocation onto node '{}' for domain '{}': {error}",
@@ -187,14 +195,16 @@ impl SessionServiceImpl {
             ));
         }
 
-        let activation_error = self.apply_current_cluster_state().await.err();
+        let local_activation_error = self.apply_current_cluster_state().await.err();
         // The hold spans planning through release, which is what the operator waited for.
         let hold_duration = handoff.as_ref().map(|handoff| handoff.started_at.elapsed());
+        let mut handoff_activation_error = None;
         if let Some(handoff) = handoff {
-            if let Some(error) = &activation_error {
+            if let Some(error) = &local_activation_error {
                 self.defer_planned_ownership_handoff_release(domain, handoff, error);
-            } else {
-                self.finish_planned_ownership_handoff(domain, handoff).await;
+            } else if let Err(error) = self.finish_planned_ownership_handoff(domain, handoff).await
+            {
+                handoff_activation_error = Some(error);
             }
         }
 
@@ -211,10 +221,18 @@ impl SessionServiceImpl {
                 )
             ));
         }
-        if let Some(error) = activation_error {
+        if let Some(error) = local_activation_error {
             return command_error(format!(
                 "relocated {moved} runtime node(s) onto node '{}', but failed to activate the \
                  updated schedule for domain '{}': {error}",
+                plan.destination,
+                domain.as_str()
+            ));
+        }
+        if let Some(error) = handoff_activation_error {
+            return command_error(format!(
+                "relocated {moved} runtime node(s) onto node '{}', but ownership state activation \
+                 did not complete for domain '{}': {error}",
                 plan.destination,
                 domain.as_str()
             ));

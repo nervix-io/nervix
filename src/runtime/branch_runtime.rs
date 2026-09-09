@@ -84,6 +84,8 @@ pub(super) struct BranchExecutionRuntime {
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
     pub(super) sender: mpsc::Sender<BranchedEntrypointInput>,
+    pub(super) checkpoints:
+        mpsc::Sender<oneshot::Sender<OwnershipHandoffResult<PersistedRuntimeStateEntry>>>,
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) task: parking_lot::Mutex<Option<JoinHandle<()>>>,
 }
@@ -288,6 +290,18 @@ impl BranchRuntime {
             return Ok(());
         };
         let result = processor.snapshot_live_state(self);
+        self.processors.insert(processor_id.clone(), processor);
+        result
+    }
+
+    pub(super) async fn checkpoint_processor_live_state(
+        &mut self,
+        processor_id: &ModelName,
+    ) -> OwnershipHandoffResult<()> {
+        let Some(mut processor) = self.processors.remove(processor_id) else {
+            return Ok(());
+        };
+        let result = processor.checkpoint_live_state(self).await;
         self.processors.insert(processor_id.clone(), processor);
         result
     }
@@ -1074,11 +1088,13 @@ impl BranchExecutionRuntime {
     ) -> Arc<Self> {
         // input from ingestor/re-ingestor
         let (sender, mut input) = mpsc::channel(1);
+        let (checkpoints, mut checkpoint_requests) = mpsc::channel(1);
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let runtime = Arc::new(Self {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
             sender,
+            checkpoints,
             shutdown,
             task: parking_lot::Mutex::new(None),
         });
@@ -1123,15 +1139,23 @@ impl BranchExecutionRuntime {
                 .unwrap_or_else(current_timestamp);
             let mut next_branch_deadline =
                 tick_due_branch_instance_branches(&graph, now, &instances).await;
+            let ownership_entity = DomainNodeRef::node_in(
+                domain.clone(),
+                template.source_kind,
+                ModelName::from(&template.source),
+            );
+            let mut checkpoint_requests_open = true;
 
             loop {
                 tokio::task::consume_budget().await;
+                let ownership_frozen =
+                    runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
                 let now = runtime_handle
                     .current_stream_expiration_time(&domain)
                     .ok()
                     .unwrap_or_else(current_timestamp);
                 let mut did_scheduled_work = false;
-                if Instant::now() >= next_expiration_scan {
+                if !ownership_frozen && Instant::now() >= next_expiration_scan {
                     if let Some(branch_ttl) = template.branch_ttl {
                         expire_branch_instance_instances(
                             &runtime_handle,
@@ -1165,7 +1189,8 @@ impl BranchExecutionRuntime {
                     next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
                     did_scheduled_work = true;
                 }
-                if next_branch_deadline.is_some_and(|deadline| deadline <= now) {
+                if !ownership_frozen && next_branch_deadline.is_some_and(|deadline| deadline <= now)
+                {
                     next_branch_deadline =
                         tick_due_branch_instance_branches(&graph, now, &instances).await;
                     did_scheduled_work = true;
@@ -1174,7 +1199,9 @@ impl BranchExecutionRuntime {
                     continue;
                 }
 
-                let sleep_duration = {
+                let sleep_duration = if ownership_frozen {
+                    OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
+                } else {
                     let expiration_sleep = next_expiration_scan
                         .checked_duration_since(Instant::now())
                         .unwrap_or(Duration::ZERO);
@@ -1212,7 +1239,39 @@ impl BranchExecutionRuntime {
                 };
                 tokio::select! {
                     biased;
-                    message = input.recv() => {
+                    checkpoint = checkpoint_requests.recv(), if checkpoint_requests_open => {
+                        let Some(checkpoint) = checkpoint else {
+                            checkpoint_requests_open = false;
+                            continue;
+                        };
+                        let placement = branch_lru_placement(&runtime_handle, &domain, &template);
+                        let result = match encode_branch_lru_snapshot(&instances.snapshot_entries()) {
+                            Ok(payload) => {
+                                let snapshot = PersistedRuntimeStateEntry {
+                                    lsm: instances.version(),
+                                    schema_fingerprint: placement.schema_fingerprint,
+                                    payload,
+                                };
+                                match runtime_handle.persist_branch_lru_snapshot(
+                                    placement.clone(),
+                                    snapshot.clone(),
+                                ) {
+                                    Ok(()) => {
+                                        last_persisted_lru_lsm = snapshot.lsm;
+                                        Ok(snapshot)
+                                    }
+                                    Err(error) => Err(OwnershipHandoffError::persistence(
+                                        error.current_context().clone(),
+                                    )),
+                                }
+                            }
+                            Err(error) => Err(OwnershipHandoffError::checkpoint(error)),
+                        };
+                        checkpoint
+                            .send(result)
+                            .means_peer_left("branch lifecycle checkpoint requester");
+                    }
+                    message = input.recv(), if !ownership_frozen => {
                         let Some(message) = message else {
                             break;
                         };
@@ -1262,6 +1321,7 @@ impl BranchExecutionRuntime {
                             break;
                         }
                     }
+                    _ = runtime_handle.inner.ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
                     _ = sleep(sleep_duration) => {}
                 }
             }
@@ -1291,6 +1351,24 @@ impl BranchExecutionRuntime {
         });
         *runtime.task.lock() = Some(task);
         runtime
+    }
+
+    pub(super) async fn checkpoint(&self) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.checkpoints.send(response).await.map_err(|_| {
+            OwnershipHandoffError::checkpoint(format!(
+                "{} '{}' branch lifecycle task is unavailable",
+                self.domain.as_str(),
+                self.ingestor.as_str()
+            ))
+        })?;
+        receiver.await.map_err(|_| {
+            OwnershipHandoffError::checkpoint(format!(
+                "{} '{}' branch lifecycle task dropped its checkpoint response",
+                self.domain.as_str(),
+                self.ingestor.as_str()
+            ))
+        })?
     }
 
     pub(super) fn sender(&self) -> mpsc::Sender<BranchedEntrypointInput> {
@@ -1439,14 +1517,11 @@ pub(super) fn restore_branch_instance_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Result<u64, String> {
-    let Some(store) = &runtime.inner.state_store else {
-        return Ok(0);
-    };
     let placement = branch_lru_placement(runtime, domain, template);
-    let Some(snapshot) = store
-        .latest_snapshot(&placement)
-        .map_err(|error| error.to_string())?
-    else {
+    let snapshot = runtime
+        .take_restorable_branch_lru_snapshot(&placement)
+        .map_err(|error| error.to_string())?;
+    let Some(snapshot) = snapshot else {
         return Ok(0);
     };
     for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
@@ -1465,17 +1540,21 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
     last_persisted_lsm: &mut u64,
 ) -> Result<(), String> {
-    let Some(store) = &runtime.inner.state_store else {
-        return Ok(());
-    };
     let lsm = instances.version();
     if lsm <= *last_persisted_lsm {
         return Ok(());
     }
     let placement = branch_lru_placement(runtime, domain, template);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
-    store
-        .persist_latest_snapshot(&placement, lsm, &payload)
+    runtime
+        .persist_branch_lru_snapshot(
+            placement.clone(),
+            PersistedRuntimeStateEntry {
+                lsm,
+                schema_fingerprint: placement.schema_fingerprint,
+                payload,
+            },
+        )
         .map_err(|error| error.to_string())?;
     *last_persisted_lsm = lsm;
     Ok(())
