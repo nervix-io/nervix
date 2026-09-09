@@ -471,10 +471,10 @@ use state_replication::{
     PreparedRuntimeStateSnapshot,
 };
 pub(crate) use state_store::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind,
-    RuntimeStateOperationError, RuntimeStatePlacement, RuntimeStateResult, RuntimeStateStore,
-    StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError, StateCapability,
-    StateReplicationRoles,
+    ForcedRuntimeStateRecoveryTransition, PersistedRuntimeStateEntry, RuntimePersistenceError,
+    RuntimeStateHandoffTransition, RuntimeStateKind, RuntimeStateOperationError,
+    RuntimeStatePlacement, RuntimeStateResult, RuntimeStateStore, StateAssignmentAuthority,
+    StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
 };
 #[cfg(test)]
 use test_fixtures::{

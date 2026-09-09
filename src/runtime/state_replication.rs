@@ -28,6 +28,67 @@ pub(super) struct PreparedRuntimeStateHandoff {
     pub(super) checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OwnershipHandoffTransitionRef<'a> {
+    operation_id: &'a str,
+    source: &'a ClusterNodeName,
+    destination: &'a ClusterNodeName,
+    source_incarnation: ClusterNodeIncarnation,
+    destination_incarnation: ClusterNodeIncarnation,
+    domain: &'a DomainName,
+    entity: &'a NodeRef,
+    base_schedule_fingerprint: [u8; 32],
+    target_schedule_fingerprint: [u8; 32],
+}
+
+impl<'a> From<&'a nervix_interconnect::ActivateOwnershipHandoffStateRequest>
+    for OwnershipHandoffTransitionRef<'a>
+{
+    fn from(request: &'a nervix_interconnect::ActivateOwnershipHandoffStateRequest) -> Self {
+        Self {
+            operation_id: &request.operation_id,
+            source: &request.source,
+            destination: &request.destination,
+            source_incarnation: request.source_incarnation,
+            destination_incarnation: request.destination_incarnation,
+            domain: &request.domain,
+            entity: &request.entity,
+            base_schedule_fingerprint: request.base_schedule_fingerprint,
+            target_schedule_fingerprint: request.target_schedule_fingerprint,
+        }
+    }
+}
+
+impl<'a> From<&'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest>
+    for OwnershipHandoffTransitionRef<'a>
+{
+    fn from(request: &'a nervix_interconnect::ConfirmOwnershipHandoffStateRequest) -> Self {
+        Self {
+            operation_id: &request.operation_id,
+            source: &request.source,
+            destination: &request.destination,
+            source_incarnation: request.source_incarnation,
+            destination_incarnation: request.destination_incarnation,
+            domain: &request.domain,
+            entity: &request.entity,
+            base_schedule_fingerprint: request.base_schedule_fingerprint,
+            target_schedule_fingerprint: request.target_schedule_fingerprint,
+        }
+    }
+}
+
+impl PreparedRuntimeStateHandoff {
+    fn matches(&self, transition: OwnershipHandoffTransitionRef<'_>) -> bool {
+        self.operation_id == transition.operation_id
+            && self.source == *transition.source
+            && self.destination == *transition.destination
+            && self.source_incarnation == transition.source_incarnation
+            && self.destination_incarnation == transition.destination_incarnation
+            && self.base_schedule_fingerprint == transition.base_schedule_fingerprint
+            && self.target_schedule_fingerprint == transition.target_schedule_fingerprint
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ActivatedRuntimeStateHandoff {
     operation_id: String,
@@ -37,6 +98,18 @@ pub(super) struct ActivatedRuntimeStateHandoff {
     destination_incarnation: ClusterNodeIncarnation,
     base_schedule_fingerprint: [u8; 32],
     target_schedule_fingerprint: [u8; 32],
+}
+
+impl ActivatedRuntimeStateHandoff {
+    fn matches(&self, transition: OwnershipHandoffTransitionRef<'_>) -> bool {
+        self.operation_id == transition.operation_id
+            && self.source == *transition.source
+            && self.destination == *transition.destination
+            && self.source_incarnation == transition.source_incarnation
+            && self.destination_incarnation == transition.destination_incarnation
+            && self.base_schedule_fingerprint == transition.base_schedule_fingerprint
+            && self.target_schedule_fingerprint == transition.target_schedule_fingerprint
+    }
 }
 
 #[derive(Debug)]
@@ -472,15 +545,14 @@ impl Runtime {
         {
             return Ok(());
         }
-        if let Some(store) = self.inner.state_store.as_ref() {
-            if !store
+        if let Some(store) = self.inner.state_store.as_ref()
+            && !store
                 .persist_replica_snapshot_if_newer(placement, &snapshot)
                 .map_err(|error| {
                     RuntimeStateOperationError::persistence(error.current_context().clone())
                 })?
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
         if placement.state == RuntimeStateKind::BranchLru {
             self.install_replica_branch_lru_snapshot(placement, &snapshot)?;
@@ -1043,16 +1115,17 @@ impl Runtime {
 
     pub(crate) async fn prepare_forced_ownership_recovery(
         &self,
-        operation_id: String,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        entity: &NodeRef,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
+        request: nervix_interconnect::PrepareForcedOwnershipRecoveryRequest,
         deadline: Instant,
     ) -> OwnershipHandoffResult<nervix_interconnect::ForcedOwnershipRecoveryPreparation> {
+        let operation_id = request.operation_id.clone();
+        let source = &request.source;
+        let destination = &request.destination;
+        let destination_incarnation = request.destination_incarnation;
+        let domain = &request.domain;
+        let entity = &request.entity;
+        let base_schedule_fingerprint = request.base_schedule_fingerprint;
+        let target_schedule_fingerprint = request.target_schedule_fingerprint;
         self.verify_local_handoff_schedule(domain, base_schedule_fingerprint)?;
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
         if scheduled.execution_node() != Some(source) {
@@ -1188,18 +1261,17 @@ impl Runtime {
                 })
         });
         if let Some(store) = self.inner.state_store.as_ref() {
+            let entity_ref = entity.in_domain(domain);
+            let transition = ForcedRuntimeStateRecoveryTransition {
+                operation_id: &operation_id,
+                source,
+                destination,
+                destination_incarnation,
+                entity: &entity_ref,
+                target_schedule_fingerprint,
+            };
             store
-                .persist_forced_recovery_preparation(
-                    &operation_id,
-                    source,
-                    destination,
-                    destination_incarnation,
-                    domain,
-                    entity.kind,
-                    &entity.identifier,
-                    target_schedule_fingerprint,
-                    &checkpoints,
-                )
+                .persist_forced_recovery_preparation(&transition, &checkpoints)
                 .map_err(|error| {
                     OwnershipHandoffError::persistence(error.current_context().clone())
                 })?;
@@ -1591,17 +1663,22 @@ impl Runtime {
 
     pub(crate) async fn prepare_ownership_handoff_state(
         &self,
-        operation_id: String,
-        source: ClusterNodeName,
-        destination: ClusterNodeName,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        entity: &NodeRef,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
-        checkpoints: Vec<nervix_interconnect::OwnershipHandoffCheckpoint>,
+        request: nervix_interconnect::PrepareOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
+        let nervix_interconnect::PrepareOwnershipHandoffStateRequest {
+            operation_id,
+            source,
+            destination,
+            source_incarnation,
+            destination_incarnation,
+            domain,
+            entity,
+            base_schedule_fingerprint,
+            target_schedule_fingerprint,
+            checkpoints,
+        } = request;
+        let domain = &domain;
+        let entity = &entity;
         self.verify_local_handoff_schedule(domain, base_schedule_fingerprint)?;
         let mut decoded = Vec::with_capacity(checkpoints.len());
         let mut placements = HashSet::default();
@@ -1702,20 +1779,19 @@ impl Runtime {
             )));
         }
         if let Some(store) = self.inner.state_store.as_ref() {
+            let entity_ref = entity.in_domain(domain);
+            let transition = RuntimeStateHandoffTransition {
+                operation_id: &operation_id,
+                source: &source,
+                destination: &destination,
+                source_incarnation,
+                destination_incarnation,
+                entity: &entity_ref,
+                base_schedule_fingerprint,
+                target_schedule_fingerprint,
+            };
             store
-                .persist_handoff_preparation(
-                    &operation_id,
-                    domain,
-                    entity.kind,
-                    &entity.identifier,
-                    &source,
-                    &destination,
-                    source_incarnation,
-                    destination_incarnation,
-                    base_schedule_fingerprint,
-                    target_schedule_fingerprint,
-                    &decoded,
-                )
+                .persist_handoff_preparation(&transition, &decoded)
                 .map_err(|error| {
                     OwnershipHandoffError::persistence(error.current_context().clone())
                 })?;
@@ -1914,19 +1990,17 @@ impl Runtime {
             return Ok(());
         }
         if let Some(store) = self.inner.state_store.as_ref() {
-            store.activate_handoff_preparation(
-                &prepared.operation_id,
-                domain,
-                node.kind(),
-                &node.identifier,
-                &prepared.source,
-                &prepared.destination,
-                prepared.source_incarnation,
-                prepared.destination_incarnation,
-                prepared.base_schedule_fingerprint,
-                prepared.target_schedule_fingerprint,
-                &prepared.checkpoints,
-            )?;
+            let transition = RuntimeStateHandoffTransition {
+                operation_id: &prepared.operation_id,
+                source: &prepared.source,
+                destination: &prepared.destination,
+                source_incarnation: prepared.source_incarnation,
+                destination_incarnation: prepared.destination_incarnation,
+                entity: &entity,
+                base_schedule_fingerprint: prepared.base_schedule_fingerprint,
+                target_schedule_fingerprint: prepared.target_schedule_fingerprint,
+            };
+            store.activate_handoff_preparation(&transition, &prepared.checkpoints)?;
         }
         self.remove_runtime_state_for_entity(domain, node.kind(), &node.identifier);
         for (placement, snapshot) in &prepared.checkpoints {
@@ -2001,17 +2075,15 @@ impl Runtime {
             .get(&entity)
             .map(|prepared| prepared.clone());
         let checkpoints = if let Some(store) = self.inner.state_store.as_ref() {
-            let Some(checkpoints) = store.activate_forced_recovery(
-                &transition.id,
-                &transition.source,
-                &transition.destination,
-                local_incarnation,
-                domain,
-                node.kind(),
-                &node.identifier,
-                schedule_fingerprint,
-            )?
-            else {
+            let recovery = ForcedRuntimeStateRecoveryTransition {
+                operation_id: &transition.id,
+                source: &transition.source,
+                destination: &transition.destination,
+                destination_incarnation: local_incarnation,
+                entity: &entity,
+                target_schedule_fingerprint: schedule_fingerprint,
+            };
+            let Some(checkpoints) = store.activate_forced_recovery(&recovery)? else {
                 return Ok(());
             };
             checkpoints
@@ -2055,58 +2127,50 @@ impl Runtime {
 
     pub(crate) fn verify_ownership_handoff_activation(
         &self,
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        entity: &NodeRef,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
+        request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
-        let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+        let transition = OwnershipHandoffTransitionRef::from(request);
+        let key = transition.entity.in_domain(transition.domain);
         let activated_in_memory = self
             .inner
             .activated_runtime_state_handoffs
             .get(&key)
-            .is_some_and(|activated| {
-                activated.operation_id == operation_id
-                    && activated.source == *source
-                    && activated.destination == *destination
-                    && activated.source_incarnation == source_incarnation
-                    && activated.destination_incarnation == destination_incarnation
-                    && activated.base_schedule_fingerprint == base_schedule_fingerprint
-                    && activated.target_schedule_fingerprint == target_schedule_fingerprint
-            });
+            .is_some_and(|activated| activated.matches(transition));
         if activated_in_memory {
             return Ok(());
         }
         let activated_on_disk = match self.inner.state_store.as_ref() {
             Some(store) => store
-                .handoff_activation(operation_id, domain, entity.kind, &entity.identifier)
+                .handoff_activation(
+                    transition.operation_id,
+                    transition.domain,
+                    transition.entity.kind,
+                    &transition.entity.identifier,
+                )
                 .map_err(|error| {
                     OwnershipHandoffError::persistence(error.current_context().clone())
                 })?
                 .is_some_and(|activated| {
-                    activated.operation_id == operation_id
-                        && activated.source == *source
-                        && activated.destination == *destination
-                        && activated.source_incarnation == source_incarnation
-                        && activated.destination_incarnation == destination_incarnation
-                        && activated.domain == *domain
-                        && activated.kind == entity.kind
-                        && activated.identifier == entity.identifier
-                        && activated.base_schedule_fingerprint == base_schedule_fingerprint
-                        && activated.target_schedule_fingerprint == target_schedule_fingerprint
+                    activated.operation_id == transition.operation_id
+                        && activated.source == *transition.source
+                        && activated.destination == *transition.destination
+                        && activated.source_incarnation == transition.source_incarnation
+                        && activated.destination_incarnation == transition.destination_incarnation
+                        && activated.domain == *transition.domain
+                        && activated.kind == transition.entity.kind
+                        && activated.identifier == transition.entity.identifier
+                        && activated.base_schedule_fingerprint
+                            == transition.base_schedule_fingerprint
+                        && activated.target_schedule_fingerprint
+                            == transition.target_schedule_fingerprint
                 }),
             None => false,
         };
         if !activated_on_disk {
             return Err(OwnershipHandoffError::participant(format!(
                 "{} '{}' has not activated the requested ownership handoff transition",
-                entity.kind.as_str(),
-                entity.identifier.as_str()
+                transition.entity.kind.as_str(),
+                transition.entity.identifier.as_str()
             )));
         }
         Ok(())
@@ -2114,36 +2178,28 @@ impl Runtime {
 
     pub(crate) fn verify_ownership_handoff_preparation(
         &self,
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        entity: &NodeRef,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
+        request: &nervix_interconnect::ConfirmOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
-        let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+        self.verify_ownership_handoff_preparation_transition(request.into())
+    }
+
+    fn verify_ownership_handoff_preparation_transition(
+        &self,
+        transition: OwnershipHandoffTransitionRef<'_>,
+    ) -> OwnershipHandoffResult<()> {
+        let key = transition.entity.in_domain(transition.domain);
         let Some(prepared) = self.inner.prepared_runtime_state_handoffs.get(&key) else {
             return Err(OwnershipHandoffError::participant(format!(
                 "prepared ownership handoff state for {} '{}' is unavailable",
-                entity.kind.as_str(),
-                entity.identifier.as_str()
+                transition.entity.kind.as_str(),
+                transition.entity.identifier.as_str()
             )));
         };
-        if prepared.operation_id != operation_id
-            || prepared.source != *source
-            || prepared.destination != *destination
-            || prepared.source_incarnation != source_incarnation
-            || prepared.destination_incarnation != destination_incarnation
-            || prepared.base_schedule_fingerprint != base_schedule_fingerprint
-            || prepared.target_schedule_fingerprint != target_schedule_fingerprint
-        {
+        if !prepared.matches(transition) {
             return Err(OwnershipHandoffError::participant(format!(
                 "prepared state for {} '{}' belongs to a different ownership handoff transition",
-                entity.kind.as_str(),
-                entity.identifier.as_str()
+                transition.entity.kind.as_str(),
+                transition.entity.identifier.as_str()
             )));
         }
         Ok(())
@@ -2151,44 +2207,14 @@ impl Runtime {
 
     pub(crate) fn authorize_persisted_ownership_handoff_activation(
         &self,
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        entity: &NodeRef,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
+        request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<bool> {
-        if self
-            .verify_ownership_handoff_activation(
-                operation_id,
-                source,
-                destination,
-                source_incarnation,
-                destination_incarnation,
-                domain,
-                entity,
-                base_schedule_fingerprint,
-                target_schedule_fingerprint,
-            )
-            .is_ok()
-        {
+        if self.verify_ownership_handoff_activation(request).is_ok() {
             return Ok(false);
         }
-        self.verify_ownership_handoff_preparation(
-            operation_id,
-            source,
-            destination,
-            source_incarnation,
-            destination_incarnation,
-            domain,
-            entity,
-            base_schedule_fingerprint,
-            target_schedule_fingerprint,
-        )?;
-        let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+        let transition = OwnershipHandoffTransitionRef::from(request);
+        self.verify_ownership_handoff_preparation_transition(transition)?;
+        let key = transition.entity.in_domain(transition.domain);
         let mut prepared = self
             .inner
             .prepared_runtime_state_handoffs

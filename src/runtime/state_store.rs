@@ -6,7 +6,8 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use meticulous::OptionExt as _;
 pub(crate) use nervix_interconnect::RuntimeStateKind;
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, DomainName, ModelKind, ModelName, NodeRef,
+    ClusterNodeIncarnation, ClusterNodeName, DomainName, DomainNodeRef, ModelKind, ModelName,
+    NodeRef,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
@@ -322,25 +323,15 @@ struct PersistedForcedRecoveryPreparation {
 }
 
 impl PersistedForcedRecoveryPreparation {
-    fn matches(
-        &self,
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-        target_schedule_fingerprint: [u8; 32],
-    ) -> bool {
-        self.operation_id == operation_id
-            && self.source == *source
-            && self.destination == *destination
-            && self.destination_incarnation == destination_incarnation
-            && self.domain == *domain
-            && self.kind == kind
-            && self.identifier == *identifier
-            && self.target_schedule_fingerprint == target_schedule_fingerprint
+    fn matches(&self, transition: &ForcedRuntimeStateRecoveryTransition<'_>) -> bool {
+        self.operation_id == transition.operation_id
+            && self.source == *transition.source
+            && self.destination == *transition.destination
+            && self.destination_incarnation == transition.destination_incarnation
+            && self.domain == transition.entity.domain
+            && self.kind == transition.entity.kind()
+            && self.identifier == *transition.entity.identifier()
+            && self.target_schedule_fingerprint == transition.target_schedule_fingerprint
     }
 }
 
@@ -360,6 +351,28 @@ pub(crate) struct PersistedRuntimeStateHandoffPreparation {
         nervix_interconnect::StatePlacementEnvelope,
         PersistedRuntimeStateEntry,
     )>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimeStateHandoffTransition<'a> {
+    pub(crate) operation_id: &'a str,
+    pub(crate) source: &'a ClusterNodeName,
+    pub(crate) destination: &'a ClusterNodeName,
+    pub(crate) source_incarnation: ClusterNodeIncarnation,
+    pub(crate) destination_incarnation: ClusterNodeIncarnation,
+    pub(crate) entity: &'a DomainNodeRef,
+    pub(crate) base_schedule_fingerprint: [u8; 32],
+    pub(crate) target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ForcedRuntimeStateRecoveryTransition<'a> {
+    pub(crate) operation_id: &'a str,
+    pub(crate) source: &'a ClusterNodeName,
+    pub(crate) destination: &'a ClusterNodeName,
+    pub(crate) destination_incarnation: ClusterNodeIncarnation,
+    pub(crate) entity: &'a DomainNodeRef,
+    pub(crate) target_schedule_fingerprint: [u8; 32],
 }
 
 impl RuntimeStatePlacement {
@@ -498,29 +511,20 @@ impl RuntimeStateStore {
     }
 
     fn encode_handoff_preparation(
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
+        transition: &RuntimeStateHandoffTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<Vec<u8>, Report<RuntimePersistenceError>> {
         let stored = StoredHandoffPreparation {
-            operation_id: operation_id.to_string(),
-            source: source.clone(),
-            destination: destination.clone(),
-            source_incarnation,
-            destination_incarnation,
-            domain: domain.clone(),
-            kind,
-            identifier: identifier.clone(),
-            base_schedule_fingerprint,
-            target_schedule_fingerprint,
+            operation_id: transition.operation_id.to_string(),
+            source: transition.source.clone(),
+            destination: transition.destination.clone(),
+            source_incarnation: transition.source_incarnation,
+            destination_incarnation: transition.destination_incarnation,
+            domain: transition.entity.domain.clone(),
+            kind: transition.entity.kind(),
+            identifier: transition.entity.identifier().clone(),
+            base_schedule_fingerprint: transition.base_schedule_fingerprint,
+            target_schedule_fingerprint: transition.target_schedule_fingerprint,
             checkpoints: checkpoints
                 .iter()
                 .map(|(placement, snapshot)| StoredHandoffCheckpoint {
@@ -561,25 +565,18 @@ impl RuntimeStateStore {
     }
 
     fn encode_forced_recovery_preparation(
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-        target_schedule_fingerprint: [u8; 32],
+        transition: &ForcedRuntimeStateRecoveryTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<Vec<u8>, Report<RuntimePersistenceError>> {
         let stored = StoredForcedRecoveryPreparation {
-            operation_id: operation_id.to_string(),
-            source: source.clone(),
-            destination: destination.clone(),
-            destination_incarnation,
-            domain: domain.clone(),
-            kind,
-            identifier: identifier.clone(),
-            target_schedule_fingerprint,
+            operation_id: transition.operation_id.to_string(),
+            source: transition.source.clone(),
+            destination: transition.destination.clone(),
+            destination_incarnation: transition.destination_incarnation,
+            domain: transition.entity.domain.clone(),
+            kind: transition.entity.kind(),
+            identifier: transition.entity.identifier().clone(),
+            target_schedule_fingerprint: transition.target_schedule_fingerprint,
             checkpoints: checkpoints
                 .iter()
                 .map(|(placement, snapshot)| StoredHandoffCheckpoint {
@@ -625,32 +622,16 @@ impl RuntimeStateStore {
 
     pub(crate) fn persist_handoff_preparation(
         &self,
-        operation_id: &str,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
+        transition: &RuntimeStateHandoffTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let key = Self::handoff_preparation_key(operation_id, domain, kind, identifier);
-        let encoded = Self::encode_handoff_preparation(
-            operation_id,
-            source,
-            destination,
-            source_incarnation,
-            destination_incarnation,
-            domain,
-            kind,
-            identifier,
-            base_schedule_fingerprint,
-            target_schedule_fingerprint,
-            checkpoints,
-        )?;
+        let key = Self::handoff_preparation_key(
+            transition.operation_id,
+            &transition.entity.domain,
+            transition.entity.kind(),
+            transition.entity.identifier(),
+        );
+        let encoded = Self::encode_handoff_preparation(transition, checkpoints)?;
         self.handoff_preparations
             .insert(key, encoded)
             .map_err(|_| RuntimePersistenceError::WriteValue)?;
@@ -662,47 +643,25 @@ impl RuntimeStateStore {
 
     pub(crate) fn persist_forced_recovery_preparation(
         &self,
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-        target_schedule_fingerprint: [u8; 32],
+        transition: &ForcedRuntimeStateRecoveryTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let key = Self::forced_recovery_key(domain, kind, identifier);
+        let key = Self::forced_recovery_key(
+            &transition.entity.domain,
+            transition.entity.kind(),
+            transition.entity.identifier(),
+        );
         if let Some(raw) = self
             .forced_recovery_activations
             .get(&key)
             .map_err(|_| RuntimePersistenceError::ReadValue)?
         {
             let activated = Self::decode_forced_recovery_preparation(raw.as_ref())?;
-            if activated.matches(
-                operation_id,
-                source,
-                destination,
-                destination_incarnation,
-                domain,
-                kind,
-                identifier,
-                target_schedule_fingerprint,
-            ) {
+            if activated.matches(transition) {
                 return Ok(());
             }
         }
-        let encoded = Self::encode_forced_recovery_preparation(
-            operation_id,
-            source,
-            destination,
-            destination_incarnation,
-            domain,
-            kind,
-            identifier,
-            target_schedule_fingerprint,
-            checkpoints,
-        )?;
+        let encoded = Self::encode_forced_recovery_preparation(transition, checkpoints)?;
         let mut batch = self.db.batch();
         batch.remove(&self.forced_recovery_activations, key.clone());
         batch.insert(&self.forced_recovery_preparations, key, encoded);
@@ -717,35 +676,23 @@ impl RuntimeStateStore {
 
     pub(crate) fn activate_forced_recovery(
         &self,
-        operation_id: &str,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        destination_incarnation: ClusterNodeIncarnation,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-        target_schedule_fingerprint: [u8; 32],
+        transition: &ForcedRuntimeStateRecoveryTransition<'_>,
     ) -> Result<
         Option<Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>>,
         Report<RuntimePersistenceError>,
     > {
-        let key = Self::forced_recovery_key(domain, kind, identifier);
+        let key = Self::forced_recovery_key(
+            &transition.entity.domain,
+            transition.entity.kind(),
+            transition.entity.identifier(),
+        );
         if let Some(raw) = self
             .forced_recovery_activations
             .get(&key)
             .map_err(|_| RuntimePersistenceError::ReadValue)?
         {
             let activated = Self::decode_forced_recovery_preparation(raw.as_ref())?;
-            if activated.matches(
-                operation_id,
-                source,
-                destination,
-                destination_incarnation,
-                domain,
-                kind,
-                identifier,
-                target_schedule_fingerprint,
-            ) {
+            if activated.matches(transition) {
                 return Ok(None);
             }
         }
@@ -759,34 +706,16 @@ impl RuntimeStateStore {
             None => None,
         };
         let checkpoints = match prepared {
-            Some(prepared)
-                if prepared.matches(
-                    operation_id,
-                    source,
-                    destination,
-                    destination_incarnation,
-                    domain,
-                    kind,
-                    identifier,
-                    target_schedule_fingerprint,
-                ) =>
-            {
-                prepared.checkpoints
-            }
+            Some(prepared) if prepared.matches(transition) => prepared.checkpoints,
             Some(_) | None => Vec::new(),
         };
-        self.replace_entity_snapshots(domain, kind, identifier, &checkpoints)?;
-        let encoded = Self::encode_forced_recovery_preparation(
-            operation_id,
-            source,
-            destination,
-            destination_incarnation,
-            domain,
-            kind,
-            identifier,
-            target_schedule_fingerprint,
+        self.replace_entity_snapshots(
+            &transition.entity.domain,
+            transition.entity.kind(),
+            transition.entity.identifier(),
             &checkpoints,
         )?;
+        let encoded = Self::encode_forced_recovery_preparation(transition, &checkpoints)?;
         let mut batch = self.db.batch();
         batch.remove(&self.forced_recovery_preparations, key.clone());
         batch.insert(&self.forced_recovery_activations, key, encoded);
@@ -857,32 +786,16 @@ impl RuntimeStateStore {
 
     pub(crate) fn activate_handoff_preparation(
         &self,
-        operation_id: &str,
-        domain: &DomainName,
-        kind: ModelKind,
-        identifier: &ModelName,
-        source: &ClusterNodeName,
-        destination: &ClusterNodeName,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-        base_schedule_fingerprint: [u8; 32],
-        target_schedule_fingerprint: [u8; 32],
+        transition: &RuntimeStateHandoffTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let preparation_key = Self::handoff_preparation_key(operation_id, domain, kind, identifier);
-        let expected = Self::encode_handoff_preparation(
-            operation_id,
-            source,
-            destination,
-            source_incarnation,
-            destination_incarnation,
-            domain,
-            kind,
-            identifier,
-            base_schedule_fingerprint,
-            target_schedule_fingerprint,
-            checkpoints,
-        )?;
+        let preparation_key = Self::handoff_preparation_key(
+            transition.operation_id,
+            &transition.entity.domain,
+            transition.entity.kind(),
+            transition.entity.identifier(),
+        );
+        let expected = Self::encode_handoff_preparation(transition, checkpoints)?;
         let stored = self
             .handoff_preparations
             .get(&preparation_key)
@@ -894,7 +807,7 @@ impl RuntimeStateStore {
             ));
         }
 
-        let mut domain_prefix = domain.as_str().as_bytes().to_vec();
+        let mut domain_prefix = transition.entity.domain.as_str().as_bytes().to_vec();
         domain_prefix.push(0);
         let latest_keys = self
             .latest
@@ -906,7 +819,9 @@ impl RuntimeStateStore {
                     .map_err(|_| RuntimePersistenceError::ReadValue)?;
                 let stored = stored_placement_schema(&key)
                     .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
-                Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
+                Ok((stored.kind == transition.entity.kind()
+                    && stored.identifier == *transition.entity.identifier())
+                .then_some(key))
             })
             .collect::<Result<Vec<_>, RuntimePersistenceError>>()?
             .into_iter()
@@ -949,7 +864,12 @@ impl RuntimeStateStore {
         batch.remove(&self.handoff_preparations, preparation_key);
         batch.insert(
             &self.handoff_activations,
-            Self::handoff_preparation_key(operation_id, domain, kind, identifier),
+            Self::handoff_preparation_key(
+                transition.operation_id,
+                &transition.entity.domain,
+                transition.entity.kind(),
+                transition.entity.identifier(),
+            ),
             expected,
         );
         batch
@@ -1378,6 +1298,15 @@ mod tests {
         };
         let operation_id = "handoff-operation";
         let target_schedule_fingerprint = [9; 32];
+        let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, identifier.clone());
+        let transition = ForcedRuntimeStateRecoveryTransition {
+            operation_id,
+            source: &source,
+            destination: &destination,
+            destination_incarnation,
+            entity: &entity,
+            target_schedule_fingerprint,
+        };
 
         {
             let db = Database::builder(dir.path())
@@ -1389,14 +1318,7 @@ mod tests {
                 .expect("earlier state should persist");
             store
                 .persist_forced_recovery_preparation(
-                    operation_id,
-                    &source,
-                    &destination,
-                    destination_incarnation,
-                    &domain,
-                    ModelKind::Relay,
-                    &identifier,
-                    target_schedule_fingerprint,
+                    &transition,
                     &[(placement.clone(), prepared.clone())],
                 )
                 .expect("forced recovery preparation should persist");
@@ -1408,16 +1330,7 @@ mod tests {
                 .expect("database should reopen");
             let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
             let activated = store
-                .activate_forced_recovery(
-                    operation_id,
-                    &source,
-                    &destination,
-                    destination_incarnation,
-                    &domain,
-                    ModelKind::Relay,
-                    &identifier,
-                    target_schedule_fingerprint,
-                )
+                .activate_forced_recovery(&transition)
                 .expect("persisted forced recovery should activate")
                 .expect("the first activation should apply its checkpoint");
             assert_eq!(activated, vec![(placement.clone(), prepared)]);
@@ -1432,16 +1345,7 @@ mod tests {
                 .expect("database should reopen again");
             let store = RuntimeStateStore::from_database(db).expect("state store should reopen");
             let activated = store
-                .activate_forced_recovery(
-                    operation_id,
-                    &source,
-                    &destination,
-                    destination_incarnation,
-                    &domain,
-                    ModelKind::Relay,
-                    &identifier,
-                    target_schedule_fingerprint,
-                )
+                .activate_forced_recovery(&transition)
                 .expect("repeated forced recovery activation should be readable");
             assert!(activated.is_none());
             let current = store
