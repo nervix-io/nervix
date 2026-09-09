@@ -3248,6 +3248,21 @@ async fn given_domain_clock_progress_is_paused(world: &mut ScenarioWorld, domain
     world.fault_injection.pause_domain_clock_progress(domain);
 }
 
+#[given(
+    expr = "domain clock progress for domain {string} on node {string} is paused before delivery"
+)]
+async fn given_domain_clock_progress_is_paused_on_node(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node_id: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_domain_clock_progress_on(domain, crate::common::cluster::node_name(&node_id));
+}
+
 #[then(
     expr = "within {string} domain clock progress for domain {string} reaches the delivery pause"
 )]
@@ -3271,6 +3286,38 @@ async fn then_domain_clock_progress_reaches_pause(
     });
 }
 
+#[then(
+    expr = "within {string} domain clock progress for domain {string} on node {string} reaches \
+            the delivery pause"
+)]
+async fn then_domain_clock_progress_reaches_pause_on_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    domain: String,
+    node_id: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let domain = expand_placeholders(world, &domain);
+    let node_id = expand_placeholders(world, &node_id);
+    tokio::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_domain_clock_progress_pause_on(
+                &domain,
+                &crate::common::cluster::node_name(&node_id),
+            ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "domain clock progress for '{domain}' on '{node_id}' did not reach its delivery \
+             pause: {error}"
+        )
+    });
+}
+
 #[when(expr = "domain clock progress for domain {string} resumes")]
 async fn when_domain_clock_progress_resumes(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -3281,6 +3328,30 @@ async fn when_domain_clock_progress_resumes(world: &mut ScenarioWorld, domain: S
     .await
     .unwrap_or_else(|error| {
         panic!("domain clock progress for '{domain}' was not delivered after release: {error}")
+    });
+}
+
+#[when(expr = "domain clock progress for domain {string} on node {string} resumes")]
+async fn when_domain_clock_progress_resumes_on_node(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node_id: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let node_id = expand_placeholders(world, &node_id);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        world.fault_injection.release_domain_clock_progress_on(
+            &domain,
+            &crate::common::cluster::node_name(&node_id),
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "domain clock progress for '{domain}' on '{node_id}' was not delivered after release: \
+             {error}"
+        )
     });
 }
 
@@ -12529,6 +12600,28 @@ async fn then_timestamp_placeholder_is_before(
     assert!(
         value < upper_bound,
         "timestamp placeholder '{placeholder}' was {value}, expected a value before {upper_bound}"
+    );
+}
+
+#[then(expr = "timestamp placeholder {string} is not before {string}")]
+async fn then_timestamp_placeholder_is_not_before_fixed_time(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+    lower_bound: String,
+) {
+    let value = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{placeholder}' is not defined"));
+    let value = chrono::DateTime::parse_from_rfc3339(value).unwrap_or_else(|error| {
+        panic!("timestamp placeholder '{placeholder}' is invalid: {error}")
+    });
+    let lower_bound = chrono::DateTime::parse_from_rfc3339(&lower_bound)
+        .unwrap_or_else(|error| panic!("timestamp lower bound is invalid: {error}"));
+    assert!(
+        value >= lower_bound,
+        "timestamp placeholder '{placeholder}' was {value}, expected a value at or after \
+         {lower_bound}"
     );
 }
 

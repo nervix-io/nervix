@@ -344,9 +344,23 @@ pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
     }
 }
 
+pub(super) fn test_domain_clock_authority() -> nervix_models::DomainClockAuthority {
+    nervix_models::DomainClockAuthority::assigned(
+        nervix_models::DomainClockAuthorityRevision::INITIAL,
+        nervix_models::ClusterNodeIdentity::new(
+            nervix_models::ClusterNodeName::parse("test-clock-authority")
+                .expect("the fixture authority name is valid"),
+            nervix_models::ClusterNodeIncarnation::new(1),
+        ),
+    )
+}
+
 pub(super) fn test_domain_clock(domain: &DomainName) -> super::DomainClock {
     let lifecycle = super::DomainClockLifecycle::new(domain.clone());
-    lifecycle.synchronize(&unpaced_domain_state(domain.as_str()));
+    lifecycle.synchronize(
+        &unpaced_domain_state(domain.as_str()),
+        &test_domain_clock_authority(),
+    );
     lifecycle
         .bind()
         .expect("the fixture installs an unpaced domain clock")

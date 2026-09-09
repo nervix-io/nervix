@@ -1,8 +1,8 @@
 use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    DomainClockState, DomainName, DomainSchedule, DomainStartPoint, DomainState, QuiesceLevel,
-    ResourceName, Statement, Timestamp, UserName,
+    ClusterNodeIdentity, DomainClockState, DomainName, DomainSchedule, DomainStartPoint,
+    DomainState, QuiesceLevel, ResourceName, Statement, Timestamp, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -477,6 +477,7 @@ pub enum TransactionStepEffect {
         expected_start_version: u64,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
+        authority: Option<ClusterNodeIdentity>,
     },
     StopDomain {
         domain_id: DomainName,

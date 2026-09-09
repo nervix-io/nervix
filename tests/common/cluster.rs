@@ -826,11 +826,25 @@ impl Cluster {
         node_id: &str,
     ) -> io::Result<()> {
         self.stop_node(node_id).await?;
+        let bootstrap_host = self
+            .nodes
+            .iter()
+            .find(|(candidate_id, candidate)| {
+                candidate_id.as_str() != node_id && candidate.task.is_some()
+            })
+            .map(|(_, candidate)| candidate.spec.interconnect_addr());
         let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
         })?;
         handle.spec.reallocate_interconnect_ports()?;
-        self.start_node(node_id).await
+        if let Some(bootstrap_host) = bootstrap_host {
+            handle.spec.bootstrap_host = Some(bootstrap_host);
+        }
+        self.start_node(node_id).await?;
+
+        let node_ids = self.node_ids();
+        self.wait_for_consistent_leader_on_all_nodes().await?;
+        self.wait_for_full_interconnect(&node_ids).await
     }
 
     pub(crate) async fn rotate_interconnect_certificates(&mut self) -> io::Result<()> {

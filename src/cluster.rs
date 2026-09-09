@@ -31,7 +31,7 @@ use nervix_interconnect::{
     InterconnectRequest, PeerTarget, PoolClass, RequestContext, RequestSubquota,
     Transport as InterconnectTransport,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};
 use nervix_recovery::Discarded as _;
 use parking_lot::{Mutex, RwLock};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -588,6 +588,16 @@ impl ClusterHandle {
         self.events.subscribe()
     }
 
+    pub async fn local_node_identity(&self) -> ClusterNodeIdentity {
+        let chitchat = self.chitchat.lock().await;
+        let identity = chitchat.self_chitchat_id();
+        ClusterNodeIdentity::new(
+            ClusterNodeName::parse(&identity.node_id)
+                .assured("the local Chitchat identity was built from a validated node name"),
+            ClusterNodeIncarnation::new(identity.generation_id),
+        )
+    }
+
     pub async fn status_lines(&self) -> Vec<String> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
@@ -689,7 +699,7 @@ impl ClusterHandle {
     pub async fn nodes_ready_for_runtime_revision(
         &self,
         revision: u64,
-    ) -> BTreeSet<ClusterNodeName> {
+    ) -> BTreeSet<ClusterNodeIdentity> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
@@ -697,8 +707,9 @@ impl ClusterHandle {
 
         if let Some(state) = chitchat.node_state(&self_id)
             && runtime_revision_is_ready(state, revision)
+            && let Some(identity) = cluster_node_identity(&self_id)
         {
-            ready.extend(ClusterNodeName::parse(&self_id.node_id).ok());
+            ready.insert(identity);
         }
         for node_id in chitchat.live_nodes() {
             if *node_id == self_id {
@@ -706,8 +717,9 @@ impl ClusterHandle {
             }
             if let Some(state) = chitchat.node_state(node_id)
                 && runtime_revision_is_ready(state, revision)
+                && let Some(identity) = cluster_node_identity(node_id)
             {
-                ready.extend(ClusterNodeName::parse(&node_id.node_id).ok());
+                ready.insert(identity);
             }
         }
         ready
@@ -887,6 +899,13 @@ fn runtime_revision_is_ready(state: &NodeState, revision: u64) -> bool {
         .is_some_and(|ready_revision| ready_revision >= revision)
 }
 
+fn cluster_node_identity(node_id: &ChitchatId) -> Option<ClusterNodeIdentity> {
+    Some(ClusterNodeIdentity::new(
+        ClusterNodeName::parse(&node_id.node_id).ok()?,
+        ClusterNodeIncarnation::new(node_id.generation_id),
+    ))
+}
+
 fn join_or_none(items: &[String]) -> String {
     if items.is_empty() {
         "(none)".to_string()
@@ -951,6 +970,7 @@ fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
 /// published a node identity this build does not accept, is one to skip and read again on the next
 /// round rather than one to report.
 fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode> {
+    let identity = cluster_node_identity(node_id)?;
     let grpc_advertise_addr = state.get(KEY_GRPC_ADVERTISE_ADDR).unwrap_or("").to_string();
     let web_console_advertise_addr = state
         .get(KEY_WEB_CONSOLE_ADVERTISE_ADDR)
@@ -961,7 +981,8 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
         .unwrap_or("")
         .to_string();
     Some(GossipNode {
-        node_id: ClusterNodeName::parse(&node_id.node_id).ok()?,
+        node_id: identity.node_id().clone(),
+        incarnation: identity.incarnation(),
         grpc_advertise_addr,
         web_console_advertise_addr,
         interconnect_advertise_addr,

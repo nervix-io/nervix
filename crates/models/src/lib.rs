@@ -15,6 +15,7 @@
 //! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
 
 mod canonical;
+mod cluster_node;
 mod domain_clock;
 mod expression;
 mod message_error;
@@ -34,8 +35,10 @@ pub use canonical::{
     alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
     expression_to_nspl, ingest_quiesce_to_nspl,
 };
+pub use cluster_node::{ClusterNodeIdentity, ClusterNodeIncarnation};
 pub use domain_clock::{
-    DomainClockAdvancement, DomainClockBoundary, DomainClockError, DomainClockPeriod,
+    DomainClockAdvancement, DomainClockAuthority, DomainClockAuthorityRevision,
+    DomainClockBoundary, DomainClockError, DomainClockPeriod, DomainClockProgress,
     DomainClockState, DomainTimeRate,
 };
 pub use expression::{

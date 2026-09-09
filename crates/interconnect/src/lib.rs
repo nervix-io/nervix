@@ -18,10 +18,10 @@ use std::{
 use meticulous::OptionExt as _;
 use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
-    ClusterNodeName, CodecName, DomainClockPeriod, DomainClockState, DomainName, DomainTick,
-    EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef, RelayName,
-    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
-    ResourceName, SubscriptionBinding,
+    ClusterNodeName, CodecName, DomainClockProgress, DomainName, EmitterName, FieldName,
+    IngestorName, LookupName, ModelKind, ModelName, NodeRef, RelayName, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
+    SubscriptionBinding,
 };
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -316,9 +316,7 @@ pub enum RelayPayloadKind {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum ControlEnvelope {
     Terminate,
-    DomainClockStart(DomainClockStart),
-    DomainClockStop(DomainClockStop),
-    DomainTick(DomainTickEnvelope),
+    DomainClockProgress(DomainClockProgressEnvelope),
     StateReplicationAck(StateReplicationAck),
     Request(RequestEnvelope),
     Response(ResponseEnvelope),
@@ -343,22 +341,9 @@ pub struct RuntimeErrorEvent {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DomainClockStart {
+pub struct DomainClockProgressEnvelope {
     pub domain_id: DomainName,
-    pub owner_node_id: ClusterNodeName,
-    pub clock: DomainClockState,
-    pub period: DomainClockPeriod,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DomainClockStop {
-    pub domain_id: DomainName,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DomainTickEnvelope {
-    pub domain_id: DomainName,
-    pub tick: DomainTick,
+    pub progress: DomainClockProgress,
 }
 
 macro_rules! declare_runtime_state_kinds {
@@ -854,10 +839,7 @@ impl Envelope {
 impl ControlEnvelope {
     pub(crate) fn pool_class(&self) -> PoolClass {
         match self {
-            Self::DomainClockStart(_)
-            | Self::DomainClockStop(_)
-            | Self::DomainTick(_)
-            | Self::RuntimeErrorEvent(_) => PoolClass::Management,
+            Self::DomainClockProgress(_) | Self::RuntimeErrorEvent(_) => PoolClass::Management,
             Self::StateReplicationAck(_) => PoolClass::Replication,
             Self::Request(request) => request.class,
             Self::Response(response) => response.class,

@@ -23,6 +23,7 @@ compile_error!(
 
 pub mod application;
 pub mod cluster;
+mod domain_clock_authority;
 #[cfg(feature = "testing")]
 mod fault_injection;
 pub mod jaq_program;
