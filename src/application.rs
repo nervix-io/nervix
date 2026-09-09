@@ -18726,7 +18726,8 @@ async fn emit_domain_clock_progress(
     }
 }
 
-const DEFAULT_TRACE_FILTER: &str = "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
+const DEFAULT_TRACE_FILTER: &str =
+    "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
