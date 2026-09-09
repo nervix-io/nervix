@@ -1028,7 +1028,8 @@ impl Runtime {
             | RuntimeStateKind::WasmProcessor
             | RuntimeStateKind::WindowProcessor => {
                 return Err(OwnershipHandoffError::state(format!(
-                    "cannot synthesize empty branch-local {:?} state without a branch lifecycle checkpoint",
+                    "cannot synthesize empty branch-local {:?} state without a branch lifecycle \
+                     checkpoint",
                     placement.state
                 )));
             }
@@ -1658,7 +1659,8 @@ impl Runtime {
                 .map(|placement| format!("{:?}", placement.state))
                 .collect::<Vec<_>>();
             return Err(OwnershipHandoffError::state(format!(
-                "ownership handoff checkpoint inventory is incomplete or invalid (missing: {}; unexpected: {})",
+                "ownership handoff checkpoint inventory is incomplete or invalid (missing: {}; \
+                 unexpected: {})",
                 if missing.is_empty() {
                     "-".to_string()
                 } else {

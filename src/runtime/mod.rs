@@ -225,9 +225,9 @@ mod syslog;
 mod test_fixtures;
 
 use branch_aggregated_state::{
-    BranchAggregatedRuntimeStateSnapshot, encode_branch_aggregated_snapshot,
+    BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
+    decode_branch_aggregated_snapshot, encode_branch_aggregated_snapshot,
 };
-use branch_aggregated_state::{ReplicatedBranchAggregatedState, decode_branch_aggregated_snapshot};
 use branch_instance_registry::BranchInstanceRegistry;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use client_config::{client_tls_paths, read_tls_file, render_client_config_template};
