@@ -198,10 +198,11 @@ Recorded on 9 September 2026 against the task 03 worktree:
 | Public join/restart reproducer before product changes | Expected red; execution on the joined node had no installed paced-clock mapping and produced no relay payload. |
 | `A joining or restarted node installs the current clock generation before execution` | Pass; one scenario and all 12 steps passed through node join, full-cluster restart, node-local HTTP ingestion, and a historical `now()` observation. |
 | Runtime domain-clock unit suite | Pass; 16 tests covered typed missing, stopped, uninstalled, and stale-generation outcomes; nondecreasing reads; pause preservation; cancellation; generation revalidation; deadline domain identity; due/fresh snapshots; and shared handle allocation. The historical-origin probe remains ignored for task 05. |
-| Runtime domain-execution unit suite | Pass; four tests covered clock installation before execution binding, paused-state preservation, stop cleanup, and rejection of an uninstalled paced clock. |
+| Runtime domain-execution unit suite | Pass; five tests covered clock installation before active execution binding, paused-state preservation, stop cleanup, rejection of an uninstalled paced clock, and a stopped generation remaining unreadable inside passive execution. |
 | Physical monotonic deadline unit | Pass; the opaque physical capability waited on Tokio's monotonic timer. |
 | WASM explicit invocation-time unit | Pass; one explicit context supplied guest time and timeout-request time without leaking into the next invocation. |
 | Deadline capability compile-fail suite | Pass; both UI cases rejected crossing a logical deadline into the physical waiter or a physical deadline into the logical waiter. |
+| `nervix-server` library suites | Pass; default features ran 789 tests with one task-05 probe ignored, and `testing` ran 797 tests with the same probe ignored. |
 | `just validate` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline, and the checked-in string-error debt fell from 514 to 512. |
 
