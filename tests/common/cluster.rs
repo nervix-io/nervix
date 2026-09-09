@@ -898,7 +898,7 @@ impl Cluster {
         )?;
         let tls =
             TlsConfigBundle::from_pem_files(&self.interconnect_ca.path, certificate_path, key_path)
-                .map_err(io::Error::other)?;
+                .map_err(|error| io::Error::other(error.to_string()))?;
         let options = TransportOptions {
             connection_setup_timeout: Duration::from_millis(750),
             request_timeout: Duration::from_millis(750),

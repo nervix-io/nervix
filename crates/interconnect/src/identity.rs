@@ -8,6 +8,7 @@
 
 use std::{io, net::IpAddr, path::Path, sync::Arc as StdArc};
 
+use error_stack::Report;
 use nervix_models::ClusterNodeName;
 use percent_encoding::percent_decode_str;
 use rustls::{
@@ -39,7 +40,7 @@ pub(crate) struct CertificateIdentity {
 impl CertificateIdentity {
     pub(crate) fn from_certificate(
         certificate: &CertificateDer<'_>,
-    ) -> Result<Self, TlsConfigError> {
+    ) -> Result<Self, Report<TlsConfigError>> {
         let (_, parsed) = X509Certificate::from_der(certificate.as_ref())
             .map_err(|error| TlsConfigError::InvalidCertificate(error.to_string()))?;
         let san = parsed
@@ -55,7 +56,7 @@ impl CertificateIdentity {
                 GeneralName::URI(uri) => {
                     let parsed_identity = parse_identity_uri(uri)?;
                     if identity.replace(parsed_identity).is_some() {
-                        return Err(TlsConfigError::MultipleIdentityUris);
+                        return Err(Report::new(TlsConfigError::MultipleIdentityUris));
                     }
                 }
                 GeneralName::DNSName(name) => dns_names.push(name.to_ascii_lowercase()),
@@ -68,7 +69,7 @@ impl CertificateIdentity {
                             *a, *b, *c, *d, *e, *f, *g, *h, *i, *j, *k, *l, *m, *n, *o, *p,
                         ]));
                     }
-                    _ => return Err(TlsConfigError::InvalidEndpointSan),
+                    _ => return Err(Report::new(TlsConfigError::InvalidEndpointSan)),
                 },
                 _ => {}
             }
@@ -89,23 +90,23 @@ impl CertificateIdentity {
         cluster_id: &str,
         node_id: &ClusterNodeName,
         advertised_host: &str,
-    ) -> Result<(), TlsConfigError> {
+    ) -> Result<(), Report<TlsConfigError>> {
         if self.cluster_id != cluster_id {
-            return Err(TlsConfigError::ClusterIdentityMismatch {
+            return Err(Report::new(TlsConfigError::ClusterIdentityMismatch {
                 expected: cluster_id.to_string(),
                 actual: self.cluster_id.clone(),
-            });
+            }));
         }
         if &self.node_id != node_id {
-            return Err(TlsConfigError::NodeIdentityMismatch {
+            return Err(Report::new(TlsConfigError::NodeIdentityMismatch {
                 expected: node_id.clone(),
                 actual: self.node_id.clone(),
-            });
+            }));
         }
         if !self.matches_endpoint(advertised_host) {
-            return Err(TlsConfigError::EndpointIdentityMismatch {
+            return Err(Report::new(TlsConfigError::EndpointIdentityMismatch {
                 endpoint: advertised_host.to_string(),
-            });
+            }));
         }
         Ok(())
     }
@@ -121,16 +122,18 @@ impl CertificateIdentity {
     }
 }
 
-fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), TlsConfigError> {
+fn parse_identity_uri(
+    raw: &str,
+) -> Result<(String, ClusterNodeName), Report<TlsConfigError>> {
     let uri = Url::parse(raw).map_err(|error| TlsConfigError::InvalidIdentityUri {
         uri: raw.to_string(),
         reason: error.to_string(),
     })?;
     if uri.scheme() != "nervix" || uri.host_str() != Some("cluster") {
-        return Err(TlsConfigError::InvalidIdentityUri {
+        return Err(Report::new(TlsConfigError::InvalidIdentityUri {
             uri: raw.to_string(),
             reason: "expected nervix://cluster/<cluster-id>/node/<node-id>".to_string(),
-        });
+        }));
     }
     if !uri.username().is_empty()
         || uri.password().is_some()
@@ -138,10 +141,10 @@ fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), TlsConfigE
         || uri.query().is_some()
         || uri.fragment().is_some()
     {
-        return Err(TlsConfigError::InvalidIdentityUri {
+        return Err(Report::new(TlsConfigError::InvalidIdentityUri {
             uri: raw.to_string(),
             reason: "identity URI cannot contain user-info, a port, query, or fragment".to_string(),
-        });
+        }));
     }
     let segments = uri
         .path_segments()
@@ -151,10 +154,10 @@ fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), TlsConfigE
         })?
         .collect::<Vec<_>>();
     let [cluster_segment, "node", node_segment] = segments.as_slice() else {
-        return Err(TlsConfigError::InvalidIdentityUri {
+        return Err(Report::new(TlsConfigError::InvalidIdentityUri {
             uri: raw.to_string(),
             reason: "expected exactly /<cluster-id>/node/<node-id>".to_string(),
-        });
+        }));
     };
     let cluster_id = percent_decode_str(cluster_segment)
         .decode_utf8()
@@ -164,10 +167,10 @@ fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), TlsConfigE
         })?
         .into_owned();
     if cluster_id.is_empty() {
-        return Err(TlsConfigError::InvalidIdentityUri {
+        return Err(Report::new(TlsConfigError::InvalidIdentityUri {
             uri: raw.to_string(),
             reason: "cluster identity is empty".to_string(),
-        });
+        }));
     }
     let node_raw = percent_decode_str(node_segment)
         .decode_utf8()
@@ -196,7 +199,7 @@ impl TlsConfigBundle {
         ca_cert_path: impl AsRef<Path>,
         cert_path: impl AsRef<Path>,
         key_path: impl AsRef<Path>,
-    ) -> Result<Self, TlsConfigError> {
+    ) -> Result<Self, Report<TlsConfigError>> {
         super::install_rustls_crypto_provider();
 
         let ca_certs = load_certificates(ca_cert_path.as_ref())?;
@@ -217,7 +220,7 @@ impl TlsConfigBundle {
         ca_cert_pem: &[u8],
         cert_pem: &[u8],
         key_pem: &[u8],
-    ) -> Result<Self, TlsConfigError> {
+    ) -> Result<Self, Report<TlsConfigError>> {
         super::install_rustls_crypto_provider();
 
         let ca_certs = load_certificates_from_pem(ca_cert_pem, "CA certificate PEM")?;
@@ -236,16 +239,17 @@ impl TlsConfigBundle {
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
         certificate: CertificateIdentity,
-    ) -> Result<Self, TlsConfigError> {
+    ) -> Result<Self, Report<TlsConfigError>> {
         let mut roots = RootCertStore::empty();
         for cert in ca_certs {
-            roots.add(cert)?;
+            roots.add(cert).map_err(TlsConfigError::from)?;
         }
 
         let mut client_config =
             ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_root_certificates(roots.clone())
-                .with_client_auth_cert(cert_chain.clone(), private_key.clone_key())?;
+                .with_client_auth_cert(cert_chain.clone(), private_key.clone_key())
+                .map_err(TlsConfigError::from)?;
         client_config.alpn_protocols = vec![INTERCONNECT_ALPN.to_vec()];
 
         let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
@@ -254,7 +258,8 @@ impl TlsConfigBundle {
         let mut server_config =
             ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_client_cert_verifier(verifier)
-                .with_single_cert(cert_chain, private_key)?;
+                .with_single_cert(cert_chain, private_key)
+                .map_err(TlsConfigError::from)?;
         server_config.alpn_protocols = vec![INTERCONNECT_ALPN.to_vec()];
 
         Ok(Self {
@@ -265,38 +270,42 @@ impl TlsConfigBundle {
     }
 }
 
-fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {
+fn load_certificates(
+    path: &Path,
+) -> Result<Vec<CertificateDer<'static>>, Report<TlsConfigError>> {
     let certs = CertificateDer::pem_file_iter(path)
         .map_err(map_pem_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(map_pem_error)?;
     if certs.is_empty() {
-        return Err(TlsConfigError::MissingCertificate(
+        return Err(Report::new(TlsConfigError::MissingCertificate(
             path.display().to_string(),
-        ));
+        )));
     }
     Ok(certs)
 }
 
-fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsConfigError> {
+fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, Report<TlsConfigError>> {
     match PrivateKeyDer::from_pem_file(path) {
         Ok(key) => Ok(key),
-        Err(PemError::NoItemsFound) => Err(TlsConfigError::MissingPrivateKey(
+        Err(PemError::NoItemsFound) => Err(Report::new(TlsConfigError::MissingPrivateKey(
             path.display().to_string(),
-        )),
-        Err(error) => Err(map_pem_error(error)),
+        ))),
+        Err(error) => Err(Report::new(map_pem_error(error))),
     }
 }
 
 fn load_certificates_from_pem(
     pem: &[u8],
     source: &'static str,
-) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {
+) -> Result<Vec<CertificateDer<'static>>, Report<TlsConfigError>> {
     let certificates = CertificateDer::pem_slice_iter(pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(map_pem_error)?;
     if certificates.is_empty() {
-        return Err(TlsConfigError::MissingCertificate(source.to_string()));
+        return Err(Report::new(TlsConfigError::MissingCertificate(
+            source.to_string(),
+        )));
     }
     Ok(certificates)
 }
@@ -304,11 +313,13 @@ fn load_certificates_from_pem(
 fn load_private_key_from_pem(
     pem: &[u8],
     source: &'static str,
-) -> Result<PrivateKeyDer<'static>, TlsConfigError> {
+) -> Result<PrivateKeyDer<'static>, Report<TlsConfigError>> {
     match PrivateKeyDer::from_pem_slice(pem) {
         Ok(key) => Ok(key),
-        Err(PemError::NoItemsFound) => Err(TlsConfigError::MissingPrivateKey(source.to_string())),
-        Err(error) => Err(map_pem_error(error)),
+        Err(PemError::NoItemsFound) => Err(Report::new(TlsConfigError::MissingPrivateKey(
+            source.to_string(),
+        ))),
+        Err(error) => Err(Report::new(map_pem_error(error))),
     }
 }
 

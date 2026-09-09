@@ -937,16 +937,18 @@ impl Consensus {
                         request.0.origin_node_id(),
                         "a heartbeat",
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(wire::ConsensusRequestError::invalid_origin)?;
                     let request = match request.0.into_request() {
                         Ok(request) => request,
-                        Err(error) => return Err(error.to_string()),
+                        Err(error) => {
+                            return Err(wire::ConsensusRequestError::invalid_request(error));
+                        }
                     };
                     receiver
                         .append_entries(request)
                         .await
                         .map(wire::AppendEntriesResponseRecord::from)
-                        .map_err(|error| error.to_string())
+                        .map_err(wire::ConsensusRequestError::raft)
                 }
             })
             .map_err(|_| ConsensusError::Startup)?;
@@ -962,16 +964,18 @@ impl Consensus {
                         request.0.origin_node_id(),
                         "replication",
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(wire::ConsensusRequestError::invalid_origin)?;
                     let request = match request.0.into_request() {
                         Ok(request) => request,
-                        Err(error) => return Err(error.to_string()),
+                        Err(error) => {
+                            return Err(wire::ConsensusRequestError::invalid_request(error));
+                        }
                     };
                     receiver
                         .append_entries(request)
                         .await
                         .map(wire::AppendEntriesResponseRecord::from)
-                        .map_err(|error| error.to_string())
+                        .map_err(wire::ConsensusRequestError::raft)
                 }
             })
             .map_err(|_| ConsensusError::Startup)?;
@@ -987,12 +991,12 @@ impl Consensus {
                         request.0.origin_node_id(),
                         "a vote request",
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(wire::ConsensusRequestError::invalid_origin)?;
                     receiver
                         .vote(request.0.into_request())
                         .await
                         .map(wire::VoteResponseRecord::from)
-                        .map_err(|error| error.to_string())
+                        .map_err(wire::ConsensusRequestError::raft)
                 }
             })
             .map_err(|_| ConsensusError::Startup)?;
@@ -1008,8 +1012,10 @@ impl Consensus {
                         request.origin_node_id(),
                         "a snapshot transfer",
                     )
-                    .map_err(|error| error.to_string())?;
-                    let transfer = request.into_start().map_err(|error| error.to_string())?;
+                    .map_err(wire::ConsensusRequestError::invalid_origin)?;
+                    let transfer = request
+                        .into_start()
+                        .map_err(wire::ConsensusRequestError::invalid_request)?;
                     receiver
                         .begin_snapshot_transfer(
                             context.peer_node_id().clone(),
@@ -1018,7 +1024,7 @@ impl Consensus {
                             transfer.meta,
                             transfer.total_bytes,
                         )
-                        .map_err(|error| error.to_string())
+                        .map_err(wire::ConsensusRequestError::snapshot_transfer)
                 }
             })
             .map_err(|_| ConsensusError::Startup)?;
@@ -1036,7 +1042,7 @@ impl Consensus {
                             request.offset,
                             request.bytes,
                         )
-                        .map_err(|error| error.to_string())
+                        .map_err(wire::ConsensusRequestError::snapshot_transfer)
                 }
             })
             .map_err(|_| ConsensusError::Startup)?;
@@ -1051,7 +1057,7 @@ impl Consensus {
                         .finish_snapshot_transfer(context.peer_node_id(), request.transfer_id)
                         .await
                         .map(wire::SnapshotResponseRecord::from)
-                        .map_err(|error| error.to_string())
+                        .map_err(wire::ConsensusRequestError::snapshot_transfer)
                 }
             })
             .map_err(|_| ConsensusError::Startup)?;
@@ -1067,12 +1073,12 @@ impl Consensus {
                         request.origin_node_id(),
                         "a leadership transfer",
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(wire::ConsensusRequestError::invalid_origin)?;
                     receiver
                         .transfer_leader(request.into_request())
                         .await
                         .map(wire::TransferLeadershipResponse::from)
-                        .map_err(|error| error.to_string())
+                        .map_err(wire::ConsensusRequestError::raft)
                 }
             })
             .map_err(|_| ConsensusError::Startup)?;

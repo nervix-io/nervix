@@ -20,6 +20,7 @@ use openraft::{
     raft::TransferLeaderError,
 };
 use rkyv::{Archive, Deserialize, Serialize};
+use thiserror::Error;
 
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, ConsensusCommand, EntryOf, LogIdOf,
@@ -29,6 +30,36 @@ use super::{
 
 type SnapshotMetaOf =
     SnapshotMeta<super::CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, BasicNode>;
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+pub(crate) enum ConsensusRequestError {
+    #[error("the authenticated request origin is invalid: {0}")]
+    InvalidOrigin(String),
+    #[error("the rkyv request could not be converted into a Raft request: {0}")]
+    InvalidRequest(String),
+    #[error("Raft rejected the request: {0}")]
+    Raft(String),
+    #[error("the snapshot transfer failed: {0}")]
+    SnapshotTransfer(String),
+}
+
+impl ConsensusRequestError {
+    pub(crate) fn invalid_origin(error: impl std::fmt::Display) -> Self {
+        Self::InvalidOrigin(error.to_string())
+    }
+
+    pub(crate) fn invalid_request(error: impl std::fmt::Display) -> Self {
+        Self::InvalidRequest(error.to_string())
+    }
+
+    pub(crate) fn raft(error: impl std::fmt::Display) -> Self {
+        Self::Raft(error.to_string())
+    }
+
+    pub(crate) fn snapshot_transfer(error: impl std::fmt::Display) -> Self {
+        Self::SnapshotTransfer(error.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct VoteRecord {
@@ -256,7 +287,7 @@ impl AppendEntriesResponseRecord {
 pub(crate) struct ReplicateRequest(pub(crate) AppendEntriesRecord);
 
 impl InterconnectRequest for ReplicateRequest {
-    type Response = Result<AppendEntriesResponseRecord, String>;
+    type Response = Result<AppendEntriesResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_replicate";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -266,7 +297,7 @@ impl InterconnectRequest for ReplicateRequest {
 pub(crate) struct HeartbeatRequest(pub(crate) AppendEntriesRecord);
 
 impl InterconnectRequest for HeartbeatRequest {
-    type Response = Result<AppendEntriesResponseRecord, String>;
+    type Response = Result<AppendEntriesResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_heartbeat";
     const CLASS: PoolClass = PoolClass::Management;
     const TIMEOUT: Duration = Duration::from_secs(1);
@@ -332,7 +363,7 @@ impl VoteResponseRecord {
 pub(crate) struct RequestVote(pub(crate) VoteRequestRecord);
 
 impl InterconnectRequest for RequestVote {
-    type Response = Result<VoteResponseRecord, String>;
+    type Response = Result<VoteResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_vote";
     const CLASS: PoolClass = PoolClass::Management;
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -427,7 +458,7 @@ impl BeginSnapshotTransfer {
 }
 
 impl InterconnectRequest for BeginSnapshotTransfer {
-    type Response = Result<(), String>;
+    type Response = Result<(), ConsensusRequestError>;
     const NAME: &'static str = "raft_begin_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
     const TIMEOUT: Duration = Duration::from_secs(30);
@@ -441,7 +472,7 @@ pub(crate) struct SnapshotChunk {
 }
 
 impl InterconnectRequest for SnapshotChunk {
-    type Response = Result<(), String>;
+    type Response = Result<(), ConsensusRequestError>;
     const NAME: &'static str = "raft_snapshot_chunk";
     const CLASS: PoolClass = PoolClass::Bulk;
     const TIMEOUT: Duration = Duration::from_secs(30);
@@ -468,7 +499,7 @@ impl SnapshotResponseRecord {
 }
 
 impl InterconnectRequest for FinishSnapshotTransfer {
-    type Response = Result<SnapshotResponseRecord, String>;
+    type Response = Result<SnapshotResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_finish_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
     const TIMEOUT: Duration = Duration::from_secs(30);
@@ -561,7 +592,7 @@ impl TransferLeadershipResponse {
 }
 
 impl InterconnectRequest for TransferLeadership {
-    type Response = Result<TransferLeadershipResponse, String>;
+    type Response = Result<TransferLeadershipResponse, ConsensusRequestError>;
     const NAME: &'static str = "raft_transfer_leadership";
     const CLASS: PoolClass = PoolClass::Management;
     const TIMEOUT: Duration = Duration::from_secs(5);

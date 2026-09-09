@@ -190,7 +190,7 @@ use crate::{
     },
     resource_interconnect::{
         FetchResourceArchiveChunk, PublishResourceReplica,
-        ResourceArchiveChunk as InterconnectResourceArchiveChunk,
+        ResourceArchiveChunk as InterconnectResourceArchiveChunk, ResourceInterconnectError,
     },
 };
 
@@ -2854,7 +2854,9 @@ impl InterconnectTlsMaterial {
         hasher.finalize()
     }
 
-    fn tls_bundle(&self) -> Result<TlsConfigBundle, nervix_interconnect::TlsConfigError> {
+    fn tls_bundle(
+        &self,
+    ) -> Result<TlsConfigBundle, Report<nervix_interconnect::TlsConfigError>> {
         TlsConfigBundle::from_pem(&self.ca, &self.certificate, &self.private_key)
     }
 }
@@ -4468,6 +4470,7 @@ impl SessionServiceImpl {
             .request(&leader_id, PublishResourceReplica { replica })
             .await
             .map_err(|error| format!("failed to publish resource replica: {error}"))?
+            .map_err(|error| format!("failed to publish resource replica: {error}"))
     }
 
     async fn reconcile_resources_once(&self) {
@@ -15714,7 +15717,8 @@ async fn fetch_resource_archive(
                 },
             )
             .await
-            .map_err(|error| format!("resource fetch failed: {error}"))??;
+            .map_err(|error| format!("resource fetch request failed: {error}"))?
+            .map_err(|error| format!("resource fetch failed: {error}"))?;
         if chunk.bytes.is_empty() && !chunk.eof {
             return Err("resource fetch made no progress".to_string());
         }
@@ -17819,7 +17823,7 @@ impl Application {
                             bytes: chunk.bytes,
                             eof: chunk.eof,
                         })
-                        .map_err(|error| error.to_string())
+                        .map_err(ResourceInterconnectError::archive_read)
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
@@ -17829,18 +17833,17 @@ impl Application {
                 let service = resource_replica_service.clone();
                 async move {
                     if &request.replica.key.node_id != context.peer_node_id() {
-                        return Err(format!(
-                            "authenticated node '{}' cannot publish resource state for '{}'",
-                            context.peer_node_id(),
-                            request.replica.key.node_id,
-                        ));
+                        return Err(ResourceInterconnectError::ReplicaOrigin {
+                            authenticated: context.peer_node_id().clone(),
+                            declared: request.replica.key.node_id.clone(),
+                        });
                     }
                     service
                         .inner
                         .consensus
                         .put_resource_replica(request.replica)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(ResourceInterconnectError::replica_publish)
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;

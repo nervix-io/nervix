@@ -10,8 +10,34 @@
 use std::time::Duration;
 
 use nervix_interconnect::{InterconnectRequest, PoolClass};
-use nervix_models::{ResourceId, ResourceNodeStatus};
+use nervix_models::{ClusterNodeName, ResourceId, ResourceNodeStatus};
 use rkyv::{Archive, Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+pub(crate) enum ResourceInterconnectError {
+    #[error("failed to read the resource archive: {0}")]
+    ArchiveRead(String),
+    #[error(
+        "authenticated node '{authenticated}' cannot publish resource state for '{declared}'"
+    )]
+    ReplicaOrigin {
+        authenticated: ClusterNodeName,
+        declared: ClusterNodeName,
+    },
+    #[error("failed to publish resource replica state: {0}")]
+    ReplicaPublish(String),
+}
+
+impl ResourceInterconnectError {
+    pub(crate) fn archive_read(error: impl std::fmt::Display) -> Self {
+        Self::ArchiveRead(error.to_string())
+    }
+
+    pub(crate) fn replica_publish(error: impl std::fmt::Display) -> Self {
+        Self::ReplicaPublish(error.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct FetchResourceArchiveChunk {
@@ -26,7 +52,7 @@ pub(crate) struct ResourceArchiveChunk {
 }
 
 impl InterconnectRequest for FetchResourceArchiveChunk {
-    type Response = Result<ResourceArchiveChunk, String>;
+    type Response = Result<ResourceArchiveChunk, ResourceInterconnectError>;
 
     const NAME: &'static str = "fetch_resource_archive_chunk";
     const CLASS: PoolClass = PoolClass::Bulk;
@@ -39,7 +65,7 @@ pub(crate) struct PublishResourceReplica {
 }
 
 impl InterconnectRequest for PublishResourceReplica {
-    type Response = Result<(), String>;
+    type Response = Result<(), ResourceInterconnectError>;
 
     const NAME: &'static str = "publish_resource_replica";
     const CLASS: PoolClass = PoolClass::Commands;
