@@ -401,6 +401,12 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
 
     let number = text::int(10)
         .then(just('.').then(text::digits(10)).or_not())
+        .then(
+            one_of("eE")
+                .then(one_of("+-").or_not())
+                .then(text::digits(10))
+                .or_not(),
+        )
         .to_slice()
         .map(|n: &str| Token::NumberLiteral(n.to_string()));
 
@@ -594,6 +600,21 @@ mod tests {
                 Token::Word(Word::UnknownWord("p99".to_string())),
                 Token::Eq,
                 Token::NumberLiteral("99.5".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_scientific_number_literals_as_one_token() {
+        let tokens = lex("5e-324 1.7976931348623157E+308").expect("numbers should lex");
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::NumberLiteral("5e-324".to_string()),
+                Token::NumberLiteral("1.7976931348623157E+308".to_string()),
             ]
         );
     }

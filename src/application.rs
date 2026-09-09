@@ -44,7 +44,6 @@ use argon2::{
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use blake3::Hasher;
-use chrono::TimeDelta;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use dashmap::DashMap;
@@ -68,7 +67,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{
     Client as NervixClient, ConnectOptions as ClientConnectOptions,
     TlsRequirement as ClientTlsRequirement,
@@ -123,17 +122,17 @@ use nervix_models::{
     DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
     DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
     DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainClockState, DomainConfig, DomainName, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, FieldName, IcebergCatalog,
-    InferencerTensorDimension, InferencerTensorSchema, IngestSource, IngestTimestampSource,
-    IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName, LookupQuery, Model,
-    ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef, ParseAsType,
-    PlacementGroupSchedule, PlacementName, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId, ResourceName,
-    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledModel, ScheduledNode,
-    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp,
-    UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
+    DescribeWindowProcessor, DomainClockAdvancement, DomainClockPeriod, DomainClockState,
+    DomainConfig, DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick,
+    EmitSink, FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule,
+    LookupName, LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction,
+    MySqlConflictAction, NodeRef, ParseAsType, PlacementGroupSchedule, PlacementName,
+    PlacementPolicy, PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel,
+    RelayName, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    ScheduledModel, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
+    Timestamp, UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
     ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
@@ -3141,9 +3140,8 @@ struct DomainClockReconciliation {
 /// how fast it advances, and the start version that clock belongs to.
 struct StartedDomainClock {
     domain_id: DomainName,
-    wall_started_at: Timestamp,
-    logical_start: Timestamp,
-    time_rate: String,
+    clock: DomainClockState,
+    period: DomainClockPeriod,
     start_version: u64,
 }
 
@@ -3457,9 +3455,8 @@ enum ActiveDomainError {
 
 #[derive(Clone)]
 struct DomainClockRuntimeState {
-    wall_started_at: Timestamp,
-    logical_start: Timestamp,
-    time_rate: String,
+    clock: DomainClockState,
+    period: DomainClockPeriod,
     next_tick_id: u64,
 }
 
@@ -5242,9 +5239,8 @@ impl SessionServiceImpl {
     async fn start_domain_clock(
         &self,
         domain_id: DomainName,
-        wall_started_at: Timestamp,
-        logical_start: Timestamp,
-        time_rate: String,
+        clock: DomainClockState,
+        period: DomainClockPeriod,
     ) -> Result<(), String> {
         let owner = self.domain_clock_owner(&domain_id).await.ok_or_else(|| {
             format!(
@@ -5255,9 +5251,8 @@ impl SessionServiceImpl {
         let start = DomainClockStart {
             domain_id: domain_id.clone(),
             owner_node_id: owner,
-            wall_started_at,
-            logical_start,
-            time_rate,
+            clock,
+            period,
         };
         for node_id in self.domain_tick_target_nodes(&domain_id).await {
             tokio::task::consume_budget().await;
@@ -5301,15 +5296,13 @@ impl SessionServiceImpl {
             }
             let result = if running {
                 match domain.clock {
-                    Some(clock) => {
-                        self.start_domain_clock(
-                            domain_id.clone(),
-                            clock.wall_started_at,
-                            clock.logical_start,
-                            clock.time_rate,
-                        )
-                        .await
-                    }
+                    Some(clock) => match domain_clock_period(&domain.config) {
+                        Ok(period) => {
+                            self.start_domain_clock(domain_id.clone(), clock, period)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    },
                     None => Err(format!(
                         "paced domain '{}' is running without replicated clock state",
                         domain_id.as_str()
@@ -5355,12 +5348,9 @@ impl SessionServiceImpl {
 
     fn handle_domain_clock_start(&self, start: DomainClockStart) {
         let domain_id = start.domain_id.clone();
-        self.inner.runtime.handle_domain_clock_start(
-            &domain_id,
-            start.logical_start,
-            start.wall_started_at,
-            &start.time_rate,
-        );
+        self.inner
+            .runtime
+            .handle_domain_clock_start(&domain_id, start.clock.clone());
         if start.owner_node_id != self.inner.consensus.local_node_id().clone() {
             self.inner.domain_clock_events.notify_waiters();
             return;
@@ -5368,9 +5358,8 @@ impl SessionServiceImpl {
         self.inner.domain_clocks.insert(
             domain_id.clone(),
             DomainClockRuntimeState {
-                wall_started_at: start.wall_started_at,
-                logical_start: start.logical_start,
-                time_rate: start.time_rate,
+                clock: start.clock,
+                period: start.period,
                 next_tick_id: 1,
             },
         );
@@ -8685,7 +8674,6 @@ impl SessionServiceImpl {
                             domain_id.as_str()
                         ));
                     }
-                    let _ = parse_start_point(&start.start)?;
                     domain.status = DomainStatus::Running;
                     domain.last_start = start.start.clone();
                     domain.start_version = domain.start_version.checked_add(1).assured(
@@ -9395,54 +9383,46 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    match parse_start_point(&start.start) {
-                        Ok((mut logical_start, time_rate)) => {
-                            if let DomainPace::Paced = domain.config.pace
-                                && let DomainStartPoint::Resume = &start.start
-                                && let Ok(Some(resume_at)) =
-                                    self.inner.runtime.current_paced_domain_time(domain_id)
-                            {
-                                logical_start = resume_at;
-                            }
-                            let wall_started_at = current_timestamp();
-                            let concrete_start = match &start.start {
-                                DomainStartPoint::Resume => DomainStartPoint::Resume,
-                                DomainStartPoint::Now { .. } => DomainStartPoint::At {
-                                    timestamp: logical_start.as_datetime().to_rfc3339(),
-                                    time_rate: time_rate.clone(),
-                                },
-                                DomainStartPoint::At { .. } => start.start.clone(),
-                            };
-                            if let DomainPace::Paced = domain.config.pace {
-                                start_clock = Some(StartedDomainClock {
-                                    domain_id: domain_id.clone(),
-                                    wall_started_at,
-                                    logical_start,
-                                    time_rate: time_rate.clone(),
-                                    start_version: domain.start_version.checked_add(1).assured(
-                                        "a domain cannot be started 2^64 times in the lifetime of \
-                                         a cluster",
-                                    ),
-                                });
-                            }
-                            (
-                                command_ok(format!("starting domain '{}'", domain_id.as_str())),
-                                Some(TransactionStepEffect::StartDomain {
-                                    domain_id: domain_id.clone(),
-                                    expected_start_version: domain.start_version,
-                                    start: concrete_start,
-                                    clock: matches!(domain.config.pace, DomainPace::Paced).then(
-                                        || DomainClockState {
-                                            wall_started_at,
-                                            logical_start,
-                                            time_rate: time_rate.clone(),
-                                        },
-                                    ),
-                                }),
-                            )
-                        }
-                        Err(message) => (command_error(message), None),
+                    let wall_started_at = current_timestamp();
+                    let (mut logical_start, time_rate) = start.start.resolve_at(wall_started_at);
+                    if let DomainPace::Paced = domain.config.pace
+                        && let DomainStartPoint::Resume = &start.start
+                        && let Ok(Some(resume_at)) =
+                            self.inner.runtime.current_paced_domain_time(domain_id)
+                    {
+                        logical_start = resume_at;
                     }
+                    let concrete_start = match &start.start {
+                        DomainStartPoint::Resume => DomainStartPoint::Resume,
+                        DomainStartPoint::Now { .. } => DomainStartPoint::At {
+                            timestamp: logical_start,
+                            time_rate,
+                        },
+                        DomainStartPoint::At { .. } => start.start.clone(),
+                    };
+                    let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
+                    if let DomainPace::Paced = domain.config.pace {
+                        start_clock = Some(StartedDomainClock {
+                            domain_id: domain_id.clone(),
+                            clock: clock.clone(),
+                            period: domain_clock_period(&domain.config).verified(
+                                "validate_domain_config above accepted this paced domain",
+                            ),
+                            start_version: domain.start_version.checked_add(1).assured(
+                                "a domain cannot be started 2^64 times in the lifetime of a \
+                                 cluster",
+                            ),
+                        });
+                    }
+                    (
+                        command_ok(format!("starting domain '{}'", domain_id.as_str())),
+                        Some(TransactionStepEffect::StartDomain {
+                            domain_id: domain_id.clone(),
+                            expected_start_version: domain.start_version,
+                            start: concrete_start,
+                            clock: matches!(domain.config.pace, DomainPace::Paced).then_some(clock),
+                        }),
+                    )
                 }
             }
             Statement::StopDomain(_) => {
@@ -9532,25 +9512,16 @@ impl SessionServiceImpl {
             }
             if let Some(StartedDomainClock {
                 domain_id,
-                wall_started_at,
-                logical_start,
-                time_rate,
+                clock,
+                period,
                 start_version,
             }) = start_clock
             {
-                self.inner.runtime.handle_domain_clock_start(
-                    &domain_id,
-                    logical_start,
-                    wall_started_at,
-                    &time_rate,
-                );
+                self.inner
+                    .runtime
+                    .handle_domain_clock_start(&domain_id, clock.clone());
                 if let Err(error) = self
-                    .start_domain_clock(
-                        domain_id.clone(),
-                        wall_started_at,
-                        logical_start,
-                        time_rate,
-                    )
+                    .start_domain_clock(domain_id.clone(), clock, period)
                     .await
                 {
                     self.broadcast_error(error);
@@ -11661,36 +11632,30 @@ impl SessionServiceImpl {
                 domain_id.as_str()
             ));
         }
-        let (mut logical_start, time_rate) = match parse_start_point(&start.start) {
-            Ok(value) => value,
-            Err(message) => return command_error(message),
-        };
+        let wall_started_at = current_timestamp();
+        let (mut logical_start, time_rate) = start.start.resolve_at(wall_started_at);
         if let DomainPace::Paced = domain.config.pace
             && let DomainStartPoint::Resume = &start.start
             && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
         {
             logical_start = resume_at;
         }
-        let wall_started_at = current_timestamp();
         let concrete_start = match &start.start {
             DomainStartPoint::Resume => DomainStartPoint::Resume,
             DomainStartPoint::Now { .. } => DomainStartPoint::At {
-                timestamp: logical_start.as_datetime().to_rfc3339(),
-                time_rate: time_rate.clone(),
+                timestamp: logical_start,
+                time_rate,
             },
             DomainStartPoint::At { .. } => start.start.clone(),
         };
+        let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
         match self
             .inner
             .consensus
             .start_domain(
                 domain_id.clone(),
                 concrete_start,
-                matches!(domain.config.pace, DomainPace::Paced).then(|| DomainClockState {
-                    wall_started_at,
-                    logical_start,
-                    time_rate: time_rate.clone(),
-                }),
+                matches!(domain.config.pace, DomainPace::Paced).then_some(clock.clone()),
             )
             .await
         {
@@ -11704,25 +11669,20 @@ impl SessionServiceImpl {
                     ));
                 }
                 if let DomainPace::Paced = domain.config.pace {
-                    self.inner.runtime.handle_domain_clock_start(
-                        domain_id,
-                        logical_start,
-                        wall_started_at,
-                        &time_rate,
-                    );
+                    self.inner
+                        .runtime
+                        .handle_domain_clock_start(domain_id, clock.clone());
                 }
-                if let DomainPace::Paced = domain.config.pace
-                    && let Err(message) = self
-                        .start_domain_clock(
-                            domain_id.clone(),
-                            wall_started_at,
-                            logical_start,
-                            time_rate,
-                        )
+                if let DomainPace::Paced = domain.config.pace {
+                    let period = domain_clock_period(&domain.config)
+                        .verified("validate_domain_config above accepted this paced domain");
+                    if let Err(message) = self
+                        .start_domain_clock(domain_id.clone(), clock, period)
                         .await
-                {
-                    let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
-                    return command_error(message);
+                    {
+                        let _ = self.inner.consensus.stop_domain(domain_id.clone()).await;
+                        return command_error(message);
+                    }
                 }
                 if let DomainPace::Paced = domain.config.pace {
                     self.inner.domain_clock_reconciliations.insert(
@@ -15950,43 +15910,24 @@ fn requires_leader(statement: &Statement) -> bool {
 
 fn validate_domain_config(config: &DomainConfig) -> Result<(), String> {
     if let DomainPace::Paced = config.pace {
-        let _ = humantime::parse_duration(&config.period)
-            .map_err(|err| format!("invalid domain period '{}': {err}", config.period))?;
-        let _ = humantime::parse_duration(&config.skew)
+        let _ = domain_clock_period(config)?;
+        let skew = humantime::parse_duration(&config.skew)
             .map_err(|err| format!("invalid domain skew '{}': {err}", config.skew))?;
+        u64::try_from(skew.as_nanos()).map_err(|_| {
+            format!(
+                "invalid domain skew '{}': duration does not fit in 64-bit nanoseconds",
+                config.skew
+            )
+        })?;
     }
     Ok(())
 }
 
-fn parse_time_rate(raw: &str) -> Result<String, String> {
-    let rate = raw
-        .parse::<f64>()
-        .map_err(|err| format!("invalid time rate '{raw}': {err}"))?;
-    if !rate.is_finite() || rate <= 0.0 {
-        return Err(format!(
-            "time rate '{raw}' must be a positive finite number"
-        ));
-    }
-    Ok(raw.to_string())
-}
-
-fn parse_start_point(start: &DomainStartPoint) -> Result<(Timestamp, String), String> {
-    match start {
-        DomainStartPoint::Resume => Ok((current_timestamp(), "1.0".to_string())),
-        DomainStartPoint::Now { time_rate } => {
-            let time_rate = parse_time_rate(time_rate)?;
-            Ok((current_timestamp(), time_rate))
-        }
-        DomainStartPoint::At {
-            timestamp,
-            time_rate,
-        } => {
-            let time_rate = parse_time_rate(time_rate)?;
-            chrono::DateTime::parse_from_rfc3339(timestamp)
-                .map(|value| (Timestamp::from(value.to_utc()), time_rate))
-                .map_err(|err| format!("invalid start timestamp '{timestamp}': {err}"))
-        }
-    }
+fn domain_clock_period(config: &DomainConfig) -> Result<DomainClockPeriod, String> {
+    config
+        .period
+        .parse::<DomainClockPeriod>()
+        .map_err(|error| format!("invalid domain period '{}': {error}", config.period))
 }
 
 fn current_timestamp() -> Timestamp {
@@ -15994,11 +15935,11 @@ fn current_timestamp() -> Timestamp {
 }
 
 fn subtract_timestamp_duration(timestamp: Timestamp, duration: Duration) -> Timestamp {
-    let delta = TimeDelta::from_std(duration).unwrap_or(TimeDelta::MAX);
-    match timestamp.into_datetime().checked_sub_signed(delta) {
-        Some(shifted) => Timestamp::from(shifted),
-        None => Timestamp::from_datetime(chrono::DateTime::UNIX_EPOCH),
-    }
+    // A skew window extends to the first representable instant when its lower edge would precede
+    // the timestamp model's range.
+    timestamp
+        .checked_sub(duration)
+        .unwrap_or_else(|_| Timestamp::from_unix_nanos(i64::MIN))
 }
 
 async fn hash_password(password: String) -> Result<String, String> {
@@ -16057,48 +15998,6 @@ async fn user_credentials(name: UserName, password: String) -> Result<UserCreden
         name,
         password_hash,
     })
-}
-
-/// `base` advanced by `delta` repeated `scale` times, or `None` when a domain has run long
-/// enough that the result leaves the representable timestamp range.
-fn add_scaled_duration_to_timestamp(
-    base: Timestamp,
-    delta: Duration,
-    scale: u64,
-) -> Option<Timestamp> {
-    let scaled_nanos = delta
-        .as_nanos()
-        .checked_mul(u128::from(scale))
-        .and_then(|nanos| i64::try_from(nanos).ok())?;
-    base.into_datetime()
-        .checked_add_signed(TimeDelta::nanoseconds(scaled_nanos))
-        .map(Timestamp::from)
-}
-
-fn logical_timestamp_at_wall_time(
-    clock: &DomainClockRuntimeState,
-    wall_time: Timestamp,
-    time_rate: f64,
-) -> Timestamp {
-    let elapsed = wall_time
-        .into_datetime()
-        .signed_duration_since(clock.wall_started_at.into_datetime())
-        .to_std()
-        .unwrap_or(Duration::ZERO);
-    // The rate is finite and positive, so the scaled span can only leave the nanosecond range at
-    // the far end, where a clock that has run past it pins to the end of the range.
-    let progressed_nanos = (elapsed.as_nanos().approx_into::<f64>() * time_rate)
-        .floor()
-        .checked_approx_into()
-        .unwrap_or(i64::MAX);
-    let progressed = clock
-        .logical_start
-        .into_datetime()
-        .checked_add_signed(TimeDelta::nanoseconds(progressed_nanos));
-    match progressed {
-        Some(progressed) => Timestamp::from(progressed),
-        None => clock.logical_start,
-    }
 }
 
 fn command_ok(message: String) -> CommandResult {
@@ -17495,141 +17394,108 @@ async fn run_domain_clock(
         else {
             break;
         };
-        let Ok(period) = humantime::parse_duration(&domain.config.period) else {
-            warn!(
-                domain = domain_id.as_str(),
-                period = domain.config.period,
-                "invalid domain period"
-            );
-            break;
+        let wall_time = current_timestamp();
+        let due = match clock
+            .clock
+            .due_advancement(clock.period, clock.next_tick_id, wall_time)
+        {
+            Ok(due) => due,
+            Err(error) => {
+                service.inner.runtime.report_error(format!(
+                    "domain clock projection for '{}' failed: {error}",
+                    domain_id.as_str()
+                ));
+                warn!(
+                    domain = domain_id.as_str(),
+                    error = %error,
+                    "domain clock arithmetic failed"
+                );
+                break;
+            }
         };
-        let Ok(time_rate) = clock.time_rate.parse::<f64>() else {
-            warn!(
-                domain = domain_id.as_str(),
-                time_rate = clock.time_rate,
-                "invalid domain time rate"
-            );
-            break;
-        };
-        if !time_rate.is_finite() || time_rate <= 0.0 {
-            warn!(
-                domain = domain_id.as_str(),
-                time_rate = clock.time_rate,
-                "invalid domain time rate"
-            );
-            break;
-        }
-
-        let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        let Some(next_logical) = add_scaled_duration_to_timestamp(
-            clock.logical_start,
-            period,
-            clock
-                .next_tick_id
-                .checked_sub(1)
-                .assured("a domain clock's tick ids start at one and only ever advance"),
-        ) else {
-            warn!(
-                domain = domain_id.as_str(),
-                period = domain.config.period,
-                next_tick_id = clock.next_tick_id,
-                "domain clock has run past the representable timestamp range"
-            );
-            break;
-        };
-        let reached_logical =
-            logical_timestamp_at_wall_time(&clock, current_timestamp(), time_rate);
-
-        if reached_logical >= next_logical {
-            emit_domain_tick(&service, &domain_id, &mut clock, next_logical, period_ms).await;
+        if let Some(advancement) = due {
+            emit_domain_tick(&service, &domain_id, &mut clock, advancement).await;
             continue;
         }
-
-        let remaining_logical = next_logical
-            .into_datetime()
-            .signed_duration_since(reached_logical.into_datetime())
-            .to_std()
-            .unwrap_or(Duration::ZERO);
-        // As above, only the far end of the range is reachable, and the sleep below caps the
-        // wait at its own polling cadence anyway.
-        let wait_nanos = (remaining_logical.as_nanos().approx_into::<f64>() / time_rate)
-            .ceil()
-            .checked_approx_into()
-            .unwrap_or(u64::MAX);
+        let next_boundary = match clock.clock.tick_boundary(clock.period, clock.next_tick_id) {
+            Ok(boundary) => boundary,
+            Err(error) => {
+                service.inner.runtime.report_error(format!(
+                    "domain clock boundary for '{}' failed: {error}",
+                    domain_id.as_str()
+                ));
+                warn!(
+                    domain = domain_id.as_str(),
+                    error = %error,
+                    "domain clock boundary arithmetic failed"
+                );
+                break;
+            }
+        };
+        let reached_logical = match clock.clock.logical_time_at(wall_time) {
+            Ok(reached) => reached,
+            Err(error) => {
+                service.inner.runtime.report_error(format!(
+                    "domain clock projection for '{}' failed: {error}",
+                    domain_id.as_str()
+                ));
+                warn!(domain = domain_id.as_str(), error = %error, "domain clock projection failed");
+                break;
+            }
+        };
+        let wait = match clock
+            .clock
+            .wall_duration_until(reached_logical, next_boundary.logical_timestamp())
+        {
+            Ok(wait) => wait,
+            Err(error) => {
+                service.inner.runtime.report_error(format!(
+                    "domain clock rate conversion for '{}' failed: {error}",
+                    domain_id.as_str()
+                ));
+                warn!(domain = domain_id.as_str(), error = %error, "domain clock rate conversion failed");
+                break;
+            }
+        };
         tokio::select! {
             _ = shutdown.cancelled() => break,
-            _ = sleep(Duration::from_nanos(wait_nanos.clamp(1_000_000, 250_000_000))) => {}
+            _ = sleep(wait.clamp(Duration::from_millis(1), Duration::from_millis(250))) => {}
         }
     }
 }
 
 async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &DomainName) {
-    loop {
-        tokio::task::consume_budget().await;
-        let Some(domain) = service.inner.consensus.current_domain(domain_id).await else {
-            break;
-        };
-        if let DomainStatus::Stopped = domain.status {
-            break;
+    let Some(domain) = service.inner.consensus.current_domain(domain_id).await else {
+        return;
+    };
+    if let DomainStatus::Stopped = domain.status {
+        return;
+    }
+    let Some(mut clock) = service
+        .inner
+        .domain_clocks
+        .get(domain_id)
+        .map(|state| state.clone())
+    else {
+        return;
+    };
+    let due = match clock.clock.due_advancement(
+        clock.period,
+        clock.next_tick_id,
+        current_timestamp(),
+    ) {
+        Ok(due) => due,
+        Err(error) => {
+            service.inner.runtime.report_error(format!(
+                "domain clock projection for '{}' failed: {error}",
+                domain_id.as_str()
+            ));
+            warn!(domain = domain_id.as_str(), error = %error, "domain clock arithmetic failed");
+            return;
         }
-        let Some(mut clock) = service
-            .inner
-            .domain_clocks
-            .get(domain_id)
-            .map(|state| state.clone())
-        else {
-            break;
-        };
-        let Ok(period) = humantime::parse_duration(&domain.config.period) else {
-            warn!(
-                domain = domain_id.as_str(),
-                period = domain.config.period,
-                "invalid domain period"
-            );
-            break;
-        };
-        let Ok(time_rate) = clock.time_rate.parse::<f64>() else {
-            warn!(
-                domain = domain_id.as_str(),
-                time_rate = clock.time_rate,
-                "invalid domain time rate"
-            );
-            break;
-        };
-        if !time_rate.is_finite() || time_rate <= 0.0 {
-            warn!(
-                domain = domain_id.as_str(),
-                time_rate = clock.time_rate,
-                "invalid domain time rate"
-            );
-            break;
-        }
-
-        let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        let Some(next_logical) = add_scaled_duration_to_timestamp(
-            clock.logical_start,
-            period,
-            clock
-                .next_tick_id
-                .checked_sub(1)
-                .assured("a domain clock's tick ids start at one and only ever advance"),
-        ) else {
-            warn!(
-                domain = domain_id.as_str(),
-                period = domain.config.period,
-                next_tick_id = clock.next_tick_id,
-                "domain clock has run past the representable timestamp range"
-            );
-            break;
-        };
-        let reached_logical =
-            logical_timestamp_at_wall_time(&clock, current_timestamp(), time_rate);
-
-        if reached_logical < next_logical {
-            break;
-        }
-
-        emit_domain_tick(service, domain_id, &mut clock, next_logical, period_ms).await;
+    };
+    if let Some(advancement) = due {
+        emit_domain_tick(service, domain_id, &mut clock, advancement).await;
     }
 }
 
@@ -17637,8 +17503,7 @@ async fn emit_domain_tick(
     service: &SessionServiceImpl,
     domain_id: &DomainName,
     clock: &mut DomainClockRuntimeState,
-    logical_timestamp: Timestamp,
-    duration_ms: u64,
+    advancement: DomainClockAdvancement,
 ) {
     #[cfg(feature = "testing")]
     let progress_was_paused = service
@@ -17647,22 +17512,21 @@ async fn emit_domain_tick(
         .pause_domain_clock_progress_if_armed(domain_id)
         .await;
     let wall_clock = current_timestamp();
+    let boundary = advancement.boundary();
     let tick = DomainTick {
-        tick_id: clock.next_tick_id,
-        logical_timestamp,
+        tick_id: boundary.tick_id(),
+        logical_timestamp: boundary.logical_timestamp(),
         wall_clock,
-        duration_ms,
+        period: clock.period,
     };
-    clock.next_tick_id = clock
-        .next_tick_id
-        .checked_add(1)
-        .assured("a domain clock cannot emit 2^64 ticks in the lifetime of a cluster");
+    clock.next_tick_id = advancement.next_tick_id();
     service
         .inner
         .domain_clocks
         .insert(domain_id.clone(), clock.clone());
     let target_nodes = service.domain_tick_target_nodes(domain_id).await;
     for node_id in target_nodes {
+        tokio::task::consume_budget().await;
         if node_id == service.inner.consensus.local_node_id().clone() {
             service.handle_domain_tick(DomainTickEnvelope {
                 domain_id: domain_id.clone(),

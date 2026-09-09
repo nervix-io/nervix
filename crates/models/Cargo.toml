@@ -13,8 +13,10 @@ ahash-compile-time = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
+humantime = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nonzero_ext = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }

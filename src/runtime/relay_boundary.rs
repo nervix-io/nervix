@@ -1276,11 +1276,12 @@ impl Runtime {
         match state.config.pace {
             DomainPace::Unpaced => Ok(Some(wall_now)),
             DomainPace::Paced => {
-                let latest_tick = state.ticks.lock().back().cloned();
                 if let Some(clock) = state.clock.as_ref() {
-                    current_domain_logical_time(clock, latest_tick.as_ref(), wall_now).map(Some)
+                    current_domain_logical_time(clock, wall_now)
+                        .map(Some)
+                        .map_err(|error| error.to_string())
                 } else {
-                    Ok(latest_tick.map(|tick| tick.logical_timestamp))
+                    Ok(state.ticks.lock().back().map(|tick| tick.logical_timestamp))
                 }
             }
         }

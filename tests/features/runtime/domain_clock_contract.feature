@@ -51,7 +51,7 @@ Feature: Domain clock contract regressions
       | 1            |
       | 3            |
 
-  @clock_contract_expected_failure @delayed_clock_progress
+  @delayed_clock_progress
   Scenario Outline: Delayed clock progress cannot move observed logical time backwards
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -125,6 +125,46 @@ Feature: Domain clock contract regressions
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: Out-of-range paced starts and projections return typed timestamp diagnostics
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
+      """
+    When these NSPL commands fail with "outside the signed Unix-nanosecond range"
+      """
+      START AT '<outside_timestamp>' TIME RATE 1.0;
+      """
+    And these NSPL commands are executed
+      """
+      CREATE SCHEMA clock_diagnostic (
+        sequence I64
+      );
+      CREATE RELAY clock_diagnostics SCHEMA clock_diagnostic UNBRANCHED;
+      CREATE SUBSCRIPTION clock_diagnostics_subscription TO clock_diagnostics;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      START AT '2262-04-11T23:47:16.854775807Z' TIME RATE 1.0;
+      """
+    Then within "10s" the active session observes a server error
+    And the last server error contains
+      """
+      domain clock projection
+      """
+    And the last server error contains
+      """
+      leaves the signed Unix-nanosecond range
+      """
+
+    Examples:
+      | cluster_size | outside_timestamp              |
+      | 1            | 1677-09-21T00:12:43.145224191Z |
+      | 1            | 2262-04-11T23:47:16.854775808Z |
+      | 3            | 1677-09-21T00:12:43.145224191Z |
+      | 3            | 2262-04-11T23:47:16.854775808Z |
 
   @clock_contract_expected_failure @logical_origin_admission
   Scenario Outline: A paced domain admits an event at its historical logical origin

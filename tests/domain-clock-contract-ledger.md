@@ -109,25 +109,30 @@ dependency explicitly and scopes recorder names with `{{test_id}}`.
 
 ## Baseline probes and controls
 
-The desired-behavior unit probes are:
+The desired-behavior unit probes established by task 01 are:
 
 ```text
 runtime::domain_clock::tests::delayed_progress_delivery_does_not_move_logical_time_backwards
 runtime::domain_clock::tests::paced_domains_admit_the_logical_origin
 runtime::domain_clock::tests::scheduled_timestamp_addition_stays_in_the_serializable_range
-runtime::domain_clock::tests::logical_time_projection_stays_in_the_serializable_range
+runtime::domain_clock::tests::logical_time_projection_reports_range_overflow
 ```
 
-Each is ignored in the ordinary suite and is expected to fail when selected with `--ignored
---exact`. The passing arithmetic control is
+Task 02 made the delayed-progress, scheduled-timestamp, and projection probes part of the ordinary
+suite. The historical-origin probe remains ignored for task 05. The passing arithmetic control is
 `runtime::domain_clock::tests::logical_rate_conversion_scales_physical_waits`.
 
-The focused public expected failures are selected independently:
+The focused public scenarios are selected independently:
 
 ```console
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @delayed_clock_progress
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @logical_origin_admission
 ```
+
+The delayed-progress scenario is part of the ordinary suite after task 02. The logical-origin
+scenario remains quarantined for task 05. The untagged
+`Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
+task 02's F10 public coverage.
 
 Physical controls are
 `tests::connection_lifetime::send_queue_admission_is_deadline_bound`,
@@ -140,9 +145,9 @@ The evidence recorded for this task consists only of the focused commands listed
 validation record. It does not assert that the complete Cucumber suite or final domain-clock
 qualification matrix has run; task 14 owns that claim.
 
-## Validation record
+## Task 01 validation record
 
-Recorded on 8 September 2026 against the current task worktree:
+Recorded on 8 September 2026 before the task 02 implementation:
 
 | Probe | Result | Evidence |
 | --- | --- | --- |
@@ -164,5 +169,21 @@ Recorded on 8 September 2026 against the current task worktree:
 | Default run of `domain_clock_contract.feature` | Pass | The two recorder-fixture examples passed; expected-failure examples were excluded by their quarantine tag. |
 | `just validate` | Pass | Repository formatting, linting, checks, skill validation, and documentation tests completed successfully. |
 | `just ratchet` | Pass | Every architecture-debt count remained at or below its checked-in baseline. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 02 validation record
+
+Recorded on 8 September 2026 against the task 02 worktree:
+
+| Probe | Result |
+| --- | --- |
+| Public out-of-range START reproducer before product changes | Expected red in all four one- and three-node endpoint examples; the invalid timestamp reached Raft serialization. |
+| `Out-of-range paced starts and projections return typed timestamp diagnostics` | Pass in all four one- and three-node endpoint examples; 36 steps passed. |
+| `Delayed clock progress cannot move observed logical time backwards` | Pass in both one- and three-node examples; 32 steps passed. |
+| `nervix-models` unit suite | Pass; 98 tests covered timestamp endpoints, validated rates and periods, rounding, direct advancement, and overflow. |
+| Runtime domain-clock unit suite | Pass; six task 02 tests passed. The historical-origin probe remains ignored for task 05. |
+| `just validate` | Pass, including all-feature workspace Clippy and all 139 executable NSPL documentation blocks. |
+| `just ratchet` | Pass with the new clock model included; the checked-in string-error debt fell from 520 to 516. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
