@@ -2854,9 +2854,7 @@ impl InterconnectTlsMaterial {
         hasher.finalize()
     }
 
-    fn tls_bundle(
-        &self,
-    ) -> Result<TlsConfigBundle, Report<nervix_interconnect::TlsConfigError>> {
+    fn tls_bundle(&self) -> Result<TlsConfigBundle, Report<nervix_interconnect::TlsConfigError>> {
         TlsConfigBundle::from_pem(&self.ca, &self.certificate, &self.private_key)
     }
 }

@@ -122,9 +122,7 @@ impl CertificateIdentity {
     }
 }
 
-fn parse_identity_uri(
-    raw: &str,
-) -> Result<(String, ClusterNodeName), Report<TlsConfigError>> {
+fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), Report<TlsConfigError>> {
     let uri = Url::parse(raw).map_err(|error| TlsConfigError::InvalidIdentityUri {
         uri: raw.to_string(),
         reason: error.to_string(),
@@ -270,9 +268,7 @@ impl TlsConfigBundle {
     }
 }
 
-fn load_certificates(
-    path: &Path,
-) -> Result<Vec<CertificateDer<'static>>, Report<TlsConfigError>> {
+fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, Report<TlsConfigError>> {
     let certs = CertificateDer::pem_file_iter(path)
         .map_err(map_pem_error)?
         .collect::<Result<Vec<_>, _>>()

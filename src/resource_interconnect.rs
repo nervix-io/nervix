@@ -18,9 +18,7 @@ use thiserror::Error;
 pub(crate) enum ResourceInterconnectError {
     #[error("failed to read the resource archive: {0}")]
     ArchiveRead(String),
-    #[error(
-        "authenticated node '{authenticated}' cannot publish resource state for '{declared}'"
-    )]
+    #[error("authenticated node '{authenticated}' cannot publish resource state for '{declared}'")]
     ReplicaOrigin {
         authenticated: ClusterNodeName,
         declared: ClusterNodeName,
