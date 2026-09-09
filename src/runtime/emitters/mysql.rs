@@ -95,6 +95,53 @@ impl MySqlWriteError {
     }
 }
 
+/// How often an idle MySQL pool is topped back up to its declared minimum.
+const MYSQL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The node's shared MySQL pool, with the task that keeps it at its declared minimum.
+pub(in crate::runtime) struct MySqlSharedPool {
+    pool: MySqlPool,
+    /// Aborted when the shared client closes, which is what stops maintenance with the pool it
+    /// maintains rather than leaving it reconnecting to a database nothing is writing to.
+    _maintenance: AbortOnDropHandle<()>,
+}
+
+impl MySqlSharedPool {
+    pub(in crate::runtime) fn pool(&self) -> &MySqlPool {
+        &self.pool
+    }
+}
+
+/// Keep `pool` at `minimum` established connections without waiting for traffic.
+///
+/// `mysql_async` treats its minimum as a retention floor: it keeps that many idle connections once
+/// they have been returned, but never opens one. A client whose emitters are idle would therefore
+/// sit below its declared minimum indefinitely, so the shortfall is opened here and released
+/// straight back. Only the shortfall is opened, so this neither exceeds the maximum nor takes
+/// capacity a writer already holds.
+async fn maintain_mysql_minimum(pool: MySqlPool, minimum: usize) {
+    loop {
+        tokio::task::consume_budget().await;
+        tokio::time::sleep(MYSQL_MAINTENANCE_INTERVAL).await;
+        let established = pool.metrics().connection_count.load(Ordering::Relaxed);
+        let Some(shortfall) = minimum.checked_sub(established) else {
+            continue;
+        };
+        // Held together and released together: taking them one at a time would let the pool hand
+        // the same connection back for the next iteration and never reach the minimum.
+        let mut opened = Vec::with_capacity(shortfall);
+        for _ in 0..shortfall {
+            match pool.get_conn().await {
+                Ok(conn) => opened.push(conn),
+                // A database that cannot supply the minimum is a client infrastructure condition
+                // reported by whoever tries to write; maintenance simply retries on the next tick.
+                Err(_) => break,
+            }
+        }
+        drop(opened);
+    }
+}
+
 /// Open the node's shared MySQL pool for one named client, sized by its declared bounds.
 ///
 /// The bounds are the driver's own constraints, so the ceiling is enforced by the pool that hands
@@ -103,7 +150,7 @@ impl MySqlWriteError {
 pub(in crate::runtime) async fn open_mysql_pool(
     config: &[nervix_models::ClientConfigEntry],
     bounds: ClientPoolBounds,
-) -> Result<MySqlPool, Report<OpenClientError>> {
+) -> Result<MySqlSharedPool, Report<OpenClientError>> {
     let Some(addr) = optional_client_config_value(config, "addr") else {
         return Err(Report::new(OpenClientError::MissingConfig {
             transport: "MySQL",
@@ -154,7 +201,14 @@ pub(in crate::runtime) async fn open_mysql_pool(
         })
     })?;
     drop(conn);
-    Ok(pool)
+    let maintenance = AbortOnDropHandle::new(tokio::spawn(maintain_mysql_minimum(
+        pool.clone(),
+        minimum,
+    )));
+    Ok(MySqlSharedPool {
+        pool,
+        _maintenance: maintenance,
+    })
 }
 
 impl MySqlEmitter {

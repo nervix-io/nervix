@@ -30,7 +30,7 @@ use mongodb::MongoDbEmitter;
 pub(in crate::runtime) use mongodb::{MongoDbClient, open_mongodb_client};
 use mqtt::MqttEmitter;
 use mysql::MySqlEmitter;
-pub(in crate::runtime) use mysql::{MySqlPool, open_mysql_pool};
+pub(in crate::runtime) use mysql::{MySqlPool, MySqlSharedPool, open_mysql_pool};
 use nats::NatsEmitter;
 use otel::{OtelEmitter, OtelEmitterInit};
 use postgres::PostgresEmitter;

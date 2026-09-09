@@ -9151,6 +9151,54 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     }
 }
 
+/// Assert that one of two emitters reports the given text.
+///
+/// Which of two peers contending for the last connection ends up holding it and which ends up
+/// waiting is a race, and the claim under test is about the waiter rather than about a particular
+/// name, so naming one of them would test the race instead of the behaviour.
+#[then(expr = "within {string} DESCRIBE EMITTER {string} or {string} on the leader node contains")]
+async fn then_describe_one_of_two_emitters_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first: String,
+    second: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let emitters = [
+        expand_placeholders(world, &first),
+        expand_placeholders(world, &second),
+    ];
+    let expected = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+
+    loop {
+        tokio::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let mut outputs = Vec::with_capacity(emitters.len());
+        for emitter in &emitters {
+            let output =
+                run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                    .await
+                    .expect("describe emitter command must succeed");
+            if output.contains(expected.trim()) {
+                world.last_command_output = Some(output);
+                return;
+            }
+            outputs.push(output);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {} or {} to contain {}. last outputs: {outputs:?}",
+            emitters[0],
+            emitters[1],
+            expected.trim()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "within {string} DESCRIBE EMITTER {string} on the leader node contains")]
 async fn then_within_duration_describe_emitter_on_leader_contains(
     world: &mut ScenarioWorld,
@@ -12956,6 +13004,28 @@ async fn then_postgres_connections_stay_within(
         observed_peak > 0,
         "expected {application} to hold at least one Postgres connection, observed none"
     );
+}
+
+#[then(expr = "Postgres eventually reports at least {int} connections for application {string}")]
+async fn then_postgres_eventually_reports_at_least_connections(
+    world: &mut ScenarioWorld,
+    expected: i64,
+    application: String,
+) {
+    let application = expand_placeholders(world, &application);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let observed = postgres_application_connections(world, &application).await;
+        if observed >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for at least {expected} Postgres connections for {application}; \
+             observed {observed}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 #[then(expr = "Postgres eventually reports {int} connections for application {string}")]

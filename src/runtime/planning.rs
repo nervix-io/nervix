@@ -8,6 +8,45 @@ use nervix_models::{
 
 use super::*;
 
+/// Which pooled transport a named client speaks, and the two things opening it needs.
+///
+/// Reading the Model to decide this is a planning concern: the data plane opens what it is handed
+/// and never works out which driver it is talking to from a `Model` of its own.
+pub(in crate::runtime) struct PooledClientPlan<'a> {
+    pub(in crate::runtime) transport: PooledTransport,
+    pub(in crate::runtime) bounds: ClientPoolBounds,
+    pub(in crate::runtime) config: &'a [ClientConfigEntry],
+}
+
+/// The transports whose drivers own a connection pool sized by declared bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum PooledTransport {
+    Postgres,
+    MySql,
+    MongoDb,
+    Redis,
+}
+
+impl<'a> PooledClientPlan<'a> {
+    /// The plan for `model`, or `None` when that client owns no connection pool.
+    pub(in crate::runtime) fn for_model(model: &'a Model) -> Option<Self> {
+        let (transport, bounds, config) = match model {
+            Model::ClientPostgres(client) => {
+                (PooledTransport::Postgres, client.pool, &client.config)
+            }
+            Model::ClientMySql(client) => (PooledTransport::MySql, client.pool, &client.config),
+            Model::ClientMongoDb(client) => (PooledTransport::MongoDb, client.pool, &client.config),
+            Model::ClientRedis(client) => (PooledTransport::Redis, client.pool, &client.config),
+            _ => return None,
+        };
+        Some(Self {
+            transport,
+            bounds,
+            config: config.as_slice(),
+        })
+    }
+}
+
 fn branched_output(output: &ModelProcessorOutput) -> BranchedProcessorOutputSpec {
     BranchedProcessorOutputSpec {
         relay: output.relay.clone(),

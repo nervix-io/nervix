@@ -14,9 +14,13 @@
 //! a property of the transport rather than of whoever happened to open a connection first.
 
 use error_stack::Report;
+use url::Url;
 
 use super::*;
-use crate::runtime::emitters::{MongoDbClient, MySqlPool, PgPool, RedisCommandPool};
+use crate::runtime::{
+    emitters::{MongoDbClient, MySqlPool, MySqlSharedPool, PgPool, RedisCommandPool},
+    planning::{PooledClientPlan, PooledTransport},
+};
 
 /// Why one client's connector instance could not be opened.
 ///
@@ -41,6 +45,60 @@ pub(in crate::runtime) enum OpenClientError {
     },
 }
 
+/// Configuration keys and address parameters that would size a pool behind NSPL's back.
+///
+/// Each driver reads at least one of these: `mysql_async` takes `pool_min`/`pool_max` from its URL
+/// and the MongoDB driver takes `minPoolSize`/`maxPoolSize` from its own. Whichever won would be a
+/// silent, per-driver answer to a question the client already answers, so both are refused.
+const POOL_SIZING_KEYS: &[&str] = &[
+    "maxpoolsize",
+    "max_pool_size",
+    "minpoolsize",
+    "min_pool_size",
+    "pool_max",
+    "pool_min",
+    "pool_size",
+];
+
+/// Reject connector configuration that tries to size the connection pool.
+///
+/// Capacity is declared once, in the client's `POOL SIZE` clause. A raw entry or address parameter
+/// that also sizes the pool is rejected rather than ignored, so an operator never has two
+/// disagreeing answers with the winner decided by which driver read which.
+fn reject_pool_sizing(
+    transport: &'static str,
+    config: &[nervix_models::ClientConfigEntry],
+) -> Result<(), Report<OpenClientError>> {
+    let rejected = |key: &str| {
+        Report::new(OpenClientError::InvalidConfig {
+            transport,
+            reason: format!(
+                "'{key}' sizes the connection pool, which is declared by POOL SIZE MIN ... MAX \
+                 ... on the client"
+            ),
+        })
+    };
+    for entry in config {
+        if POOL_SIZING_KEYS.contains(&entry.key.to_ascii_lowercase().as_str()) {
+            return Err(rejected(&entry.key));
+        }
+        // Only an address carries query parameters, and only its parameters can reach a driver's
+        // own sizing; other values are opaque strings the driver never parses that way.
+        if !entry.key.eq_ignore_ascii_case("addr") {
+            continue;
+        }
+        let Ok(url) = Url::parse(&entry.value) else {
+            continue;
+        };
+        for (key, _) in url.query_pairs() {
+            if POOL_SIZING_KEYS.contains(&key.to_ascii_lowercase().as_str()) {
+                return Err(rejected(&key));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Why this node could not supply a shared client.
 #[derive(Debug, thiserror::Error)]
 pub(in crate::runtime) enum SharedClientError {
@@ -62,7 +120,7 @@ pub(in crate::runtime) enum SharedClientError {
 /// connection pool appear here; the connection policies of the broker, socket and request
 /// transports stay with those connectors.
 pub(in crate::runtime) enum SharedClientInstance {
-    MySql(MySqlPool),
+    MySql(MySqlSharedPool),
     MongoDb(MongoDbClient),
     Redis(RedisCommandPool),
     Postgres(PgPool),
@@ -85,7 +143,7 @@ impl SharedClient {
         client: &ClientName,
     ) -> Result<&MySqlPool, Report<SharedClientError>> {
         match &self.instance {
-            SharedClientInstance::MySql(pool) => Ok(pool),
+            SharedClientInstance::MySql(shared) => Ok(shared.pool()),
             _ => Err(Report::new(SharedClientError::WrongTransport {
                 client: client.as_str().to_string(),
                 expected: "MySQL",
@@ -217,6 +275,11 @@ impl Runtime {
         model: &Model,
         resolved: Option<&ResolvedClientConfig>,
     ) -> Result<SharedClientLease, Report<SharedClientError>> {
+        let Some(plan) = PooledClientPlan::for_model(model) else {
+            return Err(Report::new(SharedClientError::NotPooled {
+                client: name.as_str().to_string(),
+            }));
+        };
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Client, name.clone());
         let cell = {
             let mut slot = self
@@ -235,7 +298,7 @@ impl Runtime {
         };
 
         let opened = cell
-            .get_or_try_init(|| Self::open_shared_client(name, model, resolved))
+            .get_or_try_init(|| Self::open_shared_client(name, &plan, resolved))
             .await;
 
         match opened {
@@ -256,64 +319,48 @@ impl Runtime {
     /// Build the driver instance behind one pool-capable client.
     async fn open_shared_client(
         name: &ClientName,
-        model: &Model,
+        plan: &PooledClientPlan<'_>,
         resolved: Option<&ResolvedClientConfig>,
     ) -> Result<StdArc<SharedClient>, Report<SharedClientError>> {
         let mounts = resolved.and_then(|resolved| resolved.mounts.clone());
-        let instance = match model {
-            Model::ClientMySql(client) => {
-                let config = client_config_entries(resolved, client.config.as_slice());
-                SharedClientInstance::MySql(
-                    emitters::open_mysql_pool(config, client.pool)
-                        .await
-                        .map_err(|error| {
-                            error.change_context(SharedClientError::Open {
-                                client: name.as_str().to_string(),
-                            })
-                        })?,
-                )
-            }
-            Model::ClientMongoDb(client) => {
-                let config = client_config_entries(resolved, client.config.as_slice());
-                SharedClientInstance::MongoDb(
-                    emitters::open_mongodb_client(config, client.pool)
-                        .await
-                        .map_err(|error| {
-                            error.change_context(SharedClientError::Open {
-                                client: name.as_str().to_string(),
-                            })
-                        })?,
-                )
-            }
-            Model::ClientPostgres(client) => {
-                let config = client_config_entries(resolved, client.config.as_slice());
-                SharedClientInstance::Postgres(
-                    emitters::open_postgres_pool(config, client.pool)
-                        .await
-                        .map_err(|error| {
-                            error.change_context(SharedClientError::Open {
-                                client: name.as_str().to_string(),
-                            })
-                        })?,
-                )
-            }
-            Model::ClientRedis(client) => {
-                let config = client_config_entries(resolved, client.config.as_slice());
-                SharedClientInstance::Redis(
-                    emitters::open_redis_command_pool(config, client.pool)
-                        .await
-                        .map_err(|error| {
-                            error.change_context(SharedClientError::Open {
-                                client: name.as_str().to_string(),
-                            })
-                        })?,
-                )
-            }
-            _ => {
-                return Err(Report::new(SharedClientError::NotPooled {
-                    client: name.as_str().to_string(),
-                }));
-            }
+        let config = client_config_entries(resolved, plan.config);
+        let transport: &'static str = match plan.transport {
+            PooledTransport::Postgres => "Postgres",
+            PooledTransport::MySql => "MySQL",
+            PooledTransport::MongoDb => "MongoDB",
+            PooledTransport::Redis => "Redis",
+        };
+        reject_pool_sizing(transport, config).map_err(|error| {
+            error.change_context(SharedClientError::Open {
+                client: name.as_str().to_string(),
+            })
+        })?;
+        let opened = |error: Report<OpenClientError>| {
+            error.change_context(SharedClientError::Open {
+                client: name.as_str().to_string(),
+            })
+        };
+        let instance = match plan.transport {
+            PooledTransport::Postgres => SharedClientInstance::Postgres(
+                emitters::open_postgres_pool(config, plan.bounds)
+                    .await
+                    .map_err(opened)?,
+            ),
+            PooledTransport::MySql => SharedClientInstance::MySql(
+                emitters::open_mysql_pool(config, plan.bounds)
+                    .await
+                    .map_err(opened)?,
+            ),
+            PooledTransport::MongoDb => SharedClientInstance::MongoDb(
+                emitters::open_mongodb_client(config, plan.bounds)
+                    .await
+                    .map_err(opened)?,
+            ),
+            PooledTransport::Redis => SharedClientInstance::Redis(
+                emitters::open_redis_command_pool(config, plan.bounds)
+                    .await
+                    .map_err(opened)?,
+            ),
         };
         Ok(StdArc::new(SharedClient {
             instance,

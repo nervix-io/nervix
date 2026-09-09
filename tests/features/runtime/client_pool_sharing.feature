@@ -108,7 +108,7 @@ Feature: Shared database client pools
       """
       {"user_id":2,"action":"OPEN"}
       """
-    Then within "20s" DESCRIBE EMITTER "writer_two" on the leader node contains
+    Then within "20s" DESCRIBE EMITTER "writer_one" or "writer_two" on the leader node contains
       """
       waiting for a connection from client 'postgres_contended'
       """
@@ -118,3 +118,58 @@ Feature: Shared database client pools
       """
       {"postgres_user_id":2,"postgres_action":"open"}
       """
+
+  Scenario: A pool outlives one user and closes with the last
+    Given Postgres table "retired_pool_out_{{test_id}}" exists
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64, action STRING );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE INGESTOR http_notifications
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLIENT postgres_retired
+        TYPE POSTGRES
+        POOL SIZE MIN 1 MAX 2
+        CONFIG {
+          'addr' = '{{postgres_addr}}&application_name=nervix_retired_{{test_id}}'
+        };
+      CREATE EMITTER writer_one FROM notifications
+        TO POSTGRES postgres_retired INSERT TO TABLE retired_pool_out_{{test_id}}
+        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
+        WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER writer_two FROM notifications
+        TO POSTGRES postgres_retired INSERT TO TABLE retired_pool_out_{{test_id}}
+        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
+        WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then node "node-1" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"user_id":1,"action":"OPEN"}
+      """
+    And Postgres eventually reports at least 1 connections for application "nervix_retired_{{test_id}}"
+    And Postgres never reports more than 2 connections for application "nervix_retired_{{test_id}}"
+    When these NSPL commands are executed
+      """
+      BEGIN;
+      DROP EMITTER writer_two;
+      COMMIT;
+      """
+    Then Postgres eventually reports at least 1 connections for application "nervix_retired_{{test_id}}"
+    When these NSPL commands are executed
+      """
+      BEGIN;
+      DROP EMITTER writer_one;
+      COMMIT;
+      """
+    Then Postgres eventually reports 0 connections for application "nervix_retired_{{test_id}}"
