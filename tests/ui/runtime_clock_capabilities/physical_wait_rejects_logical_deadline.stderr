@@ -1,13 +1,7 @@
 error[E0308]: mismatched types
- --> tests/ui/runtime_clock_capabilities/physical_wait_rejects_logical_deadline.rs:6:27
+ --> $DIR/physical_wait_rejects_logical_deadline.rs:6:38
   |
-6 |     capability.wait_until(deadline).await;
-  |                ---------- ^^^^^^^^ expected `PhysicalDeadline`, found `LogicalDeadline`
-  |                |
-  |                arguments to this method are incorrect
-  |
-note: method defined here
- --> src/runtime/physical_time.rs
-  |
-  |     pub async fn wait_until(self, deadline: PhysicalDeadline) {
-  |                  ^^^^^^^^^^
+6 |     let deadline: PhysicalDeadline = deadline;
+  |                   ----------------   ^^^^^^^^ expected `PhysicalDeadline`, found `LogicalDeadline`
+  |                   |
+  |                   expected due to this
