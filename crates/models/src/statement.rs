@@ -15,12 +15,12 @@ use crate::{
     AlterSchema, AlterWireSchema, AvroType, BranchName, CborType, ChannelName, ClientName,
     ClusterNodeName, CodecName, CollectionName, ConsumerGroupName, CorrelatorName,
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf,
-    DeduplicatorName, DomainName, EmitterName, EndpointName, FieldName, GeneratorName,
-    InferencerName, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
-    ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName,
-    RelayName, ReordererName, ResourceName, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
-    WasmProcessorName, WindowProcessorName, WireSchemaName,
+    DeduplicatorName, DomainClockState, DomainName, DomainTimeRate, EmitterName, EndpointName,
+    FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
+    ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
+    QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName,
+    UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,12 +402,25 @@ pub enum DomainStartPoint {
     #[default]
     Resume,
     Now {
-        time_rate: String,
+        time_rate: DomainTimeRate,
     },
     At {
-        timestamp: String,
-        time_rate: String,
+        timestamp: Timestamp,
+        time_rate: DomainTimeRate,
     },
+}
+
+impl DomainStartPoint {
+    pub const fn resolve_at(&self, wall_started_at: Timestamp) -> (Timestamp, DomainTimeRate) {
+        match self {
+            Self::Resume => (wall_started_at, DomainTimeRate::ONE),
+            Self::Now { time_rate } => (wall_started_at, *time_rate),
+            Self::At {
+                timestamp,
+                time_rate,
+            } => (*timestamp, *time_rate),
+        }
+    }
 }
 
 #[derive(
@@ -427,14 +440,7 @@ pub struct DomainTick {
     pub tick_id: u64,
     pub logical_timestamp: Timestamp,
     pub wall_clock: Timestamp,
-    pub duration_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DomainClockState {
-    pub wall_started_at: Timestamp,
-    pub logical_start: Timestamp,
-    pub time_rate: String,
+    pub period: crate::DomainClockPeriod,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

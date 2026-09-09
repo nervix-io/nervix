@@ -1600,9 +1600,8 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should open");
-        let runtime =
-            Runtime::with_persistence(Some(db), Duration::from_millis(10), Default::default())
-                .expect("runtime should open persisted state");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_millis(10))
+            .expect("runtime should open persisted state");
         let placement = RuntimeStatePlacement {
             domain: domain("default"),
             state: RuntimeStateKind::Deduplicator,
@@ -1643,9 +1642,8 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should open");
-        let runtime =
-            Runtime::with_persistence(Some(db), Duration::from_secs(3_600), Default::default())
-                .expect("runtime should open persisted state");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+            .expect("runtime should open persisted state");
         let placement = RuntimeStatePlacement {
             domain: domain("default"),
             state: RuntimeStateKind::MaterializedRelay,
@@ -1719,9 +1717,8 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should open");
-        let runtime =
-            Runtime::with_persistence(Some(db), Duration::from_millis(10), Default::default())
-                .expect("runtime should open persisted state");
+        let runtime = Runtime::with_persistence(Some(db), Duration::from_millis(10))
+            .expect("runtime should open persisted state");
         let placement = RuntimeStatePlacement {
             domain: domain("default"),
             state: RuntimeStateKind::WindowProcessor,

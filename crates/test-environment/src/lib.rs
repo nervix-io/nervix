@@ -963,15 +963,16 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let workspace_root = workspace_root();
-        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "v2")
-            .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
-            .with_file(
-                workspace_root.join("docker/mock-server/app.py"),
-                "docker/mock-server/app.py",
-            )
-            .build_image_with(BuildImageOptions::new().with_skip_if_exists(true))
-            .await
-            .map_err(testcontainers_error("mock server image build"))?;
+        let image =
+            GenericBuildableImage::new("nervix-cucumber-mock-server", "clock-source-recorder")
+                .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
+                .with_file(
+                    workspace_root.join("docker/mock-server/app.py"),
+                    "docker/mock-server/app.py",
+                )
+                .build_image_with(BuildImageOptions::new().with_skip_if_exists(true))
+                .await
+                .map_err(testcontainers_error("mock server image build"))?;
         let container = self
             .start_container("mock-server", 8080.tcp(), "mock server", || {
                 image

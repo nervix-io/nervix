@@ -26,11 +26,13 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use meticulous::ResultExt as _;
 use nervix_execution::{ChargedBytes, Executor};
+#[cfg(test)]
+use nervix_models::Timestamp;
 use nervix_models::{
-    ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName, FieldName, IngestorName,
-    LookupName, ModelKind, ModelName, NodeRef, RelayName, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
-    SubscriptionBinding, Timestamp,
+    ClusterNodeName, CodecName, DomainClockPeriod, DomainClockState, DomainName, DomainTick,
+    EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef, RelayName,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
+    ResourceName, SubscriptionBinding,
 };
 use nervix_recovery::{Discarded as _, Reported as _};
 use rand_core::OsRng;
@@ -305,9 +307,8 @@ pub struct RuntimeErrorEvent {
 pub struct DomainClockStart {
     pub domain_id: DomainName,
     pub owner_node_id: ClusterNodeName,
-    pub wall_started_at: Timestamp,
-    pub logical_start: Timestamp,
-    pub time_rate: String,
+    pub clock: DomainClockState,
+    pub period: DomainClockPeriod,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,3 +1,12 @@
+//! Runtime adapters for validated domain-clock mappings and progress delivery.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** Installing committed mappings, observing progress and adapting clock arithmetic to
+//!   runtime lifecycle decisions.
+//! - **Depends on.** Vocabulary clock models and branch-local runtime state.
+//! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
+
 use super::*;
 
 #[derive(Clone)]
@@ -19,14 +28,8 @@ impl WasmDomainClock for RuntimeWasmDomainClock {
 pub(super) fn checked_add_duration_to_timestamp(base: Timestamp, duration: Duration) -> Timestamp {
     // Saturation is the meaning here: a schedule further out than the nanosecond range is already
     // further out than any timestamp this clock will reach.
-    let nanos = i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX);
-    match base
-        .into_datetime()
-        .checked_add_signed(TimeDelta::nanoseconds(nanos))
-    {
-        Some(advanced) => Timestamp::from(advanced),
-        None => base,
-    }
+    base.checked_add(duration)
+        .unwrap_or_else(|_| Timestamp::from_unix_nanos(i64::MAX))
 }
 
 pub(super) fn advance_scheduled_timestamp(
@@ -46,14 +49,7 @@ pub(super) fn advance_scheduled_timestamp(
 }
 
 pub(super) fn wall_duration_until_timestamp(current: Timestamp, target: Timestamp) -> Duration {
-    if target <= current {
-        return Duration::ZERO;
-    }
-    target
-        .into_datetime()
-        .signed_duration_since(current.into_datetime())
-        .to_std()
-        .unwrap_or(Duration::ZERO)
+    target.duration_since(current).unwrap_or(Duration::ZERO)
 }
 
 pub(super) fn current_timestamp() -> Timestamp {
@@ -61,36 +57,17 @@ pub(super) fn current_timestamp() -> Timestamp {
 }
 
 pub(super) fn domain_clock_window_matches(
-    clock: &RuntimeDomainClockState,
+    clock: &DomainClockState,
     period: Duration,
     skew: Duration,
     event_timestamp: Timestamp,
-) -> Result<bool, String> {
-    let time_rate = clock.time_rate.parse::<f64>().map_err(|error| {
-        format!(
-            "invalid time rate '{}' for paced domain clock: {error}",
-            clock.time_rate
-        )
-    })?;
-    if !time_rate.is_finite() || time_rate <= 0.0 {
-        return Err(format!(
-            "invalid time rate '{}' for paced domain clock",
-            clock.time_rate
-        ));
-    }
-
-    let tick_spacing_nanos = (period.as_nanos().approx_into::<f64>() / time_rate).max(1.0);
-    let first_tick = clock.wall_started_at;
-    let event_offset_nanos = event_timestamp
-        .into_datetime()
-        .signed_duration_since(first_tick.into_datetime())
-        .num_nanoseconds()
-        .unwrap_or(if event_timestamp >= first_tick {
-            i64::MAX
-        } else {
-            i64::MIN
-        })
-        .approx_into::<f64>();
+) -> bool {
+    let tick_spacing_nanos =
+        (period.as_nanos().approx_into::<f64>() / clock.time_rate().get()).max(1.0);
+    let first_tick = clock.wall_started_at();
+    let event_offset_nanos = (i128::from(event_timestamp.unix_nanos())
+        - i128::from(first_tick.unix_nanos()))
+    .approx_into::<f64>();
     let approx_index = event_offset_nanos / tick_spacing_nanos;
     let candidates = [
         approx_index.floor() - 1.0,
@@ -106,122 +83,57 @@ pub(super) fn domain_clock_window_matches(
         }
         let Some(candidate_offset_nanos) = (candidate * tick_spacing_nanos)
             .round()
-            .checked_approx_into()
+            .checked_approx_into::<u64>()
         else {
             continue;
         };
-        let tick_wall = first_tick
-            .into_datetime()
-            .checked_add_signed(TimeDelta::nanoseconds(candidate_offset_nanos))
-            .map(Timestamp::from);
-        let Some(tick_wall) = tick_wall else {
+        let Ok(tick_wall) = first_tick.checked_add(Duration::from_nanos(candidate_offset_nanos))
+        else {
             continue;
         };
-        if event_timestamp
-            .into_datetime()
-            .signed_duration_since(tick_wall.into_datetime())
-            .abs()
-            .to_std()
-            .is_ok_and(|distance| distance <= skew)
-        {
-            return Ok(true);
+        let distance = (i128::from(event_timestamp.unix_nanos())
+            - i128::from(tick_wall.unix_nanos()))
+        .unsigned_abs();
+        if distance <= skew.as_nanos() {
+            return true;
         }
     }
 
-    Ok(false)
+    false
 }
 
 pub(super) fn current_domain_logical_time(
-    clock: &RuntimeDomainClockState,
-    latest_tick: Option<&ObservedDomainTick>,
+    clock: &DomainClockState,
     wall_now: Timestamp,
-) -> Result<Timestamp, String> {
-    let time_rate = clock.time_rate.parse::<f64>().map_err(|error| {
-        format!(
-            "invalid time rate '{}' for paced domain clock: {error}",
-            clock.time_rate
-        )
-    })?;
-    if !time_rate.is_finite() || time_rate <= 0.0 {
-        return Err(format!(
-            "invalid time rate '{}' for paced domain clock",
-            clock.time_rate
-        ));
-    }
-
-    let (anchor_logical, anchor_wall) = if let Some(tick) = latest_tick {
-        (tick.logical_timestamp, tick.wall_clock)
-    } else {
-        (clock.logical_started_at, clock.wall_started_at)
-    };
-    let wall_elapsed = wall_now
-        .into_datetime()
-        .signed_duration_since(anchor_wall.into_datetime());
-    let wall_elapsed_nanos =
-        wall_elapsed
-            .num_nanoseconds()
-            .unwrap_or(if wall_elapsed < TimeDelta::zero() {
-                i64::MIN
-            } else {
-                i64::MAX
-            });
-    // The rate is finite and positive, so the scaled span can only leave the nanosecond range at
-    // the far end, where a clock that has run past it pins to the end of the range.
-    let logical_elapsed_nanos = (wall_elapsed_nanos.max(0).approx_into::<f64>() * time_rate)
-        .round()
-        .checked_approx_into()
-        .unwrap_or(i64::MAX);
-    let advanced = anchor_logical
-        .into_datetime()
-        .checked_add_signed(TimeDelta::nanoseconds(logical_elapsed_nanos));
-    match advanced {
-        Some(advanced) => Ok(Timestamp::from(advanced)),
-        None => Ok(anchor_logical),
-    }
+) -> Result<Timestamp, Report<DomainClockError>> {
+    clock.logical_time_at(wall_now)
 }
 
 pub(super) fn wall_duration_until_logical_target(
-    clock: &RuntimeDomainClockState,
+    clock: &DomainClockState,
     current_logical: Timestamp,
     target_logical: Timestamp,
-) -> Result<Duration, String> {
-    let time_rate = clock.time_rate.parse::<f64>().map_err(|error| {
-        format!(
-            "invalid time rate '{}' for paced domain clock: {error}",
-            clock.time_rate
-        )
-    })?;
-    if !time_rate.is_finite() || time_rate <= 0.0 {
-        return Err(format!(
-            "invalid time rate '{}' for paced domain clock",
-            clock.time_rate
-        ));
-    }
-    if target_logical <= current_logical {
-        return Ok(Duration::ZERO);
-    }
-    let logical_delta = target_logical
-        .into_datetime()
-        .signed_duration_since(current_logical.into_datetime())
-        .to_std()
-        .unwrap_or(Duration::ZERO);
-    // As above, only the far end of the range is reachable, and a wall wait that long is capped
-    // by the caller's own polling cadence anyway.
-    let wall_delta_nanos = (logical_delta.as_nanos().approx_into::<f64>() / time_rate)
-        .round()
-        .checked_approx_into()
-        .unwrap_or(u64::MAX);
-    Ok(Duration::from_nanos(wall_delta_nanos.max(1)))
+) -> Result<Duration, Report<DomainClockError>> {
+    clock.wall_duration_until(current_logical, target_logical)
 }
 
 impl Runtime {
-    pub fn handle_domain_clock_start(
-        &self,
-        domain: &DomainName,
-        logical_started_at: Timestamp,
-        wall_started_at: Timestamp,
-        time_rate: &str,
-    ) {
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_domain_clock_progress_if_armed(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .pause_domain_clock_progress_if_armed(domain)
+            .await
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn mark_domain_clock_progress_delivered(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .mark_domain_clock_progress_delivered(domain);
+    }
+
+    pub fn handle_domain_clock_start(&self, domain: &DomainName, clock: DomainClockState) {
         let mut entry =
             self.inner
                 .domains
@@ -239,11 +151,7 @@ impl Runtime {
                     clock: None,
                     ticks: parking_lot::Mutex::new(VecDeque::new()),
                 });
-        entry.clock = Some(RuntimeDomainClockState {
-            logical_started_at,
-            wall_started_at,
-            time_rate: time_rate.to_string(),
-        });
+        entry.clock = Some(clock);
     }
 
     pub fn handle_domain_clock_stop(&self, domain: &DomainName) {
@@ -261,7 +169,7 @@ impl Runtime {
                 .or_insert_with(|| RuntimeDomainState {
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
-                        period: tick.duration_ms.to_string(),
+                        period: tick.period.to_string(),
                         skew: "0ms".to_string(),
                         placement: nervix_models::PlacementPolicy::Neutral,
                     },
@@ -299,11 +207,17 @@ impl Runtime {
             return Ok(None);
         }
         let wall_now = current_timestamp();
-        let latest_tick = domain_state.ticks.lock().back().cloned();
         if let Some(clock) = domain_state.clock.as_ref() {
-            current_domain_logical_time(clock, latest_tick.as_ref(), wall_now).map(Some)
+            clock
+                .logical_time_at(wall_now)
+                .map(Some)
+                .map_err(|error| error.to_string())
         } else {
-            Ok(latest_tick.map(|tick| tick.logical_timestamp))
+            Ok(domain_state
+                .ticks
+                .lock()
+                .back()
+                .map(|tick| tick.logical_timestamp))
         }
     }
 }
@@ -312,7 +226,7 @@ impl Runtime {
 mod tests {
     use std::collections::BTreeMap;
 
-    use nervix_models::{DomainTick, Timestamp};
+    use nervix_models::{DomainClockState, DomainTick, DomainTimeRate, Timestamp};
 
     use super::*;
 
@@ -328,7 +242,7 @@ mod tests {
                 tick_id: 1,
                 logical_timestamp: Timestamp::from_unix_nanos(0),
                 wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                duration_ms: 1_000,
+                period: "1s".parse().expect("fixture period is valid"),
             },
         );
 
@@ -360,9 +274,11 @@ mod tests {
         runtime.sync_domains(&domains);
         runtime.handle_domain_clock_start(
             &domain("paced"),
-            Timestamp::from_unix_nanos(10_000_000_000),
-            Timestamp::from_unix_nanos(10_000_000_000),
-            "1.0",
+            DomainClockState::new(
+                Timestamp::from_unix_nanos(10_000_000_000),
+                Timestamp::from_unix_nanos(10_000_000_000),
+                DomainTimeRate::ONE,
+            ),
         );
 
         assert!(
@@ -383,5 +299,96 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn delayed_progress_delivery_does_not_move_logical_time_backwards() {
+        let clock = DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        );
+        let delayed_wall_time = Timestamp::from_unix_nanos(1_000_000_000);
+        let before_delivery = current_domain_logical_time(&clock, delayed_wall_time)
+            .assured("the fixture uses a finite positive rate");
+        let after_delivery = current_domain_logical_time(&clock, delayed_wall_time)
+            .assured("the fixture uses a finite positive rate");
+
+        assert!(
+            after_delivery >= before_delivery,
+            "delivering progress moved logical time from {before_delivery} to {after_delivery}"
+        );
+    }
+
+    #[test]
+    #[ignore = "expected clock-contract failure owned by domain clocks task 05"]
+    fn paced_domains_admit_the_logical_origin() {
+        let runtime = Runtime::new();
+        let mut domains = BTreeMap::new();
+        domains.insert(domain("paced"), paced_domain_state("paced"));
+        runtime.sync_domains(&domains);
+        runtime.handle_domain_clock_start(
+            &domain("paced"),
+            DomainClockState::new(
+                Timestamp::from_unix_nanos(10_000_000_000),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+
+        let admission = runtime.ensure_domain_allows_ingestion(
+            &domain("paced"),
+            &named("ing"),
+            Timestamp::from_unix_nanos(0),
+        );
+
+        assert!(
+            admission.is_ok(),
+            "logical origin was rejected: {admission:?}"
+        );
+    }
+
+    #[test]
+    fn scheduled_timestamp_addition_stays_in_the_serializable_range() {
+        let timestamp = checked_add_duration_to_timestamp(
+            Timestamp::from_unix_nanos(i64::MAX),
+            Duration::from_nanos(1),
+        );
+
+        let serialized = serde_json::to_string(&timestamp);
+
+        assert!(
+            serialized.is_ok(),
+            "schedule arithmetic constructed an unserializable timestamp: {serialized:?}"
+        );
+    }
+
+    #[test]
+    fn logical_time_projection_reports_range_overflow() {
+        let clock = DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(i64::MAX),
+            DomainTimeRate::ONE,
+        );
+
+        assert!(current_domain_logical_time(&clock, Timestamp::from_unix_nanos(1)).is_err());
+    }
+
+    #[test]
+    fn logical_rate_conversion_scales_physical_waits() {
+        let clock = DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::try_from(4.0).expect("fixture rate is valid"),
+        );
+
+        let wait = wall_duration_until_logical_target(
+            &clock,
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(1_000_000_000),
+        )
+        .assured("the fixture uses a finite positive rate");
+
+        assert_eq!(wait, Duration::from_millis(250));
     }
 }

@@ -895,7 +895,7 @@ impl Runtime {
         ingestor: &IngestorName,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> bool {
-        if !self.inner.ingestor_faults.is_failed(ingestor) {
+        if !self.inner.fault_injection.ingestor_is_failed(ingestor) {
             return false;
         }
         self.record_ingestor_transient_error_with_backoff(

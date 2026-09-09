@@ -1279,11 +1279,12 @@ impl Runtime {
         match state.config.pace {
             DomainPace::Unpaced => Ok(Some(wall_now)),
             DomainPace::Paced => {
-                let latest_tick = state.ticks.lock().back().cloned();
                 if let Some(clock) = state.clock.as_ref() {
-                    current_domain_logical_time(clock, latest_tick.as_ref(), wall_now).map(Some)
+                    current_domain_logical_time(clock, wall_now)
+                        .map(Some)
+                        .map_err(|error| error.to_string())
                 } else {
-                    Ok(latest_tick.map(|tick| tick.logical_timestamp))
+                    Ok(state.ticks.lock().back().map(|tick| tick.logical_timestamp))
                 }
             }
         }
@@ -2427,15 +2428,16 @@ mod tests {
             .expect("relay owner should stop");
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn relay_owner_expires_branch_presence_by_ttl() {
-        let runtime = Runtime::with_persistence(
+        let fault_injection = ConfiguredFaultInjection::default();
+        fault_injection.set_branch_instance_expiration_scan_interval(Duration::from_millis(5));
+        let runtime = Runtime::with_persistence_and_temp_dir(
             None,
             Duration::from_secs(60),
-            RuntimeTestHooks {
-                branch_instance_expiration_scan_interval: Some(Duration::from_millis(5)),
-                ..Default::default()
-            },
+            fault_injection,
+            PathBuf::from(DEFAULT_TEMP_DIR),
         )
         .expect("runtime should build");
         let domain = domain("default");

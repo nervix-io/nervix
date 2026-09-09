@@ -100,7 +100,7 @@ pub(in crate::runtime) struct EmitterSinkContext {
 }
 
 struct EmitterPublishControl<'a> {
-    fault_injector: &'a EmitterFaultInjector,
+    fault_injection: &'a ConfiguredFaultInjection,
     shutdown_rx: &'a mut watch::Receiver<bool>,
     stop_rx: &'a mut watch::Receiver<Option<Instant>>,
     backoff: &'a mut RuntimeReconnectBackoff,
@@ -1046,8 +1046,8 @@ impl EmitterRetrySchedule {
         false
     }
 
-    fn release_if_stall_cleared(&mut self, fault: Option<EmitterFaultMode>) -> bool {
-        if !self.waiting_for_stall_clear || fault.is_some() {
+    fn release_if_stall_cleared(&mut self, stalled: bool) -> bool {
+        if !self.waiting_for_stall_clear || stalled {
             return false;
         }
         self.retry_at = None;
@@ -2243,7 +2243,7 @@ impl SinkEmitter {
         if let EmitSink::Iceberg { .. } = sink
             && let Self::Iceberg(_) = self
         {
-            self.check_fault_injector(context, control)
+            self.check_fault_injection(context, control)
                 .map_err(EmitterPublishFailure::caller)?;
             let Self::Iceberg(emitter) = self else {
                 unreachable!("checked Iceberg emitter must remain Iceberg")
@@ -2300,7 +2300,7 @@ impl SinkEmitter {
         if !buffer.should_flush(force) {
             return Ok(None);
         }
-        self.check_fault_injector(context, control)?;
+        self.check_fault_injection(context, control)?;
         let Self::Iceberg(emitter) = self else {
             return Ok(None);
         };
@@ -2337,7 +2337,7 @@ impl SinkEmitter {
         if buffer.is_empty() {
             return Ok(None);
         }
-        self.check_fault_injector(context, control)?;
+        self.check_fault_injection(context, control)?;
         let report = buffer.report();
         let pending_acks = buffer.pending_acks();
         {
@@ -2612,33 +2612,39 @@ impl SinkEmitter {
         Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
             .attach_printable("emitter has no initialized sink client for its configured sink"))
     }
-    fn check_fault_injector(
+    fn check_fault_injection(
         &self,
         context: &EmitterSinkContext,
         control: &EmitterPublishControl<'_>,
     ) -> EmitterRuntimeResult<()> {
-        match control.fault_injector.fault_mode(&context.emitter) {
-            Some(EmitterFaultMode::Fail) => {
-                let reason = format!(
-                    "fault injector failed emitter '{}'",
-                    context.emitter.as_str()
-                );
-                context.runtime.events().report_error(format!(
-                    "{} in domain '{}'",
-                    reason,
-                    context.domain.as_str()
-                ));
-                warn!(
-                    domain = context.domain.as_str(),
-                    emitter = context.emitter.as_str(),
-                    "fault injector failed emitter publish"
-                );
-                Err(Report::new(EmitterRuntimeError::FaultInjected).attach_printable(reason))
-            }
-            Some(EmitterFaultMode::Stall) => Err(Report::new(EmitterRuntimeError::PublishStalled)
-                .attach_printable("fault injector stalled emitter publish")),
-            None => Ok(()),
+        if control
+            .fault_injection
+            .emitter_should_fail(&context.emitter)
+        {
+            let reason = format!(
+                "fault injector failed emitter '{}'",
+                context.emitter.as_str()
+            );
+            context.runtime.events().report_error(format!(
+                "{} in domain '{}'",
+                reason,
+                context.domain.as_str()
+            ));
+            warn!(
+                domain = context.domain.as_str(),
+                emitter = context.emitter.as_str(),
+                "fault injector failed emitter publish"
+            );
+            return Err(Report::new(EmitterRuntimeError::FaultInjected).attach_printable(reason));
         }
+        if control
+            .fault_injection
+            .emitter_should_stall(&context.emitter)
+        {
+            return Err(Report::new(EmitterRuntimeError::PublishStalled)
+                .attach_printable("fault injector stalled emitter publish"));
+        }
+        Ok(())
     }
 
     async fn wait_for_iceberg_retry(
@@ -2745,13 +2751,13 @@ fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
 
 fn emitter_unavailable_reason(
     sink: &SinkEmitter,
-    fault_injector: &EmitterFaultInjector,
+    fault_injection: &ConfiguredFaultInjection,
     emitter: &EmitterName,
 ) -> Option<String> {
     if let Some(reason) = sink.missing_reason() {
         return Some(reason.to_owned());
     }
-    if let Some(EmitterFaultMode::Stall) = fault_injector.fault_mode(emitter) {
+    if fault_injection.emitter_should_stall(emitter) {
         Some("fault injector stalled emitter publish".to_string())
     } else {
         None
@@ -3193,7 +3199,7 @@ impl EmitterTask {
         let task_flush_policy = emitter.flush_policy.clone();
         let task_error_policies = emitter.error_policies.clone();
         let task_materialized_state = emitter.materialized_state.clone();
-        let fault_injector = runtime.inner.emitter_faults.clone();
+        let fault_injection = runtime.inner.fault_injection.clone();
         let runtime = runtime.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let interaction_shutdown_rx = shutdown_tx.subscribe();
@@ -3360,7 +3366,7 @@ impl EmitterTask {
                         }
                         if emitter_buffer_count.load(Ordering::Acquire) > 0
                             && let Some(reason) =
-                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
                         {
                             runtime.record_emitter_transient_error(
                                 &task_domain,
@@ -3375,7 +3381,7 @@ impl EmitterTask {
                             continue;
                         }
                         let mut control = EmitterPublishControl {
-                            fault_injector: &fault_injector,
+                            fault_injection: &fault_injection,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
                             backoff: &mut publish_backoff,
@@ -3437,7 +3443,7 @@ impl EmitterTask {
                     RelayInteractionEvent::ForceFlush(completion) => {
                         if emitter_buffer_count.load(Ordering::Acquire) > 0
                             && let Some(reason) =
-                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
                         {
                             retry_schedule.include_acks(sink.pending_acks(&emitter_buffer));
                             let wait = if retry_schedule.is_active() {
@@ -3447,8 +3453,7 @@ impl EmitterTask {
                                 retry_schedule.schedule(
                                     wait,
                                     sink.pending_acks(&emitter_buffer),
-                                    fault_injector.fault_mode(&task_emitter)
-                                        == Some(EmitterFaultMode::Stall),
+                                    fault_injection.emitter_should_stall(&task_emitter),
                                 );
                                 wait
                             };
@@ -3463,7 +3468,7 @@ impl EmitterTask {
                             continue;
                         }
                         let mut control = EmitterPublishControl {
-                            fault_injector: &fault_injector,
+                            fault_injection: &fault_injection,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
                             backoff: &mut publish_backoff,
@@ -3534,7 +3539,7 @@ impl EmitterTask {
                         );
                         if emitter_buffer_count.load(Ordering::Acquire) > 0
                             && let Some(reason) =
-                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
                         {
                             runtime.record_emitter_transient_error(
                                 &task_domain,
@@ -3553,7 +3558,7 @@ impl EmitterTask {
                             break;
                         }
                         let mut control = EmitterPublishControl {
-                            fault_injector: &fault_injector,
+                            fault_injection: &fault_injection,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
                             backoff: &mut publish_backoff,
@@ -3591,8 +3596,9 @@ impl EmitterTask {
                     RelayInteractionEvent::Wake => {
                         let retry_was_active = retry_schedule.is_active();
                         let retry_is_due = retry_schedule.retry_is_due();
-                        let stall_cleared = retry_schedule
-                            .release_if_stall_cleared(fault_injector.fault_mode(&task_emitter));
+                        let stall_cleared = retry_schedule.release_if_stall_cleared(
+                            fault_injection.emitter_should_stall(&task_emitter),
+                        );
                         if !retry_is_due && !stall_cleared {
                             continue;
                         }
@@ -3633,7 +3639,7 @@ impl EmitterTask {
                             runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
                         }
                         let mut control = EmitterPublishControl {
-                            fault_injector: &fault_injector,
+                            fault_injection: &fault_injection,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
                             backoff: &mut publish_backoff,
@@ -3769,11 +3775,11 @@ impl EmitterTask {
                         }
 
                         if retry_schedule.is_active()
-                            || emitter_unavailable_reason(&sink, &fault_injector, &task_emitter)
+                            || emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
                                 .is_some()
                         {
                             let unavailable =
-                                emitter_unavailable_reason(&sink, &fault_injector, &task_emitter);
+                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter);
                             if let Err(error) = emitter_buffer
                                 .retain_for_retry(publish_batch.clone(), Duration::ZERO)
                             {
@@ -3791,8 +3797,7 @@ impl EmitterTask {
                                 retry_schedule.schedule(
                                     wait,
                                     sink.pending_acks(&emitter_buffer),
-                                    fault_injector.fault_mode(&task_emitter)
-                                        == Some(EmitterFaultMode::Stall),
+                                    fault_injection.emitter_should_stall(&task_emitter),
                                 );
                                 if let Some(reason) = unavailable.as_deref() {
                                     runtime.record_emitter_transient_error_with_backoff(
@@ -3810,7 +3815,7 @@ impl EmitterTask {
 
                         let mut pending_batch = Some(publish_batch);
                         let mut control = EmitterPublishControl {
-                            fault_injector: &fault_injector,
+                            fault_injection: &fault_injection,
                             shutdown_rx: &mut shutdown_rx,
                             stop_rx: &mut stop_rx,
                             backoff: &mut publish_backoff,
@@ -4923,12 +4928,12 @@ mod tests {
 
     #[tokio::test]
     async fn retry_wake_attempts_a_buffer_before_its_ordinary_deadline() {
-        let fault_injector = EmitterFaultInjector::default();
+        let fault_injection = ConfiguredFaultInjection::default();
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
         let mut control = EmitterPublishControl {
-            fault_injector: &fault_injector,
+            fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
@@ -5107,9 +5112,9 @@ mod tests {
         let mut retry = EmitterRetrySchedule::default();
         retry.schedule(Duration::from_secs(30), AckSet::empty(), true);
 
-        assert!(!retry.release_if_stall_cleared(Some(EmitterFaultMode::Stall)));
+        assert!(!retry.release_if_stall_cleared(true));
         assert!(retry.is_active());
-        assert!(retry.release_if_stall_cleared(None));
+        assert!(retry.release_if_stall_cleared(false));
         assert!(!retry.is_active());
     }
 
@@ -5171,12 +5176,12 @@ mod tests {
 
     #[tokio::test]
     async fn flush_all_returns_the_failure_and_retains_unpublished_batches() {
-        let fault_injector = EmitterFaultInjector::default();
+        let fault_injection = ConfiguredFaultInjection::default();
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
         let mut control = EmitterPublishControl {
-            fault_injector: &fault_injector,
+            fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
@@ -5404,15 +5409,16 @@ mod tests {
         assert_eq!(input_value(&failed[1].batch), 2);
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn buffering_does_not_wait_for_sink_fault_until_a_flush_is_required() {
-        let fault_injector = EmitterFaultInjector::default();
-        fault_injector.fail_emitter("output");
+        let fault_injection = ConfiguredFaultInjection::default();
+        fault_injection.fail_emitter("output");
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
         let mut control = EmitterPublishControl {
-            fault_injector: &fault_injector,
+            fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,

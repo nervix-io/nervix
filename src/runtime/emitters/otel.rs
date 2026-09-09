@@ -105,7 +105,7 @@ enum OtelTransport {
 
 struct OtelClient {
     transport: OtelTransport,
-    fault_injector: Arc<OtelClientFaultInjector>,
+    fault_injection: ConfiguredFaultInjection,
     emitter: EmitterName,
 }
 
@@ -282,7 +282,7 @@ impl OtelEmitter {
         let client = match Self::transport_from_config(config) {
             Ok(transport) => Some(OtelClient {
                 transport,
-                fault_injector: context.runtime.inner.otel_client_faults.clone(),
+                fault_injection: context.runtime.inner.fault_injection.clone(),
                 emitter: context.emitter.clone(),
             }),
             Err(error) => {
@@ -837,7 +837,10 @@ impl OtelEmitter {
 
 impl OtelClient {
     async fn export(&self, request: OtelExportRequest) -> OtelTransportOutcome {
-        if self.fault_injector.is_unavailable(&self.emitter) {
+        if self
+            .fault_injection
+            .otel_client_is_unavailable(&self.emitter)
+        {
             let reason = match &self.transport {
                 OtelTransport::Grpc { .. } => {
                     "OTEL client fault injector returned gRPC UNAVAILABLE"
@@ -2071,11 +2074,12 @@ mod tests {
         assert!(emitter_publish_error_is_retryable(&error));
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn client_fault_injector_returns_retryable_unavailable_without_a_server() {
+    async fn client_fault_injection_returns_retryable_unavailable_without_a_server() {
         let emitter = EmitterName::parse("otel_output").expect("valid emitter name");
-        let fault_injector = Arc::new(OtelClientFaultInjector::default());
-        fault_injector.fail_unavailable(emitter.as_str());
+        let fault_injection = ConfiguredFaultInjection::default();
+        fault_injection.fail_otel_client_unavailable(emitter.as_str());
         let client = OtelClient {
             transport: OtelEmitter::transport_from_config(&config(&[
                 ("endpoint", "http://127.0.0.1:0"),
@@ -2083,7 +2087,7 @@ mod tests {
                 ("timeout_ms", "1"),
             ]))
             .expect("lazy gRPC client must initialize"),
-            fault_injector,
+            fault_injection,
             emitter,
         };
 

@@ -1395,7 +1395,15 @@ impl Runtime {
             Some(IngestTimestampSource::Now) => Ok(record.metadata().ingested_at_low_watermark()),
             Some(IngestTimestampSource::At(timestamp_field)) => {
                 match record.value(timestamp_field.as_str())? {
-                    Some(RuntimeValue::Datetime(value)) => Ok(Timestamp::from(value.to_utc())),
+                    Some(RuntimeValue::Datetime(value)) => Timestamp::try_from(value.to_utc())
+                        .map_err(|error| {
+                            format!(
+                                "TIMESTAMP field '{}' for ingestor '{}' is outside the supported \
+                                 range: {error}",
+                                timestamp_field.as_str(),
+                                ingestor.as_str()
+                            )
+                        }),
                     Some(_) => Err(format!(
                         "TIMESTAMP field '{}' for ingestor '{}' is not DATETIME at runtime",
                         timestamp_field.as_str(),
@@ -1485,7 +1493,7 @@ impl Runtime {
             )
         })?;
         if let Some(clock) = &domain_state.clock
-            && domain_clock_window_matches(clock, period, skew, event_timestamp)?
+            && domain_clock_window_matches(clock, period, skew, event_timestamp)
         {
             return Ok(());
         }
@@ -1534,13 +1542,7 @@ impl Runtime {
         } else {
             let timestamp = match &last_start {
                 nervix_models::DomainStartPoint::Now { .. } => current_timestamp(),
-                nervix_models::DomainStartPoint::At { timestamp, .. } => {
-                    chrono::DateTime::parse_from_rfc3339(timestamp)
-                        .map(|value| Timestamp::from(value.to_utc()))
-                        .map_err(|error| {
-                            format!("invalid start timestamp '{timestamp}': {error}")
-                        })?
-                }
+                nervix_models::DomainStartPoint::At { timestamp, .. } => *timestamp,
                 nervix_models::DomainStartPoint::Resume => unreachable!("handled above"),
             };
             KafkaIngestor::offsets_by_timestamp(consumer, topic, timestamp)?
@@ -1855,11 +1857,12 @@ mod tests {
 
         assert_eq!(
             timestamp,
-            Timestamp::from(
+            Timestamp::try_from(
                 chrono::DateTime::parse_from_rfc3339("2026-04-07T12:34:56Z")
                     .expect("valid timestamp")
                     .to_utc()
             )
+            .expect("fixture timestamp is representable")
         );
     }
 

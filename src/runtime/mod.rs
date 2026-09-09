@@ -45,8 +45,9 @@ use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array,
     take::take as take_arrow_array,
 };
-use chrono::{TimeDelta, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use dashmap::DashMap;
+use error_stack::Report;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -64,22 +65,23 @@ use nervix_models::{
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
     CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
     CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateUdf, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState,
-    DomainTick, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
-    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
-    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
-    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
+    CreateUdf, DomainClockError, DomainClockState, DomainConfig, DomainName, DomainNodeRef,
+    DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName,
+    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
+    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
+    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, OutputBranch, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
+    PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus,
+    RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -132,7 +134,7 @@ use upon::Engine as TemplateEngine;
 #[cfg(test)]
 use crate::runtime_schema::test_runtime_row;
 use crate::{
-    cluster,
+    ConfiguredFaultInjection, cluster,
     metrics::{
         BranchEvictionReason, IngestorQuiesceMetricLabels, NodeBatchObservation,
         NodeLatencyObservation, NodeWithoutRelayObservation, RelayBatchObservation,
@@ -217,7 +219,6 @@ mod state_store;
 mod syslog;
 #[cfg(test)]
 mod test_fixtures;
-mod test_hooks;
 
 #[cfg(test)]
 use branch_aggregated_state::{
@@ -336,7 +337,7 @@ use domain_clock::{
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
     DOMAIN_TICK_HISTORY_LIMIT, DomainExecution, DomainResourceKey, ObservedDomainTick,
-    RuntimeDomainClockState, RuntimeDomainState,
+    RuntimeDomainState,
 };
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
 use domain_wire_schemas::DomainWireSchemas;
@@ -469,11 +470,6 @@ use test_fixtures::{
     wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
     window_inputs, window_outputs, with_inherit_all,
 };
-use test_hooks::EmitterFaultMode;
-pub use test_hooks::{
-    EmitterFaultInjector, IngestorFaultInjector, OtelClientFaultInjector, RuntimeTestHooks,
-    SchedulePublicationFaultInjector,
-};
 use tls::RustlsClientConfigSource;
 pub(crate) use vm_compile::{
     CompiledBranchProgram, CompiledDomainUdfs, CompiledEmitterFilterMapProgram,
@@ -530,6 +526,41 @@ const RUNTIME_EVENT_CAPACITY: usize = 256;
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
 
 type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredFaultInjection {
+    fn emitter_should_fail(&self, _emitter: &EmitterName) -> bool {
+        false
+    }
+
+    fn emitter_should_stall(&self, _emitter: &EmitterName) -> bool {
+        false
+    }
+
+    fn ingestor_is_failed(&self, _ingestor: &IngestorName) -> bool {
+        false
+    }
+
+    fn otel_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
+        false
+    }
+
+    fn syslog_ingestor_bind_addr(&self, _node_id: &ClusterNodeName, configured: &str) -> String {
+        configured.to_string()
+    }
+
+    fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn domain_drain_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    fn entity_gate_deadline(&self) -> Option<Duration> {
+        None
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -662,21 +693,9 @@ struct RuntimeInner {
     routed_endpoints: DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>,
     relay_boundary_fanouts: RelayBoundaryFanoutMap,
     events: RuntimeEvents,
-    /// The fault injectors are handed to the runtime by `RuntimeTestHooks`, and the test that
-    /// built those hooks keeps arming them while the node runs.
-    emitter_faults: Arc<EmitterFaultInjector>,
-    ingestor_faults: Arc<IngestorFaultInjector>,
-    otel_client_faults: Arc<OtelClientFaultInjector>,
-    #[cfg(feature = "testing")]
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
-    #[cfg(feature = "testing")]
-    transaction_binding_drops: Arc<test_hooks::TransactionBindingDropInjector>,
-    #[cfg(feature = "testing")]
-    command_pauses: Arc<test_hooks::CommandPauseInjector>,
-    #[cfg(feature = "testing")]
-    entity_gate_pauses: Arc<test_hooks::EntityGatePauseInjector>,
-    #[cfg(feature = "testing")]
-    syslog_ingestor_bind_address_overrides: Arc<test_hooks::SyslogIngestorBindAddressOverrides>,
+    /// The test harness keeps another handle to the same injected state and arms it while this
+    /// node runs. Normal builds store a zero-sized marker here.
+    fault_injection: ConfiguredFaultInjection,
     resource_store: RwLock<Option<Arc<ResourceStore>>>,
     resource_versions: RwLock<ResourceVersionStatus>,
     remote_dispatcher: RwLock<Option<Arc<RemoteDispatcher>>>,

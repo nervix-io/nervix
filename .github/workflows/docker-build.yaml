@@ -267,7 +267,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'no-docker') &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       pull-requests: write
