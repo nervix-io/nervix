@@ -57,7 +57,8 @@ struct FaultInjectionState {
     ownership_handoff_preparation_pauses:
         DashMap<String, Arc<OwnershipHandoffPreparationPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
-    domain_clock_progress_pauses: DashMap<String, Arc<DomainClockProgressPause>, RandomState>,
+    domain_clock_progress_pauses:
+        DashMap<DomainClockProgressPausePoint, Arc<DomainClockProgressPause>, RandomState>,
     state_replica_polling_paused: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
@@ -116,6 +117,12 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         completed_statements: usize,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DomainClockProgressPausePoint {
+    domain: String,
+    node: Option<ClusterNodeName>,
 }
 
 #[derive(Clone, Debug)]
@@ -371,7 +378,20 @@ impl FaultInjection {
 
     pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
         self.inner.domain_clock_progress_pauses.insert(
-            domain.into().to_ascii_lowercase(),
+            DomainClockProgressPausePoint {
+                domain: domain.into().to_ascii_lowercase(),
+                node: None,
+            },
+            Arc::new(DomainClockProgressPause::default()),
+        );
+    }
+
+    pub fn pause_domain_clock_progress_on(&self, domain: impl Into<String>, node: ClusterNodeName) {
+        self.inner.domain_clock_progress_pauses.insert(
+            DomainClockProgressPausePoint {
+                domain: domain.into().to_ascii_lowercase(),
+                node: Some(node),
+            },
             Arc::new(DomainClockProgressPause::default()),
         );
     }
@@ -383,17 +403,47 @@ impl FaultInjection {
     }
 
     pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
-        let key = domain.to_ascii_lowercase();
-        let pause = self.domain_clock_progress_pause(&key);
+        let point = DomainClockProgressPausePoint {
+            domain: domain.to_ascii_lowercase(),
+            node: None,
+        };
+        let pause = self.domain_clock_progress_pause(&point);
+        pause.wait_until_reached().await;
+    }
+
+    pub async fn wait_for_domain_clock_progress_pause_on(
+        &self,
+        domain: &str,
+        node: &ClusterNodeName,
+    ) {
+        let point = DomainClockProgressPausePoint {
+            domain: domain.to_ascii_lowercase(),
+            node: Some(node.clone()),
+        };
+        let pause = self.domain_clock_progress_pause(&point);
         pause.wait_until_reached().await;
     }
 
     pub async fn release_domain_clock_progress(&self, domain: &str) {
-        let key = domain.to_ascii_lowercase();
-        let pause = self.domain_clock_progress_pause(&key);
+        let point = DomainClockProgressPausePoint {
+            domain: domain.to_ascii_lowercase(),
+            node: None,
+        };
+        let pause = self.domain_clock_progress_pause(&point);
         pause.release();
         pause.wait_until_delivered().await;
-        self.inner.domain_clock_progress_pauses.remove(&key);
+        self.inner.domain_clock_progress_pauses.remove(&point);
+    }
+
+    pub async fn release_domain_clock_progress_on(&self, domain: &str, node: &ClusterNodeName) {
+        let point = DomainClockProgressPausePoint {
+            domain: domain.to_ascii_lowercase(),
+            node: Some(node.clone()),
+        };
+        let pause = self.domain_clock_progress_pause(&point);
+        pause.release();
+        pause.wait_until_delivered().await;
+        self.inner.domain_clock_progress_pauses.remove(&point);
     }
 
     pub fn release_all_domain_clock_progress(&self) {
@@ -556,14 +606,24 @@ impl FaultInjection {
         self.inner.ownership_handoff_preparation_pauses.remove(&key);
     }
 
-    pub(crate) async fn pause_domain_clock_progress_if_armed(&self, domain: &DomainName) -> bool {
-        let key = domain.as_str().to_ascii_lowercase();
-        let Some(pause) = self
-            .inner
-            .domain_clock_progress_pauses
-            .get(&key)
-            .map(|pause| pause.value().clone())
-        else {
+    pub(crate) async fn pause_domain_clock_progress_if_armed(
+        &self,
+        domain: &DomainName,
+        node: &ClusterNodeName,
+    ) -> bool {
+        let exact = DomainClockProgressPausePoint {
+            domain: domain.as_str().to_ascii_lowercase(),
+            node: Some(node.clone()),
+        };
+        let any_node = DomainClockProgressPausePoint {
+            domain: domain.as_str().to_ascii_lowercase(),
+            node: None,
+        };
+        let pause = if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&exact) {
+            pause.value().clone()
+        } else if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&any_node) {
+            pause.value().clone()
+        } else {
             return false;
         };
         pause.reached.store(true, Ordering::Release);
@@ -572,9 +632,25 @@ impl FaultInjection {
         true
     }
 
-    pub(crate) fn mark_domain_clock_progress_delivered(&self, domain: &DomainName) {
-        let key = domain.as_str().to_ascii_lowercase();
-        if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&key) {
+    pub(crate) fn mark_domain_clock_progress_delivered(
+        &self,
+        domain: &DomainName,
+        node: &ClusterNodeName,
+    ) {
+        let exact = DomainClockProgressPausePoint {
+            domain: domain.as_str().to_ascii_lowercase(),
+            node: Some(node.clone()),
+        };
+        let any_node = DomainClockProgressPausePoint {
+            domain: domain.as_str().to_ascii_lowercase(),
+            node: None,
+        };
+        if let Some(pause) = self
+            .inner
+            .domain_clock_progress_pauses
+            .get(&exact)
+            .or_else(|| self.inner.domain_clock_progress_pauses.get(&any_node))
+        {
             pause.mark_delivered();
         }
     }
@@ -697,9 +773,12 @@ impl FaultInjection {
         pause.value().clone()
     }
 
-    fn domain_clock_progress_pause(&self, key: &str) -> Arc<DomainClockProgressPause> {
-        let Some(pause) = self.inner.domain_clock_progress_pauses.get(key) else {
-            panic!("domain clock progress pause for '{key}' is not armed");
+    fn domain_clock_progress_pause(
+        &self,
+        point: &DomainClockProgressPausePoint,
+    ) -> Arc<DomainClockProgressPause> {
+        let Some(pause) = self.inner.domain_clock_progress_pauses.get(point) else {
+            panic!("domain clock progress pause for '{point:?}' is not armed");
         };
         pause.value().clone()
     }

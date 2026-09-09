@@ -104,9 +104,9 @@ use nervix_interconnect::{
     DescribeRelayRequest as RemoteDescribeRelayRequest,
     DescribeRelayResponse as RemoteDescribeRelayResponse,
     DiscardOwnershipHandoffStateRequest as RemoteDiscardOwnershipHandoffStateRequest,
-    DomainClockStart, DomainClockStop, DomainDrainStatusEnvelope,
+    DomainClockProgressEnvelope, DomainDrainStatusEnvelope,
     DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
-    DomainDrainStatusResponse as RemoteDomainDrainStatusResponse, DomainTickEnvelope,
+    DomainDrainStatusResponse as RemoteDomainDrainStatusResponse,
     EmitterPublishingDrainStateEnvelope, EmitterPublishingDrainStatusEnvelope,
     EntityDrainStatusEnvelope, EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
     EntityDrainStatusResponse as RemoteEntityDrainStatusResponse, EntityGatePurpose,
@@ -124,27 +124,28 @@ use nervix_interconnect::{
     TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AlterDomain, BranchSelection, ClusterNodeIncarnation, ClusterNodeName, CreateBranch,
-    CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSchema, CreateStatement,
-    CreateUdf, CreateUser, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainClockAdvancement, DomainClockPeriod, DomainClockState,
-    DomainConfig, DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick,
-    EmitSink, FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule,
-    LookupName, LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction,
-    MySqlConflictAction, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, OwnershipTransition, ParseAsType, PlacementGroupSchedule,
-    PlacementName, PlacementPolicy, PostgresConflictAction, ProcessorInputs, ProcessorOutputs,
-    QuiesceLevel, RelayName, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey, ScheduledModel, ScheduledNode, ShowRelayMaterializedState, StartDomain,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    SubscriptionName, Timestamp, UniquelyKindedModel, UploadResource, UserName, VhostTlsResource,
-    expression_to_nspl, ingest_quiesce_to_nspl,
+    AlterDomain, BranchSelection, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
+    CreateBranch, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
+    CreateEndpoint, CreateInferencer, CreateIngestor, CreateJunction, CreateLookup,
+    CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSchema,
+    CreateStatement, CreateUdf, CreateUser, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainClockAdvancement,
+    DomainClockAuthority, DomainClockPeriod, DomainClockProgress, DomainClockState, DomainConfig,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
+    FieldName, IcebergCatalog, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, IngestorName, KafkaOffsetMode, KafkaPartitionSchedule, LookupName,
+    LookupQuery, Model, ModelKind, ModelName, MongoDbConflictAction, MySqlConflictAction, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId,
+    ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledModel,
+    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
+    Timestamp, UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
+    ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -185,7 +186,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot, watch},
+    sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::{Duration, interval, sleep},
 };
@@ -612,6 +613,7 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     ConfiguredFaultInjection, cluster,
+    domain_clock_authority::DomainClockAuthorityCandidates,
     memory_pressure::{MemoryPressureConfig, MemoryPressureController},
     proto,
     proto::{
@@ -3161,23 +3163,6 @@ struct AppliedModelMutation {
     message: String,
 }
 
-/// The last replicated clock state a domain was reconciled against, so a repeated state that
-/// changes neither the start version nor whether the domain runs is not reconciled again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DomainClockReconciliation {
-    start_version: u64,
-    running: bool,
-}
-
-/// A paced domain's clock as one committed transaction starts it: where its logical time begins,
-/// how fast it advances, and the start version that clock belongs to.
-struct StartedDomainClock {
-    domain_id: DomainName,
-    clock: DomainClockState,
-    period: DomainClockPeriod,
-    start_version: u64,
-}
-
 /// A domain schedule computed from a candidate graph, with how many runtime nodes it moves off
 /// the node that owns them today.
 struct PreparedDomainSchedule {
@@ -3217,11 +3202,23 @@ struct BackgroundTask {
 }
 
 impl BackgroundTask {
+    fn request_stop(&self) {
+        self.cancel.cancel();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    async fn join(self) {
+        self.handle.join_after_shutdown("background task").await;
+    }
+
     /// Stops the task and waits for it to finish, so the caller never drops a task that is still
     /// touching the state it is about to replace.
     async fn stop(self) {
-        self.cancel.cancel();
-        self.handle.join_after_shutdown("background task").await;
+        self.request_stop();
+        self.join().await;
     }
 }
 
@@ -3624,9 +3621,6 @@ struct SessionServiceInner {
     events: SessionEvents,
     subscription_interest_counts: DashMap<SubscriptionInterestKey, usize, RandomState>,
     interconnect: Transport,
-    domain_clocks: DashMap<DomainName, DomainClockRuntimeState, RandomState>,
-    domain_clock_reconciliations: DashMap<DomainName, DomainClockReconciliation, RandomState>,
-    domain_clock_events: Notify,
     next_cluster_command_correlation_id: AtomicU64,
     pending_cluster_commands: PendingClusterCommands,
     service_tasks: TaskTracker,
@@ -3793,11 +3787,72 @@ enum ActiveDomainError {
     NotFound { domain: DomainName },
 }
 
-#[derive(Clone)]
-struct DomainClockRuntimeState {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DomainClockTaskSpec {
     clock: DomainClockState,
     period: DomainClockPeriod,
-    next_tick_id: u64,
+    generation: u64,
+    authority_revision: nervix_models::DomainClockAuthorityRevision,
+    authority: ClusterNodeIdentity,
+    targets: BTreeSet<ClusterNodeIdentity>,
+}
+
+struct DomainClockTask {
+    spec: DomainClockTaskSpec,
+    task: BackgroundTask,
+}
+
+/// Producers whose authority was revoked while they finish an in-flight fenced delivery.
+///
+/// Installing the committed replacement cannot wait for transport or a test-held delivery from
+/// the previous producer. Its immutable specification still carries the superseded fence, and a
+/// successor for the same domain starts only after every retiring local task has finished.
+#[derive(Default)]
+struct DomainClockRetirements {
+    tasks: HashMap<DomainName, Vec<BackgroundTask>>,
+}
+
+impl DomainClockRetirements {
+    fn contains(&self, domain: &DomainName) -> bool {
+        self.tasks.contains_key(domain)
+    }
+
+    fn retire(&mut self, domain: DomainName, task: BackgroundTask) {
+        task.request_stop();
+        self.tasks.entry(domain).or_default().push(task);
+    }
+
+    async fn reap(&mut self) {
+        let domains = self.tasks.keys().cloned().collect::<Vec<_>>();
+        for domain in domains {
+            tokio::task::consume_budget().await;
+            let Some(tasks) = self.tasks.remove(&domain) else {
+                continue;
+            };
+            let mut pending = Vec::new();
+            for task in tasks {
+                tokio::task::consume_budget().await;
+                if task.is_finished() {
+                    task.join().await;
+                } else {
+                    pending.push(task);
+                }
+            }
+            if !pending.is_empty() {
+                self.tasks.insert(domain, pending);
+            }
+        }
+    }
+
+    async fn stop_all(self) {
+        for tasks in self.tasks.into_values() {
+            tokio::task::consume_budget().await;
+            for task in tasks {
+                tokio::task::consume_budget().await;
+                task.stop().await;
+            }
+        }
+    }
 }
 
 struct DownloadedResourceArchive {
@@ -4666,6 +4721,7 @@ async fn apply_cluster_runtime_state(
             local_node_id,
             state.revision,
             &state.domains,
+            &state.domain_clock_authorities,
             &state.schedule,
         )
         .await?;
@@ -4679,17 +4735,14 @@ async fn apply_cluster_runtime_state(
     let deadline = tokio::time::Instant::now() + RUNTIME_REVISION_READINESS_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
-        let expected_nodes = cluster
-            .live_node_ids()
-            .await
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let gossip = cluster.gossip_state().await;
+        let expected_nodes = gossip.live_identities();
         let ready_nodes = cluster
             .nodes_ready_for_runtime_revision(state.revision)
             .await;
         let pending_nodes = expected_nodes
             .difference(&ready_nodes)
-            .cloned()
+            .map(|identity| identity.node_id().clone())
             .collect::<Vec<_>>();
         if pending_nodes.is_empty() {
             break;
@@ -5571,199 +5624,90 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn start_domain_clock(
-        &self,
-        domain_id: DomainName,
-        clock: DomainClockState,
-        period: DomainClockPeriod,
-    ) -> Result<(), String> {
-        let owner = self.domain_clock_owner(&domain_id).await.ok_or_else(|| {
-            format!(
-                "no live node available to own domain '{}'",
-                domain_id.as_str()
-            )
-        })?;
-        let start = DomainClockStart {
-            domain_id: domain_id.clone(),
-            owner_node_id: owner,
-            clock,
-            period,
-        };
-        for node_id in self.domain_tick_target_nodes(&domain_id).await {
-            tokio::task::consume_budget().await;
-            if node_id == self.inner.consensus.local_node_id().clone() {
-                self.handle_domain_clock_start(start.clone());
-                continue;
-            }
-            self.dispatch_interconnect_control(
-                &node_id,
-                ControlEnvelope::DomainClockStart(start.clone()),
-            )
-            .await?;
-        }
-        Ok(())
+    async fn domain_clock_authority_candidates(&self) -> DomainClockAuthorityCandidates {
+        let gossip = self.inner.cluster.gossip_state().await;
+        let live_identities = gossip.live_identities();
+        let live_node_ids = live_identities
+            .iter()
+            .map(|identity| identity.node_id().clone())
+            .collect::<Vec<_>>();
+        let voters = self
+            .inner
+            .consensus
+            .live_voter_ids(live_node_ids)
+            .await
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        DomainClockAuthorityCandidates::new(
+            live_identities
+                .into_iter()
+                .filter(|identity| voters.contains(identity.node_id())),
+        )
     }
 
-    async fn reconcile_domain_clocks_from_state(&self) {
-        let domains = self.inner.consensus.current_domains().await;
-        let known_domains = domains.keys().cloned().collect::<HashSet<_>>();
-        self.inner
-            .domain_clock_reconciliations
-            .retain(|domain, _| known_domains.contains(domain));
-        for (domain_id, domain) in domains {
+    async fn selected_domain_clock_authority(
+        &self,
+        domain_id: &DomainName,
+    ) -> Option<ClusterNodeIdentity> {
+        self.domain_clock_authority_candidates()
+            .await
+            .owner_for(domain_id)
+    }
+
+    async fn reconcile_domain_clock_authorities(&self) {
+        let state = self.inner.consensus.current_runtime_state().await;
+        let candidates = self.domain_clock_authority_candidates().await;
+        for (domain_id, domain) in state.domains {
             tokio::task::consume_budget().await;
-            if let DomainPace::Unpaced = domain.config.pace {
-                self.inner.domain_clock_reconciliations.remove(&domain_id);
-                continue;
-            }
-            let running = !matches!(domain.status, DomainStatus::Stopped);
-            let observed = DomainClockReconciliation {
-                start_version: domain.start_version,
-                running,
-            };
-            if self
-                .inner
-                .domain_clock_reconciliations
-                .get(&domain_id)
-                .is_some_and(|current| *current.value() == observed)
+            if matches!(domain.config.pace, DomainPace::Unpaced)
+                || matches!(domain.status, DomainStatus::Stopped)
             {
                 continue;
             }
-            let result = if running {
-                match domain.clock {
-                    Some(clock) => match domain_clock_period(&domain.config) {
-                        Ok(period) => {
-                            self.start_domain_clock(domain_id.clone(), clock, period)
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    },
-                    None => Err(format!(
-                        "paced domain '{}' is running without replicated clock state",
-                        domain_id.as_str()
-                    )),
-                }
-            } else {
-                self.stop_domain_clock(&domain_id).await
-            };
-            match result {
-                Ok(()) => {
-                    self.inner
-                        .domain_clock_reconciliations
-                        .insert(domain_id, observed);
-                }
-                Err(error) => {
-                    warn!(
-                        domain = domain_id.as_str(),
-                        error, "failed to reconcile replicated domain clock state"
-                    );
-                }
-            }
-        }
-    }
-
-    async fn stop_domain_clock(&self, domain_id: &DomainName) -> Result<(), String> {
-        let stop = DomainClockStop {
-            domain_id: domain_id.clone(),
-        };
-        for node_id in self.domain_tick_target_nodes(domain_id).await {
-            tokio::task::consume_budget().await;
-            if node_id == self.inner.consensus.local_node_id().clone() {
-                self.handle_domain_clock_stop(stop.clone());
+            let expected = state
+                .domain_clock_authorities
+                .get(&domain_id)
+                .cloned()
+                .unwrap_or_else(DomainClockAuthority::initial);
+            let owner = candidates.owner_for(&domain_id);
+            if expected.owner() == owner.as_ref() {
                 continue;
             }
-            self.dispatch_interconnect_control(
-                &node_id,
-                ControlEnvelope::DomainClockStop(stop.clone()),
-            )
-            .await?;
+            if let Err(error) = self
+                .inner
+                .consensus
+                .reconcile_domain_clock_authority(
+                    domain_id.clone(),
+                    domain.start_version,
+                    expected,
+                    owner,
+                )
+                .await
+            {
+                warn!(
+                    domain = domain_id.as_str(),
+                    error = %error,
+                    "failed to reconcile committed domain-clock authority"
+                );
+            }
         }
-        Ok(())
     }
 
-    fn handle_domain_clock_start(&self, start: DomainClockStart) {
-        let domain_id = start.domain_id.clone();
-        if let Err(error) = self
-            .inner
-            .runtime
-            .handle_domain_clock_start(&domain_id, start.clock.clone())
-        {
-            self.broadcast_error(format!(
-                "failed to install domain clock for '{}': {error}",
-                domain_id.as_str(),
-            ));
-            return;
-        }
-        if start.owner_node_id != self.inner.consensus.local_node_id().clone() {
-            self.inner.domain_clock_events.notify_waiters();
-            return;
-        }
-        self.inner.domain_clocks.insert(
-            domain_id.clone(),
-            DomainClockRuntimeState {
-                clock: start.clock,
-                period: start.period,
-                next_tick_id: 1,
-            },
-        );
-        let service = self.clone();
-        self.inner.service_tasks.spawn(async move {
-            emit_due_domain_ticks(&service, &domain_id).await;
-        });
-        self.inner.domain_clock_events.notify_waiters();
-    }
-
-    fn handle_domain_clock_stop(&self, stop: DomainClockStop) {
-        if let Err(error) = self.inner.runtime.handle_domain_clock_stop(&stop.domain_id) {
-            self.broadcast_error(format!(
-                "failed to stop domain clock for '{}': {error}",
-                stop.domain_id.as_str(),
-            ));
-            return;
-        }
-        self.inner.domain_clocks.remove(&stop.domain_id);
-        self.inner.domain_clock_events.notify_waiters();
-    }
-
-    fn handle_domain_tick(&self, tick: DomainTickEnvelope) {
-        if let Err(error) = self
-            .inner
-            .runtime
-            .handle_domain_tick(&tick.domain_id, &tick.tick)
-        {
+    fn handle_domain_clock_progress(
+        &self,
+        authenticated_node: &ClusterNodeName,
+        envelope: DomainClockProgressEnvelope,
+    ) {
+        if let Err(error) = self.inner.runtime.handle_domain_clock_progress(
+            &envelope.domain_id,
+            authenticated_node,
+            &envelope.progress,
+        ) {
             self.broadcast_error(format!(
                 "failed to apply domain clock progress for '{}': {error}",
-                tick.domain_id.as_str(),
+                envelope.domain_id.as_str(),
             ));
         }
-    }
-
-    async fn domain_clock_owner(&self, domain_id: &DomainName) -> Option<ClusterNodeName> {
-        let mut live_nodes = self.inner.cluster.live_node_ids().await;
-        live_nodes.sort();
-        if live_nodes.is_empty() {
-            return None;
-        }
-        // Wrapping is the meaning here: this is a string hash, so the multiply-and-add mixer
-        // is defined modulo the word size and every bit that falls off is intended to.
-        let mut hash: usize = 0;
-        for byte in domain_id.as_str().bytes() {
-            hash = hash.wrapping_mul(131).wrapping_add(usize::from(byte));
-        }
-        live_nodes.get(hash % live_nodes.len()).cloned()
-    }
-
-    async fn domain_tick_target_nodes(&self, domain_id: &DomainName) -> Vec<ClusterNodeName> {
-        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
-            return Vec::new();
-        };
-        if let DomainStatus::Stopped = domain.status {
-            return Vec::new();
-        }
-        let mut nodes = self.inner.cluster.live_node_ids().await;
-        nodes.sort();
-        nodes.dedup();
-        nodes
     }
 
     async fn describe_stream(&self, domain: &DomainName, describe: DescribeRelay) -> CommandResult {
@@ -10291,8 +10235,6 @@ impl SessionServiceImpl {
             "the caller checked this index against the same statement list before dispatching the \
              step",
         );
-        let mut start_clock = None;
-        let mut stop_clock = None;
         let mut ownership_handoff = None;
         let mut step_quiesce_level = None;
         let domain_id = &transaction.domain;
@@ -10502,28 +10444,31 @@ impl SessionServiceImpl {
                         DomainStartPoint::At { .. } => start.start.clone(),
                     };
                     let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
-                    if let DomainPace::Paced = domain.config.pace {
-                        start_clock = Some(StartedDomainClock {
-                            domain_id: domain_id.clone(),
-                            clock: clock.clone(),
-                            period: domain_clock_period(&domain.config).verified(
-                                "validate_domain_config above accepted this paced domain",
-                            ),
-                            start_version: domain.start_version.checked_add(1).assured(
-                                "a domain cannot be started 2^64 times in the lifetime of a \
-                                 cluster",
-                            ),
-                        });
+                    let authority = if let DomainPace::Paced = domain.config.pace {
+                        match self.selected_domain_clock_authority(domain_id).await {
+                            Some(authority) => Ok(Some(authority)),
+                            None => Err(format!(
+                                "no live voter is available to own the clock for domain '{}'",
+                                domain_id.as_str()
+                            )),
+                        }
+                    } else {
+                        Ok(None)
+                    };
+                    match authority {
+                        Ok(authority) => (
+                            command_ok(format!("starting domain '{}'", domain_id.as_str())),
+                            Some(TransactionStepEffect::StartDomain {
+                                domain_id: domain_id.clone(),
+                                expected_start_version: domain.start_version,
+                                start: concrete_start,
+                                clock: matches!(domain.config.pace, DomainPace::Paced)
+                                    .then_some(clock),
+                                authority,
+                            }),
+                        ),
+                        Err(message) => (command_error(message), None),
                     }
-                    (
-                        command_ok(format!("starting domain '{}'", domain_id.as_str())),
-                        Some(TransactionStepEffect::StartDomain {
-                            domain_id: domain_id.clone(),
-                            expected_start_version: domain.start_version,
-                            start: concrete_start,
-                            clock: matches!(domain.config.pace, DomainPace::Paced).then_some(clock),
-                        }),
-                    )
                 }
             }
             Statement::StopDomain(_) => {
@@ -10551,9 +10496,6 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    if let DomainPace::Paced = domain.config.pace {
-                        stop_clock = Some((domain_id.clone(), domain.start_version));
-                    }
                     (
                         command_ok(format!("stopped domain '{}'", domain_id.as_str())),
                         Some(TransactionStepEffect::StopDomain {
@@ -10618,57 +10560,6 @@ impl SessionServiceImpl {
                         statement_index
                             .checked_add(1)
                             .assured("the index names a statement of a transaction held in memory")
-                    ));
-                }
-            }
-            if let Some(StartedDomainClock {
-                domain_id,
-                clock,
-                period,
-                start_version,
-            }) = start_clock
-            {
-                if let Err(error) = self
-                    .inner
-                    .runtime
-                    .handle_domain_clock_start(&domain_id, clock.clone())
-                {
-                    self.broadcast_error(format!(
-                        "failed to install domain clock for '{}': {error}",
-                        domain_id.as_str(),
-                    ));
-                }
-                if let Err(error) = self
-                    .start_domain_clock(domain_id.clone(), clock, period)
-                    .await
-                {
-                    self.broadcast_error(error);
-                } else {
-                    self.inner.domain_clock_reconciliations.insert(
-                        domain_id,
-                        DomainClockReconciliation {
-                            start_version,
-                            running: true,
-                        },
-                    );
-                }
-            }
-            if let Some((domain_id, start_version)) = stop_clock {
-                if let Err(error) = self.stop_domain_clock(&domain_id).await {
-                    self.broadcast_error(error);
-                } else {
-                    self.inner.domain_clock_reconciliations.insert(
-                        domain_id.clone(),
-                        DomainClockReconciliation {
-                            start_version,
-                            running: false,
-                        },
-                    );
-                }
-                if let Err(error) = self.inner.runtime.handle_domain_clock_stop(&domain_id) {
-                    self.broadcast_error(format!(
-                        "failed to stop domain clock for '{}': {error}",
-                        domain_id.as_str(),
                     ));
                 }
             }
@@ -12393,6 +12284,7 @@ impl SessionServiceImpl {
                 self.inner.consensus.local_node_id(),
                 state.revision,
                 &state.domains,
+                &state.domain_clock_authorities,
                 &state.schedule,
             )
             .await
@@ -12833,6 +12725,17 @@ impl SessionServiceImpl {
             DomainStartPoint::At { .. } => start.start.clone(),
         };
         let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
+        let authority = if let DomainPace::Paced = domain.config.pace {
+            let Some(authority) = self.selected_domain_clock_authority(domain_id).await else {
+                return command_error(format!(
+                    "no live voter is available to own the clock for domain '{}'",
+                    domain_id.as_str()
+                ));
+            };
+            Some(authority)
+        } else {
+            None
+        };
         match self
             .inner
             .consensus
@@ -12840,6 +12743,7 @@ impl SessionServiceImpl {
                 domain_id.clone(),
                 concrete_start,
                 matches!(domain.config.pace, DomainPace::Paced).then_some(clock.clone()),
+                authority,
             )
             .await
         {
@@ -12850,41 +12754,6 @@ impl SessionServiceImpl {
                         "failed to start domain '{}': {error}{rollback}",
                         domain_id.as_str()
                     ));
-                }
-                if let DomainPace::Paced = domain.config.pace
-                    && let Err(error) = self
-                        .inner
-                        .runtime
-                        .handle_domain_clock_start(domain_id, clock.clone())
-                {
-                    let rollback = self.roll_back_started_domain(domain_id).await;
-                    return command_error(format!(
-                        "failed to install domain clock for '{}': {error}{rollback}",
-                        domain_id.as_str(),
-                    ));
-                }
-                if let DomainPace::Paced = domain.config.pace {
-                    let period = domain_clock_period(&domain.config)
-                        .verified("validate_domain_config above accepted this paced domain");
-                    if let Err(message) = self
-                        .start_domain_clock(domain_id.clone(), clock, period)
-                        .await
-                    {
-                        let rollback = self.roll_back_started_domain(domain_id).await;
-                        return command_error(format!("{message}{rollback}"));
-                    }
-                }
-                if let DomainPace::Paced = domain.config.pace {
-                    self.inner.domain_clock_reconciliations.insert(
-                        domain_id.clone(),
-                        DomainClockReconciliation {
-                            start_version: domain.start_version.checked_add(1).assured(
-                                "a domain cannot be started 2^64 times in the lifetime of a \
-                                 cluster",
-                            ),
-                            running: true,
-                        },
-                    );
                 }
                 command_ok(format!("starting domain '{}'", domain_id.as_str()))
             }
@@ -12907,26 +12776,6 @@ impl SessionServiceImpl {
                 "domain '{}' is already stopped",
                 domain_id.as_str()
             ));
-        }
-        if let DomainPace::Paced = domain.config.pace
-            && let Err(message) = self.stop_domain_clock(domain_id).await
-        {
-            return command_error(message);
-        }
-        if let DomainPace::Paced = domain.config.pace {
-            if let Err(error) = self.inner.runtime.handle_domain_clock_stop(domain_id) {
-                return command_error(format!(
-                    "failed to stop domain clock for '{}': {error}",
-                    domain_id.as_str(),
-                ));
-            }
-            self.inner.domain_clock_reconciliations.insert(
-                domain_id.clone(),
-                DomainClockReconciliation {
-                    start_version: domain.start_version,
-                    running: false,
-                },
-            );
         }
         match self.inner.consensus.stop_domain(domain_id.clone()).await {
             Ok(()) => {
@@ -18627,46 +18476,101 @@ fn format_ownership_transition(node: &ScheduledNode) -> String {
 async fn reconcile_domain_clock_tasks(
     service: &SessionServiceImpl,
     shutdown: &CancellationToken,
-    tasks: &mut HashMap<DomainName, BackgroundTask>,
+    tasks: &mut HashMap<DomainName, DomainClockTask>,
+    retirements: &mut DomainClockRetirements,
 ) {
-    let domains = service.inner.consensus.current_domains().await;
-    let desired = domains
-        .iter()
-        .filter(|(domain_id, domain)| {
-            if let DomainStatus::Running = domain.status {
-                service.inner.domain_clocks.contains_key(*domain_id)
-            } else {
-                false
-            }
-        })
-        .map(|(domain_id, _)| domain_id.clone())
-        .collect::<Vec<_>>();
+    retirements.reap().await;
+    let state = service.inner.consensus.current_runtime_state().await;
+    let local_identity = service.inner.cluster.local_node_identity().await;
+    let gossip = service.inner.cluster.gossip_state().await;
+    let targets = gossip.live_identities();
+    let ready_nodes = service
+        .inner
+        .cluster
+        .nodes_ready_for_runtime_revision(state.revision)
+        .await;
+    let all_targets_ready = !targets.is_empty()
+        && targets
+            .iter()
+            .all(|identity| ready_nodes.contains(identity));
 
-    let existing = tasks.keys().cloned().collect::<Vec<_>>();
-    for domain_id in existing {
-        if !desired.iter().any(|candidate| candidate == &domain_id)
-            && let Some(task) = tasks.remove(&domain_id)
-        {
-            task.stop().await;
+    let mut desired = HashMap::<DomainName, DomainClockTaskSpec>::new();
+    if all_targets_ready {
+        for (domain_id, domain) in &state.domains {
+            tokio::task::consume_budget().await;
+            if matches!(domain.status, DomainStatus::Stopped)
+                || matches!(domain.config.pace, DomainPace::Unpaced)
+            {
+                continue;
+            }
+            let Some(clock) = domain.clock.clone() else {
+                continue;
+            };
+            let Some(authority) = state.domain_clock_authorities.get(domain_id) else {
+                continue;
+            };
+            let Some(owner) = authority.owner() else {
+                continue;
+            };
+            if owner != &local_identity {
+                continue;
+            }
+            let period = match domain_clock_period(&domain.config) {
+                Ok(period) => period,
+                Err(error) => {
+                    warn!(
+                        domain = domain_id.as_str(),
+                        error, "committed paced domain has an invalid clock period"
+                    );
+                    continue;
+                }
+            };
+            desired.insert(
+                domain_id.clone(),
+                DomainClockTaskSpec {
+                    clock,
+                    period,
+                    generation: domain.start_version,
+                    authority_revision: authority.revision(),
+                    authority: owner.clone(),
+                    targets: targets.clone(),
+                },
+            );
         }
     }
 
-    for domain_id in desired {
-        if tasks.contains_key(&domain_id) {
+    let existing = tasks.keys().cloned().collect::<Vec<_>>();
+    for domain_id in existing {
+        let unchanged = match (tasks.get(&domain_id), desired.get(&domain_id)) {
+            (Some(task), Some(spec)) => &task.spec == spec,
+            _ => false,
+        };
+        if !unchanged && let Some(task) = tasks.remove(&domain_id) {
+            retirements.retire(domain_id, task.task);
+        }
+    }
+
+    for (domain_id, spec) in desired {
+        tokio::task::consume_budget().await;
+        if tasks.contains_key(&domain_id) || retirements.contains(&domain_id) {
             continue;
         }
         let token = shutdown.child_token();
         let task_service = service.clone();
         let task_domain_id = domain_id.clone();
         let task_token = token.clone();
+        let task_spec = spec.clone();
         let handle = tokio::spawn(async move {
-            run_domain_clock(task_service, task_domain_id, task_token).await;
+            run_domain_clock(task_service, task_domain_id, task_spec, task_token).await;
         });
         tasks.insert(
             domain_id,
-            BackgroundTask {
-                cancel: token,
-                handle,
+            DomainClockTask {
+                spec,
+                task: BackgroundTask {
+                    cancel: token,
+                    handle,
+                },
             },
         );
     }
@@ -18675,31 +18579,19 @@ async fn reconcile_domain_clock_tasks(
 async fn run_domain_clock(
     service: SessionServiceImpl,
     domain_id: DomainName,
+    spec: DomainClockTaskSpec,
     shutdown: CancellationToken,
 ) {
+    let mut next_tick_id = 1;
     loop {
         tokio::task::consume_budget().await;
         if shutdown.is_cancelled() {
             break;
         }
-        let Some(domain) = service.inner.consensus.current_domain(&domain_id).await else {
-            break;
-        };
-        if let DomainStatus::Stopped = domain.status {
-            break;
-        }
-        let Some(mut clock) = service
-            .inner
-            .domain_clocks
-            .get(&domain_id)
-            .map(|state| state.clone())
-        else {
-            break;
-        };
         let wall_time = current_timestamp();
-        let due = match clock
+        let due = match spec
             .clock
-            .due_advancement(clock.period, clock.next_tick_id, wall_time)
+            .due_advancement(spec.period, next_tick_id, wall_time)
         {
             Ok(due) => due,
             Err(error) => {
@@ -18716,10 +18608,11 @@ async fn run_domain_clock(
             }
         };
         if let Some(advancement) = due {
-            emit_domain_tick(&service, &domain_id, &mut clock, advancement).await;
+            emit_domain_clock_progress(&service, &domain_id, &spec, &mut next_tick_id, advancement)
+                .await;
             continue;
         }
-        let next_boundary = match clock.clock.tick_boundary(clock.period, clock.next_tick_id) {
+        let next_boundary = match spec.clock.tick_boundary(spec.period, next_tick_id) {
             Ok(boundary) => boundary,
             Err(error) => {
                 service.inner.runtime.report_error(format!(
@@ -18734,7 +18627,7 @@ async fn run_domain_clock(
                 break;
             }
         };
-        let reached_logical = match clock.clock.logical_time_at(wall_time) {
+        let reached_logical = match spec.clock.logical_time_at(wall_time) {
             Ok(reached) => reached,
             Err(error) => {
                 service.inner.runtime.report_error(format!(
@@ -18745,7 +18638,7 @@ async fn run_domain_clock(
                 break;
             }
         };
-        let wait = match clock
+        let wait = match spec
             .clock
             .wall_duration_until(reached_logical, next_boundary.logical_timestamp())
         {
@@ -18766,52 +18659,18 @@ async fn run_domain_clock(
     }
 }
 
-async fn emit_due_domain_ticks(service: &SessionServiceImpl, domain_id: &DomainName) {
-    let Some(domain) = service.inner.consensus.current_domain(domain_id).await else {
-        return;
-    };
-    if let DomainStatus::Stopped = domain.status {
-        return;
-    }
-    let Some(mut clock) = service
-        .inner
-        .domain_clocks
-        .get(domain_id)
-        .map(|state| state.clone())
-    else {
-        return;
-    };
-    let due = match clock.clock.due_advancement(
-        clock.period,
-        clock.next_tick_id,
-        current_timestamp(),
-    ) {
-        Ok(due) => due,
-        Err(error) => {
-            service.inner.runtime.report_error(format!(
-                "domain clock projection for '{}' failed: {error}",
-                domain_id.as_str()
-            ));
-            warn!(domain = domain_id.as_str(), error = %error, "domain clock arithmetic failed");
-            return;
-        }
-    };
-    if let Some(advancement) = due {
-        emit_domain_tick(service, domain_id, &mut clock, advancement).await;
-    }
-}
-
-async fn emit_domain_tick(
+async fn emit_domain_clock_progress(
     service: &SessionServiceImpl,
     domain_id: &DomainName,
-    clock: &mut DomainClockRuntimeState,
+    spec: &DomainClockTaskSpec,
+    next_tick_id: &mut u64,
     advancement: DomainClockAdvancement,
 ) {
     #[cfg(feature = "testing")]
     let progress_was_paused = service
         .inner
         .runtime
-        .pause_domain_clock_progress_if_armed(domain_id)
+        .pause_domain_clock_progress_if_armed(domain_id, service.inner.consensus.local_node_id())
         .await;
     let wall_clock = current_timestamp();
     let boundary = advancement.boundary();
@@ -18819,36 +18678,40 @@ async fn emit_domain_tick(
         tick_id: boundary.tick_id(),
         logical_timestamp: boundary.logical_timestamp(),
         wall_clock,
-        period: clock.period,
+        period: spec.period,
     };
-    clock.next_tick_id = advancement.next_tick_id();
-    service
-        .inner
-        .domain_clocks
-        .insert(domain_id.clone(), clock.clone());
-    let target_nodes = service.domain_tick_target_nodes(domain_id).await;
-    for node_id in target_nodes {
+    *next_tick_id = advancement.next_tick_id();
+    let progress = DomainClockProgress {
+        generation: spec.generation,
+        authority_revision: spec.authority_revision,
+        authority: spec.authority.clone(),
+        tick,
+    };
+    for target in &spec.targets {
         tokio::task::consume_budget().await;
-        if node_id == service.inner.consensus.local_node_id().clone() {
-            service.handle_domain_tick(DomainTickEnvelope {
-                domain_id: domain_id.clone(),
-                tick: tick.clone(),
-            });
+        if target == &spec.authority {
+            service.handle_domain_clock_progress(
+                spec.authority.node_id(),
+                DomainClockProgressEnvelope {
+                    domain_id: domain_id.clone(),
+                    progress: progress.clone(),
+                },
+            );
             continue;
         }
         if let Err(error) = service
             .dispatch_interconnect_control(
-                &node_id,
-                ControlEnvelope::DomainTick(DomainTickEnvelope {
+                target.node_id(),
+                ControlEnvelope::DomainClockProgress(DomainClockProgressEnvelope {
                     domain_id: domain_id.clone(),
-                    tick: tick.clone(),
+                    progress: progress.clone(),
                 }),
             )
             .await
         {
             warn!(
                 domain = domain_id.as_str(),
-                node = %node_id,
+                node = %target,
                 error = %error,
                 "failed to deliver domain tick"
             );
@@ -18856,15 +18719,14 @@ async fn emit_domain_tick(
     }
     #[cfg(feature = "testing")]
     if progress_was_paused {
-        service
-            .inner
-            .runtime
-            .mark_domain_clock_progress_delivered(domain_id);
+        service.inner.runtime.mark_domain_clock_progress_delivered(
+            domain_id,
+            service.inner.consensus.local_node_id(),
+        );
     }
 }
 
-const DEFAULT_TRACE_FILTER: &str =
-    "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
+const DEFAULT_TRACE_FILTER: &str = "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -20003,9 +19865,6 @@ impl Application {
                 events: events.clone(),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect: interconnect.clone(),
-                domain_clocks: DashMap::with_hasher(RandomState::new()),
-                domain_clock_reconciliations: DashMap::with_hasher(RandomState::new()),
-                domain_clock_events: Notify::new(),
                 next_cluster_command_correlation_id: AtomicU64::new(1),
                 pending_cluster_commands: DashMap::default(),
                 service_tasks: TaskTracker::new(),
@@ -20443,10 +20302,6 @@ impl Application {
                     == Some(transaction_service.inner.consensus.local_node_id());
                 if observed_leadership != Some(is_leader) {
                     transaction_service.inner.transaction_bindings.clear();
-                    transaction_service
-                        .inner
-                        .domain_clock_reconciliations
-                        .clear();
                     let schedule = transaction_service.inner.consensus.current_schedule().await;
                     match transaction_service
                         .inner
@@ -20471,7 +20326,7 @@ impl Application {
                 if is_leader {
                     transaction_service.reconcile_transactions_once().await;
                     transaction_service
-                        .reconcile_domain_clocks_from_state()
+                        .reconcile_domain_clock_authorities()
                         .await;
                 }
                 tokio::select! {
@@ -20554,15 +20409,21 @@ impl Application {
         let domain_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             let mut domains_rx = domain_service.inner.consensus.subscribe_domains();
-            let mut tasks: HashMap<DomainName, BackgroundTask> = HashMap::new();
+            let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
+            let mut retirements = DomainClockRetirements::default();
             if let Err(error) = domain_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
 
             loop {
                 tokio::task::consume_budget().await;
-                reconcile_domain_clock_tasks(&domain_service, &domain_shutdown, &mut tasks).await;
-                let domain_clock_event = domain_service.inner.domain_clock_events.notified();
+                reconcile_domain_clock_tasks(
+                    &domain_service,
+                    &domain_shutdown,
+                    &mut tasks,
+                    &mut retirements,
+                )
+                .await;
                 tokio::select! {
                     _ = domain_shutdown.cancelled() => break,
                     changed = domains_rx.changed() => {
@@ -20573,13 +20434,14 @@ impl Application {
                             warn!(error = %error, "failed to apply cluster schedule after domain sync");
                         }
                     }
-                    _ = domain_clock_event => {}
+                    _ = sleep(Duration::from_millis(100)) => {}
                 }
             }
 
             for (_, task) in tasks {
-                task.stop().await;
+                task.task.stop().await;
             }
+            retirements.stop_all().await;
         }));
 
         let kafka_schedule_service = service.clone();
@@ -20672,14 +20534,11 @@ impl Application {
                             ) => {
                                 unreachable!("typed requests are consumed by the interconnect")
                             }
-                            Envelope::Control(ControlEnvelope::DomainClockStart(start)) => {
-                                service_for_interconnect.handle_domain_clock_start(start);
-                            }
-                            Envelope::Control(ControlEnvelope::DomainClockStop(stop)) => {
-                                service_for_interconnect.handle_domain_clock_stop(stop);
-                            }
-                            Envelope::Control(ControlEnvelope::DomainTick(tick)) => {
-                                service_for_interconnect.handle_domain_tick(tick);
+                            Envelope::Control(ControlEnvelope::DomainClockProgress(progress)) => {
+                                service_for_interconnect.handle_domain_clock_progress(
+                                    &message.peer_node_id,
+                                    progress,
+                                );
                             }
                             Envelope::Control(ControlEnvelope::StateSyncRequest(request)) => {
                                 let result = match crate::runtime::RuntimeStatePlacement::from_remote(
@@ -21641,9 +21500,6 @@ mod tests {
                 events: SessionEvents::new(16),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect,
-                domain_clocks: DashMap::with_hasher(RandomState::new()),
-                domain_clock_reconciliations: DashMap::with_hasher(RandomState::new()),
-                domain_clock_events: Notify::new(),
                 next_cluster_command_correlation_id: AtomicU64::new(1),
                 pending_cluster_commands: DashMap::default(),
                 service_tasks: TaskTracker::new(),

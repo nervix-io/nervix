@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 arch-into = { workspace = true }
 ciborium = { workspace = true }
+error-stack = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }

@@ -88,12 +88,34 @@ pub(super) struct RuntimeDomainState {
     pub(super) status: nervix_models::DomainStatus,
     pub(super) start_version: u64,
     pub(super) last_start: nervix_models::DomainStartPoint,
+    pub(super) clock_authority: DomainClockAuthority,
     pub(super) clock: DomainClockLifecycle,
     pub(super) ticks: parking_lot::Mutex<VecDeque<ObservedDomainTick>>,
 }
 
 impl Runtime {
-    pub fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
+    #[cfg(test)]
+    pub(super) fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
+        let authority = DomainClockAuthority::assigned(
+            nervix_models::DomainClockAuthorityRevision::INITIAL,
+            nervix_models::ClusterNodeIdentity::new(
+                ClusterNodeName::parse("test-clock-authority")
+                    .assured("the fixed test authority name satisfies the name grammar"),
+                nervix_models::ClusterNodeIncarnation::new(1),
+            ),
+        );
+        let authorities = domains
+            .keys()
+            .map(|domain| (domain.clone(), authority.clone()))
+            .collect::<BTreeMap<_, _>>();
+        self.sync_committed_domains(domains, &authorities);
+    }
+
+    pub(super) fn sync_committed_domains(
+        &self,
+        domains: &BTreeMap<DomainName, DomainState>,
+        authorities: &BTreeMap<DomainName, DomainClockAuthority>,
+    ) {
         for domain in self
             .inner
             .domains
@@ -118,24 +140,31 @@ impl Runtime {
         }
 
         for (domain, state) in domains {
+            let authority = authorities
+                .get(domain)
+                .cloned()
+                .unwrap_or_else(DomainClockAuthority::initial);
             let mut entry = self.inner.domains.entry(domain.clone()).or_insert_with(|| {
                 let clock = DomainClockLifecycle::new(domain.clone());
-                clock.synchronize(state);
+                clock.synchronize(state, &authority);
                 RuntimeDomainState {
                     config: state.config.clone(),
                     status: state.status.clone(),
                     start_version: state.start_version,
                     last_start: state.last_start.clone(),
+                    clock_authority: authority.clone(),
                     clock,
                     ticks: parking_lot::Mutex::new(VecDeque::new()),
                 }
             });
+            let generation_changed = entry.start_version != state.start_version;
             entry.config = state.config.clone();
             entry.status = state.status.clone();
             entry.start_version = state.start_version;
             entry.last_start = state.last_start.clone();
-            entry.clock.synchronize(state);
-            if let nervix_models::DomainStatus::Stopped = state.status {
+            entry.clock_authority = authority.clone();
+            entry.clock.synchronize(state, &authority);
+            if generation_changed || matches!(state.status, nervix_models::DomainStatus::Stopped) {
                 entry.ticks.lock().clear();
             }
         }
@@ -952,6 +981,37 @@ mod tests {
 
         let Err(RuntimeError::BuildDomainExecution { domain, reason }) = result else {
             panic!("execution must reject a paced domain without an installed mapping");
+        };
+        assert_eq!(domain, clock_domain.as_str());
+        assert!(
+            reason.contains("not installed"),
+            "unexpected error: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_rejects_a_mapping_without_a_committed_authority() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("paced");
+        let mut state = paced_domain_state("paced");
+        state.start_version = 3;
+        state.clock = Some(DomainClockState::new(
+            current_timestamp(),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        runtime.sync_committed_domains(
+            &BTreeMap::from([(clock_domain.clone(), state)]),
+            &BTreeMap::new(),
+        );
+        let schedule = DomainSchedule::new(clock_domain.clone(), Vec::new(), Vec::new());
+
+        let result = runtime
+            .build_passive_execution_from_schedule(&clock_domain, &schedule)
+            .await;
+
+        let Err(RuntimeError::BuildDomainExecution { domain, reason }) = result else {
+            panic!("execution must reject a paced clock without its committed authority");
         };
         assert_eq!(domain, clock_domain.as_str());
         assert!(

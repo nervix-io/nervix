@@ -128,6 +128,7 @@ The focused public scenarios are selected independently:
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @delayed_clock_progress
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @logical_origin_admission
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_bound_clock
+just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
 ```
 
 The delayed-progress scenario is part of the ordinary suite after task 02. The logical-origin
@@ -205,5 +206,21 @@ Recorded on 9 September 2026 against the task 03 worktree:
 | `nervix-server` library suites | Pass; default features ran 789 tests with one task-05 probe ignored, and `testing` ran 797 tests with the same probe ignored. |
 | `just validate` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline, and the checked-in string-error debt fell from 514 to 512. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 04 validation record
+
+Recorded on 9 September 2026 against the task 04 worktree:
+
+| Probe | Result |
+| --- | --- |
+| Public live-owner-transfer reproducer before product changes | Expected red; after the third voter joined, the newly selected node never produced progress and the node-specific delivery barrier timed out. |
+| `One fenced authority emits coalesced progress for each clock generation` and `Nonleader clock-owner loss preserves the committed mapping` | Pass; two scenarios and all 46 steps passed through live membership expansion, a held progress report across `STOP` and a later `START`, affected-node verification of the replacement mapping, leader transfer, follower and owner restarts with new incarnations and addresses, nonleader owner loss, and transfer to the surviving authority. |
+| `A joining or restarted node installs the current clock generation before execution` | Pass; one scenario and all 12 steps verified join and full-cluster restart installation before node-local HTTP execution. |
+| `Delayed clock progress cannot move observed logical time backwards` | Pass in both the one- and three-node examples; all 32 steps passed with progress held across physical time and then released. |
+| Authority and progress unit coverage | Pass; pure selection covered membership and incarnation changes, consensus covered revision fencing and identical direct/transactional lifecycle commits, and runtime covered exact generation/revision/incarnation/peer fences, stopped and restarted generations, missing domains, bounded tick history, and execution refusal without installed authority. |
+| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. Clamped-arithmetic debt fell from 13 to 11 and string-error debt fell from 512 to 510. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.

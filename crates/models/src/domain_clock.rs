@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** Positive clock rates and periods, committed clock mappings, tick boundaries and
-//!   their checked projection arithmetic.
+//! - **Owns.** Positive clock rates and periods, committed clock mappings and authorities,
+//!   fenced progress, tick boundaries and their checked projection arithmetic.
 //! - **Depends on.** Timestamp and serialization primitives.
 //! - **Must not know.** Runtime tasks, consensus, notifications, sleeps or transport behavior.
 
@@ -20,7 +20,7 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::Timestamp;
+use crate::{ClusterNodeIdentity, Timestamp};
 
 #[derive(Debug, Error)]
 pub enum DomainClockError {
@@ -36,6 +36,89 @@ pub enum DomainClockError {
     DurationOverflow { operation: &'static str },
     #[error("domain clock {operation} leaves the signed Unix-nanosecond range")]
     TimestampOverflow { operation: &'static str },
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct DomainClockAuthorityRevision(u64);
+
+impl DomainClockAuthorityRevision {
+    pub const INITIAL: Self = Self(0);
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DomainClockAuthority {
+    Unassigned {
+        revision: DomainClockAuthorityRevision,
+    },
+    Assigned {
+        revision: DomainClockAuthorityRevision,
+        owner: ClusterNodeIdentity,
+    },
+}
+
+impl DomainClockAuthority {
+    pub const fn initial() -> Self {
+        Self::Unassigned {
+            revision: DomainClockAuthorityRevision::INITIAL,
+        }
+    }
+
+    pub const fn unassigned(revision: DomainClockAuthorityRevision) -> Self {
+        Self::Unassigned { revision }
+    }
+
+    pub const fn assigned(
+        revision: DomainClockAuthorityRevision,
+        owner: ClusterNodeIdentity,
+    ) -> Self {
+        Self::Assigned { revision, owner }
+    }
+
+    pub const fn revision(&self) -> DomainClockAuthorityRevision {
+        match self {
+            Self::Unassigned { revision } | Self::Assigned { revision, .. } => *revision,
+        }
+    }
+
+    pub const fn owner(&self) -> Option<&ClusterNodeIdentity> {
+        match self {
+            Self::Unassigned { .. } => None,
+            Self::Assigned { owner, .. } => Some(owner),
+        }
+    }
+
+    pub fn checked_reassign(&self, owner: Option<ClusterNodeIdentity>) -> Option<Self> {
+        let revision = self.revision().checked_next()?;
+        match owner {
+            Some(owner) => Some(Self::Assigned { revision, owner }),
+            None => Some(Self::Unassigned { revision }),
+        }
+    }
 }
 
 #[derive(
@@ -195,6 +278,16 @@ pub struct DomainClockState {
     wall_started_at: Timestamp,
     logical_start: Timestamp,
     time_rate: DomainTimeRate,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DomainClockProgress {
+    pub generation: u64,
+    pub authority_revision: DomainClockAuthorityRevision,
+    pub authority: ClusterNodeIdentity,
+    pub tick: crate::DomainTick,
 }
 
 impl DomainClockState {

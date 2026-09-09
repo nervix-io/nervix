@@ -17,13 +17,15 @@ use std::{
     time::Duration,
 };
 
+use error_stack::Report;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures_util::StreamExt;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, DomainClockState, DomainName,
-    DomainSchedule, DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus,
-    ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Statement, UserName,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
+    DomainClockAuthority, DomainClockState, DomainName, DomainPace, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
+    ResourceVersionCounter, ResourceVersionStatus, Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -85,6 +87,7 @@ pub enum ConsensusCommand {
         domain_id: DomainName,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
+        authority: Option<ClusterNodeIdentity>,
     },
     StopDomain {
         domain_id: DomainName,
@@ -94,6 +97,12 @@ pub enum ConsensusCommand {
     },
     ResumeDomain {
         domain_id: DomainName,
+    },
+    ReconcileDomainClockAuthority {
+        domain_id: DomainName,
+        expected_start_version: u64,
+        expected_authority: DomainClockAuthority,
+        owner: Option<ClusterNodeIdentity>,
     },
     CreateUser {
         user: Box<UserCredentials>,
@@ -199,6 +208,9 @@ impl std::fmt::Display for ConsensusCommand {
             Self::StopDomain { domain_id } => write!(f, "stop-domain:{}", domain_id.as_str()),
             Self::PauseDomain { domain_id } => write!(f, "pause-domain:{}", domain_id.as_str()),
             Self::ResumeDomain { domain_id } => write!(f, "resume-domain:{}", domain_id.as_str()),
+            Self::ReconcileDomainClockAuthority { domain_id, .. } => {
+                write!(f, "reconcile-domain-clock-authority:{}", domain_id.as_str())
+            }
             Self::CreateUser { user } => write!(f, "create-user:{}", user.name.as_str()),
             Self::CreateResourceCatalog { domain, identifier } => {
                 write!(
@@ -344,6 +356,12 @@ pub struct GossipNode {
     pub interconnect_public_key: String,
 }
 
+impl GossipNode {
+    pub fn identity(&self) -> ClusterNodeIdentity {
+        ClusterNodeIdentity::new(self.node_id.clone(), self.incarnation)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GossipState {
     pub live_nodes: Vec<GossipNode>,
@@ -356,6 +374,21 @@ impl GossipState {
             .iter()
             .filter(|node| !self.dead_node_ids.contains(&node.node_id))
     }
+
+    pub fn live_identities(&self) -> BTreeSet<ClusterNodeIdentity> {
+        let mut current = BTreeMap::<ClusterNodeName, ClusterNodeIdentity>::new();
+        for node in self.admission_candidates() {
+            let identity = node.identity();
+            let replace = match current.get(&node.node_id) {
+                Some(observed) => observed.incarnation() < identity.incarnation(),
+                None => true,
+            };
+            if replace {
+                current.insert(node.node_id.clone(), identity);
+            }
+        }
+        current.into_values().collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +396,7 @@ pub struct ConsensusRuntimeState {
     pub revision: u64,
     pub schedule: ClusterSchedule,
     pub domains: BTreeMap<DomainName, DomainState>,
+    pub domain_clock_authorities: BTreeMap<DomainName, DomainClockAuthority>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +406,7 @@ struct StateMachineData {
     runtime_revision: u64,
     schedule: ClusterSchedule,
     domains: BTreeMap<DomainName, DomainState>,
+    domain_clock_authorities: BTreeMap<DomainName, DomainClockAuthority>,
     #[serde(default)]
     users: BTreeMap<UserName, UserCredentials>,
     resources: ResourceVersionStatus,
@@ -395,6 +430,91 @@ impl StateMachineData {
         self.schedule
             .domains
             .insert(domain.clone(), domain_schedule.clone());
+    }
+
+    fn advance_domain_clock_authority(
+        &mut self,
+        domain: &DomainName,
+        owner: Option<ClusterNodeIdentity>,
+    ) {
+        let current = self
+            .domain_clock_authorities
+            .get(domain)
+            .cloned()
+            .unwrap_or_else(DomainClockAuthority::initial);
+        let next = current.checked_reassign(owner).assured(
+            "a domain-clock authority cannot be reassigned 2^64 times in the lifetime of a cluster",
+        );
+        self.domain_clock_authorities.insert(domain.clone(), next);
+    }
+
+    fn commit_domain_start(
+        &mut self,
+        domain_id: &DomainName,
+        start: &DomainStartPoint,
+        clock: &Option<DomainClockState>,
+        authority: &Option<ClusterNodeIdentity>,
+    ) -> bool {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return false;
+        };
+        domain.status = DomainStatus::Running;
+        domain.start_version = domain
+            .start_version
+            .checked_add(1)
+            .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
+        domain.last_start = start.clone();
+        domain.clock = clock.clone();
+        let paced = matches!(domain.config.pace, DomainPace::Paced);
+
+        if paced {
+            self.advance_domain_clock_authority(domain_id, authority.clone());
+        } else {
+            self.domain_clock_authorities.remove(domain_id);
+        }
+        true
+    }
+
+    fn commit_domain_stop(&mut self, domain_id: &DomainName) -> bool {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return false;
+        };
+        domain.status = DomainStatus::Stopped;
+        domain.clock = None;
+        let paced = matches!(domain.config.pace, DomainPace::Paced);
+
+        if paced {
+            self.advance_domain_clock_authority(domain_id, None);
+        } else {
+            self.domain_clock_authorities.remove(domain_id);
+        }
+        true
+    }
+
+    fn reconcile_domain_clock_authority(
+        &mut self,
+        domain_id: &DomainName,
+        expected_start_version: u64,
+        expected_authority: &DomainClockAuthority,
+        owner: &Option<ClusterNodeIdentity>,
+    ) -> bool {
+        let current_domain = self.domains.get(domain_id);
+        let current_authority = self
+            .domain_clock_authorities
+            .get(domain_id)
+            .cloned()
+            .unwrap_or_else(DomainClockAuthority::initial);
+        let eligible = current_domain.is_some_and(|domain| {
+            domain.start_version == expected_start_version
+                && !matches!(domain.status, DomainStatus::Stopped)
+                && matches!(domain.config.pace, DomainPace::Paced)
+        }) && &current_authority == expected_authority;
+        if !eligible || expected_authority.owner() == owner.as_ref() {
+            return false;
+        }
+
+        self.advance_domain_clock_authority(domain_id, owner.clone());
+        true
     }
 }
 
@@ -878,6 +998,7 @@ impl Observer {
             revision: state.runtime_revision,
             schedule: state.schedule.clone(),
             domains: state.domains.clone(),
+            domain_clock_authorities: state.domain_clock_authorities.clone(),
         }
     }
 
@@ -1136,6 +1257,7 @@ impl Proposer {
         domain_id: DomainName,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
+        authority: Option<ClusterNodeIdentity>,
     ) -> Result<(), ConsensusError> {
         self.inner
             .raft
@@ -1143,6 +1265,7 @@ impl Proposer {
                 domain_id,
                 start,
                 clock,
+                authority,
             })
             .await
             .map(|_| ())
@@ -1156,6 +1279,29 @@ impl Proposer {
             .await
             .map(|_| ())
             .map_err(ConsensusError::from)
+    }
+
+    pub async fn reconcile_domain_clock_authority(
+        &self,
+        domain_id: DomainName,
+        expected_start_version: u64,
+        expected_authority: DomainClockAuthority,
+        owner: Option<ClusterNodeIdentity>,
+    ) -> Result<(), Report<ConsensusError>> {
+        let written = self
+            .inner
+            .raft
+            .client_write(ConsensusCommand::ReconcileDomainClockAuthority {
+                domain_id,
+                expected_start_version,
+                expected_authority,
+                owner,
+            })
+            .await;
+        match written {
+            Ok(_) => Ok(()),
+            Err(error) => Err(Report::new(ConsensusError::from(error))),
+        }
     }
 
     pub async fn pause_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
@@ -2458,24 +2604,12 @@ fn apply_consensus_command(
             domain_id,
             start,
             clock,
+            authority,
         } => {
-            if let Some(domain) = state.domains.get_mut(domain_id) {
-                domain.status = DomainStatus::Running;
-                domain.start_version = domain
-                    .start_version
-                    .checked_add(1)
-                    .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
-                domain.last_start = start.clone();
-                domain.clock = clock.clone();
-                changes.domains_changed = true;
-            }
+            changes.domains_changed = state.commit_domain_start(domain_id, start, clock, authority);
         }
         ConsensusCommand::StopDomain { domain_id } => {
-            if let Some(domain) = state.domains.get_mut(domain_id) {
-                domain.status = DomainStatus::Stopped;
-                domain.clock = None;
-                changes.domains_changed = true;
-            }
+            changes.domains_changed = state.commit_domain_stop(domain_id);
         }
         ConsensusCommand::PauseDomain { domain_id } => {
             if let Some(domain) = state.domains.get_mut(domain_id)
@@ -2492,6 +2626,19 @@ fn apply_consensus_command(
                 domain.status = DomainStatus::Running;
                 changes.domains_changed = true;
             }
+        }
+        ConsensusCommand::ReconcileDomainClockAuthority {
+            domain_id,
+            expected_start_version,
+            expected_authority,
+            owner,
+        } => {
+            changes.domains_changed = state.reconcile_domain_clock_authority(
+                domain_id,
+                *expected_start_version,
+                expected_authority,
+                owner,
+            );
         }
         ConsensusCommand::CreateUser { user } => {
             state
@@ -2939,25 +3086,13 @@ fn apply_transaction_step_effect(
             domain_id,
             start,
             clock,
+            authority,
             ..
         } => {
-            if let Some(domain) = state.domains.get_mut(domain_id) {
-                domain.status = DomainStatus::Running;
-                domain.start_version = domain
-                    .start_version
-                    .checked_add(1)
-                    .assured("a domain cannot be started 2^64 times in the lifetime of a cluster");
-                domain.last_start = start.clone();
-                domain.clock = clock.clone();
-                changes.domains_changed = true;
-            }
+            changes.domains_changed = state.commit_domain_start(domain_id, start, clock, authority);
         }
         TransactionStepEffect::StopDomain { domain_id, .. } => {
-            if let Some(domain) = state.domains.get_mut(domain_id) {
-                domain.status = DomainStatus::Stopped;
-                domain.clock = None;
-                changes.domains_changed = true;
-            }
+            changes.domains_changed = state.commit_domain_stop(domain_id);
         }
         TransactionStepEffect::CreateResourceCatalog { identifier } => {
             ensure_resource_catalog(&mut state.resources, domain, identifier);
@@ -3087,16 +3222,17 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, ops::RangeInclusive, sync::Arc as StdArc};
+    use std::{collections::BTreeSet, io::Cursor, ops::RangeInclusive, sync::Arc as StdArc};
 
     use arch_into::ArchInto as _;
     use fjall::Database;
     use meticulous::OptionExt as _;
     use nervix_models::{
-        ClusterNodeIncarnation, DomainConfig, DomainName, DomainPace, DomainSchedule,
-        DomainStartPoint, DomainState, DomainStatus, ResourceId, ResourceName, ResourceNodeState,
+        ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
+        DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
+        DomainStatus, DomainTimeRate, ResourceId, ResourceName, ResourceNodeState,
         ResourceNodeStatus, ResourceReplicaKey, ResourceVersion, ResourceVersionCounter,
-        ResourceVersionStatus, Statement,
+        ResourceVersionStatus, Statement, Timestamp,
     };
     use openraft::{
         SnapshotMeta,
@@ -3112,10 +3248,11 @@ mod tests {
     use super::{
         ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
         GossipNode, GossipState, KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, SnapshotRelayHeader,
-        StateMachineData, StoredMembershipOf, TransactionCommandResult, TransactionMutationError,
-        TransactionOutcome, TransactionStatement, TransactionStepEffect, TransactionStepResult,
-        TypeConfig, UserCredentials, apply_consensus_command, decode, encode, encode_stream_frame,
-        io_error, load_value, read_key, write_key,
+        StateMachineChanges, StateMachineData, StoredMembershipOf, TransactionCommandResult,
+        TransactionMutationError, TransactionOutcome, TransactionStatement, TransactionStepEffect,
+        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
+        apply_transaction_step_effect, decode, encode, encode_stream_frame, io_error, load_value,
+        read_key, write_key,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
@@ -3221,6 +3358,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn live_identities_require_the_newest_nondead_node_incarnation() {
+        let gossip_node = |name: &str, incarnation| GossipNode {
+            node_id: ClusterNodeName::parse(name).expect("valid node name"),
+            incarnation: ClusterNodeIncarnation::new(incarnation),
+            cluster_api_advertise_addr: format!("http://{name}"),
+            grpc_advertise_addr: String::new(),
+            web_console_advertise_addr: String::new(),
+            interconnect_advertise_addr: String::new(),
+            interconnect_mode: String::new(),
+            interconnect_public_key: String::new(),
+        };
+        let state = GossipState {
+            live_nodes: vec![
+                gossip_node("node-1", 10),
+                gossip_node("node-1", 11),
+                gossip_node("node-2", 20),
+            ],
+            dead_node_ids: BTreeSet::from([
+                ClusterNodeName::parse("node-2").expect("valid node name")
+            ]),
+        };
+
+        assert_eq!(
+            state.live_identities(),
+            BTreeSet::from([node_identity("node-1", 11)])
+        );
+    }
+
     fn domain_schedule(raw: &str) -> DomainSchedule {
         DomainSchedule::new(domain(raw), Vec::new(), Vec::new())
     }
@@ -3239,6 +3405,185 @@ mod tests {
             last_start: DomainStartPoint::Resume,
             clock: None,
         }
+    }
+
+    fn node_identity(raw: &str, incarnation: u64) -> ClusterNodeIdentity {
+        ClusterNodeIdentity::new(
+            ClusterNodeName::parse(raw).expect("valid node name"),
+            ClusterNodeIncarnation::new(incarnation),
+        )
+    }
+
+    #[test]
+    fn committed_clock_authority_revisions_fence_transfer_and_stop() {
+        let domain_id = domain("paced");
+        let mut stopped = running_domain_state("paced");
+        stopped.config.pace = DomainPace::Paced;
+        stopped.status = DomainStatus::Stopped;
+        stopped.start_version = 0;
+        let mut state = StateMachineData::default();
+        state.domains.insert(domain_id.clone(), stopped);
+        let first_owner = node_identity("node-1", 10);
+        let second_owner = node_identity("node-2", 20);
+        let mapping = DomainClockState::new(
+            Timestamp::from_unix_nanos(100),
+            Timestamp::from_unix_nanos(1_000),
+            DomainTimeRate::ONE,
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::StartDomain {
+                domain_id: domain_id.clone(),
+                start: DomainStartPoint::At {
+                    timestamp: Timestamp::from_unix_nanos(1_000),
+                    time_rate: DomainTimeRate::ONE,
+                },
+                clock: Some(mapping.clone()),
+                authority: Some(first_owner.clone()),
+            },
+        );
+        let first = state
+            .domain_clock_authorities
+            .get(&domain_id)
+            .cloned()
+            .expect("START commits an authority");
+        assert_eq!(first.revision().get(), 1);
+        assert_eq!(first.owner(), Some(&first_owner));
+        assert_eq!(
+            state
+                .domains
+                .get(&domain_id)
+                .and_then(|domain| domain.clock.as_ref()),
+            Some(&mapping)
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReconcileDomainClockAuthority {
+                domain_id: domain_id.clone(),
+                expected_start_version: 1,
+                expected_authority: first.clone(),
+                owner: Some(second_owner.clone()),
+            },
+        );
+        let transferred = state
+            .domain_clock_authorities
+            .get(&domain_id)
+            .cloned()
+            .expect("the transfer commits its fence");
+        assert_eq!(transferred.revision().get(), 2);
+        assert_eq!(transferred.owner(), Some(&second_owner));
+        assert_eq!(
+            state
+                .domains
+                .get(&domain_id)
+                .and_then(|domain| domain.clock.as_ref()),
+            Some(&mapping),
+            "authority transfer must preserve the committed mapping"
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReconcileDomainClockAuthority {
+                domain_id: domain_id.clone(),
+                expected_start_version: 1,
+                expected_authority: first,
+                owner: Some(first_owner),
+            },
+        );
+        assert_eq!(
+            state.domain_clock_authorities.get(&domain_id),
+            Some(&transferred),
+            "a superseded reconciliation must not replace the committed authority"
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::StopDomain {
+                domain_id: domain_id.clone(),
+            },
+        );
+        let stopped = state
+            .domain_clock_authorities
+            .get(&domain_id)
+            .expect("STOP retains the revocation fence");
+        assert_eq!(stopped.revision().get(), 3);
+        assert!(matches!(stopped, DomainClockAuthority::Unassigned { .. }));
+    }
+
+    #[test]
+    fn direct_and_transactional_lifecycle_commit_the_same_clock_state() {
+        let domain_id = domain("paced");
+        let mut stopped = running_domain_state("paced");
+        stopped.config.pace = DomainPace::Paced;
+        stopped.status = DomainStatus::Stopped;
+        stopped.start_version = 0;
+        let mut direct = StateMachineData::default();
+        direct.domains.insert(domain_id.clone(), stopped);
+        let mut transactional = direct.clone();
+        let owner = node_identity("node-1", 10);
+        let start = DomainStartPoint::At {
+            timestamp: Timestamp::from_unix_nanos(1_000),
+            time_rate: DomainTimeRate::ONE,
+        };
+        let mapping = DomainClockState::new(
+            Timestamp::from_unix_nanos(100),
+            Timestamp::from_unix_nanos(1_000),
+            DomainTimeRate::ONE,
+        );
+
+        apply_consensus_command(
+            &mut direct,
+            &ConsensusCommand::StartDomain {
+                domain_id: domain_id.clone(),
+                start: start.clone(),
+                clock: Some(mapping.clone()),
+                authority: Some(owner.clone()),
+            },
+        );
+        let mut changes = StateMachineChanges::default();
+        apply_transaction_step_effect(
+            &mut transactional,
+            &domain_id,
+            &TransactionStepEffect::StartDomain {
+                domain_id: domain_id.clone(),
+                expected_start_version: 0,
+                start,
+                clock: Some(mapping),
+                authority: Some(owner),
+            },
+            &mut changes,
+        );
+        assert!(changes.domains_changed);
+        assert_eq!(transactional.domains, direct.domains);
+        assert_eq!(
+            transactional.domain_clock_authorities,
+            direct.domain_clock_authorities
+        );
+
+        apply_consensus_command(
+            &mut direct,
+            &ConsensusCommand::StopDomain {
+                domain_id: domain_id.clone(),
+            },
+        );
+        let mut changes = StateMachineChanges::default();
+        apply_transaction_step_effect(
+            &mut transactional,
+            &domain_id,
+            &TransactionStepEffect::StopDomain {
+                domain_id: domain_id.clone(),
+                expected_start_version: 1,
+            },
+            &mut changes,
+        );
+        assert!(changes.domains_changed);
+        assert_eq!(transactional.domains, direct.domains);
+        assert_eq!(
+            transactional.domain_clock_authorities,
+            direct.domain_clock_authorities
+        );
     }
 
     fn resource_version(domain_id: &str, identifier: &str, version: u64) -> ResourceVersion {
@@ -3577,6 +3922,7 @@ mod tests {
                 expected_start_version: 0,
                 start: DomainStartPoint::Resume,
                 clock: None,
+                authority: None,
             })),
             completion: None,
         };
