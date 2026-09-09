@@ -2,31 +2,37 @@ use super::*;
 
 impl Runtime {
     pub fn new() -> Self {
-        Self::with_test_hooks(RuntimeTestHooks::default())
-    }
-
-    pub fn with_test_hooks(hooks: RuntimeTestHooks) -> Self {
-        Self::with_persistence(None, DEFAULT_STATE_SNAPSHOT_INTERVAL, hooks)
+        Self::with_persistence(None, DEFAULT_STATE_SNAPSHOT_INTERVAL)
             .verified("the None persistence path has no fallible step")
     }
 
     pub fn with_persistence(
         db: Option<Database>,
         state_snapshot_interval: Duration,
-        hooks: RuntimeTestHooks,
     ) -> Result<Self, RuntimePersistenceError> {
         Self::with_persistence_and_temp_dir(
             db,
             state_snapshot_interval,
-            hooks,
+            ConfiguredFaultInjection::default(),
             PathBuf::from(DEFAULT_TEMP_DIR),
         )
     }
 
-    pub fn with_persistence_and_temp_dir(
+    #[cfg(feature = "testing")]
+    pub fn with_fault_injection(fault_injection: ConfiguredFaultInjection) -> Self {
+        Self::with_persistence_and_temp_dir(
+            None,
+            DEFAULT_STATE_SNAPSHOT_INTERVAL,
+            fault_injection,
+            PathBuf::from(DEFAULT_TEMP_DIR),
+        )
+        .verified("the None persistence path has no fallible step")
+    }
+
+    pub(crate) fn with_persistence_and_temp_dir(
         db: Option<Database>,
         state_snapshot_interval: Duration,
-        hooks: RuntimeTestHooks,
+        fault_injection: ConfiguredFaultInjection,
         temp_dir: PathBuf,
     ) -> Result<Self, RuntimePersistenceError> {
         let events = RuntimeEvents::new();
@@ -35,6 +41,15 @@ impl Runtime {
             .map(RuntimeStateStore::from_database)
             .transpose()?
             .map(Arc::new);
+        let branch_instance_expiration_scan_interval = fault_injection
+            .branch_instance_expiration_scan_interval()
+            .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL);
+        let domain_drain_timeout = fault_injection
+            .domain_drain_timeout()
+            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+        let entity_gate_deadline = fault_injection
+            .entity_gate_deadline()
+            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 ingestors: Arc::new(DashMap::default()),
@@ -68,20 +83,7 @@ impl Runtime {
                 routed_endpoints: DashMap::default(),
                 relay_boundary_fanouts: DashMap::default(),
                 events,
-                emitter_faults: hooks.emitter_faults,
-                ingestor_faults: hooks.ingestor_faults,
-                otel_client_faults: hooks.otel_client_faults,
-                #[cfg(feature = "testing")]
-                schedule_publication_faults: hooks.schedule_publication_faults,
-                #[cfg(feature = "testing")]
-                transaction_binding_drops: hooks.transaction_binding_drops,
-                #[cfg(feature = "testing")]
-                command_pauses: hooks.command_pauses,
-                #[cfg(feature = "testing")]
-                runtime_pauses: hooks.runtime_pauses,
-                #[cfg(feature = "testing")]
-                syslog_ingestor_bind_address_overrides: hooks
-                    .syslog_ingestor_bind_address_overrides,
+                fault_injection,
                 resource_store: RwLock::new(None),
                 resource_versions: RwLock::new(ResourceVersionStatus::default()),
                 remote_dispatcher: RwLock::new(None),
@@ -105,18 +107,12 @@ impl Runtime {
                 replicated_branch_aggregated_states: DashMap::default(),
                 wasm_runtime: WasmRuntime::new(WasmRuntimeConfig::default())
                     .assured("wasmtime accepts its own default configuration"),
-                branch_instance_expiration_scan_interval: hooks
-                    .branch_instance_expiration_scan_interval
-                    .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL),
+                branch_instance_expiration_scan_interval,
                 state_store,
                 state_snapshot_interval,
                 state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-                domain_drain_timeout: hooks
-                    .domain_drain_timeout
-                    .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
-                entity_gate_deadline: hooks
-                    .entity_gate_deadline
-                    .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
+                domain_drain_timeout,
+                entity_gate_deadline,
                 temp_dir,
                 executor: Executor::default(),
                 metrics: RuntimeMetrics::default(),
@@ -164,13 +160,15 @@ impl Runtime {
     #[cfg(feature = "testing")]
     pub fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
         self.inner
-            .schedule_publication_faults
-            .take_armed_fault(domain)
+            .fault_injection
+            .take_armed_schedule_publication_fault(domain)
     }
 
     #[cfg(feature = "testing")]
     pub fn take_armed_transaction_binding_drop(&self, node_id: &ClusterNodeName) -> bool {
-        self.inner.transaction_binding_drops.take(node_id)
+        self.inner
+            .fault_injection
+            .take_armed_transaction_binding_drop(node_id)
     }
 
     #[cfg(feature = "testing")]
@@ -180,20 +178,29 @@ impl Runtime {
         completed_statements: usize,
     ) {
         self.inner
-            .command_pauses
-            .pause_if_armed(test_hooks::CommandPausePoint::TransactionCommit {
-                node_id: node_id.clone(),
-                completed_statements,
-            })
+            .fault_injection
+            .pause_transaction_commit_after_progress_if_armed(node_id, completed_statements)
             .await;
     }
 
     #[cfg(feature = "testing")]
     pub async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
-            .command_pauses
-            .pause_if_armed(test_hooks::CommandPausePoint::Admission(node_id.clone()))
+            .fault_injection
+            .pause_command_admission_if_armed(node_id)
             .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn scheduler_mode(&self) -> crate::registry::SchedulerMode {
+        self.inner.fault_injection.scheduler_mode()
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn subscribe_leadership_transfers(
+        &self,
+    ) -> broadcast::Receiver<crate::fault_injection::LeadershipTransferRequest> {
+        self.inner.fault_injection.subscribe_leadership_transfers()
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {

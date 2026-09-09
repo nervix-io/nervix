@@ -189,8 +189,6 @@ use tokio_tungstenite::{
     },
 };
 
-#[cfg(feature = "testing")]
-use crate::registry::SchedulerMode;
 use crate::registry::{
     ActiveGraph, PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan,
     PlacementRulePlan, Registry, RegistryError, RegistryMutation,
@@ -596,7 +594,7 @@ use triomphe::Arc;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    cluster,
+    ConfiguredFaultInjection, cluster,
     memory_pressure::{MemoryPressureConfig, MemoryPressureController},
     proto,
     proto::{
@@ -613,8 +611,8 @@ use crate::{
         CompiledProgramWithMaterializedInterest, EntityGateLease, IngestMessageHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, RelayMessage, RelayRecordBatch,
         RelaySubscriptionReceiver, RelaySubscriptionRecvError, RetainedIngestHeaders, Runtime,
-        RuntimeEvent, RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext,
-        SignalingDataSink, WebsocketSignalingSession, compile_session_filter_map_program,
+        RuntimeEvent, RuntimeMaterializedRelaySpec, RuntimeVmCompileContext, SignalingDataSink,
+        WebsocketSignalingSession, compile_session_filter_map_program,
         execute_filter_map_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
@@ -3284,8 +3282,6 @@ struct SessionServiceInner {
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     runtime: Runtime,
     replica_count: usize,
-    #[cfg(feature = "testing")]
-    scheduler_mode: SchedulerMode,
     shutdown: CancellationToken,
     events: broadcast::Sender<ServerEvent>,
     subscription_interest_counts: DashMap<SubscriptionInterestKey, usize, RandomState>,
@@ -3725,9 +3721,6 @@ pub struct Application {
     pub transaction_max_open: usize,
     #[builder(default = 0)]
     pub replica_count: usize,
-    #[cfg(feature = "testing")]
-    #[builder(default)]
-    pub scheduler_mode: SchedulerMode,
     #[builder(default = Duration::from_secs(30))]
     pub state_snapshot_interval: Duration,
     #[builder(default)]
@@ -3737,7 +3730,8 @@ pub struct Application {
     #[builder(default = PathBuf::from(crate::runtime::DEFAULT_TEMP_DIR))]
     pub temp_dir: PathBuf,
     #[builder(default)]
-    pub runtime_test_hooks: RuntimeTestHooks,
+    #[doc(hidden)]
+    pub fault_injection: ConfiguredFaultInjection,
     #[builder(default=CancellationToken::new())]
     pub shutdown: CancellationToken,
     #[builder(default = true)]
@@ -11375,7 +11369,7 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 self.inner.replica_count,
                 alter.policy,
-                self.inner.scheduler_mode,
+                self.inner.runtime.scheduler_mode(),
             );
             #[cfg(not(feature = "testing"))]
             let mut schedule = graph.schedule_for_domain(
@@ -12300,7 +12294,7 @@ impl SessionServiceImpl {
                     &cluster_nodes,
                     self.inner.replica_count,
                     placement,
-                    self.inner.scheduler_mode,
+                    self.inner.runtime.scheduler_mode(),
                 );
                 #[cfg(not(feature = "testing"))]
                 let mut schedule = graph.schedule_for_domain(
@@ -12392,7 +12386,7 @@ impl SessionServiceImpl {
                 cluster_nodes,
                 self.inner.replica_count,
                 domain_state.config.placement,
-                self.inner.scheduler_mode,
+                self.inner.runtime.scheduler_mode(),
             );
             #[cfg(not(feature = "testing"))]
             let mut schedule = graph.schedule_for_domain(
@@ -12564,7 +12558,7 @@ impl SessionServiceImpl {
                     &replacement_nodes,
                     self.inner.replica_count,
                     domain_state.config.placement,
-                    self.inner.scheduler_mode,
+                    self.inner.runtime.scheduler_mode(),
                 );
                 #[cfg(not(feature = "testing"))]
                 let desired = graph.schedule_for_domain(
@@ -17924,8 +17918,6 @@ impl Application {
         let transaction_max_source_bytes = self.transaction_max_source_bytes;
         let transaction_max_open = self.transaction_max_open;
         let replica_count = self.replica_count;
-        #[cfg(feature = "testing")]
-        let scheduler_mode = self.scheduler_mode;
         let state_snapshot_interval = self.state_snapshot_interval;
         let memory_pressure_controller = self
             .memory_pressure
@@ -17938,7 +17930,7 @@ impl Application {
         let db_path = self.db_path.clone();
         let temp_dir = self.temp_dir.clone();
         let shutdown = self.shutdown.clone();
-        let runtime_test_hooks = self.runtime_test_hooks.clone();
+        let fault_injection = self.fault_injection.clone();
         let interconnect_identity = LocalIdentity::generate(node_id.clone());
         let interconnect_public_key = encode_hex(&interconnect_identity.public_key().to_bytes());
         let cluster_api_clients = Arc::new(ClusterApiClients::build().map_err(|error| {
@@ -18087,7 +18079,7 @@ impl Application {
         let runtime = Runtime::with_persistence_and_temp_dir(
             Some(db.clone()),
             state_snapshot_interval,
-            runtime_test_hooks.clone(),
+            fault_injection.clone(),
             temp_dir.clone(),
         )
         .map_err(|error| {
@@ -18255,9 +18247,10 @@ impl Application {
             interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
-        runtime_test_hooks
-            .bulk_execution_occupancy
-            .register(node_id.clone(), runtime.executor().clone());
+        #[cfg(feature = "testing")]
+        fault_injection.register_bulk_executor(node_id.clone(), runtime.executor().clone());
+        #[cfg(feature = "testing")]
+        let scheduler_mode = runtime.scheduler_mode();
 
         let cluster_for_reconcile = cluster.clone();
         let consensus_for_reconcile = consensus.proposer();
@@ -18273,45 +18266,48 @@ impl Application {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
-        let mut leadership_transfer_rx = runtime_test_hooks.leadership_transfers.subscribe();
-        let consensus_for_leadership_transfer = consensus.administrator();
-        let leadership_transfer_shutdown = shutdown.clone();
-        let leadership_transfer_local_node_id = node_id.clone();
-        background_tasks.push(tokio::spawn(async move {
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    _ = leadership_transfer_shutdown.cancelled() => break,
-                    request = leadership_transfer_rx.recv() => {
-                        match request {
-                            Ok(request)
-                                if request.from_node_id == leadership_transfer_local_node_id =>
-                            {
-                                if let Err(error) = consensus_for_leadership_transfer
-                                    .transfer_leadership_to(request.to_node_id.clone())
-                                    .await
+        #[cfg(feature = "testing")]
+        {
+            let mut leadership_transfer_rx = runtime.subscribe_leadership_transfers();
+            let consensus_for_leadership_transfer = consensus.administrator();
+            let leadership_transfer_shutdown = shutdown.clone();
+            let leadership_transfer_local_node_id = node_id.clone();
+            background_tasks.push(tokio::spawn(async move {
+                loop {
+                    tokio::task::consume_budget().await;
+                    tokio::select! {
+                        _ = leadership_transfer_shutdown.cancelled() => break,
+                        request = leadership_transfer_rx.recv() => {
+                            match request {
+                                Ok(request)
+                                    if request.from_node_id == leadership_transfer_local_node_id =>
                                 {
+                                    if let Err(error) = consensus_for_leadership_transfer
+                                        .transfer_leadership_to(request.to_node_id.clone())
+                                        .await
+                                    {
+                                        warn!(
+                                            from_node_id = %request.from_node_id,
+                                            to_node_id = %request.to_node_id,
+                                            error = %error,
+                                            "test leadership transfer request failed"
+                                        );
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(broadcast::error::RecvError::Lagged(skipped)) => {
                                     warn!(
-                                        from_node_id = %request.from_node_id,
-                                        to_node_id = %request.to_node_id,
-                                        error = %error,
-                                        "test leadership transfer request failed"
+                                        skipped,
+                                        "test leadership transfer request receiver lagged"
                                     );
                                 }
+                                Err(broadcast::error::RecvError::Closed) => break,
                             }
-                            Ok(_) => {}
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                warn!(
-                                    skipped,
-                                    "test leadership transfer request receiver lagged"
-                                );
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
                 }
-            }
-        }));
+            }));
+        }
         background_tasks.push(tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             let mut initialized = false;
@@ -18801,8 +18797,6 @@ impl Application {
                 http_tls_server_config: Arc::new(RwLock::new(None)),
                 runtime: runtime.clone(),
                 replica_count,
-                #[cfg(feature = "testing")]
-                scheduler_mode,
                 shutdown: shutdown.clone(),
                 events: events.clone(),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
@@ -20042,8 +20036,6 @@ mod tests {
                 http_tls_server_config: Arc::new(RwLock::new(None)),
                 runtime: Runtime::new(),
                 replica_count: 0,
-                #[cfg(feature = "testing")]
-                scheduler_mode: SchedulerMode::Sticky,
                 shutdown: CancellationToken::new(),
                 events: broadcast::channel(16).0,
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),

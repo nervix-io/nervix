@@ -17,8 +17,8 @@ path = "src/main.rs"
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
-# Test-only feature used by the standard test recipes for random multinode scheduling and to lower
-# intentionally expensive password hashing parameters.
+# Test-only feature used by the standard test recipes for fault injection, random multinode
+# scheduling, and lower intentionally expensive password hashing parameters.
 testing = []
 
 [dependencies]
@@ -208,6 +208,7 @@ trybuild = { workspace = true }
 [[test]]
 harness = false
 name = "scenarios"
+required-features = ["testing"]
 
 [[bench]]
 harness = false

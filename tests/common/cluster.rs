@@ -32,12 +32,11 @@ pub use nervix_proto as proto;
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
     ClusterNodeName::parse(raw).expect("cucumber node ids are valid cluster node names")
 }
-#[cfg(feature = "testing")]
-use nervix_server::SchedulerMode;
 use nervix_server::{
+    FaultInjection, SchedulerMode,
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::{DEFAULT_TEMP_DIR, RuntimeTestHooks},
+    runtime::DEFAULT_TEMP_DIR,
 };
 use parking_lot::Mutex;
 use proto::{
@@ -440,7 +439,7 @@ pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions>
 pub(crate) struct Cluster {
     _root_dir: TempDir,
     nodes: BTreeMap<String, NodeHandle>,
-    runtime_test_hooks: RuntimeTestHooks,
+    fault_injection: FaultInjection,
     dependencies: DependencyEndpoints,
 }
 
@@ -492,18 +491,19 @@ impl Default for TestClusterConfig {
 impl Cluster {
     pub(crate) async fn start_with_config(
         node_count: usize,
-        runtime_test_hooks: RuntimeTestHooks,
+        fault_injection: FaultInjection,
         config: TestClusterConfig,
     ) -> io::Result<Self> {
         assert!(node_count >= 1, "cluster must contain at least one node");
         #[cfg(feature = "testing")]
         let config = {
             let mut config = config;
-            config.scheduler_mode.get_or_insert(if node_count == 3 {
+            let scheduler_mode = *config.scheduler_mode.get_or_insert(if node_count == 3 {
                 SchedulerMode::Random
             } else {
                 SchedulerMode::Sticky
             });
+            fault_injection.set_scheduler_mode(scheduler_mode);
             config
         };
         truncate_test_log_once()?;
@@ -514,17 +514,17 @@ impl Cluster {
         for index in 1..=node_count {
             let node_id = format!("node-{index}");
             let spec = NodeSpec::new(&root_dir, &node_id, index == 1)?;
-            runtime_test_hooks
+            fault_injection
                 .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
-                NodeHandle::new(spec, runtime_test_hooks.clone(), config.clone()),
+                NodeHandle::new(spec, fault_injection.clone(), config.clone()),
             );
         }
 
         let mut cluster = Self {
             _root_dir: root_dir,
-            runtime_test_hooks,
+            fault_injection,
             nodes,
             dependencies: config.dependencies,
         };
@@ -671,11 +671,11 @@ impl Cluster {
             .clone();
         let mut spec = NodeSpec::new(&self._root_dir, node_id, false)?;
         spec.bootstrap_host = Some(bootstrap_host);
-        self.runtime_test_hooks
+        self.fault_injection
             .set_syslog_ingestor_bind_ip(node_name(node_id), spec.syslog_ingestor_host);
         self.nodes.insert(
             node_id.to_string(),
-            NodeHandle::new(spec, self.runtime_test_hooks.clone(), config),
+            NodeHandle::new(spec, self.fault_injection.clone(), config),
         );
         self.start_node(node_id).await?;
 
@@ -1409,51 +1409,35 @@ impl Cluster {
     }
 
     pub(crate) fn fail_emitter_on_all_nodes(&self, emitter: &str) {
-        for handle in self.nodes.values() {
-            handle.fail_emitter(emitter);
-        }
+        self.fault_injection.fail_emitter(emitter);
     }
 
     pub(crate) fn stall_emitter_on_all_nodes(&self, emitter: &str) {
-        for handle in self.nodes.values() {
-            handle.stall_emitter(emitter);
-        }
+        self.fault_injection.stall_emitter(emitter);
     }
 
     pub(crate) fn clear_emitter_fault_on_all_nodes(&self, emitter: &str) {
-        for handle in self.nodes.values() {
-            handle.clear_emitter_fault(emitter);
-        }
+        self.fault_injection.clear_emitter_fault(emitter);
     }
 
     pub(crate) fn fail_otel_client_unavailable_on_all_nodes(&self, emitter: &str) {
-        self.runtime_test_hooks
-            .otel_client_faults
-            .fail_unavailable(emitter);
+        self.fault_injection.fail_otel_client_unavailable(emitter);
     }
 
     pub(crate) fn clear_otel_client_fault_on_all_nodes(&self, emitter: &str) {
-        self.runtime_test_hooks
-            .otel_client_faults
-            .clear_emitter(emitter);
+        self.fault_injection.clear_otel_client_fault(emitter);
     }
 
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
-        for handle in self.nodes.values() {
-            handle.fail_next_schedule_publication(domain);
-        }
+        self.fault_injection.fail_next_schedule_publication(domain);
     }
 
     pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str) {
-        for handle in self.nodes.values() {
-            handle.fail_ingestor(ingestor);
-        }
+        self.fault_injection.fail_ingestor(ingestor);
     }
 
     pub(crate) fn clear_ingestor_fault_on_all_nodes(&self, ingestor: &str) {
-        for handle in self.nodes.values() {
-            handle.clear_ingestor_fault(ingestor);
-        }
+        self.fault_injection.clear_ingestor_fault(ingestor);
     }
 
     pub(crate) async fn wait_for_interconnect_status(
@@ -1800,7 +1784,7 @@ impl Cluster {
     }
 
     pub(crate) fn transfer_leadership(&self, from_node_id: &str, to_node_id: &str) {
-        self.runtime_test_hooks
+        self.fault_injection
             .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
     }
     async fn wait_until<F>(&self, node_id: &str, predicate: F) -> io::Result<()>
@@ -1847,13 +1831,12 @@ impl Drop for Cluster {
     }
 }
 
-/// One node in a test cluster. The fault injectors are reached through `runtime_test_hooks`
-/// rather than copied in beside it, so arming a fault and the node that observes it can never
-/// drift apart.
+/// One node in a test cluster. Every fault is reached through the shared injection handle, so
+/// arming a fault and the node that observes it can never drift apart.
 #[derive(Debug)]
 struct NodeHandle {
     spec: NodeSpec,
-    runtime_test_hooks: RuntimeTestHooks,
+    fault_injection: FaultInjection,
     config: TestClusterConfig,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
@@ -1861,14 +1844,10 @@ struct NodeHandle {
 }
 
 impl NodeHandle {
-    fn new(
-        spec: NodeSpec,
-        runtime_test_hooks: RuntimeTestHooks,
-        config: TestClusterConfig,
-    ) -> Self {
+    fn new(spec: NodeSpec, fault_injection: FaultInjection, config: TestClusterConfig) -> Self {
         Self {
             spec,
-            runtime_test_hooks,
+            fault_injection,
             config,
             failure: Arc::new(Mutex::new(None)),
             task: None,
@@ -1927,12 +1906,6 @@ impl NodeHandle {
             .raft_election_timeout_min(TEST_RAFT_ELECTION_TIMEOUT_MIN)
             .raft_election_timeout_max(TEST_RAFT_ELECTION_TIMEOUT_MAX)
             .replica_count(self.config.replica_count);
-        #[cfg(feature = "testing")]
-        let application_builder = application_builder.scheduler_mode(
-            self.config
-                .scheduler_mode
-                .expect("test scheduler mode must be resolved before node startup"),
-        );
         let application = application_builder
             .state_snapshot_interval(self.config.state_snapshot_interval)
             .transaction_idle_timeout(self.config.transaction_idle_timeout)
@@ -1949,7 +1922,7 @@ impl NodeHandle {
                     .clone()
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_TEMP_DIR)),
             )
-            .runtime_test_hooks(self.runtime_test_hooks.clone())
+            .fault_injection(self.fault_injection.clone())
             .shutdown(shutdown.clone())
             .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
             .drain_timeout(self.config.drain_timeout)
@@ -2060,40 +2033,6 @@ impl NodeHandle {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-    }
-
-    fn fail_emitter(&self, emitter: &str) {
-        self.runtime_test_hooks.emitter_faults.fail_emitter(emitter);
-    }
-
-    fn stall_emitter(&self, emitter: &str) {
-        self.runtime_test_hooks
-            .emitter_faults
-            .stall_emitter(emitter);
-    }
-
-    fn clear_emitter_fault(&self, emitter: &str) {
-        self.runtime_test_hooks
-            .emitter_faults
-            .clear_emitter(emitter);
-    }
-
-    fn fail_ingestor(&self, ingestor: &str) {
-        self.runtime_test_hooks
-            .ingestor_faults
-            .fail_ingestor(ingestor);
-    }
-
-    fn clear_ingestor_fault(&self, ingestor: &str) {
-        self.runtime_test_hooks
-            .ingestor_faults
-            .clear_ingestor(ingestor);
-    }
-
-    fn fail_next_schedule_publication(&self, domain: &str) {
-        self.runtime_test_hooks
-            .schedule_publication_faults
-            .fail_next_publication(domain);
     }
 }
 

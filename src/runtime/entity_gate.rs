@@ -781,7 +781,7 @@ impl Runtime {
     #[cfg(feature = "testing")]
     pub async fn pause_entity_gate_if_armed(&self, domain: &DomainName) {
         self.inner
-            .runtime_pauses
+            .fault_injection
             .pause_entity_gate_if_armed(domain)
             .await;
     }

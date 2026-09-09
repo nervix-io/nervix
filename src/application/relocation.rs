@@ -426,7 +426,7 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 self.inner.replica_count,
                 placement,
-                self.inner.scheduler_mode,
+                self.inner.runtime.scheduler_mode(),
             )
         }
         #[cfg(not(feature = "testing"))]

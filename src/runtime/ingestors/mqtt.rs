@@ -236,8 +236,8 @@ impl MqttIngestor {
                     if task_context
                         .runtime
                         .inner
-                        .ingestor_faults
-                        .is_failed(&task_context.ingestor)
+                        .fault_injection
+                        .ingestor_is_failed(&task_context.ingestor)
                     {
                         continue;
                     }

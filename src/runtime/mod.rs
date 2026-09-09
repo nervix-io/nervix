@@ -131,7 +131,7 @@ use upon::Engine as TemplateEngine;
 #[cfg(test)]
 use crate::runtime_schema::test_runtime_row;
 use crate::{
-    cluster,
+    ConfiguredFaultInjection, cluster,
     metrics::{
         BranchEvictionReason, IngestorQuiesceMetricLabels, NodeBatchObservation,
         NodeLatencyObservation, NodeWithoutRelayObservation, RelayBatchObservation,
@@ -216,7 +216,6 @@ mod state_store;
 mod syslog;
 #[cfg(test)]
 mod test_fixtures;
-mod test_hooks;
 
 #[cfg(test)]
 use branch_aggregated_state::{
@@ -461,11 +460,6 @@ use test_fixtures::{
     wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
     window_inputs, window_outputs, with_inherit_all,
 };
-use test_hooks::EmitterFaultMode;
-pub use test_hooks::{
-    EmitterFaultInjector, IngestorFaultInjector, OtelClientFaultInjector, RuntimeTestHooks,
-    SchedulePublicationFaultInjector,
-};
 use tls::RustlsClientConfigSource;
 pub(crate) use vm_compile::{
     CompiledBranchProgram, CompiledDomainUdfs, CompiledEmitterFilterMapProgram,
@@ -522,6 +516,41 @@ const RUNTIME_EVENT_CAPACITY: usize = 256;
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
 
 type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredFaultInjection {
+    fn emitter_should_fail(&self, _emitter: &EmitterName) -> bool {
+        false
+    }
+
+    fn emitter_should_stall(&self, _emitter: &EmitterName) -> bool {
+        false
+    }
+
+    fn ingestor_is_failed(&self, _ingestor: &IngestorName) -> bool {
+        false
+    }
+
+    fn otel_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
+        false
+    }
+
+    fn syslog_ingestor_bind_addr(&self, _node_id: &ClusterNodeName, configured: &str) -> String {
+        configured.to_string()
+    }
+
+    fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn domain_drain_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    fn entity_gate_deadline(&self) -> Option<Duration> {
+        None
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -654,21 +683,9 @@ struct RuntimeInner {
     routed_endpoints: DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>,
     relay_boundary_fanouts: RelayBoundaryFanoutMap,
     events: RuntimeEvents,
-    /// The fault injectors are handed to the runtime by `RuntimeTestHooks`, and the test that
-    /// built those hooks keeps arming them while the node runs.
-    emitter_faults: Arc<EmitterFaultInjector>,
-    ingestor_faults: Arc<IngestorFaultInjector>,
-    otel_client_faults: Arc<OtelClientFaultInjector>,
-    #[cfg(feature = "testing")]
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
-    #[cfg(feature = "testing")]
-    transaction_binding_drops: Arc<test_hooks::TransactionBindingDropInjector>,
-    #[cfg(feature = "testing")]
-    command_pauses: Arc<test_hooks::CommandPauseInjector>,
-    #[cfg(feature = "testing")]
-    runtime_pauses: Arc<test_hooks::RuntimePauseInjectors>,
-    #[cfg(feature = "testing")]
-    syslog_ingestor_bind_address_overrides: Arc<test_hooks::SyslogIngestorBindAddressOverrides>,
+    /// The test harness keeps another handle to the same injected state and arms it while this
+    /// node runs. Normal builds store a zero-sized marker here.
+    fault_injection: ConfiguredFaultInjection,
     resource_store: RwLock<Option<Arc<ResourceStore>>>,
     resource_versions: RwLock<ResourceVersionStatus>,
     remote_dispatcher: RwLock<Option<Arc<RemoteDispatcher>>>,

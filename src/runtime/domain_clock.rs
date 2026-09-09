@@ -218,7 +218,7 @@ impl Runtime {
     #[cfg(feature = "testing")]
     pub(crate) async fn pause_domain_clock_progress_if_armed(&self, domain: &DomainName) -> bool {
         self.inner
-            .runtime_pauses
+            .fault_injection
             .pause_domain_clock_progress_if_armed(domain)
             .await
     }
@@ -226,7 +226,7 @@ impl Runtime {
     #[cfg(feature = "testing")]
     pub(crate) fn mark_domain_clock_progress_delivered(&self, domain: &DomainName) {
         self.inner
-            .runtime_pauses
+            .fault_injection
             .mark_domain_clock_progress_delivered(domain);
     }
 

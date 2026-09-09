@@ -4225,13 +4225,19 @@ impl ActiveGraph {
     ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
         let placement = self.placement.effective(default_policy);
+        let assignment_slots = replica_count
+            .min(cluster_nodes.len())
+            .checked_add(1)
+            .assured("a replica count clamped to the cluster leaves room for the primary slot");
         #[cfg(feature = "testing")]
-        let random_schedule_seed = {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"nervix/test-random-scheduler/domain");
-            hasher.update(&[0]);
-            hasher.update(domain.as_str().as_bytes());
-            *hasher.finalize().as_bytes()
+        let random_assignment_planner = if let SchedulerMode::Random = scheduler_mode {
+            Some(RandomAssignmentPlanner::new(
+                domain,
+                &cluster_nodes,
+                assignment_slots,
+            ))
+        } else {
+            None
         };
         let mut next_assignment = 0usize;
         let mut node_load = HashMap::<ClusterNodeName, usize>::new();
@@ -4284,11 +4290,7 @@ impl ActiveGraph {
                     placement_pairs: &placement.pairs,
                     node_load: &node_load,
                     next_assignment: &mut next_assignment,
-                    replica_count,
-                    #[cfg(feature = "testing")]
-                    scheduler_mode,
-                    #[cfg(feature = "testing")]
-                    random_schedule_seed,
+                    assignment_slots,
                 };
                 let assignment = if let Some(group_index) = group_index {
                     let members = &placement.require_groups[group_index];
@@ -4301,8 +4303,27 @@ impl ActiveGraph {
                                 .verified("index_by_key was built from every node of this graph")
                         })
                         .collect::<Vec<_>>();
+                    #[cfg(feature = "testing")]
+                    if let Some(random_assignment_planner) = &random_assignment_planner {
+                        random_assignment_planner.assignment(members)
+                    } else {
+                        assignment_planner.for_group(members, &member_indices)
+                    }
+                    #[cfg(not(feature = "testing"))]
                     assignment_planner.for_group(members, &member_indices)
                 } else {
+                    #[cfg(feature = "testing")]
+                    if let Some(random_assignment_planner) = &random_assignment_planner {
+                        random_assignment_planner.for_model(&key, node.config.as_ref())
+                    } else {
+                        assignment_for_model(
+                            &mut assignment_planner,
+                            index,
+                            &key,
+                            node.config.as_ref(),
+                        )
+                    }
+                    #[cfg(not(feature = "testing"))]
                     assignment_for_model(&mut assignment_planner, index, &key, node.config.as_ref())
                 };
                 if let Some(group_index) = group_index {
@@ -6065,21 +6086,40 @@ struct AssignmentPlanner<'a> {
     placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
     node_load: &'a HashMap<ClusterNodeName, usize>,
     next_assignment: &'a mut usize,
-    replica_count: usize,
-    #[cfg(feature = "testing")]
-    scheduler_mode: SchedulerMode,
-    #[cfg(feature = "testing")]
-    random_schedule_seed: [u8; 32],
+    assignment_slots: usize,
 }
 
-impl AssignmentPlanner<'_> {
-    #[cfg(feature = "testing")]
-    fn random_schedule_seed_for(&self, members: &[NodeRef]) -> u64 {
+#[cfg(feature = "testing")]
+struct RandomAssignmentPlanner<'a> {
+    cluster_nodes: &'a [ClusterNodeName],
+    assignment_slots: usize,
+    domain_seed: [u8; 32],
+}
+
+#[cfg(feature = "testing")]
+impl<'a> RandomAssignmentPlanner<'a> {
+    fn new(
+        domain: &DomainName,
+        cluster_nodes: &'a [ClusterNodeName],
+        assignment_slots: usize,
+    ) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nervix/test-random-scheduler/domain");
+        hasher.update(&[0]);
+        hasher.update(domain.as_str().as_bytes());
+        Self {
+            cluster_nodes,
+            assignment_slots,
+            domain_seed: *hasher.finalize().as_bytes(),
+        }
+    }
+
+    fn assignment_seed_for(&self, members: &[NodeRef]) -> u64 {
         let mut hasher = blake3::Hasher::new();
         if let [member] = members {
             hasher.update(b"nervix/test-random-scheduler/model");
             hasher.update(&[0]);
-            hasher.update(&self.random_schedule_seed);
+            hasher.update(&self.domain_seed);
             hasher.update(member.kind.as_str().as_bytes());
             hasher.update(&[0]);
             hasher.update(member.identifier.as_str().as_bytes());
@@ -6088,7 +6128,7 @@ impl AssignmentPlanner<'_> {
             members.sort();
             hasher.update(b"nervix/test-random-scheduler/placement-unit");
             hasher.update(&[0]);
-            hasher.update(&self.random_schedule_seed);
+            hasher.update(&self.domain_seed);
             for member in members {
                 hasher.update(member.kind.as_str().as_bytes());
                 hasher.update(&[0]);
@@ -6101,26 +6141,28 @@ impl AssignmentPlanner<'_> {
         u64::from_le_bytes(seed)
     }
 
-    /// How many nodes one entity is assigned to: its primary plus its configured replicas.
-    ///
-    /// `replica_count` is an operator-supplied number with no upper bound, so it is clamped to
-    /// the cluster before the primary slot is added. Both callers select from a list no longer
-    /// than the cluster, so the clamp cannot change which nodes they pick.
-    fn assignment_slots(&self) -> usize {
-        self.replica_count
-            .min(self.cluster_nodes.len())
-            .checked_add(1)
-            .assured("a replica count clamped to the cluster leaves room for the primary slot")
-    }
-
-    #[cfg(feature = "testing")]
-    fn random_assignment(&self, members: &[NodeRef]) -> Vec<ClusterNodeName> {
+    fn assignment(&self, members: &[NodeRef]) -> Vec<ClusterNodeName> {
         let mut nodes = self.cluster_nodes.to_vec();
-        fastrand::Rng::with_seed(self.random_schedule_seed_for(members)).shuffle(&mut nodes);
-        nodes.truncate(self.assignment_slots());
+        fastrand::Rng::with_seed(self.assignment_seed_for(members)).shuffle(&mut nodes);
+        nodes.truncate(self.assignment_slots);
         nodes
     }
 
+    fn for_model(&self, key: &NodeRef, model: &Model) -> Vec<ClusterNodeName> {
+        if let Model::Ingestor(_) = model
+            && model.executes_on_every_cluster_node()
+        {
+            return self.cluster_nodes.to_vec();
+        }
+        if is_schedulable_model(model) {
+            self.assignment(std::slice::from_ref(key))
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl AssignmentPlanner<'_> {
     fn ranked_assignment(
         &mut self,
         preferred_order: &HashMap<ClusterNodeName, usize>,
@@ -6147,7 +6189,7 @@ impl AssignmentPlanner<'_> {
         *self.next_assignment += 1;
         ordered_nodes
             .into_iter()
-            .take(self.assignment_slots())
+            .take(self.assignment_slots)
             .map(|candidate| candidate.node_id)
             .collect()
     }
@@ -6155,11 +6197,6 @@ impl AssignmentPlanner<'_> {
     fn for_group(&mut self, members: &[NodeRef], indices: &[NodeIndex]) -> Vec<ClusterNodeName> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
-        }
-
-        #[cfg(feature = "testing")]
-        if let SchedulerMode::Random = self.scheduler_mode {
-            return self.random_assignment(members);
         }
 
         let mut preferred_order = HashMap::<ClusterNodeName, usize>::new();
@@ -6208,11 +6245,6 @@ impl AssignmentPlanner<'_> {
             | Model::WindowProcessor(_)
             | Model::WasmProcessor(_)
             | Model::Emitter(_) => {
-                #[cfg(feature = "testing")]
-                if let SchedulerMode::Random = self.scheduler_mode {
-                    return self.random_assignment(std::slice::from_ref(key));
-                }
-
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
                 let placement_order =
@@ -15055,41 +15087,26 @@ mod tests {
         let domain_seed = *domain_hasher.finalize().as_bytes();
         let member = NodeRef::new(ModelKind::Ingestor, named::<ModelName>("ing"));
 
-        let mut legacy_hasher = blake3::Hasher::new();
-        legacy_hasher.update(b"nervix/test-random-scheduler/model");
-        legacy_hasher.update(&[0]);
-        legacy_hasher.update(&domain_seed);
-        legacy_hasher.update(member.kind.as_str().as_bytes());
-        legacy_hasher.update(&[0]);
-        legacy_hasher.update(member.identifier.as_str().as_bytes());
+        let mut expected_hasher = blake3::Hasher::new();
+        expected_hasher.update(b"nervix/test-random-scheduler/model");
+        expected_hasher.update(&[0]);
+        expected_hasher.update(&domain_seed);
+        expected_hasher.update(member.kind.as_str().as_bytes());
+        expected_hasher.update(&[0]);
+        expected_hasher.update(member.identifier.as_str().as_bytes());
         let mut expected_seed = [0; 8];
-        expected_seed.copy_from_slice(&legacy_hasher.finalize().as_bytes()[..8]);
+        expected_seed.copy_from_slice(&expected_hasher.finalize().as_bytes()[..8]);
         let expected_seed = u64::from_le_bytes(expected_seed);
 
-        let graph = petgraph::graph::DiGraph::new();
         let cluster_nodes = [
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let assigned_by_key = HashMap::default();
-        let placement_pairs = HashMap::default();
-        let node_load = HashMap::default();
-        let mut next_assignment = 0;
-        let planner = super::AssignmentPlanner {
-            graph: &graph,
-            cluster_nodes: &cluster_nodes,
-            assigned_by_key: &assigned_by_key,
-            placement_pairs: &placement_pairs,
-            node_load: &node_load,
-            next_assignment: &mut next_assignment,
-            replica_count: 0,
-            scheduler_mode: SchedulerMode::Random,
-            random_schedule_seed: domain_seed,
-        };
+        let planner = super::RandomAssignmentPlanner::new(&domain, &cluster_nodes, 1);
 
         assert_eq!(
-            planner.random_schedule_seed_for(std::slice::from_ref(&member)),
+            planner.assignment_seed_for(std::slice::from_ref(&member)),
             expected_seed,
             "a singleton must retain the pre-placement random-scheduler seed"
         );
@@ -15097,7 +15114,7 @@ mod tests {
         fastrand::Rng::with_seed(expected_seed).shuffle(&mut expected_assignment);
         expected_assignment.truncate(1);
         assert_eq!(
-            planner.random_assignment(std::slice::from_ref(&member)),
+            planner.assignment(std::slice::from_ref(&member)),
             expected_assignment,
             "a singleton must retain the pre-placement randomized assignment"
         );

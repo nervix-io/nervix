@@ -63,7 +63,11 @@ impl ZeroMqIngestor {
                 {
                     break;
                 }
-                if task_runtime.inner.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime
+                    .inner
+                    .fault_injection
+                    .ingestor_is_failed(&task_ingestor)
+                {
                     continue;
                 }
                 let mut socket = match Self::pull_socket_from_config(&client.config).await {

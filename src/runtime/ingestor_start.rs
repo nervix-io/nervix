@@ -10,12 +10,11 @@ pub(super) enum ScheduledIngestorStart {
 
 impl Runtime {
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
-        #[cfg(feature = "testing")]
         if let Some(node_id) = self.inner.remote_dispatch.local_node_id.read().as_ref() {
             return self
                 .inner
-                .syslog_ingestor_bind_address_overrides
-                .resolve(node_id, configured);
+                .fault_injection
+                .syslog_ingestor_bind_addr(node_id, configured);
         }
 
         configured.to_string()
