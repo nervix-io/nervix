@@ -3,12 +3,13 @@
 //! Layer: decisions.
 //!
 //! - **Owns.** Deterministic authority selection for a named domain.
-//! - **Depends on.** Vocabulary identities and ordered collections.
+//! - **Depends on.** Vocabulary identities, ordered collections and BLAKE3 as a deterministic
+//!   hashing primitive.
 //! - **Must not know.** Gossip, consensus, transport, Tokio or clock-production tasks.
 
 use std::collections::BTreeMap;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName, DomainName};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,12 +39,12 @@ impl DomainClockAuthorityCandidates {
             return None;
         }
 
-        // Wrapping is the definition of this stable byte mixer. It gives every node the same
-        // bounded value independently of the domain-name length.
-        let mut hash = 0_u64;
-        for byte in domain.as_str().bytes() {
-            hash = hash.wrapping_mul(131).wrapping_add(u64::from(byte));
-        }
+        let digest = blake3::hash(domain.as_str().as_bytes());
+        let hash_bytes = digest
+            .as_bytes()
+            .first_chunk::<8>()
+            .assured("a BLAKE3 digest contains 32 bytes");
+        let hash = u64::from_le_bytes(*hash_bytes);
         let candidate_count = u64::try_from(self.identities.len())
             .assured("a collection length always fits in u64 on supported targets");
         let index = usize::try_from(hash % candidate_count)
