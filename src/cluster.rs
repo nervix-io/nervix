@@ -52,6 +52,7 @@ const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
 const CLUSTER_EVENT_CAPACITY: usize = 256;
 
 pub struct ClusterHandle {
+    local_incarnation: nervix_models::ClusterNodeIncarnation,
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
     chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: ClusterEvents,
@@ -370,6 +371,7 @@ pub async fn start_cluster_with_transport(
     });
 
     Ok(ClusterHandle {
+        local_incarnation: nervix_models::ClusterNodeIncarnation::new(generation_id),
         chitchat: chitchat_state,
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
@@ -380,6 +382,10 @@ pub async fn start_cluster_with_transport(
 }
 
 impl ClusterHandle {
+    pub fn local_incarnation(&self) -> nervix_models::ClusterNodeIncarnation {
+        self.local_incarnation
+    }
+
     pub async fn shutdown(&self) -> io::Result<()> {
         let chitchat_server = self.chitchat_server.lock().take();
         let result = match chitchat_server {
@@ -459,11 +465,11 @@ impl ClusterHandle {
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
 
-        let mut live_nodes = Vec::new();
+        let mut live_nodes = BTreeMap::new();
         if let Some(state) = chitchat.node_state(&self_id)
             && let Some(node) = to_gossip_node(&self_id, state)
         {
-            live_nodes.push(node);
+            live_nodes.insert(node.node_id.clone(), node);
         }
 
         for node_id in chitchat.live_nodes() {
@@ -473,13 +479,19 @@ impl ClusterHandle {
             if let Some(state) = chitchat.node_state(node_id)
                 && let Some(node) = to_gossip_node(node_id, state)
             {
-                live_nodes.push(node);
+                match live_nodes.entry(node.node_id.clone()) {
+                    std::collections::btree_map::Entry::Occupied(mut current) => {
+                        if node.incarnation > current.get().incarnation {
+                            current.insert(node);
+                        }
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(node);
+                    }
+                }
             }
         }
-        let live_node_ids = live_nodes
-            .iter()
-            .map(|node| node.node_id.clone())
-            .collect::<BTreeSet<_>>();
+        let live_node_ids = live_nodes.keys().cloned().collect::<BTreeSet<_>>();
 
         let mut dead_node_ids = chitchat
             .dead_nodes()
@@ -488,9 +500,8 @@ impl ClusterHandle {
             .collect::<BTreeSet<_>>();
         dead_node_ids.extend(self.unavailable_interconnect_nodes());
 
-        live_nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
         GossipState {
-            live_nodes,
+            live_nodes: live_nodes.into_values().collect(),
             dead_node_ids,
         }
     }

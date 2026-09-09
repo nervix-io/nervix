@@ -2186,6 +2186,42 @@ impl RelayProcessorNode {
         Ok(())
     }
 
+    pub(super) async fn checkpoint_live_state(
+        &mut self,
+        branch: &mut BranchRuntime,
+    ) -> OwnershipHandoffResult<()> {
+        match &mut self.operation {
+            RelayProcessorOperationNode::WindowProcessor {
+                state,
+                replicated_state,
+                ..
+            } => {
+                if !replicated_state.live_dirty.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                snapshot_window_processor_live_state(&self.processor, replicated_state, state)
+                    .map_err(OwnershipHandoffError::checkpoint)
+            }
+            RelayProcessorOperationNode::WasmProcessor {
+                instance,
+                replicated_state,
+                ..
+            } => {
+                if instance.is_none() {
+                    return Ok(());
+                }
+                checkpoint_wasm_guest_state(
+                    &branch.runtime,
+                    &self.processor,
+                    replicated_state,
+                    instance,
+                )
+                .await
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(super) fn spawn_snapshot_task(
         &self,
         runtime: &Runtime,

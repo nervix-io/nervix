@@ -11,9 +11,16 @@ pub(super) enum ProcessorBranchStopMode {
     Handoff(oneshot::Sender<ProcessorBranchHandoff>),
 }
 
+pub(super) enum ProcessorBranchCommand {
+    Checkpoint {
+        response: oneshot::Sender<OwnershipHandoffResult<()>>,
+    },
+    Stop(ProcessorBranchStopMode),
+}
+
 pub(super) struct ProcessorBranchTask {
     pub(super) input: mpsc::Sender<ProcessorBranchInput>,
-    pub(super) stop: mpsc::Sender<ProcessorBranchStopMode>,
+    pub(super) commands: mpsc::Sender<ProcessorBranchCommand>,
     pub(super) task: parking_lot::Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -46,6 +53,9 @@ pub(super) struct ProcessorBranchHandoff {
 }
 
 pub(super) enum ProcessorNodeCommand {
+    Checkpoint {
+        response: oneshot::Sender<OwnershipHandoffResult<PersistedRuntimeStateEntry>>,
+    },
     Handoff {
         response: oneshot::Sender<Vec<ProcessorBranchHandoff>>,
     },
@@ -139,6 +149,11 @@ pub(super) async fn run_processor_node_runtime(
         graph,
     } = context;
     let processor = template.source.clone();
+    let ownership_entity = DomainNodeRef::node_in(
+        domain.clone(),
+        template.source_kind,
+        ModelName::from(&processor),
+    );
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
     let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
     let mut last_persisted_lru_lsm = 0;
@@ -224,12 +239,13 @@ pub(super) async fn run_processor_node_runtime(
     let mut handoff_response = None;
     loop {
         tokio::task::consume_budget().await;
+        let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
         let now = runtime_handle
             .current_stream_expiration_time(&domain)
             .ok()
             .unwrap_or_else(current_timestamp);
         let mut did_scheduled_work = false;
-        if Instant::now() >= next_expiration_scan {
+        if !ownership_frozen && Instant::now() >= next_expiration_scan {
             if let Some(branch_ttl) = template.branch_ttl {
                 expire_processor_branch_instances(
                     &runtime_handle,
@@ -267,10 +283,12 @@ pub(super) async fn run_processor_node_runtime(
             continue;
         }
 
-        let work = match interaction
-            .next(Some(next_expiration_scan.min(next_lru_snapshot)))
-            .await
-        {
+        let wake_at = if ownership_frozen {
+            Some(Instant::now() + OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
+        } else {
+            Some(next_expiration_scan.min(next_lru_snapshot))
+        };
+        let work = match interaction.next(wake_at).await {
             Ok(work) => work,
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
@@ -309,10 +327,25 @@ pub(super) async fn run_processor_node_runtime(
                 .await;
             }
             RelayInteractionEvent::Wake => {}
-            RelayInteractionEvent::Command(ProcessorNodeCommand::Handoff { response }) => {
-                handoff_response = Some(response);
-                break;
-            }
+            RelayInteractionEvent::Command(command) => match command {
+                ProcessorNodeCommand::Checkpoint { response } => {
+                    let result = checkpoint_all_processor_branch_instances(
+                        &runtime_handle,
+                        &domain,
+                        processor.clone(),
+                        &template,
+                        &instances,
+                    )
+                    .await;
+                    response
+                        .send(result)
+                        .means_peer_left("processor lifecycle checkpoint requester");
+                }
+                ProcessorNodeCommand::Handoff { response } => {
+                    handoff_response = Some(response);
+                    break;
+                }
+            },
             RelayInteractionEvent::ForceFlush(completion) => {
                 // The supervisor never registers as a participant; keep the exhaustive arm from
                 // stranding an obligation if that ownership changes in the future.
@@ -489,7 +522,7 @@ pub(super) fn spawn_processor_branch_task(
         processor.pending_materialized = pending_materialized;
     }
     let (input_tx, input_rx) = mpsc::channel(1);
-    let (stop_tx, stop_rx) = mpsc::channel(1);
+    let (command_tx, command_rx) = mpsc::channel(1);
     let processor = template.source.clone();
     let (snapshot_shutdown_tx, _) = watch::channel(false);
     let spawned = match branch.processors.get(&ModelName::from(&processor)) {
@@ -515,13 +548,13 @@ pub(super) fn spawn_processor_branch_task(
         ModelName::from(&processor),
         branch,
         input_rx,
-        stop_rx,
+        command_rx,
         quiesce_counters,
         snapshot_task,
     ));
     Ok(ProcessorBranchTask {
         input: input_tx,
-        stop: stop_tx,
+        commands: command_tx,
         task: parking_lot::Mutex::new(Some(task)),
     })
 }
@@ -573,7 +606,7 @@ pub(super) async fn run_processor_branch_task(
     processor: ModelName,
     mut branch: BranchRuntime,
     mut input: mpsc::Receiver<ProcessorBranchInput>,
-    mut stop_rx: mpsc::Receiver<ProcessorBranchStopMode>,
+    mut command_rx: mpsc::Receiver<ProcessorBranchCommand>,
     quiesce_counters: Arc<NodeQuiesceCounters>,
     mut snapshot: ProcessorSnapshotTask,
 ) {
@@ -584,45 +617,72 @@ pub(super) async fn run_processor_branch_task(
     } = context;
     let mut force_flush = runtime_handle.force_flush_participant(&domain, quiesce_counters.clone());
     let mut quiesce_gauges = BranchQuiesceGauges::new(quiesce_counters.clone());
+    let ownership_entity =
+        DomainNodeRef::node_in(domain.clone(), branch.source_kind, processor.clone());
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
     loop {
         tokio::task::consume_budget().await;
+        let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
         let now = runtime_handle
             .current_stream_expiration_time(&domain)
             .ok()
             .unwrap_or_else(current_timestamp);
-        if branch
-            .next_deadline()
-            .is_some_and(|deadline| deadline <= now)
+        if !ownership_frozen
+            && branch
+                .next_deadline()
+                .is_some_and(|deadline| deadline <= now)
         {
             branch.tick(&graph, now).await;
             quiesce_gauges.observe(&branch, &processor);
             continue;
         }
-        let sleep_duration = match branch.next_deadline() {
-            Some(deadline) => {
-                match wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline) {
-                    Ok(duration) => duration,
-                    Err(error) => {
-                        runtime_handle.events().report_error(format!(
-                            "processor '{}' in domain '{}' lost its clock: {error}",
-                            processor.as_str(),
-                            domain.as_str(),
-                        ));
-                        stop_mode = Some(ProcessorBranchStopMode::Detach);
-                        break;
+        let sleep_duration = if ownership_frozen {
+            OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
+        } else {
+            match branch.next_deadline() {
+                Some(deadline) => {
+                    match wall_duration_until_domain_deadline(
+                        &runtime_handle,
+                        &domain,
+                        now,
+                        deadline,
+                    ) {
+                        Ok(duration) => duration,
+                        Err(error) => {
+                            runtime_handle.events().report_error(format!(
+                                "processor '{}' in domain '{}' lost its clock: {error}",
+                                processor.as_str(),
+                                domain.as_str(),
+                            ));
+                            stop_mode = Some(ProcessorBranchStopMode::Detach);
+                            break;
+                        }
                     }
                 }
+                None => PROCESSOR_BRANCH_TASK_IDLE_SLEEP,
             }
-            None => PROCESSOR_BRANCH_TASK_IDLE_SLEEP,
         };
         let has_pending_materialized = branch.processor_has_pending_materialized(&processor);
         tokio::select! {
             biased;
-            mode = stop_rx.recv() => {
-                stop_mode = Some(mode.unwrap_or(ProcessorBranchStopMode::Detach));
-                break;
+            command = command_rx.recv() => {
+                match command {
+                    Some(ProcessorBranchCommand::Checkpoint { response }) => {
+                        let result = branch.checkpoint_processor_live_state(&processor).await;
+                        response
+                            .send(result)
+                            .means_peer_left("processor branch checkpoint requester");
+                    }
+                    Some(ProcessorBranchCommand::Stop(mode)) => {
+                        stop_mode = Some(mode);
+                        break;
+                    }
+                    None => {
+                        stop_mode = Some(ProcessorBranchStopMode::Detach);
+                        break;
+                    }
+                }
             }
             snapshot_request = async {
                 snapshot.requests
@@ -641,7 +701,7 @@ pub(super) async fn run_processor_branch_task(
                     None => snapshot.requests = None,
                 }
             }
-            received = input.recv() => {
+            received = input.recv(), if !ownership_frozen => {
                 match received {
                     Some(ProcessorBranchInput { relay, batch, work }) => {
                         branch
@@ -661,13 +721,13 @@ pub(super) async fn run_processor_branch_task(
                     _ = runtime_handle.inner.materialized_state_changed.notified() => {}
                     _ = sleep(runtime_handle.inner.state_replication_poll_interval) => {}
                 }
-            }, if has_pending_materialized => {
+            }, if has_pending_materialized && !ownership_frozen => {
                 branch
                     .retry_processor_pending_materialized(&graph, &processor)
                     .await;
                 quiesce_gauges.observe(&branch, &processor);
             }
-            completion = force_flush.changed() => {
+            completion = force_flush.changed(), if !ownership_frozen => {
                 let Ok(completion) = completion else {
                     stop_mode = Some(ProcessorBranchStopMode::Detach);
                     break;
@@ -676,6 +736,7 @@ pub(super) async fn run_processor_branch_task(
                 quiesce_gauges.observe(&branch, &processor);
                 completion.complete();
             }
+            _ = runtime_handle.inner.ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
             _ = sleep(sleep_duration) => {}
         }
     }
@@ -738,8 +799,8 @@ pub(super) async fn stop_processor_branch_task(
 ) {
     let processor = processor.into();
     entry
-        .stop
-        .send(mode)
+        .commands
+        .send(ProcessorBranchCommand::Stop(mode))
         .await
         .means_shutdown("processor branch task");
     let Some(mut task) = entry.task.lock().take() else {
@@ -778,6 +839,45 @@ pub(super) async fn stop_processor_branch_task(
             }
         }
     }
+}
+
+pub(super) async fn checkpoint_all_processor_branch_instances(
+    runtime: &Runtime,
+    domain: &DomainName,
+    processor: impl Into<ModelName>,
+    template: &BranchInstanceTemplate,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
+    let processor = processor.into();
+    let states = instances.states();
+    for entry in states {
+        tokio::task::consume_budget().await;
+        let (response, receiver) = oneshot::channel();
+        entry
+            .commands
+            .send(ProcessorBranchCommand::Checkpoint { response })
+            .await
+            .map_err(|_| {
+                OwnershipHandoffError::checkpoint(format!(
+                    "processor '{}' branch task is unavailable for checkpoint",
+                    processor.as_str()
+                ))
+            })?;
+        receiver.await.map_err(|_| {
+            OwnershipHandoffError::checkpoint(format!(
+                "processor '{}' branch task dropped its checkpoint response",
+                processor.as_str()
+            ))
+        })??;
+    }
+    let placement = branch_lru_placement(runtime, domain, template);
+    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
+        .map_err(OwnershipHandoffError::checkpoint)?;
+    Ok(PersistedRuntimeStateEntry {
+        lsm: instances.version(),
+        schema_fingerprint: placement.schema_fingerprint,
+        payload,
+    })
 }
 
 pub(super) async fn handoff_all_processor_branch_instances(
@@ -909,14 +1009,11 @@ pub(super) fn restore_processor_branch_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) -> Result<u64, String> {
-    let Some(store) = &runtime.inner.state_store else {
-        return Ok(0);
-    };
     let placement = branch_lru_placement(runtime, domain, template);
-    let Some(snapshot) = store
-        .latest_snapshot(&placement)
-        .map_err(|error| error.to_string())?
-    else {
+    let snapshot = runtime
+        .take_restorable_branch_lru_snapshot(&placement)
+        .map_err(|error| error.to_string())?;
+    let Some(snapshot) = snapshot else {
         return Ok(0);
     };
     for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
@@ -1116,7 +1213,7 @@ mod tests {
         let counters =
             runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
         let (input_tx, mut input_rx) = mpsc::channel(1);
-        let (stop_tx, _stop_rx) = mpsc::channel(1);
+        let (commands, _command_rx) = mpsc::channel(1);
         let task = tokio::spawn(std::future::pending::<()>());
         let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
         instances.insert_restored(
@@ -1124,7 +1221,7 @@ mod tests {
             current_timestamp(),
             ProcessorBranchTask {
                 input: input_tx,
-                stop: stop_tx,
+                commands,
                 task: parking_lot::Mutex::new(Some(task)),
             },
         );
