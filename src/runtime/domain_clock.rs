@@ -215,6 +215,21 @@ pub(super) fn wall_duration_until_logical_target(
 }
 
 impl Runtime {
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_domain_clock_progress_if_armed(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .pause_domain_clock_progress_if_armed(domain)
+            .await
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn mark_domain_clock_progress_delivered(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .mark_domain_clock_progress_delivered(domain);
+    }
+
     pub fn handle_domain_clock_start(
         &self,
         domain: &DomainName,
@@ -383,5 +398,110 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    #[ignore = "expected clock-contract failure owned by domain clocks task 02"]
+    fn delayed_progress_delivery_does_not_move_logical_time_backwards() {
+        let clock = RuntimeDomainClockState {
+            logical_started_at: Timestamp::from_unix_nanos(0),
+            wall_started_at: Timestamp::from_unix_nanos(0),
+            time_rate: "1.0".to_string(),
+        };
+        let delayed_wall_time = Timestamp::from_unix_nanos(1_000_000_000);
+        let before_delivery = current_domain_logical_time(&clock, None, delayed_wall_time)
+            .assured("the fixture uses a finite positive rate");
+        let delayed_tick = ObservedDomainTick {
+            tick_id: 1,
+            logical_timestamp: Timestamp::from_unix_nanos(0),
+            wall_clock: delayed_wall_time,
+        };
+        let after_delivery =
+            current_domain_logical_time(&clock, Some(&delayed_tick), delayed_wall_time)
+                .assured("the fixture uses a finite positive rate");
+
+        assert!(
+            after_delivery >= before_delivery,
+            "delivering progress moved logical time from {before_delivery} to {after_delivery}"
+        );
+    }
+
+    #[test]
+    #[ignore = "expected clock-contract failure owned by domain clocks task 05"]
+    fn paced_domains_admit_the_logical_origin() {
+        let runtime = Runtime::new();
+        let mut domains = BTreeMap::new();
+        domains.insert(domain("paced"), paced_domain_state("paced"));
+        runtime.sync_domains(&domains);
+        runtime.handle_domain_clock_start(
+            &domain("paced"),
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(10_000_000_000),
+            "1.0",
+        );
+
+        let admission = runtime.ensure_domain_allows_ingestion(
+            &domain("paced"),
+            &named("ing"),
+            Timestamp::from_unix_nanos(0),
+        );
+
+        assert!(
+            admission.is_ok(),
+            "logical origin was rejected: {admission:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "expected clock-contract failure owned by domain clocks task 02"]
+    fn scheduled_timestamp_addition_stays_in_the_serializable_range() {
+        let timestamp = checked_add_duration_to_timestamp(
+            Timestamp::from_unix_nanos(i64::MAX),
+            Duration::from_nanos(1),
+        );
+
+        let serialized = serde_json::to_string(&timestamp);
+
+        assert!(
+            serialized.is_ok(),
+            "schedule arithmetic constructed an unserializable timestamp: {serialized:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "expected clock-contract failure owned by domain clocks task 02"]
+    fn logical_time_projection_stays_in_the_serializable_range() {
+        let clock = RuntimeDomainClockState {
+            logical_started_at: Timestamp::from_unix_nanos(i64::MAX),
+            wall_started_at: Timestamp::from_unix_nanos(0),
+            time_rate: "1.0".to_string(),
+        };
+        let projected = current_domain_logical_time(&clock, None, Timestamp::from_unix_nanos(1))
+            .assured("the fixture uses a finite positive rate");
+
+        let serialized = serde_json::to_string(&projected);
+
+        assert!(
+            serialized.is_ok(),
+            "clock projection constructed an unserializable timestamp: {serialized:?}"
+        );
+    }
+
+    #[test]
+    fn logical_rate_conversion_scales_physical_waits() {
+        let clock = RuntimeDomainClockState {
+            logical_started_at: Timestamp::from_unix_nanos(0),
+            wall_started_at: Timestamp::from_unix_nanos(0),
+            time_rate: "4.0".to_string(),
+        };
+
+        let wait = wall_duration_until_logical_target(
+            &clock,
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(1_000_000_000),
+        )
+        .assured("the fixture uses a finite positive rate");
+
+        assert_eq!(wait, Duration::from_millis(250));
     }
 }

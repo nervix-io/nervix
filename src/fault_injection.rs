@@ -52,6 +52,8 @@ struct FaultInjectionState {
     command_pauses: DashMap<CommandPausePoint, Arc<CommandPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     entity_gate_pauses: DashMap<String, Arc<EntityGatePause>, RandomState>,
+    /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
+    domain_clock_progress_pauses: DashMap<String, Arc<DomainClockProgressPause>, RandomState>,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
@@ -83,6 +85,16 @@ struct EntityGatePause {
     release_notify: Notify,
 }
 
+#[derive(Debug, Default)]
+struct DomainClockProgressPause {
+    reached: AtomicBool,
+    released: AtomicBool,
+    delivered: AtomicBool,
+    reached_notify: Notify,
+    release_notify: Notify,
+    delivered_notify: Notify,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
@@ -112,6 +124,7 @@ impl Default for FaultInjection {
                 bulk_executions: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
+                domain_clock_progress_pauses: DashMap::default(),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
@@ -307,6 +320,34 @@ impl FaultInjection {
         pause.release_notify.notify_waiters();
     }
 
+    pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
+        self.inner.domain_clock_progress_pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(DomainClockProgressPause::default()),
+        );
+    }
+
+    pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self.domain_clock_progress_pause(&key);
+        pause.wait_until_reached().await;
+    }
+
+    pub async fn release_domain_clock_progress(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self.domain_clock_progress_pause(&key);
+        pause.release();
+        pause.wait_until_delivered().await;
+        self.inner.domain_clock_progress_pauses.remove(&key);
+    }
+
+    pub fn release_all_domain_clock_progress(&self) {
+        for pause in &self.inner.domain_clock_progress_pauses {
+            pause.release();
+        }
+        self.inner.domain_clock_progress_pauses.clear();
+    }
+
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
         self.inner.syslog_ingestor_bind_ips.insert(node_id, host);
     }
@@ -434,6 +475,29 @@ impl FaultInjection {
         self.inner.entity_gate_pauses.remove(&key);
     }
 
+    pub(crate) async fn pause_domain_clock_progress_if_armed(&self, domain: &DomainName) -> bool {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self
+            .inner
+            .domain_clock_progress_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return false;
+        };
+        pause.reached.store(true, Ordering::Release);
+        pause.reached_notify.notify_waiters();
+        pause.wait_until_released().await;
+        true
+    }
+
+    pub(crate) fn mark_domain_clock_progress_delivered(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&key) {
+            pause.mark_delivered();
+        }
+    }
+
     pub(crate) fn syslog_ingestor_bind_addr(
         &self,
         node_id: &ClusterNodeName,
@@ -534,5 +598,57 @@ impl FaultInjection {
             panic!("entity gate pause for domain '{key}' is not armed");
         };
         pause.value().clone()
+    }
+
+    fn domain_clock_progress_pause(&self, key: &str) -> Arc<DomainClockProgressPause> {
+        let Some(pause) = self.inner.domain_clock_progress_pauses.get(key) else {
+            panic!("domain clock progress pause for '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+}
+
+impl DomainClockProgressPause {
+    async fn wait_until_reached(&self) {
+        while !self.reached.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = self.reached_notify.notified();
+            if self.reached.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_until_released(&self) {
+        while !self.released.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = self.release_notify.notified();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_until_delivered(&self) {
+        while !self.delivered.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = self.delivered_notify.notified();
+            if self.delivered.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release_notify.notify_waiters();
+    }
+
+    fn mark_delivered(&self) {
+        self.delivered.store(true, Ordering::Release);
+        self.delivered_notify.notify_waiters();
     }
 }

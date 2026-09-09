@@ -64,6 +64,50 @@ impl TestDependencies {
         })
     }
 
+    fn clock_source_observations_url(&self, name: &str) -> io::Result<url::Url> {
+        let base = self.endpoints.get(MOCK_HTTP_ADDR)?;
+        let mut url = url::Url::parse(base)
+            .map_err(|error| io::Error::other(format!("invalid HTTP mock endpoint: {error}")))?;
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| io::Error::other("HTTP mock endpoint cannot hold path segments"))?;
+        segments
+            .clear()
+            .push("clock-source-observations")
+            .push(name);
+        drop(segments);
+        Ok(url)
+    }
+
+    pub(crate) async fn reset_clock_source(&self, name: &str) -> io::Result<()> {
+        let url = self.clock_source_observations_url(name)?;
+        reqwest::Client::new()
+            .delete(url)
+            .send()
+            .await
+            .map_err(|error| io::Error::other(format!("clock source reset failed: {error}")))?
+            .error_for_status()
+            .map_err(|error| io::Error::other(format!("clock source reset failed: {error}")))?;
+        Ok(())
+    }
+
+    pub(crate) async fn clock_source_observations(
+        &self,
+        name: &str,
+    ) -> io::Result<serde_json::Value> {
+        let url = self.clock_source_observations_url(name)?;
+        reqwest::get(url)
+            .await
+            .map_err(|error| io::Error::other(format!("clock source query failed: {error}")))?
+            .error_for_status()
+            .map_err(|error| io::Error::other(format!("clock source query failed: {error}")))?
+            .json()
+            .await
+            .map_err(|error| {
+                io::Error::other(format!("clock source response was not valid JSON: {error}"))
+            })
+    }
+
     dependency_starters! {
         start_kafka => "kafka",
         start_pulsar => "pulsar",

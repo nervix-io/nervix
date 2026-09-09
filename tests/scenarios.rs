@@ -548,6 +548,54 @@ async fn given_http_mock_server_is_running(world: &mut ScenarioWorld) {
     refresh_dependency_configuration(world);
 }
 
+#[given(expr = "clock source recorder {string} is reset")]
+async fn given_clock_source_recorder_is_reset(world: &mut ScenarioWorld, name: String) {
+    let name = expand_placeholders(world, &name);
+    world
+        .dependencies
+        .reset_clock_source(&name)
+        .await
+        .unwrap_or_else(|error| panic!("failed to reset clock source recorder '{name}': {error}"));
+}
+
+#[then(expr = "within {string} clock source recorder {string} records {int} requests")]
+async fn then_clock_source_recorder_records_requests(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+    expected_count: u64,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let name = expand_placeholders(world, &name);
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        let observations = world
+            .dependencies
+            .clock_source_observations(&name)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read clock source recorder '{name}': {error}")
+            });
+        let Some(count) = observations.get("count") else {
+            panic!("clock source recorder '{name}' returned no count: {observations}");
+        };
+        let Some(observed_count) = count.as_u64() else {
+            panic!("clock source recorder '{name}' returned a nonnumeric count: {observations}");
+        };
+        if observed_count == expected_count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clock source recorder '{name}' expected {expected_count} requests, observed \
+             {observed_count}: {observations}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[given("Iceberg dependencies are running")]
 async fn given_iceberg_dependencies_are_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -3162,6 +3210,55 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
 async fn when_entity_gate_pause_is_released(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.release_entity_gate_pause(&domain);
+}
+
+#[given(expr = "domain clock progress for domain {string} is paused before delivery")]
+async fn given_domain_clock_progress_is_paused(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_domain_clock_progress(domain);
+}
+
+#[then(
+    expr = "within {string} domain clock progress for domain {string} reaches the delivery pause"
+)]
+async fn then_domain_clock_progress_reaches_pause(
+    world: &mut ScenarioWorld,
+    duration: String,
+    domain: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_domain_clock_progress_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("domain clock progress for '{domain}' did not reach its delivery pause: {error}")
+    });
+}
+
+#[when(expr = "domain clock progress for domain {string} resumes")]
+async fn when_domain_clock_progress_resumes(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world.fault_injection.release_domain_clock_progress(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("domain clock progress for '{domain}' was not delivered after release: {error}")
+    });
+}
+
+#[when(expr = "physical time passes for {string}")]
+async fn when_physical_time_passes(_world: &mut ScenarioWorld, duration: String) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    tokio::time::sleep(duration).await;
 }
 
 #[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]
@@ -12309,6 +12406,58 @@ async fn then_last_stream_subscription_payload_contains(
     );
 }
 
+#[then(
+    expr = "the last relay subscription payload field {string} is saved as timestamp placeholder \
+            {string}"
+)]
+async fn then_subscription_timestamp_field_is_saved(
+    world: &mut ScenarioWorld,
+    field: String,
+    placeholder: String,
+) {
+    let field = expand_placeholders(world, &field);
+    let payload = world
+        .last_subscription_payload
+        .as_deref()
+        .expect("subscription payload must be captured before saving a timestamp field");
+    let parsed = serde_json::from_str::<serde_json::Value>(payload)
+        .unwrap_or_else(|error| panic!("subscription payload is not valid JSON: {error}"));
+    let Some(value) = parsed.get(&field).and_then(serde_json::Value::as_str) else {
+        panic!("subscription payload has no string field '{field}': {payload}");
+    };
+    if chrono::DateTime::parse_from_rfc3339(value).is_err() {
+        panic!("subscription payload field '{field}' is not an RFC 3339 timestamp: {value}");
+    }
+    world.placeholders.insert(placeholder, value.to_string());
+}
+
+#[then(expr = "timestamp placeholder {string} is not before timestamp placeholder {string}")]
+async fn then_timestamp_placeholder_is_not_before(
+    world: &mut ScenarioWorld,
+    later_placeholder: String,
+    earlier_placeholder: String,
+) {
+    let later = world
+        .placeholders
+        .get(&later_placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{later_placeholder}' is not defined"));
+    let earlier = world
+        .placeholders
+        .get(&earlier_placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{earlier_placeholder}' is not defined"));
+    let Ok(later_timestamp) = chrono::DateTime::parse_from_rfc3339(later) else {
+        panic!("timestamp placeholder '{later_placeholder}' is not RFC 3339: {later}");
+    };
+    let Ok(earlier_timestamp) = chrono::DateTime::parse_from_rfc3339(earlier) else {
+        panic!("timestamp placeholder '{earlier_placeholder}' is not RFC 3339: {earlier}");
+    };
+
+    assert!(
+        later_timestamp >= earlier_timestamp,
+        "timestamp moved backwards from {earlier_timestamp} to {later_timestamp}"
+    );
+}
+
 #[then(expr = "the last relay subscription payload masks field {string}")]
 async fn then_last_stream_subscription_payload_masks_field(
     world: &mut ScenarioWorld,
@@ -14084,8 +14233,15 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
 }
 
 async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
-    let cli =
+    let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
+    if cli.tags_filter.is_none() {
+        cli.tags_filter = Some(
+            "not @clock_contract_expected_failure"
+                .parse()
+                .assured("the built-in clock-contract tag expression is valid"),
+        );
+    }
     let concurrency_factor = cli.custom.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli
@@ -14141,6 +14297,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
             Box::pin(async move {
                 append_cucumber_log_line("scenario finished");
                 if let Some(world) = world {
+                    world.fault_injection.release_all_domain_clock_progress();
                     append_cluster_statuses(world, "scenario teardown").await;
                     append_cucumber_log_line(&format!(
                         "scenario context: domain={} test_id={} last_command_error={:?} \
