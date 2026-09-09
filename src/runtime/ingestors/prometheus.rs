@@ -178,11 +178,14 @@ impl PrometheusIngestor {
                     continue;
                 }
                 let mut query_time = current_timestamp();
-                let paced_state = task_runtime
-                    .inner
-                    .domains
-                    .get(&task_domain)
-                    .map(|domain_state| (domain_state.config.pace, domain_state.clock.clone()));
+                let paced_state =
+                    task_runtime
+                        .inner
+                        .domains
+                        .get(&task_domain)
+                        .map(|domain_state| {
+                            (domain_state.config.pace, domain_state.clock.paced_mapping())
+                        });
                 let sleep_duration = if let Some((DomainPace::Paced, clock)) = paced_state {
                     let Some(clock) = clock else {
                         next_logical_query = None;

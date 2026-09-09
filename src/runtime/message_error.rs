@@ -617,7 +617,6 @@ impl Runtime {
             ingest_metadata,
             self.current_stream_expiration_time(domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp),
         )
         .await?;

@@ -133,7 +133,6 @@ impl MessageErrorRouteTask {
         self.runtime
             .current_stream_expiration_time(&self.route.domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp)
     }
 
@@ -287,12 +286,27 @@ impl MessageErrorRouteTask {
             let now = self.now();
             let next_flush = self.next_flush();
             let flush_wait = match next_flush {
-                Some(deadline) => wall_duration_until_domain_deadline(
+                Some(deadline) => match wall_duration_until_domain_deadline(
                     &self.runtime,
                     &self.route.domain,
                     now,
                     deadline,
-                ),
+                ) {
+                    Ok(duration) => duration,
+                    Err(error) => {
+                        let acks = self.pending_acks();
+                        self.report_failure(
+                            &[acks],
+                            format!(
+                                "message-error route for '{}' in domain '{}' lost its clock: \
+                                 {error}",
+                                self.route.node.identifier.as_str(),
+                                self.route.domain.as_str(),
+                            ),
+                        );
+                        break;
+                    }
+                },
                 None => Duration::from_secs(86_400),
             };
             tokio::select! {
@@ -422,10 +436,16 @@ mod tests {
         flush_policy: RuntimeFlushPolicy,
         fanout: RelayBoundaryFanout,
     ) -> (MessageErrorRouteTask, RelayOwnerTask) {
+        let runtime = Runtime::default();
+        let domain = DomainName::try_from("test").expect("valid domain");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let task = MessageErrorRouteTask {
-            runtime: Runtime::default(),
+            runtime,
             route: MessageErrorRouteKey {
-                domain: DomainName::try_from("test").expect("valid domain"),
+                domain,
                 node: NodeRef::new(ModelKind::Emitter, named::<ModelName>("notifications")),
                 source_route: None,
                 error_relay: named("emitter_errors"),

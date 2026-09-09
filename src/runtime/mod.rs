@@ -47,7 +47,6 @@ use arrow_select::{
 };
 use chrono::{TimeZone, Utc};
 use dashmap::DashMap;
-use error_stack::Report;
 use fjall::Database;
 use futures_util::stream::FuturesUnordered;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -65,23 +64,22 @@ use nervix_models::{
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
     CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator,
     CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateUdf, DomainClockError, DomainClockState, DomainConfig, DomainName, DomainNodeRef,
-    DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink, EmitterAckWindow, EmitterName,
-    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
-    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OtelValueMapping, OutputBranch, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
-    PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResourceId, ResourceName, ResourceVersionStatus,
-    RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
-    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp,
+    CreateUdf, DomainClockState, DomainConfig, DomainName, DomainNodeRef, DomainPace,
+    DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode,
+    EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
+    GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
+    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, PostgresConflictAction,
+    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceId,
+    ResourceName, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
 };
 #[cfg(test)]
 use nervix_models::{CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets};
@@ -110,9 +108,8 @@ use nervix_vm::{
     },
 };
 use nervix_wasm::{
-    DomainClock as WasmDomainClock, WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit,
-    WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput, WasmRuntime,
-    WasmRuntimeConfig,
+    WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit, WasmEnvelope,
+    WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput, WasmRuntime, WasmRuntimeConfig,
 };
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
@@ -191,6 +188,7 @@ mod message_error;
 mod message_error_delivery;
 mod node_settings;
 mod observability;
+mod physical_time;
 mod planning;
 mod processor_branch_task;
 mod processor_output;
@@ -262,6 +260,17 @@ pub mod state_capability_compile_tests {
         },
     };
 }
+
+/// Opaque clock and deadline capabilities exposed only so compile-fail tests can prove that
+/// logical and physical deadlines cannot be interchanged.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod clock_capability_compile_tests {
+    pub use super::{
+        domain_clock::{DomainClock, LogicalDeadline},
+        physical_time::{PhysicalDeadline, PhysicalDeadlineCapability},
+    };
+}
 use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
     matching_message_error_output,
@@ -330,9 +339,10 @@ use correlator::{
     enqueue_correlator_output, evaluate_correlator_output_batch, handle_correlator_timeout_action,
 };
 use domain_clock::{
-    RuntimeWasmDomainClock, advance_scheduled_timestamp, checked_add_duration_to_timestamp,
-    current_domain_logical_time, current_timestamp, domain_clock_window_matches,
-    wall_duration_until_logical_target, wall_duration_until_timestamp,
+    DomainClock, DomainClockAccessResult, DomainClockLifecycle, RuntimeWasmDomainClock,
+    advance_scheduled_timestamp, checked_add_duration_to_timestamp, current_domain_logical_time,
+    current_timestamp, domain_clock_window_matches, wall_duration_until_logical_target,
+    wall_duration_until_timestamp,
 };
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
@@ -463,12 +473,13 @@ use test_fixtures::{
     construction, domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
     junction_branch_template, key_label, named, nonzero_capacity, paced_domain_state,
     processor_branched_by, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
-    test_ingestor_quiesce_control, test_optional_schema, test_relay_boundary_services, test_schema,
-    u32_branch_key, validate_wasm_test_output_groups, validate_wasm_test_outputs,
-    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
-    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
-    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
-    window_inputs, window_outputs, with_inherit_all,
+    test_domain_clock, test_ingestor_quiesce_control, test_optional_schema,
+    test_relay_boundary_services, test_schema, u32_branch_key, unpaced_domain_state,
+    validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
+    wait_for_persisted_runtime_state_lsm, wasm_generated_pool, wasm_guest_column,
+    wasm_guest_stream, wasm_input_acks, wasm_input_for_records, wasm_input_for_values,
+    wasm_test_generated_output, wasm_test_output, window_aggregate, window_inputs, window_outputs,
+    with_inherit_all,
 };
 use tls::RustlsClientConfigSource;
 pub(crate) use vm_compile::{
