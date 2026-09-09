@@ -929,7 +929,6 @@ pub(super) async fn dispatch_wasm_output_route(
         .runtime
         .current_stream_expiration_time(&context.branch.domain)
         .ok()
-        .flatten()
         .unwrap_or_else(current_timestamp);
     let owner_nodes = match context
         .branch

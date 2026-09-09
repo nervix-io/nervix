@@ -1120,7 +1120,6 @@ impl BranchExecutionRuntime {
             let now = runtime_handle
                 .current_stream_expiration_time(&domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp);
             let mut next_branch_deadline =
                 tick_due_branch_instance_branches(&graph, now, &instances).await;
@@ -1130,7 +1129,6 @@ impl BranchExecutionRuntime {
                 let now = runtime_handle
                     .current_stream_expiration_time(&domain)
                     .ok()
-                    .flatten()
                     .unwrap_or_else(current_timestamp);
                 let mut did_scheduled_work = false;
                 if Instant::now() >= next_expiration_scan {
@@ -1180,9 +1178,28 @@ impl BranchExecutionRuntime {
                     let expiration_sleep = next_expiration_scan
                         .checked_duration_since(Instant::now())
                         .unwrap_or(Duration::ZERO);
-                    let branch_sleep = next_branch_deadline.map(|deadline| {
-                        wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline)
-                    });
+                    let branch_sleep = match next_branch_deadline {
+                        Some(deadline) => {
+                            match wall_duration_until_domain_deadline(
+                                &runtime_handle,
+                                &domain,
+                                now,
+                                deadline,
+                            ) {
+                                Ok(duration) => Some(duration),
+                                Err(error) => {
+                                    runtime_handle.events().report_error(format!(
+                                        "branch runtime for ingestor '{}' in domain '{}' lost its \
+                                         clock: {error}",
+                                        ingestor.as_str(),
+                                        domain.as_str(),
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                        None => None,
+                    };
                     let until_next_deadline = match branch_sleep {
                         Some(branch_sleep) => expiration_sleep.min(branch_sleep),
                         None => expiration_sleep,
@@ -1224,7 +1241,6 @@ impl BranchExecutionRuntime {
                                 let drain_now = runtime_handle
                                     .current_stream_expiration_time(&domain)
                                     .ok()
-                                    .flatten()
                                     .unwrap_or_else(current_timestamp);
                                 record_next_branch_instance_branch_deadline(
                                     &mut next_branch_deadline,
@@ -1501,24 +1517,10 @@ pub(super) fn wall_duration_until_domain_deadline(
     domain: &DomainName,
     now: Timestamp,
     deadline: Timestamp,
-) -> Duration {
-    let Some(domain_state) = runtime.inner.domains.get(domain) else {
-        return wall_duration_until_timestamp(now, deadline);
-    };
-    if domain_state.config.pace != DomainPace::Paced {
-        return wall_duration_until_timestamp(now, deadline);
-    }
-    let Some(clock) = domain_state.clock.as_ref() else {
-        return Duration::from_millis(100);
-    };
-    match wall_duration_until_logical_target(clock, now, deadline) {
-        Ok(duration) => duration,
-        // The conversion fails only for a paced domain whose configured time rate does not parse,
-        // which the registry rejects when the domain is configured. Nothing this task does can
-        // repair one that got through, so it waits a fixed step and looks again rather than
-        // spinning; the domain clock reports its own state.
-        Err(_) => Duration::from_millis(100),
-    }
+) -> DomainClockAccessResult<Duration> {
+    runtime
+        .bind_domain_clock(domain)?
+        .physical_duration_until(now, deadline)
 }
 
 pub(super) async fn flush_branch_junction(

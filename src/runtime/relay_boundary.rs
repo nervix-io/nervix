@@ -1271,23 +1271,10 @@ impl Runtime {
     pub(in crate::runtime) fn current_stream_expiration_time(
         &self,
         domain: &DomainName,
-    ) -> Result<Option<Timestamp>, String> {
-        let wall_now = current_timestamp();
-        let Some(state) = self.inner.domains.get(domain) else {
-            return Ok(Some(wall_now));
-        };
-        match state.config.pace {
-            DomainPace::Unpaced => Ok(Some(wall_now)),
-            DomainPace::Paced => {
-                if let Some(clock) = state.clock.as_ref() {
-                    current_domain_logical_time(clock, wall_now)
-                        .map(Some)
-                        .map_err(|error| error.to_string())
-                } else {
-                    Ok(state.ticks.lock().back().map(|tick| tick.logical_timestamp))
-                }
-            }
-        }
+    ) -> DomainClockAccessResult<Timestamp> {
+        let clock = self.bind_domain_clock(domain)?;
+        let snapshot = clock.snapshot()?;
+        Ok(snapshot.now())
     }
 
     pub(in crate::runtime) fn touch_stream_key(
@@ -1339,7 +1326,6 @@ impl Runtime {
         let now = self
             .current_stream_expiration_time(domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         branches.registry.touch(&batch.key, now);
         self.touch_stream_key(domain, relay, &batch.key, now);
@@ -1530,7 +1516,6 @@ impl Runtime {
                         let now = runtime
                             .current_stream_expiration_time(&domain)
                             .ok()
-                            .flatten()
                             .unwrap_or_else(current_timestamp);
                         for (expired_key, _) in branches.instances.expire(
                             now,
@@ -1630,7 +1615,6 @@ impl Runtime {
                     let now = runtime
                         .current_stream_expiration_time(&domain)
                         .ok()
-                        .flatten()
                         .unwrap_or_else(current_timestamp);
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         tokio::task::consume_budget().await;
@@ -1700,7 +1684,6 @@ impl Runtime {
                 let now = runtime
                     .current_stream_expiration_time(&domain)
                     .ok()
-                    .flatten()
                     .unwrap_or_else(current_timestamp);
                 branch_instances
                     .get_or_try_create_with(branch_key.clone(), now, |_| {
@@ -2287,6 +2270,7 @@ mod tests {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                 passive_only: false,
                 start_version: 0,
+                domain_clock: test_domain_clock(&domain),
                 shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
                 relay_registries,
@@ -2509,6 +2493,7 @@ mod tests {
                     schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                     passive_only: false,
                     start_version: 0,
+                    domain_clock: test_domain_clock(&domain),
                     shutdown,
                     graph: StdArc::new(ArcSwapOption::empty()),
                     relay_registries: HashMap::default(),

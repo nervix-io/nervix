@@ -447,7 +447,6 @@ pub(super) async fn dispatch_selected_processor_outputs(
         .runtime
         .current_stream_expiration_time(&context.branch.domain)
         .ok()
-        .flatten()
         .unwrap_or_else(current_timestamp);
     let mut scope = ProcessorOutputBatchScope {
         state_snapshot: relay_state_snapshot_from_side_inputs(&side_inputs),

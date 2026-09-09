@@ -4208,7 +4208,6 @@ impl EmitterBatchContext<'_> {
             .runtime
             .current_stream_expiration_time(self.domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         let sqs_message_groups = match self.sqs_fifo_group {
             None => vec![Ok(None); batch.batch.batch().num_rows()],
@@ -4351,7 +4350,6 @@ impl EmitterBatchContext<'_> {
             self.runtime
                 .current_stream_expiration_time(self.domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp),
             side_inputs,
         )

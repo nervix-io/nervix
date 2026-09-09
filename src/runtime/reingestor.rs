@@ -522,7 +522,6 @@ impl Runtime {
             execution_now: self
                 .current_stream_expiration_time(domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp),
             output_schemas,
             shared: SharedBatchColumns::default(),
@@ -907,7 +906,6 @@ impl Runtime {
         let execution_now = self
             .current_stream_expiration_time(domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         let plan = match plan_filter_map_messages(
             "reingestor",
@@ -1045,17 +1043,29 @@ impl Runtime {
                 let execution_now = runtime
                     .current_stream_expiration_time(&task_domain)
                     .ok()
-                    .flatten()
                     .unwrap_or_else(current_timestamp);
-                let wake_at = task_output_routes.next_flush().map(|deadline| {
-                    Instant::now()
-                        + wall_duration_until_domain_deadline(
+                let wake_at = match task_output_routes.next_flush() {
+                    Some(deadline) => {
+                        let duration = match wall_duration_until_domain_deadline(
                             &runtime,
                             &task_domain,
                             execution_now,
                             deadline,
-                        )
-                });
+                        ) {
+                            Ok(duration) => duration,
+                            Err(error) => {
+                                runtime.events().report_error(format!(
+                                    "reingestor '{}' in domain '{}' lost its clock: {error}",
+                                    task_reingestor.as_str(),
+                                    task_domain.as_str(),
+                                ));
+                                break;
+                            }
+                        };
+                        Some(Instant::now() + duration)
+                    }
+                    None => None,
+                };
                 let work = match interaction.next(wake_at).await {
                     Ok(work) => work,
                     Err(error) => {
@@ -1105,7 +1115,6 @@ impl Runtime {
                         let now = runtime
                             .current_stream_expiration_time(&task_domain)
                             .ok()
-                            .flatten()
                             .unwrap_or_else(current_timestamp);
                         runtime
                             .flush_reingestor_outputs(
@@ -1552,6 +1561,7 @@ mod tests {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                 passive_only: false,
                 start_version: 0,
+                domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
                 relay_registries: HashMap::default(),
@@ -1778,6 +1788,7 @@ mod tests {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                 passive_only: false,
                 start_version: 0,
+                domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
                 relay_registries: HashMap::default(),

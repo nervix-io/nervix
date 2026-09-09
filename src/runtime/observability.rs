@@ -965,6 +965,7 @@ mod tests {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                 passive_only: false,
                 start_version: 0,
+                domain_clock: test_domain_clock(&domain),
                 shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
                 relay_registries: HashMap::default(),

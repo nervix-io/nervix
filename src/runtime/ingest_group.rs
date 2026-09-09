@@ -942,7 +942,6 @@ impl Runtime {
         let execution_now = self
             .current_stream_expiration_time(domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
 
         if let Some(filter_where) = filter_where {
@@ -1492,8 +1491,8 @@ impl Runtime {
                 domain.as_str()
             )
         })?;
-        if let Some(clock) = &domain_state.clock
-            && domain_clock_window_matches(clock, period, skew, event_timestamp)
+        if let Some(clock) = domain_state.clock.paced_mapping()
+            && domain_clock_window_matches(&clock, period, skew, event_timestamp)
         {
             return Ok(());
         }
@@ -1532,7 +1531,9 @@ impl Runtime {
         };
 
         let offsets = if let nervix_models::DomainStartPoint::Resume = &last_start {
-            let missing_partition_timestamp = self.current_paced_domain_time(domain)?;
+            let missing_partition_timestamp = self
+                .current_paced_domain_time(domain)
+                .map_err(|error| error.to_string())?;
             KafkaIngestor::resume_offsets_from_state(
                 consumer,
                 topic,

@@ -7,21 +7,545 @@
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
 //! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
 
-use super::*;
+use std::time::Duration;
 
-#[derive(Clone)]
+use error_stack::{Report, ResultExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_models::{
+    DomainClockError, DomainClockState, DomainName, DomainPace, DomainState, DomainTick, Timestamp,
+};
+use nervix_wasm::{DomainClock as WasmDomainClock, WasmExecutionContext};
+use thiserror::Error;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+use triomphe::Arc;
+
+use super::{DOMAIN_TICK_HISTORY_LIMIT, ObservedDomainTick, Runtime, VmExecutionContext};
+use crate::runtime::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum DomainClockAccessError {
+    #[error("domain '{domain}' is missing from this runtime")]
+    Missing { domain: DomainName },
+    #[error("domain '{domain}' clock generation {generation} is stopped")]
+    Stopped { domain: DomainName, generation: u64 },
+    #[error("domain '{domain}' clock generation {generation} is not installed")]
+    Uninstalled { domain: DomainName, generation: u64 },
+    #[error(
+        "domain '{domain}' clock generation {bound_generation} is stale; current generation is \
+         {current_generation}"
+    )]
+    StaleGeneration {
+        domain: DomainName,
+        bound_generation: u64,
+        current_generation: u64,
+    },
+    #[error(
+        "logical deadline for domain '{deadline_domain}' cannot be used by domain '{clock_domain}'"
+    )]
+    DeadlineDomainMismatch {
+        clock_domain: DomainName,
+        deadline_domain: DomainName,
+    },
+    #[error("domain '{domain}' clock arithmetic failed during {operation}")]
+    Arithmetic {
+        domain: DomainName,
+        operation: DomainClockArithmetic,
+    },
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum DomainClockArithmetic {
+    #[error("logical-time projection")]
+    Projection,
+    #[error("logical-deadline conversion")]
+    DeadlineConversion,
+}
+
+pub type DomainClockAccessResult<T> = Result<T, Report<DomainClockAccessError>>;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum DomainClockWaitError {
+    #[error("domain '{domain}' clock became unavailable while waiting for a logical deadline")]
+    Clock { domain: DomainName },
+    #[error("domain '{domain}' logical deadline wait was cancelled")]
+    Cancelled { domain: DomainName },
+    #[error("domain '{domain}' physical deadline could not be scheduled")]
+    PhysicalDeadline { domain: DomainName },
+}
+
+pub type DomainClockWaitResult<T> = Result<T, Report<DomainClockWaitError>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DomainClockSource {
+    Unpaced,
+    Paced(DomainClockState),
+}
+
+impl DomainClockSource {
+    fn now(&self, domain: &DomainName, wall_now: Timestamp) -> DomainClockAccessResult<Timestamp> {
+        match self {
+            Self::Unpaced => Ok(wall_now),
+            Self::Paced(mapping) => mapping.logical_time_at(wall_now).change_context(
+                DomainClockAccessError::Arithmetic {
+                    domain: domain.clone(),
+                    operation: DomainClockArithmetic::Projection,
+                },
+            ),
+        }
+    }
+
+    fn physical_duration_until(
+        &self,
+        domain: &DomainName,
+        current: Timestamp,
+        target: Timestamp,
+    ) -> DomainClockAccessResult<Duration> {
+        match self {
+            Self::Unpaced => Ok(target.duration_since(current).unwrap_or(Duration::ZERO)),
+            Self::Paced(mapping) => mapping.wall_duration_until(current, target).change_context(
+                DomainClockAccessError::Arithmetic {
+                    domain: domain.clone(),
+                    operation: DomainClockArithmetic::DeadlineConversion,
+                },
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DomainClockInstallation {
+    Missing,
+    Stopped {
+        generation: u64,
+    },
+    Uninstalled {
+        generation: u64,
+    },
+    Installed {
+        generation: u64,
+        source: DomainClockSource,
+    },
+}
+
+impl DomainClockInstallation {
+    const fn generation(&self) -> Option<u64> {
+        match self {
+            Self::Missing => None,
+            Self::Stopped { generation }
+            | Self::Uninstalled { generation }
+            | Self::Installed { generation, .. } => Some(*generation),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DomainClockSharedState {
+    installation: DomainClockInstallation,
+    last_read: Option<DomainExecutionSnapshot>,
+    change_version: u64,
+}
+
+#[derive(Debug)]
+struct DomainClockInner {
+    domain: DomainName,
+    state: parking_lot::Mutex<DomainClockSharedState>,
+    changes: watch::Sender<u64>,
+}
+
+/// The lifecycle owner for one domain clock on one runtime node.
+///
+/// Bound execution capabilities and lifecycle updates share this one allocation. Updating the
+/// installation therefore wakes every waiter without copying a mapping into task-local state.
+#[derive(Debug, Clone)]
+pub struct DomainClockLifecycle {
+    inner: Arc<DomainClockInner>,
+}
+
+impl DomainClockLifecycle {
+    pub fn new(domain: DomainName) -> Self {
+        let (changes, _) = watch::channel(0);
+        Self {
+            inner: Arc::new(DomainClockInner {
+                domain,
+                state: parking_lot::Mutex::new(DomainClockSharedState {
+                    installation: DomainClockInstallation::Missing,
+                    last_read: None,
+                    change_version: 0,
+                }),
+                changes,
+            }),
+        }
+    }
+
+    pub fn synchronize(&self, state: &DomainState) {
+        if let nervix_models::DomainStatus::Paused = state.status
+            && let DomainPace::Paced = state.config.pace
+            && state.clock.is_none()
+        {
+            let shared = self.inner.state.lock();
+            if matches!(
+                &shared.installation,
+                DomainClockInstallation::Installed {
+                    generation,
+                    source: DomainClockSource::Paced(_),
+                } if *generation == state.start_version
+            ) {
+                return;
+            }
+        }
+
+        let installation = match state.status {
+            nervix_models::DomainStatus::Stopped => DomainClockInstallation::Stopped {
+                generation: state.start_version,
+            },
+            nervix_models::DomainStatus::Running | nervix_models::DomainStatus::Paused => {
+                match state.config.pace {
+                    DomainPace::Unpaced => DomainClockInstallation::Installed {
+                        generation: state.start_version,
+                        source: DomainClockSource::Unpaced,
+                    },
+                    DomainPace::Paced => match &state.clock {
+                        Some(mapping) => DomainClockInstallation::Installed {
+                            generation: state.start_version,
+                            source: DomainClockSource::Paced(mapping.clone()),
+                        },
+                        None => DomainClockInstallation::Uninstalled {
+                            generation: state.start_version,
+                        },
+                    },
+                }
+            }
+        };
+        self.replace(installation);
+    }
+
+    pub fn install_paced(&self, generation: u64, mapping: DomainClockState) {
+        self.replace(DomainClockInstallation::Installed {
+            generation,
+            source: DomainClockSource::Paced(mapping),
+        });
+    }
+
+    pub fn stop(&self, generation: u64) {
+        self.replace(DomainClockInstallation::Stopped { generation });
+    }
+
+    pub fn mark_missing(&self) {
+        self.replace(DomainClockInstallation::Missing);
+    }
+
+    pub fn bind(&self) -> DomainClockAccessResult<DomainClock> {
+        let shared = self.inner.state.lock();
+        let generation = match shared.installation {
+            DomainClockInstallation::Missing => {
+                return Err(Report::new(DomainClockAccessError::Missing {
+                    domain: self.inner.domain.clone(),
+                }));
+            }
+            DomainClockInstallation::Stopped { generation } => {
+                return Err(Report::new(DomainClockAccessError::Stopped {
+                    domain: self.inner.domain.clone(),
+                    generation,
+                }));
+            }
+            DomainClockInstallation::Uninstalled { generation } => {
+                return Err(Report::new(DomainClockAccessError::Uninstalled {
+                    domain: self.inner.domain.clone(),
+                    generation,
+                }));
+            }
+            DomainClockInstallation::Installed { generation, .. } => generation,
+        };
+        Ok(DomainClock {
+            inner: self.inner.clone(),
+            generation,
+        })
+    }
+
+    pub(super) fn paced_mapping(&self) -> Option<DomainClockState> {
+        let shared = self.inner.state.lock();
+        match &shared.installation {
+            DomainClockInstallation::Installed {
+                source: DomainClockSource::Paced(mapping),
+                ..
+            } => Some(mapping.clone()),
+            DomainClockInstallation::Missing
+            | DomainClockInstallation::Stopped { .. }
+            | DomainClockInstallation::Uninstalled { .. }
+            | DomainClockInstallation::Installed {
+                source: DomainClockSource::Unpaced,
+                ..
+            } => None,
+        }
+    }
+
+    fn replace(&self, installation: DomainClockInstallation) {
+        let mut shared = self.inner.state.lock();
+        if shared.installation == installation {
+            return;
+        }
+        let generation_changed = shared.installation.generation() != installation.generation();
+        shared.installation = installation;
+        if generation_changed
+            || !matches!(
+                shared.installation,
+                DomainClockInstallation::Installed { .. }
+            )
+        {
+            shared.last_read = None;
+        }
+        shared.change_version = shared
+            .change_version
+            .checked_add(1)
+            .assured("a runtime cannot install 2^64 domain clock lifecycle changes");
+        self.inner.changes.send_replace(shared.change_version);
+    }
+}
+
+/// A clock capability bound to one domain and one installed lifecycle generation.
+#[derive(Debug, Clone)]
+pub struct DomainClock {
+    inner: Arc<DomainClockInner>,
+    generation: u64,
+}
+
+impl DomainClock {
+    pub fn snapshot(&self) -> DomainClockAccessResult<DomainExecutionSnapshot> {
+        let wall_now = actual_utc_now();
+        let mut shared = self.inner.state.lock();
+        let source = self.source(&shared.installation)?;
+        let projected = source.now(&self.inner.domain, wall_now)?;
+        let now = match &shared.last_read {
+            Some(previous)
+                if previous.generation == self.generation && previous.now > projected =>
+            {
+                previous.now
+            }
+            _ => projected,
+        };
+        let snapshot = DomainExecutionSnapshot {
+            generation: self.generation,
+            now,
+        };
+        shared.last_read = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    pub fn deadline_at(&self, due_at: Timestamp) -> LogicalDeadline {
+        LogicalDeadline {
+            domain: self.inner.domain.clone(),
+            generation: self.generation,
+            due_at,
+        }
+    }
+
+    pub fn physical_duration_until(
+        &self,
+        current: Timestamp,
+        target: Timestamp,
+    ) -> DomainClockAccessResult<Duration> {
+        let shared = self.inner.state.lock();
+        self.source(&shared.installation)?.physical_duration_until(
+            &self.inner.domain,
+            current,
+            target,
+        )
+    }
+
+    fn revalidate(&self) -> DomainClockAccessResult<()> {
+        let shared = self.inner.state.lock();
+        self.source(&shared.installation)?;
+        Ok(())
+    }
+
+    pub async fn wait_until(
+        &self,
+        deadline: LogicalDeadline,
+        cancellation: &CancellationToken,
+    ) -> DomainClockWaitResult<LogicalDeadlineReached> {
+        if deadline.domain != self.inner.domain {
+            return Err(Report::new(DomainClockAccessError::DeadlineDomainMismatch {
+                clock_domain: self.inner.domain.clone(),
+                deadline_domain: deadline.domain,
+            })
+            .change_context(DomainClockWaitError::Clock {
+                domain: self.inner.domain.clone(),
+            }));
+        }
+        if deadline.generation != self.generation {
+            return Err(Report::new(DomainClockAccessError::StaleGeneration {
+                domain: self.inner.domain.clone(),
+                bound_generation: deadline.generation,
+                current_generation: self.generation,
+            })
+            .change_context(DomainClockWaitError::Clock {
+                domain: self.inner.domain.clone(),
+            }));
+        }
+
+        let mut changes = self.inner.changes.subscribe();
+        loop {
+            tokio::task::consume_budget().await;
+            let snapshot = self
+                .snapshot()
+                .change_context(DomainClockWaitError::Clock {
+                    domain: self.inner.domain.clone(),
+                })?;
+            if snapshot.now >= deadline.due_at {
+                return Ok(LogicalDeadlineReached {
+                    due_at: deadline.due_at,
+                    snapshot,
+                });
+            }
+            let duration = self
+                .physical_duration_until(snapshot.now, deadline.due_at)
+                .change_context(DomainClockWaitError::Clock {
+                    domain: self.inner.domain.clone(),
+                })?;
+            let physical_time = PhysicalDeadlineCapability::new();
+            let physical = physical_time.after(duration).change_context(
+                DomainClockWaitError::PhysicalDeadline {
+                    domain: self.inner.domain.clone(),
+                },
+            )?;
+            tokio::select! {
+                _ = physical_time.wait_until(physical) => {}
+                changed = changes.changed() => {
+                    changed.assured(
+                        "the bound clock holds its lifecycle notification sender for every waiter",
+                    );
+                }
+                _ = cancellation.cancelled() => {
+                    return Err(Report::new(DomainClockWaitError::Cancelled {
+                        domain: self.inner.domain.clone(),
+                    }));
+                }
+            }
+        }
+    }
+
+    fn source(
+        &self,
+        installation: &DomainClockInstallation,
+    ) -> DomainClockAccessResult<DomainClockSource> {
+        if let Some(current_generation) = installation.generation()
+            && current_generation != self.generation
+        {
+            return Err(Report::new(DomainClockAccessError::StaleGeneration {
+                domain: self.inner.domain.clone(),
+                bound_generation: self.generation,
+                current_generation,
+            }));
+        }
+        match installation {
+            DomainClockInstallation::Missing => Err(Report::new(DomainClockAccessError::Missing {
+                domain: self.inner.domain.clone(),
+            })),
+            DomainClockInstallation::Stopped { generation } => {
+                Err(Report::new(DomainClockAccessError::Stopped {
+                    domain: self.inner.domain.clone(),
+                    generation: *generation,
+                }))
+            }
+            DomainClockInstallation::Uninstalled { generation } => {
+                Err(Report::new(DomainClockAccessError::Uninstalled {
+                    domain: self.inner.domain.clone(),
+                    generation: *generation,
+                }))
+            }
+            DomainClockInstallation::Installed { source, .. } => Ok(source.clone()),
+        }
+    }
+}
+
+/// The time value handed to one VM or WASM invocation after its clock generation is validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainExecutionSnapshot {
+    generation: u64,
+    now: Timestamp,
+}
+
+impl DomainExecutionSnapshot {
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn now(&self) -> Timestamp {
+        self.now
+    }
+
+    pub fn vm_context(&self) -> VmExecutionContext {
+        VmExecutionContext {
+            now: self.now,
+            injector: None,
+        }
+    }
+
+    pub const fn wasm_context(&self) -> WasmExecutionContext {
+        WasmExecutionContext::new(self.now)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalDeadline {
+    domain: DomainName,
+    generation: u64,
+    due_at: Timestamp,
+}
+
+impl LogicalDeadline {
+    pub const fn due_at(&self) -> Timestamp {
+        self.due_at
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalDeadlineReached {
+    due_at: Timestamp,
+    snapshot: DomainExecutionSnapshot,
+}
+
+impl LogicalDeadlineReached {
+    pub const fn due_at(&self) -> Timestamp {
+        self.due_at
+    }
+
+    pub const fn snapshot(&self) -> &DomainExecutionSnapshot {
+        &self.snapshot
+    }
+}
+
 pub(super) struct RuntimeWasmDomainClock {
-    pub(super) runtime: Runtime,
-    pub(super) domain: DomainName,
+    clock: DomainClock,
+    last_snapshot: parking_lot::Mutex<Timestamp>,
+}
+
+impl RuntimeWasmDomainClock {
+    pub(super) fn new(clock: DomainClock) -> DomainClockAccessResult<Self> {
+        let last_snapshot = clock.snapshot()?.now();
+        Ok(Self {
+            clock,
+            last_snapshot: parking_lot::Mutex::new(last_snapshot),
+        })
+    }
 }
 
 impl WasmDomainClock for RuntimeWasmDomainClock {
     fn now(&self) -> Timestamp {
-        self.runtime
-            .current_stream_expiration_time(&self.domain)
-            .ok()
-            .flatten()
-            .unwrap_or_else(current_timestamp)
+        match self.clock.snapshot() {
+            Ok(snapshot) => {
+                *self.last_snapshot.lock() = snapshot.now();
+                snapshot.now()
+            }
+            Err(_clock_error) => {
+                // This infallible engine adapter cannot cross into a different time coordinate.
+                // Its owning domain task observes the same lifecycle invalidation and is rebuilt;
+                // until then the last validated value keeps guest reads nondecreasing.
+                *self.last_snapshot.lock()
+            }
+        }
     }
 }
 
@@ -53,7 +577,7 @@ pub(super) fn wall_duration_until_timestamp(current: Timestamp, target: Timestam
 }
 
 pub(super) fn current_timestamp() -> Timestamp {
-    Timestamp::now()
+    actual_utc_now()
 }
 
 pub(super) fn domain_clock_window_matches(
@@ -133,92 +657,89 @@ impl Runtime {
             .mark_domain_clock_progress_delivered(domain);
     }
 
-    pub fn handle_domain_clock_start(&self, domain: &DomainName, clock: DomainClockState) {
-        let mut entry =
-            self.inner
-                .domains
-                .entry(domain.clone())
-                .or_insert_with(|| RuntimeDomainState {
-                    config: DomainConfig {
-                        pace: DomainPace::Paced,
-                        period: "1s".to_string(),
-                        skew: "0ms".to_string(),
-                        placement: nervix_models::PlacementPolicy::Neutral,
-                    },
-                    status: nervix_models::DomainStatus::Running,
-                    start_version: 0,
-                    last_start: nervix_models::DomainStartPoint::Resume,
-                    clock: None,
-                    ticks: parking_lot::Mutex::new(VecDeque::new()),
-                });
-        entry.clock = Some(clock);
+    pub fn handle_domain_clock_start(
+        &self,
+        domain: &DomainName,
+        clock: DomainClockState,
+    ) -> DomainClockAccessResult<()> {
+        let Some(entry) = self.inner.domains.get(domain) else {
+            return Err(Report::new(DomainClockAccessError::Missing {
+                domain: domain.clone(),
+            }));
+        };
+        entry.clock.install_paced(entry.start_version, clock);
+        Ok(())
     }
 
-    pub fn handle_domain_clock_stop(&self, domain: &DomainName) {
-        if let Some(mut entry) = self.inner.domains.get_mut(domain) {
-            entry.clock = None;
-            entry.ticks.lock().clear();
-        }
+    pub fn handle_domain_clock_stop(&self, domain: &DomainName) -> DomainClockAccessResult<()> {
+        let Some(entry) = self.inner.domains.get(domain) else {
+            return Err(Report::new(DomainClockAccessError::Missing {
+                domain: domain.clone(),
+            }));
+        };
+        entry.clock.stop(entry.start_version);
+        entry.ticks.lock().clear();
+        Ok(())
     }
 
-    pub fn handle_domain_tick(&self, domain: &DomainName, tick: &DomainTick) {
-        let entry =
-            self.inner
-                .domains
-                .entry(domain.clone())
-                .or_insert_with(|| RuntimeDomainState {
-                    config: DomainConfig {
-                        pace: DomainPace::Unpaced,
-                        period: tick.period.to_string(),
-                        skew: "0ms".to_string(),
-                        placement: nervix_models::PlacementPolicy::Neutral,
-                    },
-                    status: nervix_models::DomainStatus::Running,
-                    start_version: 0,
-                    last_start: nervix_models::DomainStartPoint::Resume,
-                    clock: None,
-                    ticks: parking_lot::Mutex::new(VecDeque::new()),
-                });
+    pub fn handle_domain_tick(
+        &self,
+        domain: &DomainName,
+        tick: &DomainTick,
+    ) -> DomainClockAccessResult<()> {
+        let Some(entry) = self.inner.domains.get(domain) else {
+            return Err(Report::new(DomainClockAccessError::Missing {
+                domain: domain.clone(),
+            }));
+        };
         let mut ticks = entry.ticks.lock();
         if ticks
             .back()
             .is_some_and(|observed| observed.tick_id == tick.tick_id)
         {
-            return;
+            return Ok(());
         }
         ticks.push_back(ObservedDomainTick {
             tick_id: tick.tick_id,
-            logical_timestamp: tick.logical_timestamp,
             wall_clock: tick.wall_clock,
         });
         while ticks.len() > DOMAIN_TICK_HISTORY_LIMIT {
             ticks.pop_front();
         }
+        Ok(())
+    }
+
+    pub(super) fn bind_domain_clock(
+        &self,
+        domain: &DomainName,
+    ) -> DomainClockAccessResult<DomainClock> {
+        if let Some(execution) = self.inner.executions.get(domain) {
+            execution.domain_clock.revalidate()?;
+            return Ok(execution.domain_clock.clone());
+        }
+        let Some(entry) = self.inner.domains.get(domain) else {
+            return Err(Report::new(DomainClockAccessError::Missing {
+                domain: domain.clone(),
+            }));
+        };
+        entry.clock.bind()
     }
 
     pub(crate) fn current_paced_domain_time(
         &self,
         domain: &DomainName,
-    ) -> Result<Option<Timestamp>, String> {
+    ) -> DomainClockAccessResult<Option<Timestamp>> {
         let Some(domain_state) = self.inner.domains.get(domain) else {
-            return Ok(None);
+            return Err(Report::new(DomainClockAccessError::Missing {
+                domain: domain.clone(),
+            }));
         };
         if let DomainPace::Unpaced = domain_state.config.pace {
             return Ok(None);
         }
-        let wall_now = current_timestamp();
-        if let Some(clock) = domain_state.clock.as_ref() {
-            clock
-                .logical_time_at(wall_now)
-                .map(Some)
-                .map_err(|error| error.to_string())
-        } else {
-            Ok(domain_state
-                .ticks
-                .lock()
-                .back()
-                .map(|tick| tick.logical_timestamp))
-        }
+        let clock = domain_state.clock.bind()?;
+        let snapshot = clock.snapshot()?;
+        Ok(Some(snapshot.now()))
     }
 }
 
@@ -226,9 +747,10 @@ impl Runtime {
 mod tests {
     use std::collections::BTreeMap;
 
-    use nervix_models::{DomainClockState, DomainTick, DomainTimeRate, Timestamp};
+    use nervix_models::{DomainClockState, DomainConfig, DomainTick, DomainTimeRate, Timestamp};
 
     use super::*;
+    use crate::runtime::{domain, named, paced_domain_state};
 
     #[test]
     fn paced_domains_accept_records_inside_tick_window() {
@@ -236,15 +758,17 @@ mod tests {
         let mut domains = BTreeMap::new();
         domains.insert(domain("paced"), paced_domain_state("paced"));
         runtime.sync_domains(&domains);
-        runtime.handle_domain_tick(
-            &domain("paced"),
-            &DomainTick {
-                tick_id: 1,
-                logical_timestamp: Timestamp::from_unix_nanos(0),
-                wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                period: "1s".parse().expect("fixture period is valid"),
-            },
-        );
+        runtime
+            .handle_domain_tick(
+                &domain("paced"),
+                &DomainTick {
+                    tick_id: 1,
+                    logical_timestamp: Timestamp::from_unix_nanos(0),
+                    wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
+                    period: "1s".parse().expect("fixture period is valid"),
+                },
+            )
+            .expect("the fixture domain exists");
 
         assert!(
             runtime
@@ -272,14 +796,16 @@ mod tests {
         let mut domains = BTreeMap::new();
         domains.insert(domain("paced"), paced_domain_state("paced"));
         runtime.sync_domains(&domains);
-        runtime.handle_domain_clock_start(
-            &domain("paced"),
-            DomainClockState::new(
-                Timestamp::from_unix_nanos(10_000_000_000),
-                Timestamp::from_unix_nanos(10_000_000_000),
-                DomainTimeRate::ONE,
-            ),
-        );
+        runtime
+            .handle_domain_clock_start(
+                &domain("paced"),
+                DomainClockState::new(
+                    Timestamp::from_unix_nanos(10_000_000_000),
+                    Timestamp::from_unix_nanos(10_000_000_000),
+                    DomainTimeRate::ONE,
+                ),
+            )
+            .expect("the fixture domain exists");
 
         assert!(
             runtime
@@ -327,14 +853,16 @@ mod tests {
         let mut domains = BTreeMap::new();
         domains.insert(domain("paced"), paced_domain_state("paced"));
         runtime.sync_domains(&domains);
-        runtime.handle_domain_clock_start(
-            &domain("paced"),
-            DomainClockState::new(
-                Timestamp::from_unix_nanos(10_000_000_000),
-                Timestamp::from_unix_nanos(0),
-                DomainTimeRate::ONE,
-            ),
-        );
+        runtime
+            .handle_domain_clock_start(
+                &domain("paced"),
+                DomainClockState::new(
+                    Timestamp::from_unix_nanos(10_000_000_000),
+                    Timestamp::from_unix_nanos(0),
+                    DomainTimeRate::ONE,
+                ),
+            )
+            .expect("the fixture domain exists");
 
         let admission = runtime.ensure_domain_allows_ingestion(
             &domain("paced"),
@@ -390,5 +918,359 @@ mod tests {
         .assured("the fixture uses a finite positive rate");
 
         assert_eq!(wait, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn lifecycle_access_reports_missing_stopped_and_uninstalled_clocks() {
+        let clock_domain = domain("paced");
+        let lifecycle = DomainClockLifecycle::new(clock_domain.clone());
+
+        let Err(error) = lifecycle.bind() else {
+            panic!("a missing clock must reject binding");
+        };
+        assert!(matches!(
+            error.current_context(),
+            DomainClockAccessError::Missing { domain } if domain == &clock_domain
+        ));
+
+        lifecycle.stop(7);
+        let Err(error) = lifecycle.bind() else {
+            panic!("a stopped clock must reject binding");
+        };
+        assert!(matches!(
+            error.current_context(),
+            DomainClockAccessError::Stopped {
+                domain,
+                generation: 7,
+            } if domain == &clock_domain
+        ));
+
+        let mut uninstalled = paced_domain_state("paced");
+        uninstalled.start_version = 8;
+        lifecycle.synchronize(&uninstalled);
+        let Err(error) = lifecycle.bind() else {
+            panic!("an uninstalled clock must reject binding");
+        };
+        assert!(matches!(
+            error.current_context(),
+            DomainClockAccessError::Uninstalled {
+                domain,
+                generation: 8,
+            } if domain == &clock_domain
+        ));
+    }
+
+    #[test]
+    fn bound_clock_rejects_a_later_generation() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                Timestamp::from_unix_nanos(0),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installed generation one");
+
+        lifecycle.install_paced(
+            2,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(1),
+                DomainTimeRate::ONE,
+            ),
+        );
+
+        let Err(error) = bound.snapshot() else {
+            panic!("a superseded clock capability must be stale");
+        };
+        assert!(matches!(
+            error.current_context(),
+            DomainClockAccessError::StaleGeneration {
+                bound_generation: 1,
+                current_generation: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reads_do_not_decrease_within_one_generation() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                Timestamp::from_unix_nanos(0),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installed generation one");
+        let before = bound
+            .snapshot()
+            .assured("the first mapping fits the timestamp range");
+
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let after = bound
+            .snapshot()
+            .assured("the replacement mapping fits the timestamp range");
+
+        assert!(after.now() >= before.now());
+    }
+
+    #[test]
+    fn automatic_pause_preserves_the_installed_mapping() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        let mapping = DomainClockState::new(
+            current_timestamp(),
+            Timestamp::from_unix_nanos(10),
+            DomainTimeRate::ONE,
+        );
+        let mut running = paced_domain_state("paced");
+        running.start_version = 3;
+        running.clock = Some(mapping);
+        lifecycle.synchronize(&running);
+        let bound = lifecycle
+            .bind()
+            .assured("the running state installs its committed mapping");
+
+        let mut paused = running;
+        paused.status = nervix_models::DomainStatus::Paused;
+        paused.clock = None;
+        lifecycle.synchronize(&paused);
+
+        assert!(bound.snapshot().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_logical_wait_returns_a_typed_outcome() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installed generation one");
+        let snapshot = bound
+            .snapshot()
+            .assured("the fixture mapping fits the timestamp range");
+        let due_at = snapshot
+            .now()
+            .checked_add(Duration::from_secs(60))
+            .assured("the fixture deadline fits the timestamp range");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let result = bound
+            .wait_until(bound.deadline_at(due_at), &cancellation)
+            .await;
+
+        let Err(error) = result else {
+            panic!("a cancelled deadline must return cancellation");
+        };
+        assert!(matches!(
+            error.current_context(),
+            DomainClockWaitError::Cancelled { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn logical_deadline_cannot_cross_domain_capabilities() {
+        let first = DomainClockLifecycle::new(domain("first"));
+        first.synchronize(&DomainState {
+            id: domain("first"),
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                period: "1s".to_string(),
+                skew: "0ms".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
+            },
+            status: nervix_models::DomainStatus::Running,
+            start_version: 1,
+            last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
+        });
+        let second = DomainClockLifecycle::new(domain("second"));
+        second.synchronize(&DomainState {
+            id: domain("second"),
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                period: "1s".to_string(),
+                skew: "0ms".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
+            },
+            status: nervix_models::DomainStatus::Running,
+            start_version: 1,
+            last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
+        });
+        let first = first.bind().assured("the first unpaced clock is installed");
+        let second = second
+            .bind()
+            .assured("the second unpaced clock is installed");
+
+        let result = first
+            .wait_until(
+                second.deadline_at(Timestamp::from_unix_nanos(0)),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        let Err(error) = result else {
+            panic!("a logical deadline from another domain must be rejected");
+        };
+        let access_error = error
+            .downcast_ref::<DomainClockAccessError>()
+            .assured("cross-domain waits retain their typed access-error frame");
+        assert!(matches!(
+            access_error,
+            DomainClockAccessError::DeadlineDomainMismatch {
+                clock_domain,
+                deadline_domain,
+            } if clock_domain == &domain("first") && deadline_domain == &domain("second")
+        ));
+    }
+
+    #[tokio::test]
+    async fn logical_wait_revalidates_generation_after_waking() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installed generation one");
+        let due_at = bound
+            .snapshot()
+            .assured("the fixture mapping fits the timestamp range")
+            .now()
+            .checked_add(Duration::from_secs(60))
+            .assured("the fixture deadline fits the timestamp range");
+        let deadline = bound.deadline_at(due_at);
+        let cancellation = CancellationToken::new();
+        let task_clock = bound.clone();
+        let task_cancellation = cancellation.clone();
+        let waiter =
+            tokio::spawn(async move { task_clock.wait_until(deadline, &task_cancellation).await });
+        tokio::task::yield_now().await;
+
+        lifecycle.install_paced(
+            2,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let result = waiter.await.assured("the clock waiter task must join");
+
+        let Err(error) = result else {
+            panic!("a generation change must invalidate the waiter");
+        };
+        let access_error = error
+            .downcast_ref::<DomainClockAccessError>()
+            .assured("clock wait failures retain their typed access-error frame");
+        assert!(matches!(
+            access_error,
+            DomainClockAccessError::StaleGeneration {
+                bound_generation: 1,
+                current_generation: 2,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn due_logical_wait_returns_due_time_and_a_fresh_snapshot() {
+        let clock_domain = domain("unpaced");
+        let lifecycle = DomainClockLifecycle::new(clock_domain.clone());
+        lifecycle.synchronize(&DomainState {
+            id: clock_domain,
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                period: "1s".to_string(),
+                skew: "0ms".to_string(),
+                placement: nervix_models::PlacementPolicy::Neutral,
+            },
+            status: nervix_models::DomainStatus::Running,
+            start_version: 4,
+            last_start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
+        });
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installs an unpaced clock");
+        let due_at = Timestamp::from_unix_nanos(0);
+
+        let reached = bound
+            .wait_until(bound.deadline_at(due_at), &CancellationToken::new())
+            .await
+            .assured("the deadline is already due");
+
+        assert_eq!(reached.due_at(), due_at);
+        assert_eq!(reached.snapshot().generation(), 4);
+        assert!(reached.snapshot().now() >= due_at);
+        assert_eq!(
+            reached.snapshot().vm_context().now,
+            reached.snapshot().now()
+        );
+        assert_eq!(
+            reached.snapshot().wasm_context().now(),
+            reached.snapshot().now()
+        );
+    }
+
+    #[test]
+    fn lifecycle_and_execution_handles_share_one_state_allocation() {
+        let lifecycle = DomainClockLifecycle::new(domain("paced"));
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let bound = lifecycle
+            .bind()
+            .assured("the fixture installed generation one");
+
+        assert!(Arc::ptr_eq(&lifecycle.inner, &bound.inner));
+    }
+
+    #[test]
+    fn logical_clock_source_has_no_direct_wall_clock_imports() {
+        let (product_source, _) = include_str!("domain_clock.rs")
+            .split_once("#[cfg(test)]")
+            .assured("the module has a test boundary");
+
+        for forbidden in ["tokio::time", "Instant::", "Timestamp::now"] {
+            assert!(
+                !product_source.contains(forbidden),
+                "logical clock source directly imports physical time through '{forbidden}'"
+            );
+        }
     }
 }

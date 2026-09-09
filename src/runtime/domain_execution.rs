@@ -11,6 +11,7 @@ pub(super) struct DomainExecution {
     pub(super) schedule: DomainSchedule,
     pub(super) passive_only: bool,
     pub(super) start_version: u64,
+    pub(super) domain_clock: DomainClock,
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) graph: SharedActiveGraph,
     pub(super) relay_registries: HashMap<RelayName, RelayRegistry>,
@@ -78,7 +79,6 @@ pub(super) const DOMAIN_TICK_HISTORY_LIMIT: usize = 256;
 #[derive(Debug, Clone)]
 pub(super) struct ObservedDomainTick {
     pub(super) tick_id: u64,
-    pub(super) logical_timestamp: Timestamp,
     pub(super) wall_clock: Timestamp,
 }
 
@@ -88,7 +88,7 @@ pub(super) struct RuntimeDomainState {
     pub(super) status: nervix_models::DomainStatus,
     pub(super) start_version: u64,
     pub(super) last_start: nervix_models::DomainStartPoint,
-    pub(super) clock: Option<DomainClockState>,
+    pub(super) clock: DomainClockLifecycle,
     pub(super) ticks: parking_lot::Mutex<VecDeque<ObservedDomainTick>>,
 }
 
@@ -102,7 +102,9 @@ impl Runtime {
             .collect::<Vec<_>>()
         {
             if !domains.contains_key(&domain) {
-                self.inner.domains.remove(&domain);
+                if let Some((_, removed)) = self.inner.domains.remove(&domain) {
+                    removed.clock.mark_missing();
+                }
                 self.inner.domain_instantiation_errors.remove(&domain);
                 self.inner.in_flight_by_domain.remove(&domain);
                 self.inner
@@ -116,24 +118,24 @@ impl Runtime {
         }
 
         for (domain, state) in domains {
-            let mut entry =
-                self.inner
-                    .domains
-                    .entry(domain.clone())
-                    .or_insert_with(|| RuntimeDomainState {
-                        config: state.config.clone(),
-                        status: state.status.clone(),
-                        start_version: state.start_version,
-                        last_start: state.last_start.clone(),
-                        clock: None,
-                        ticks: parking_lot::Mutex::new(VecDeque::new()),
-                    });
+            let mut entry = self.inner.domains.entry(domain.clone()).or_insert_with(|| {
+                let clock = DomainClockLifecycle::new(domain.clone());
+                clock.synchronize(state);
+                RuntimeDomainState {
+                    config: state.config.clone(),
+                    status: state.status.clone(),
+                    start_version: state.start_version,
+                    last_start: state.last_start.clone(),
+                    clock,
+                    ticks: parking_lot::Mutex::new(VecDeque::new()),
+                }
+            });
             entry.config = state.config.clone();
             entry.status = state.status.clone();
             entry.start_version = state.start_version;
             entry.last_start = state.last_start.clone();
+            entry.clock.synchronize(state);
             if let nervix_models::DomainStatus::Stopped = state.status {
-                entry.clock = None;
                 entry.ticks.lock().clear();
             }
         }
@@ -171,6 +173,12 @@ impl Runtime {
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         }
+        let domain_clock =
+            self.bind_domain_clock(domain)
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
         self.install_state_schema_fingerprints_from_graph(domain, &graph);
 
         let domain_graph = self.domain_graph_handle(domain).await;
@@ -767,6 +775,7 @@ impl Runtime {
                 ),
                 passive_only: false,
                 start_version,
+                domain_clock,
                 shutdown: shutdown_tx,
                 graph: domain_graph.clone(),
                 relay_registries,
@@ -804,7 +813,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::{
-        DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick, Timestamp,
+        DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
+        DomainTimeRate, Timestamp,
     };
 
     use super::*;
@@ -815,15 +825,17 @@ mod tests {
         let mut domains = BTreeMap::new();
         domains.insert(domain("paced"), paced_domain_state("paced"));
         runtime.sync_domains(&domains);
-        runtime.handle_domain_tick(
-            &domain("paced"),
-            &DomainTick {
-                tick_id: 1,
-                logical_timestamp: Timestamp::from_unix_nanos(0),
-                wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                period: "1s".parse().expect("fixture period is valid"),
-            },
-        );
+        runtime
+            .handle_domain_tick(
+                &domain("paced"),
+                &DomainTick {
+                    tick_id: 1,
+                    logical_timestamp: Timestamp::from_unix_nanos(0),
+                    wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
+                    period: "1s".parse().expect("fixture period is valid"),
+                },
+            )
+            .expect("the fixture domain exists");
 
         domains.insert(
             domain("paced"),
@@ -860,15 +872,17 @@ mod tests {
         let mut domains = BTreeMap::new();
         domains.insert(domain("paced"), paced_domain_state("paced"));
         runtime.sync_domains(&domains);
-        runtime.handle_domain_tick(
-            &domain("paced"),
-            &DomainTick {
-                tick_id: 1,
-                logical_timestamp: Timestamp::from_unix_nanos(0),
-                wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                period: "1s".parse().expect("fixture period is valid"),
-            },
-        );
+        runtime
+            .handle_domain_tick(
+                &domain("paced"),
+                &DomainTick {
+                    tick_id: 1,
+                    logical_timestamp: Timestamp::from_unix_nanos(0),
+                    wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
+                    period: "1s".parse().expect("fixture period is valid"),
+                },
+            )
+            .expect("the fixture domain exists");
 
         let mut paused = paced_domain_state("paced");
         paused.status = DomainStatus::Paused;
@@ -894,5 +908,57 @@ mod tests {
             )
             .expect_err("paused domain must reject ingestion");
         assert!(error.contains("paused"));
+    }
+
+    #[test]
+    fn sync_domains_installs_the_committed_generation_before_execution_binds() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("paced");
+        let logical_origin = "2000-01-01T00:00:00Z"
+            .parse::<Timestamp>()
+            .expect("fixture timestamp is valid");
+        let mapping =
+            DomainClockState::new(current_timestamp(), logical_origin, DomainTimeRate::ONE);
+        let mut state = paced_domain_state("paced");
+        state.start_version = 9;
+        state.clock = Some(mapping);
+
+        runtime.sync_domains(&BTreeMap::from([(clock_domain.clone(), state)]));
+        let snapshot = runtime
+            .bind_domain_clock(&clock_domain)
+            .and_then(|clock| clock.snapshot())
+            .expect("the replicated mapping must be installed before execution");
+
+        assert_eq!(snapshot.generation(), 9);
+        assert!(
+            snapshot.now()
+                < "2001-01-01T00:00:00Z"
+                    .parse::<Timestamp>()
+                    .expect("fixture timestamp is valid")
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_rejects_an_uninstalled_paced_clock() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("paced");
+        runtime.sync_domains(&BTreeMap::from([(
+            clock_domain.clone(),
+            paced_domain_state("paced"),
+        )]));
+        let schedule = DomainSchedule::new(clock_domain.clone(), Vec::new(), Vec::new());
+
+        let result = runtime
+            .build_passive_execution_from_schedule(&clock_domain, &schedule)
+            .await;
+
+        let Err(RuntimeError::BuildDomainExecution { domain, reason }) = result else {
+            panic!("execution must reject a paced domain without an installed mapping");
+        };
+        assert_eq!(domain, clock_domain.as_str());
+        assert!(
+            reason.contains("not installed"),
+            "unexpected error: {reason}"
+        );
     }
 }

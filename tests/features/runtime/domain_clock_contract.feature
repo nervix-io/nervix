@@ -1,4 +1,65 @@
 Feature: Domain clock contract regressions
+  @domain_bound_clock
+  Scenario: A joining or restarted node installs the current clock generation before execution
+    Given the production sticky scheduler is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 1 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 1m;
+      """
+    When these NSPL commands are executed
+      """
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
+      """
+    And node "node-2" is added to the cluster
+    And the cluster is restarted
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA joined_clock_request (
+        sequence I64
+      );
+      CREATE SCHEMA joined_clock_observation (
+        sequence I64,
+        observed_at DATETIME
+      );
+      CREATE WIRE JSON SCHEMA joined_clock_request_wire MODE STRICT (
+        sequence integer
+      );
+      CREATE CODEC joined_clock_request_codec
+        FROM WIRE JSON SCHEMA joined_clock_request_wire
+        TO SCHEMA joined_clock_request;
+      CREATE RELAY joined_clock_observations
+        SCHEMA joined_clock_observation UNBRANCHED;
+      CREATE VHOST edge joined-clock-{{test_id}}.example.com;
+      CREATE ENDPOINT joined_clock_endpoint
+        ON edge
+        PATH '/clock'
+        TYPE HTTP;
+      CREATE INGESTOR joined_clock_source
+        FROM ENDPOINT joined_clock_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING joined_clock_request_codec
+        TIMESTAMP NOW
+        TO joined_clock_observations
+          SET sequence = message.sequence,
+              observed_at = now()
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION joined_clock_subscription TO joined_clock_observations;
+      """
+    Then node "node-2" eventually accepts http traffic for host "joined-clock-{{test_id}}.example.com" path "/clock"
+      """
+      {"sequence":1}
+      """
+    And within "5s" the relay subscription receives a payload
+      """
+      "sequence":1
+      """
+    And the last relay subscription payload field "observed_at" is saved as timestamp placeholder "joined_clock_time"
+    And timestamp placeholder "joined_clock_time" is before "2001-01-01T00:00:00Z"
+
   Scenario Outline: External source fixture records request timing and count
     Given the HTTP mock server is running
     And clock source recorder "{{test_id}}" is reset
