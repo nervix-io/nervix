@@ -12,8 +12,11 @@ use std::time::Duration;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+#[cfg(test)]
+use nervix_models::DomainTick;
 use nervix_models::{
-    DomainClockError, DomainClockState, DomainName, DomainPace, DomainState, DomainTick, Timestamp,
+    DomainClockAuthority, DomainClockError, DomainClockProgress, DomainClockState, DomainName,
+    DomainPace, DomainState, Timestamp,
 };
 use nervix_wasm::{DomainClock as WasmDomainClock, WasmExecutionContext};
 use thiserror::Error;
@@ -185,10 +188,11 @@ impl DomainClockLifecycle {
         }
     }
 
-    pub fn synchronize(&self, state: &DomainState) {
+    pub fn synchronize(&self, state: &DomainState, authority: &DomainClockAuthority) {
         if let nervix_models::DomainStatus::Paused = state.status
             && let DomainPace::Paced = state.config.pace
             && state.clock.is_none()
+            && authority.owner().is_some()
         {
             let shared = self.inner.state.lock();
             if matches!(
@@ -212,12 +216,12 @@ impl DomainClockLifecycle {
                         generation: state.start_version,
                         source: DomainClockSource::Unpaced,
                     },
-                    DomainPace::Paced => match &state.clock {
-                        Some(mapping) => DomainClockInstallation::Installed {
+                    DomainPace::Paced => match (&state.clock, authority.owner()) {
+                        (Some(mapping), Some(_)) => DomainClockInstallation::Installed {
                             generation: state.start_version,
                             source: DomainClockSource::Paced(mapping.clone()),
                         },
-                        None => DomainClockInstallation::Uninstalled {
+                        (None, _) | (_, None) => DomainClockInstallation::Uninstalled {
                             generation: state.start_version,
                         },
                     },
@@ -227,6 +231,7 @@ impl DomainClockLifecycle {
         self.replace(installation);
     }
 
+    #[cfg(test)]
     pub fn install_paced(&self, generation: u64, mapping: DomainClockState) {
         self.replace(DomainClockInstallation::Installed {
             generation,
@@ -234,6 +239,7 @@ impl DomainClockLifecycle {
         });
     }
 
+    #[cfg(test)]
     pub fn stop(&self, generation: u64) {
         self.replace(DomainClockInstallation::Stopped { generation });
     }
@@ -659,46 +665,68 @@ pub(super) fn wall_duration_until_logical_target(
 
 impl Runtime {
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_domain_clock_progress_if_armed(&self, domain: &DomainName) -> bool {
+    pub(crate) async fn pause_domain_clock_progress_if_armed(
+        &self,
+        domain: &DomainName,
+        node: &nervix_models::ClusterNodeName,
+    ) -> bool {
         self.inner
             .fault_injection
-            .pause_domain_clock_progress_if_armed(domain)
+            .pause_domain_clock_progress_if_armed(domain, node)
             .await
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) fn mark_domain_clock_progress_delivered(&self, domain: &DomainName) {
-        self.inner
-            .fault_injection
-            .mark_domain_clock_progress_delivered(domain);
-    }
-
-    pub fn handle_domain_clock_start(
+    pub(crate) fn mark_domain_clock_progress_delivered(
         &self,
         domain: &DomainName,
-        clock: DomainClockState,
+        node: &nervix_models::ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .mark_domain_clock_progress_delivered(domain, node);
+    }
+
+    pub(crate) fn handle_domain_clock_progress(
+        &self,
+        domain: &DomainName,
+        authenticated_node: &nervix_models::ClusterNodeName,
+        progress: &DomainClockProgress,
     ) -> DomainClockAccessResult<()> {
         let Some(entry) = self.inner.domains.get(domain) else {
             return Err(Report::new(DomainClockAccessError::Missing {
                 domain: domain.clone(),
             }));
         };
-        entry.clock.install_paced(entry.start_version, clock);
+        if matches!(&entry.status, nervix_models::DomainStatus::Stopped)
+            || entry.start_version != progress.generation
+            || entry.clock_authority.revision() != progress.authority_revision
+            || entry.clock_authority.owner() != Some(&progress.authority)
+            || progress.authority.node_id() != authenticated_node
+            || progress.tick.tick_id == 0
+        {
+            return Ok(());
+        }
+
+        let mut ticks = entry.ticks.lock();
+        if ticks.back().is_some_and(|observed| {
+            observed.tick_id >= progress.tick.tick_id
+                || observed.wall_clock > progress.tick.wall_clock
+        }) {
+            return Ok(());
+        }
+        ticks.push_back(ObservedDomainTick {
+            tick_id: progress.tick.tick_id,
+            wall_clock: progress.tick.wall_clock,
+        });
+        while ticks.len() > DOMAIN_TICK_HISTORY_LIMIT {
+            ticks.pop_front();
+        }
         Ok(())
     }
 
-    pub fn handle_domain_clock_stop(&self, domain: &DomainName) -> DomainClockAccessResult<()> {
-        let Some(entry) = self.inner.domains.get(domain) else {
-            return Err(Report::new(DomainClockAccessError::Missing {
-                domain: domain.clone(),
-            }));
-        };
-        entry.clock.stop(entry.start_version);
-        entry.ticks.lock().clear();
-        Ok(())
-    }
-
-    pub fn handle_domain_tick(
+    #[cfg(test)]
+    pub(super) fn handle_domain_tick(
         &self,
         domain: &DomainName,
         tick: &DomainTick,
@@ -708,21 +736,19 @@ impl Runtime {
                 domain: domain.clone(),
             }));
         };
-        let mut ticks = entry.ticks.lock();
-        if ticks
-            .back()
-            .is_some_and(|observed| observed.tick_id == tick.tick_id)
-        {
-            return Ok(());
-        }
-        ticks.push_back(ObservedDomainTick {
-            tick_id: tick.tick_id,
-            wall_clock: tick.wall_clock,
-        });
-        while ticks.len() > DOMAIN_TICK_HISTORY_LIMIT {
-            ticks.pop_front();
-        }
-        Ok(())
+        let authority = entry
+            .clock_authority
+            .owner()
+            .cloned()
+            .assured("test domain synchronization installs a clock authority");
+        let progress = DomainClockProgress {
+            generation: entry.start_version,
+            authority_revision: entry.clock_authority.revision(),
+            authority: authority.clone(),
+            tick: tick.clone(),
+        };
+        drop(entry);
+        self.handle_domain_clock_progress(domain, authority.node_id(), &progress)
     }
 
     pub(super) fn bind_domain_clock(
@@ -775,10 +801,13 @@ impl Runtime {
 mod tests {
     use std::collections::BTreeMap;
 
-    use nervix_models::{DomainClockState, DomainConfig, DomainTick, DomainTimeRate, Timestamp};
+    use nervix_models::{
+        ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainClockAuthorityRevision,
+        DomainClockProgress, DomainClockState, DomainConfig, DomainTick, DomainTimeRate, Timestamp,
+    };
 
     use super::*;
-    use crate::runtime::{domain, named, paced_domain_state};
+    use crate::runtime::{domain, named, paced_domain_state, test_domain_clock_authority};
 
     #[test]
     fn paced_domains_accept_records_inside_tick_window() {
@@ -819,21 +848,324 @@ mod tests {
     }
 
     #[test]
+    fn progress_requires_the_committed_generation_revision_identity_and_peer() {
+        let runtime = Runtime::new();
+        let domain_id = domain("paced");
+        let mut state = paced_domain_state("paced");
+        state.start_version = 4;
+        state.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), state)]));
+        let authority = test_domain_clock_authority();
+        let owner = authority
+            .owner()
+            .cloned()
+            .expect("the fixture authority is assigned");
+        let tick = |tick_id, wall_clock| DomainTick {
+            tick_id,
+            logical_timestamp: Timestamp::from_unix_nanos(i64::try_from(tick_id).expect(
+                "the fixture tick ids fit in the signed timestamp boundary representation",
+            )),
+            wall_clock: Timestamp::from_unix_nanos(wall_clock),
+            period: "1s".parse().expect("fixture period is valid"),
+        };
+        let accepted = DomainClockProgress {
+            generation: 4,
+            authority_revision: authority.revision(),
+            authority: owner.clone(),
+            tick: tick(3, 30),
+        };
+        runtime
+            .handle_domain_clock_progress(&domain_id, owner.node_id(), &accepted)
+            .expect("the fixture domain exists");
+
+        let rejected = [
+            DomainClockProgress {
+                generation: 3,
+                tick: tick(4, 40),
+                ..accepted.clone()
+            },
+            DomainClockProgress {
+                authority_revision: DomainClockAuthorityRevision::INITIAL
+                    .checked_next()
+                    .expect("the initial revision has a successor"),
+                tick: tick(5, 50),
+                ..accepted.clone()
+            },
+            DomainClockProgress {
+                authority: ClusterNodeIdentity::new(
+                    owner.node_id().clone(),
+                    ClusterNodeIncarnation::new(
+                        owner
+                            .incarnation()
+                            .get()
+                            .checked_add(1)
+                            .expect("the fixture incarnation can advance"),
+                    ),
+                ),
+                tick: tick(6, 60),
+                ..accepted.clone()
+            },
+            DomainClockProgress {
+                tick: tick(2, 20),
+                ..accepted.clone()
+            },
+        ];
+        for progress in rejected {
+            runtime
+                .handle_domain_clock_progress(&domain_id, owner.node_id(), &progress)
+                .expect("a fenced progress message is safely ignored");
+        }
+        let wrong_peer = ClusterNodeName::parse("another-node").expect("fixture name is valid");
+        runtime
+            .handle_domain_clock_progress(&domain_id, &wrong_peer, &accepted)
+            .expect("an unauthenticated authority claim is safely ignored");
+
+        let observed = runtime
+            .inner
+            .domains
+            .get(&domain_id)
+            .expect("the fixture domain remains installed");
+        let ticks = observed.ticks.lock();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks.front().map(|tick| tick.tick_id), Some(3));
+    }
+
+    #[test]
+    fn progress_never_creates_a_missing_domain() {
+        let runtime = Runtime::new();
+        let domain_id = domain("missing");
+        let authority = ClusterNodeIdentity::new(
+            ClusterNodeName::parse("node-1").expect("fixture name is valid"),
+            ClusterNodeIncarnation::new(1),
+        );
+        let progress = DomainClockProgress {
+            generation: 1,
+            authority_revision: DomainClockAuthorityRevision::INITIAL,
+            authority: authority.clone(),
+            tick: DomainTick {
+                tick_id: 1,
+                logical_timestamp: Timestamp::from_unix_nanos(0),
+                wall_clock: Timestamp::from_unix_nanos(0),
+                period: "1s".parse().expect("fixture period is valid"),
+            },
+        };
+
+        let error = runtime
+            .handle_domain_clock_progress(&domain_id, authority.node_id(), &progress)
+            .expect_err("progress for an unknown domain must be rejected");
+
+        assert!(matches!(
+            error.current_context(),
+            DomainClockAccessError::Missing { domain } if domain == &domain_id
+        ));
+        assert!(runtime.inner.domains.is_empty());
+    }
+
+    #[test]
+    fn stopped_and_restarted_generations_ignore_delayed_progress() {
+        let runtime = Runtime::new();
+        let domain_id = domain("paced");
+        let first_mapping = DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        );
+        let mut first = paced_domain_state("paced");
+        first.start_version = 4;
+        first.clock = Some(first_mapping);
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), first.clone())]));
+        let authority = test_domain_clock_authority();
+        let owner = authority
+            .owner()
+            .cloned()
+            .expect("the fixture authority is assigned");
+        let delayed = DomainClockProgress {
+            generation: 4,
+            authority_revision: authority.revision(),
+            authority: owner.clone(),
+            tick: DomainTick {
+                tick_id: 1,
+                logical_timestamp: Timestamp::from_unix_nanos(1),
+                wall_clock: Timestamp::from_unix_nanos(1),
+                period: "1s".parse().expect("fixture period is valid"),
+            },
+        };
+
+        first.status = nervix_models::DomainStatus::Stopped;
+        first.clock = None;
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), first)]));
+        runtime
+            .handle_domain_clock_progress(&domain_id, owner.node_id(), &delayed)
+            .expect("stopped generations safely ignore progress");
+
+        let next_mapping = DomainClockState::new(
+            Timestamp::from_unix_nanos(100),
+            Timestamp::from_unix_nanos(1_000),
+            DomainTimeRate::ONE,
+        );
+        let mut next = paced_domain_state("paced");
+        next.start_version = 5;
+        next.clock = Some(next_mapping.clone());
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), next)]));
+        runtime
+            .handle_domain_clock_progress(&domain_id, owner.node_id(), &delayed)
+            .expect("earlier generations safely ignore delayed progress");
+
+        let observed = runtime
+            .inner
+            .domains
+            .get(&domain_id)
+            .expect("the restarted domain remains installed");
+        assert!(observed.ticks.lock().is_empty());
+        let installed = observed.clock.inner.state.lock();
+        assert!(matches!(
+            &installed.installation,
+            DomainClockInstallation::Installed {
+                generation: 5,
+                source: DomainClockSource::Paced(mapping),
+            } if mapping == &next_mapping
+        ));
+    }
+
+    #[test]
+    fn coalesced_generation_transition_discards_prior_progress() {
+        let runtime = Runtime::new();
+        let domain_id = domain("paced");
+        let mut first = paced_domain_state("paced");
+        first.start_version = 4;
+        first.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), first)]));
+        let authority = test_domain_clock_authority();
+        let owner = authority
+            .owner()
+            .cloned()
+            .expect("the fixture authority is assigned");
+        let progress = |generation, tick_id| DomainClockProgress {
+            generation,
+            authority_revision: authority.revision(),
+            authority: owner.clone(),
+            tick: DomainTick {
+                tick_id,
+                logical_timestamp: Timestamp::from_unix_nanos(
+                    i64::try_from(tick_id).expect("fixture tick ids fit in a timestamp"),
+                ),
+                wall_clock: Timestamp::from_unix_nanos(
+                    i64::try_from(tick_id).expect("fixture tick ids fit in a timestamp"),
+                ),
+                period: "1s".parse().expect("fixture period is valid"),
+            },
+        };
+        runtime
+            .handle_domain_clock_progress(&domain_id, owner.node_id(), &progress(4, 50))
+            .expect("the first generation accepts its progress");
+
+        let mut next = paced_domain_state("paced");
+        next.start_version = 5;
+        next.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(100),
+            Timestamp::from_unix_nanos(1_000),
+            DomainTimeRate::ONE,
+        ));
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), next)]));
+
+        let observed = runtime
+            .inner
+            .domains
+            .get(&domain_id)
+            .expect("the later generation remains installed");
+        assert!(
+            observed.ticks.lock().is_empty(),
+            "progress retained from the skipped STOP belongs to the previous generation"
+        );
+        drop(observed);
+        runtime
+            .handle_domain_clock_progress(&domain_id, owner.node_id(), &progress(5, 1))
+            .expect("the later generation accepts its first progress");
+        let observed = runtime
+            .inner
+            .domains
+            .get(&domain_id)
+            .expect("the later generation remains installed");
+        assert_eq!(
+            observed.ticks.lock().back().map(|tick| tick.tick_id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn progress_history_retains_only_the_bounded_newest_frontier() {
+        let runtime = Runtime::new();
+        let domain_id = domain("paced");
+        let mut state = paced_domain_state("paced");
+        state.start_version = 4;
+        state.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), state)]));
+        let authority = test_domain_clock_authority();
+        let owner = authority
+            .owner()
+            .cloned()
+            .expect("the fixture authority is assigned");
+        let final_tick = u64::try_from(DOMAIN_TICK_HISTORY_LIMIT)
+            .expect("the fixed history limit fits in u64")
+            .checked_add(3)
+            .expect("the fixed history limit can advance by three");
+
+        for tick_id in 1..=final_tick {
+            let timestamp = i64::try_from(tick_id).expect("fixture tick ids fit in a timestamp");
+            runtime
+                .handle_domain_clock_progress(
+                    &domain_id,
+                    owner.node_id(),
+                    &DomainClockProgress {
+                        generation: 4,
+                        authority_revision: authority.revision(),
+                        authority: owner.clone(),
+                        tick: DomainTick {
+                            tick_id,
+                            logical_timestamp: Timestamp::from_unix_nanos(timestamp),
+                            wall_clock: Timestamp::from_unix_nanos(timestamp),
+                            period: "1s".parse().expect("fixture period is valid"),
+                        },
+                    },
+                )
+                .expect("the current authority progress is accepted");
+        }
+
+        let observed = runtime
+            .inner
+            .domains
+            .get(&domain_id)
+            .expect("the domain remains installed");
+        let ticks = observed.ticks.lock();
+        assert_eq!(ticks.len(), DOMAIN_TICK_HISTORY_LIMIT);
+        assert_eq!(ticks.front().map(|tick| tick.tick_id), Some(4));
+        assert_eq!(ticks.back().map(|tick| tick.tick_id), Some(final_tick));
+    }
+
+    #[test]
     fn paced_domains_accept_records_while_clock_is_running_before_ticks_arrive() {
         let runtime = Runtime::new();
         let mut domains = BTreeMap::new();
-        domains.insert(domain("paced"), paced_domain_state("paced"));
+        let mut state = paced_domain_state("paced");
+        state.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(10_000_000_000),
+            Timestamp::from_unix_nanos(10_000_000_000),
+            DomainTimeRate::ONE,
+        ));
+        domains.insert(domain("paced"), state);
         runtime.sync_domains(&domains);
-        runtime
-            .handle_domain_clock_start(
-                &domain("paced"),
-                DomainClockState::new(
-                    Timestamp::from_unix_nanos(10_000_000_000),
-                    Timestamp::from_unix_nanos(10_000_000_000),
-                    DomainTimeRate::ONE,
-                ),
-            )
-            .expect("the fixture domain exists");
 
         assert!(
             runtime
@@ -879,18 +1211,14 @@ mod tests {
     fn paced_domains_admit_the_logical_origin() {
         let runtime = Runtime::new();
         let mut domains = BTreeMap::new();
-        domains.insert(domain("paced"), paced_domain_state("paced"));
+        let mut state = paced_domain_state("paced");
+        state.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(10_000_000_000),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        domains.insert(domain("paced"), state);
         runtime.sync_domains(&domains);
-        runtime
-            .handle_domain_clock_start(
-                &domain("paced"),
-                DomainClockState::new(
-                    Timestamp::from_unix_nanos(10_000_000_000),
-                    Timestamp::from_unix_nanos(0),
-                    DomainTimeRate::ONE,
-                ),
-            )
-            .expect("the fixture domain exists");
 
         let admission = runtime.ensure_domain_allows_ingestion(
             &domain("paced"),
@@ -975,7 +1303,7 @@ mod tests {
 
         let mut uninstalled = paced_domain_state("paced");
         uninstalled.start_version = 8;
-        lifecycle.synchronize(&uninstalled);
+        lifecycle.synchronize(&uninstalled, &test_domain_clock_authority());
         let Err(error) = lifecycle.bind() else {
             panic!("an uninstalled clock must reject binding");
         };
@@ -1069,7 +1397,7 @@ mod tests {
         let mut running = paced_domain_state("paced");
         running.start_version = 3;
         running.clock = Some(mapping);
-        lifecycle.synchronize(&running);
+        lifecycle.synchronize(&running, &test_domain_clock_authority());
         let bound = lifecycle
             .bind()
             .assured("the running state installs its committed mapping");
@@ -1077,7 +1405,7 @@ mod tests {
         let mut paused = running;
         paused.status = nervix_models::DomainStatus::Paused;
         paused.clock = None;
-        lifecycle.synchronize(&paused);
+        lifecycle.synchronize(&paused, &test_domain_clock_authority());
 
         assert!(bound.snapshot().is_ok());
     }
@@ -1122,33 +1450,39 @@ mod tests {
     #[tokio::test]
     async fn logical_deadline_cannot_cross_domain_capabilities() {
         let first = DomainClockLifecycle::new(domain("first"));
-        first.synchronize(&DomainState {
-            id: domain("first"),
-            config: DomainConfig {
-                pace: DomainPace::Unpaced,
-                period: "1s".to_string(),
-                skew: "0ms".to_string(),
-                placement: nervix_models::PlacementPolicy::Neutral,
+        first.synchronize(
+            &DomainState {
+                id: domain("first"),
+                config: DomainConfig {
+                    pace: DomainPace::Unpaced,
+                    period: "1s".to_string(),
+                    skew: "0ms".to_string(),
+                    placement: nervix_models::PlacementPolicy::Neutral,
+                },
+                status: nervix_models::DomainStatus::Running,
+                start_version: 1,
+                last_start: nervix_models::DomainStartPoint::Resume,
+                clock: None,
             },
-            status: nervix_models::DomainStatus::Running,
-            start_version: 1,
-            last_start: nervix_models::DomainStartPoint::Resume,
-            clock: None,
-        });
+            &test_domain_clock_authority(),
+        );
         let second = DomainClockLifecycle::new(domain("second"));
-        second.synchronize(&DomainState {
-            id: domain("second"),
-            config: DomainConfig {
-                pace: DomainPace::Unpaced,
-                period: "1s".to_string(),
-                skew: "0ms".to_string(),
-                placement: nervix_models::PlacementPolicy::Neutral,
+        second.synchronize(
+            &DomainState {
+                id: domain("second"),
+                config: DomainConfig {
+                    pace: DomainPace::Unpaced,
+                    period: "1s".to_string(),
+                    skew: "0ms".to_string(),
+                    placement: nervix_models::PlacementPolicy::Neutral,
+                },
+                status: nervix_models::DomainStatus::Running,
+                start_version: 1,
+                last_start: nervix_models::DomainStartPoint::Resume,
+                clock: None,
             },
-            status: nervix_models::DomainStatus::Running,
-            start_version: 1,
-            last_start: nervix_models::DomainStartPoint::Resume,
-            clock: None,
-        });
+            &test_domain_clock_authority(),
+        );
         let first = first.bind().assured("the first unpaced clock is installed");
         let second = second
             .bind()
@@ -1234,19 +1568,22 @@ mod tests {
     async fn due_logical_wait_returns_due_time_and_a_fresh_snapshot() {
         let clock_domain = domain("unpaced");
         let lifecycle = DomainClockLifecycle::new(clock_domain.clone());
-        lifecycle.synchronize(&DomainState {
-            id: clock_domain,
-            config: DomainConfig {
-                pace: DomainPace::Unpaced,
-                period: "1s".to_string(),
-                skew: "0ms".to_string(),
-                placement: nervix_models::PlacementPolicy::Neutral,
+        lifecycle.synchronize(
+            &DomainState {
+                id: clock_domain,
+                config: DomainConfig {
+                    pace: DomainPace::Unpaced,
+                    period: "1s".to_string(),
+                    skew: "0ms".to_string(),
+                    placement: nervix_models::PlacementPolicy::Neutral,
+                },
+                status: nervix_models::DomainStatus::Running,
+                start_version: 4,
+                last_start: nervix_models::DomainStartPoint::Resume,
+                clock: None,
             },
-            status: nervix_models::DomainStatus::Running,
-            start_version: 4,
-            last_start: nervix_models::DomainStartPoint::Resume,
-            clock: None,
-        });
+            &test_domain_clock_authority(),
+        );
         let bound = lifecycle
             .bind()
             .assured("the fixture installs an unpaced clock");
