@@ -23,6 +23,7 @@ use meticulous::OptionExt as _;
 pub use nervix_models::SubscriptionDeliveryBehavior;
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use proto::{
     AttachTransactionRequest, CommandRequest, ListDomainsRequest, SessionRequest,
     session_service_client::SessionServiceClient,
@@ -316,7 +317,10 @@ impl GrpcConnector {
             return Err(ClientError::TlsRequired);
         }
         if is_https {
-            let _ = aws_lc_rs::default_provider().install_default();
+            aws_lc_rs::default_provider().install_default().discarded(
+                "a provider another client installed first is the one this client would have \
+                 installed",
+            );
             let mut tls = ClientTlsConfig::new();
             if let Some(pem) = self.options.ca_certificate_pem.clone() {
                 tls = tls.ca_certificate(Certificate::from_pem(pem));
@@ -463,7 +467,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -566,7 +572,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -678,7 +686,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -749,7 +759,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -780,26 +792,34 @@ impl Client {
             tokio::spawn(async move {
                 let (writer, mut reader) = tokio::io::duplex(64 * 1024);
                 // A build that fails or panics drops its end of the pipe, so the loop below sees
-                // a short archive and the server rejects the upload. The failure is reported by
-                // `upload_resource` rather than here, which is why neither this result nor the
-                // join below is turned into a second report.
+                // a short archive and the server rejects the upload. That rejection is the report
+                // for a build error, which is why the build's own result is discarded; a panic
+                // escapes it, so the join below is what keeps that one visible.
                 let build_task = tokio::spawn(async move {
-                    let _ = relay_upload_archive(&request_directory, writer).await;
+                    relay_upload_archive(&request_directory, writer)
+                        .await
+                        .discarded(
+                            "a build that fails drops its end of the pipe, and upload_resource \
+                             reports the short archive that produces",
+                        );
                 });
-                let _ = tx
-                    .send(proto::UploadResourceRequest {
-                        event: Some(proto::upload_resource_request::Event::Start(
-                            proto::UploadResourceStart {
-                                name: request_identifier,
-                                total_bytes: 0,
-                                domain: request_domain,
-                            },
-                        )),
-                    })
-                    .await;
+                tx.send(proto::UploadResourceRequest {
+                    event: Some(proto::upload_resource_request::Event::Start(
+                        proto::UploadResourceStart {
+                            name: request_identifier,
+                            total_bytes: 0,
+                            domain: request_domain,
+                        },
+                    )),
+                })
+                .await
+                .means_peer_left("resource upload stream");
                 let mut buffer = vec![0u8; 64 * 1024];
                 loop {
                     tokio::task::consume_budget().await;
+                    // The pipe's other end is the build task above. A read failure means it
+                    // stopped writing, which the server sees as a short archive and reports as a
+                    // rejected upload; the join at the end of this task is what surfaces a panic.
                     let read = match reader.read(&mut buffer).await {
                         Ok(read) => read,
                         Err(_) => return,
@@ -820,7 +840,9 @@ impl Client {
                         return;
                     }
                 }
-                let _ = build_task.await;
+                build_task
+                    .await
+                    .reported("building the resource archive to upload");
             });
             let response = client
                 .upload_resource(request_with_auth(
@@ -972,6 +994,8 @@ async fn start_session(
         while let Ok(Some(session_response)) = response.message().await {
             tokio::task::consume_budget().await;
             match session_response.event {
+                // A caller that stopped reading its events has left the session, and ending
+                // this loop is what closes it. The send is the only place that fact arrives.
                 Some(proto::session_response::Event::Subscription(event)) => {
                     match subscription_tx.send(event.into()).await {
                         Ok(()) => {}
@@ -987,7 +1011,7 @@ async fn start_session(
                 Some(proto::session_response::Event::Result(result)) => {
                     let pending = pending.lock().await.pop_front();
                     if let Some(PendingResponse::Command(tx)) = pending {
-                        let _ = tx.send(result.into());
+                        tx.send(result.into()).means_peer_left("command requester");
                     }
                 }
                 Some(proto::session_response::Event::Domains(domains)) => {
@@ -996,7 +1020,7 @@ async fn start_session(
                     if response_to_request {
                         let pending = pending.lock().await.pop_front();
                         if let Some(PendingResponse::DomainList(tx)) = pending {
-                            let _ = tx.send(domains);
+                            tx.send(domains).means_peer_left("domain list requester");
                         }
                     } else if domain_tx.send(domains).await.is_err() {
                         break;
@@ -1019,7 +1043,7 @@ async fn start_session(
                                 },
                             })
                             .collect();
-                        let _ = tx.send(suggestions);
+                        tx.send(suggestions).means_peer_left("suggestion requester");
                     }
                 }
                 #[cfg(not(feature = "autocomplete"))]

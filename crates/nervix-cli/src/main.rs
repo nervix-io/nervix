@@ -33,6 +33,7 @@ use nervix_models::ClusterNodeName;
 use nervix_nspl::client_statement::{
     parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
 };
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use reedline::{
     Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
     KeyCode, KeyModifiers, ListMenu, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -701,7 +702,9 @@ async fn execute_upload_and_print(
     finished.store(true, Ordering::Relaxed);
     // The task only renders the progress line, and `finished` has already told it to stop. Losing
     // its join tells the operator nothing the upload outcome below does not already say.
-    let _ = progress_task.await;
+    progress_task
+        .await
+        .reported("rendering the upload progress line");
     let total_uploaded = uploaded.load(Ordering::Relaxed);
     clear_progress_line();
     let result = outcome.map_err(|err| StackReport::new(ClientError::from(err)))?;
@@ -740,12 +743,16 @@ fn emit_terminal_line(line: impl Into<String>) {
 
 fn render_progress_line(line: impl AsRef<str>) {
     print!("\r\x1b[2K{}", line.as_ref());
-    let _ = io::stdout().flush();
+    io::stdout()
+        .flush()
+        .discarded("the next update redraws the progress line a failed flush left behind");
 }
 
 fn clear_progress_line() {
     print!("\r\x1b[2K");
-    let _ = io::stdout().flush();
+    io::stdout()
+        .flush()
+        .discarded("the next update redraws the progress line a failed flush left behind");
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -759,17 +766,21 @@ fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSe
     tokio::spawn(async move {
         while let Ok(event) = subscription_client.next_subscription().await {
             tokio::task::consume_budget().await;
-            let _ = subscription_sender.send(format!(
-                "[events] subscription [{}] from [{}]: {}",
-                event.subscription, event.relay, event.payload
-            ));
+            subscription_sender
+                .send(format!(
+                    "[events] subscription [{}] from [{}]: {}",
+                    event.subscription, event.relay, event.payload
+                ))
+                .means_shutdown("terminal event printer");
         }
     });
 
     tokio::spawn(async move {
         while let Ok(event) = client.next_server_event().await {
             tokio::task::consume_budget().await;
-            let _ = sender.send(format_server_event(&event));
+            sender
+                .send(format_server_event(&event))
+                .means_shutdown("terminal event printer");
         }
     });
 }

@@ -16,6 +16,7 @@ use std::{
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
 use nervix_models::ClusterNodeName;
+use nervix_recovery::NoReceiver as _;
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -234,7 +235,10 @@ impl RequestState {
             .collect::<Vec<_>>();
         for correlation_id in pending_requests {
             if let Some((_, pending)) = self.pending.remove(&correlation_id) {
-                let _ = pending.response.send(PendingResponse::ShuttingDown);
+                pending
+                    .response
+                    .send(PendingResponse::ShuttingDown)
+                    .means_peer_left("interconnect request awaiting a shutting-down transport");
             }
         }
         self.connection_changed.notify_waiters();
@@ -331,9 +335,10 @@ impl RequestState {
         }
         drop(pending);
         if let Some((_, pending)) = self.pending.remove(&response.correlation_id) {
-            let _ = pending
+            pending
                 .response
-                .send(PendingResponse::Response(response.result));
+                .send(PendingResponse::Response(response.result))
+                .means_peer_left("interconnect request awaiting this response");
         }
     }
 
@@ -372,7 +377,10 @@ impl RequestState {
             .collect::<Vec<_>>();
         for correlation_id in departed_requests {
             if let Some((_, pending)) = self.pending.remove(&correlation_id) {
-                let _ = pending.response.send(PendingResponse::TargetLeft);
+                pending
+                    .response
+                    .send(PendingResponse::TargetLeft)
+                    .means_peer_left("interconnect request awaiting a departed node");
             }
         }
         self.connection_changed.notify_waiters();

@@ -5,8 +5,8 @@ use nervix_models::DescribeResource;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, completion_context, filter_by_prefix,
-        into_parse_error, kw, lex_input, resource_ref, suggestions_from_errors,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        filter_by_prefix, into_parse_error, kw, lex_input, resource_ref, suggestions_from_errors,
     },
 };
 
@@ -64,9 +64,8 @@ pub fn parse_describe_resource(input: &str) -> Result<DescribeResource, ParseFro
 pub fn suggest_describe_resource(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let LexedInput { tokens, .. } = match lex_input(&source) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
 
     let out = describe_resource_parser()

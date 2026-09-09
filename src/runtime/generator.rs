@@ -517,11 +517,10 @@ impl Runtime {
                 let wall_now = current_timestamp();
                 let execution_now;
                 /// The domain's pacing as this generator tick observes it: whether the domain is
-                /// paced, the clock it started under, and the last tick it advanced to.
+                /// paced and the committed clock mapping it started under.
                 struct PacedDomainState {
                     pace: DomainPace,
-                    clock: Option<RuntimeDomainClockState>,
-                    latest_tick: Option<ObservedDomainTick>,
+                    clock: Option<DomainClockState>,
                 }
 
                 let paced_state =
@@ -531,8 +530,7 @@ impl Runtime {
                         .get(&task_domain)
                         .map(|domain_state| PacedDomainState {
                             pace: domain_state.config.pace,
-                            clock: domain_state.clock.clone(),
-                            latest_tick: domain_state.ticks.lock().back().cloned(),
+                            clock: domain_state.clock.paced_mapping(),
                         });
                 let is_paced = paced_state
                     .as_ref()
@@ -540,7 +538,6 @@ impl Runtime {
                 if let Some(PacedDomainState {
                     pace: DomainPace::Paced,
                     clock,
-                    latest_tick,
                 }) = &paced_state
                 {
                     let Some(clock) = clock else {
@@ -562,29 +559,28 @@ impl Runtime {
                         }
                         continue;
                     };
-                    execution_now =
-                        match current_domain_logical_time(clock, latest_tick.as_ref(), wall_now) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                task_events.report_error(format!(
-                                    "failed to resolve generator domain clock for '{}' in domain \
-                                     '{}': {}",
-                                    task_generator.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                ));
-                                tokio::select! {
-                                    changed = shutdown_rx.changed() => {
-                                        if changed.is_err() || *shutdown_rx.borrow() {
-                                            break;
-                                        }
+                    execution_now = match current_domain_logical_time(clock, wall_now) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            task_events.report_error(format!(
+                                "failed to resolve generator domain clock for '{}' in domain \
+                                 '{}': {}",
+                                task_generator.as_str(),
+                                task_domain.as_str(),
+                                error
+                            ));
+                            tokio::select! {
+                                changed = shutdown_rx.changed() => {
+                                    if changed.is_err() || *shutdown_rx.borrow() {
+                                        break;
                                     }
-                                    _ = sleep(Duration::from_millis(100)) => {}
-                                    _ = source_gate.wait_closed() => {}
                                 }
-                                continue;
+                                _ = sleep(Duration::from_millis(100)) => {}
+                                _ = source_gate.wait_closed() => {}
                             }
-                        };
+                            continue;
+                        }
+                    };
                 } else {
                     execution_now = current_timestamp();
                 }
@@ -961,6 +957,9 @@ impl Runtime {
                         {
                             match wall_duration_until_logical_target(clock, execution_now, next) {
                                 Ok(duration) => duration,
+                                // A time rate the registry accepted but that no longer parses is
+                                // not something this generator can repair, so it waits a fixed
+                                // step and looks again rather than spinning.
                                 Err(_) => Duration::from_millis(100),
                             }
                         } else {

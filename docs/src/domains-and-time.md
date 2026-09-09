@@ -18,6 +18,10 @@ domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is reject
 
 Paced domains maintain a domain clock.
 
+`PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
+fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
+is stored.
+
 While the domain is running:
 
 - Nervix produces domain ticks
@@ -87,6 +91,37 @@ Important runtime consequences:
 The lifecycle state and active paced-clock anchor are replicated with the domain. After leader
 failover, reconciliation reconstructs the running clock from that state; a completed transactional
 `START` therefore remains effective without re-executing its commit step.
+
+Every live node installs that committed mapping before it builds executable work for the domain.
+The installed capability is bound to the domain name and `START` generation. A joining node uses
+the existing logical origin, physical UTC anchor, and rate; it does not establish a new anchor from
+its join time. An unpaced domain receives actual UTC through the same domain-bound capability. A
+missing domain, stopped clock, uninstalled paced mapping, or task bound to an earlier generation is
+a lifecycle error and never selects wall time as a paced fallback. Reads on one node do not move
+backward within a generation.
+
+An explicit `START AT` timestamp must fit exactly in signed Unix nanoseconds. The inclusive range
+is `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`; valid RFC 3339 values
+immediately outside those endpoints are rejected by the command. Nervix converts accepted text to
+a timestamp at the language boundary and carries that timestamp through persistence and runtime
+state without reparsing it.
+
+`TIME RATE` accepts every positive finite `f64`, including scientific notation such as `5e-324`
+and `1.7976931348623157e308`. Zero, negative values, infinities, and NaN are rejected. The committed
+start mapping remains the sole clock anchor for that run. Tick delivery records progress but never
+re-anchors logical time, so a delayed tick cannot move time backwards.
+
+Clock projection rounds fractional logical nanoseconds down. Converting a logical target to a
+physical wait rounds fractional physical nanoseconds up, which prevents a deadline from firing
+early. Timestamp, duration, boundary, and tick-id overflow are errors. If tick production wakes
+after several periods have passed, it emits one tick at the latest due logical boundary and next
+targets the first future boundary.
+
+Domain cadence and data-lifecycle policy create logical deadlines from a bound domain clock.
+Connection, retry, cancellation, drain, and other operational policy create physical deadlines on
+the process monotonic clock. The two deadline kinds cannot be interchanged. A logical wait
+revalidates its domain and generation after every wake and returns both the logical instant that
+became due and a fresh execution-time snapshot. Cancellation is a separate typed outcome.
 
 ## Automatic Model-Alteration Quiescing
 

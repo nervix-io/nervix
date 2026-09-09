@@ -6,7 +6,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, alter_generator_route_body,
-        alter_op_separator, branch_selection, completion_context, duration_lit,
+        alter_op_separator, branch_selection, completion_context, completion_tokens, duration_lit,
         flushed_explicit_processor_outputs, generator_name, generator_ref, if_not_exists_clause,
         into_parse_error, kw, kw_phrase3, lex_input, relay_ref, suggest_from,
         suggestions_from_errors, tok,
@@ -158,9 +158,8 @@ pub fn suggest_create_generator(input: &str, cursor: usize) -> Vec<String> {
 
 pub fn suggest_alter_generator(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let LexedInput { tokens, .. } = match lex_input(&source) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
     let out = alter_generator_parser()
         .then_ignore(end())

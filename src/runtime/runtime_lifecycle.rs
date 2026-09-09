@@ -255,13 +255,17 @@ impl Runtime {
         self.inner.events.subscribe()
     }
 
+    pub(crate) fn report_error(&self, message: impl Into<String>) {
+        self.inner.events.report_error(message);
+    }
+
     pub(in crate::runtime) async fn stop_domain_execution(
         &self,
         domain: &DomainName,
         execution: DomainExecution,
     ) {
         self.withdraw_routed_endpoints(domain, &execution);
-        let _ = execution.shutdown.send(true);
+        execution.shutdown.send_replace(true);
         for (relay, task) in execution.relay_owner_tasks {
             tokio::task::consume_budget().await;
             if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
@@ -429,8 +433,9 @@ impl Runtime {
     ) -> Option<AckOutcome> {
         loop {
             tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    let _ = changed;
+                // A signalled stop and a dropped sender both end this wait, so the outcome
+                // carries nothing the caller could act on differently.
+                _ = shutdown_rx.changed() => {
                     return None;
                 }
                 progress = tokio::time::timeout(timeout_duration, completion.wait_for_progress()) => {

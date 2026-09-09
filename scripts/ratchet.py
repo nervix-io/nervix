@@ -352,6 +352,57 @@ def count_bare_unwrap_and_expect(files: Sequence[RustFile]) -> list[Site]:
     return sites
 
 
+_DISCARDED_BINDING = re.compile(r"\blet\s+_\s*(?::\s*[^=;]+?)?=")
+
+# A `let _` whose initializer is a plain name, or a tuple of them, silences an unused parameter
+# rather than dropping an outcome. There is no result there to classify. The count is `let _`
+# only: `_ = fut => …` is a `select!` arm pattern, not a discard, and matching it would flag every
+# such arm in the workspace.
+_PLAIN_BINDING = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*"
+    r"|\(\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*,?\s*\))$"
+)
+
+
+def count_discarded_results(files: Sequence[RustFile]) -> list[Site]:
+    """Count outcomes dropped with `let _ = …`.
+
+    A dropped outcome states no class. It reads the same whether the failure was considered and
+    recovered from or never considered at all, so it is the one form that cannot be reviewed.
+    `meticulous` spells the panic class and `nervix-recovery` spells the recovery class; a site
+    left here has chosen neither, so this count only falls.
+    """
+
+    sites: list[Site] = []
+    for file in product_files(files):
+        for match in _DISCARDED_BINDING.finditer(file.product):
+            initializer = _initializer(file.product, match.end())
+            if initializer is None or _PLAIN_BINDING.match(initializer.strip()):
+                continue
+            sites.append(file.site(match.start(), file.source_line(match.start())))
+    return sites
+
+
+def _initializer(code: str, start: int) -> str | None:
+    """Return the initializer beginning at `start`, up to the `;` that ends its statement."""
+
+    depth = 0
+    index = start
+    length = len(code)
+    while index < length:
+        character = code[index]
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif character == ";" and depth == 0:
+            return code[start:index]
+        index += 1
+    return None
+
+
 # `saturating_duration_since` is `Instant`'s query for "how long since, or zero if it has not
 # happened yet". It answers a question about time rather than choosing what an overflow means, so
 # it is not what this count is about.
@@ -664,6 +715,11 @@ COUNTS: tuple[Count, ...] = (
         "bare_unwrap_and_expect",
         "bare `unwrap()` and `expect()` calls",
         count_bare_unwrap_and_expect,
+    ),
+    Count(
+        "discarded_results",
+        "outcomes dropped with `let _ =` instead of stating their class",
+        count_discarded_results,
     ),
     Count(
         "clamped_arithmetic",

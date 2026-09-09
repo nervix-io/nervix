@@ -23,6 +23,7 @@ use std::{
 
 use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
+use nervix_recovery::Discarded as _;
 use tempfile::{TempDir, tempdir, tempdir_in};
 use testcontainers::{
     ContainerAsync, ContainerRequest, CopyTargetOptions, GenericBuildableImage, GenericImage,
@@ -1876,7 +1877,9 @@ impl ReusableStartupLock {
 
 impl Drop for ReusableStartupLock {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        self.0
+            .unlock()
+            .discarded("closing the file releases the lock, which happens as this guard drops");
     }
 }
 

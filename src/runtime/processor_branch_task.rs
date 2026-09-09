@@ -243,7 +243,6 @@ pub(super) async fn run_processor_node_runtime(
         let now = runtime_handle
             .current_stream_expiration_time(&domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         let mut did_scheduled_work = false;
         if !ownership_frozen && Instant::now() >= next_expiration_scan {
@@ -338,7 +337,9 @@ pub(super) async fn run_processor_node_runtime(
                         &instances,
                     )
                     .await;
-                    let _ = response.send(result);
+                    response
+                        .send(result)
+                        .means_peer_left("processor lifecycle checkpoint requester");
                 }
                 ProcessorNodeCommand::Handoff { response } => {
                     handoff_response = Some(response);
@@ -385,7 +386,9 @@ pub(super) async fn run_processor_node_runtime(
             &mut instances,
         )
         .await;
-        let _ = response.send(handoffs);
+        response
+            .send(handoffs)
+            .means_peer_left("processor handoff requester");
     } else {
         shutdown_all_processor_branch_instances(
             &runtime_handle,
@@ -566,11 +569,25 @@ pub(super) async fn stop_processor_snapshot_task(
         while let Some(response) = requests.recv().await {
             tokio::task::consume_budget().await;
             let result = branch.snapshot_processor_live_state(processor);
-            let _ = response.send(result);
+            response
+                .send(result)
+                .means_peer_left("processor snapshot requester");
         }
     }
-    if snapshot.task.is_some() && branch.snapshot_processor_live_state(processor).is_err() {
-        let _ = branch.snapshot_processor_live_state(processor);
+    // A failed snapshot routes the entries it could not store through the processor's error policy
+    // and clears them, so the second attempt is what persists that cleared state: without it a
+    // replacement node would restore entries this branch has already failed. The first failure is
+    // reported by the error policy; the second one leaves the earlier snapshot as the last state
+    // anyone can restore, and this is the only place that fact exists.
+    if snapshot.task.is_some()
+        && branch.snapshot_processor_live_state(processor).is_err()
+        && let Err(error) = branch.snapshot_processor_live_state(processor)
+    {
+        warn!(
+            processor = processor.as_str(),
+            error = %error,
+            "processor state snapshot failed again after clearing the entries it could not store"
+        );
     }
     snapshot.shutdown_tx.send_replace(true);
     if let Some(task) = snapshot.task.take()
@@ -610,7 +627,6 @@ pub(super) async fn run_processor_branch_task(
         let now = runtime_handle
             .current_stream_expiration_time(&domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         if !ownership_frozen
             && branch
@@ -626,7 +642,23 @@ pub(super) async fn run_processor_branch_task(
         } else {
             match branch.next_deadline() {
                 Some(deadline) => {
-                    wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline)
+                    match wall_duration_until_domain_deadline(
+                        &runtime_handle,
+                        &domain,
+                        now,
+                        deadline,
+                    ) {
+                        Ok(duration) => duration,
+                        Err(error) => {
+                            runtime_handle.events().report_error(format!(
+                                "processor '{}' in domain '{}' lost its clock: {error}",
+                                processor.as_str(),
+                                domain.as_str(),
+                            ));
+                            stop_mode = Some(ProcessorBranchStopMode::Detach);
+                            break;
+                        }
+                    }
                 }
                 None => PROCESSOR_BRANCH_TASK_IDLE_SLEEP,
             }
@@ -638,7 +670,9 @@ pub(super) async fn run_processor_branch_task(
                 match command {
                     Some(ProcessorBranchCommand::Checkpoint { response }) => {
                         let result = branch.checkpoint_processor_live_state(&processor).await;
-                        let _ = response.send(result);
+                        response
+                            .send(result)
+                            .means_peer_left("processor branch checkpoint requester");
                     }
                     Some(ProcessorBranchCommand::Stop(mode)) => {
                         stop_mode = Some(mode);
@@ -660,7 +694,9 @@ pub(super) async fn run_processor_branch_task(
                 match snapshot_request {
                     Some(response) => {
                         let result = branch.snapshot_processor_live_state(&processor);
-                        let _ = response.send(result);
+                        response
+                            .send(result)
+                            .means_peer_left("processor snapshot requester");
                     }
                     None => snapshot.requests = None,
                 }
@@ -719,7 +755,6 @@ pub(super) async fn run_processor_branch_task(
             let now = runtime_handle
                 .current_stream_expiration_time(&domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp);
             branch.force_flush(&graph, now).await;
             Some(now)
@@ -747,7 +782,9 @@ pub(super) async fn run_processor_branch_task(
                 restored_at,
                 pending_materialized,
             };
-            let _ = response.send(handoff);
+            response
+                .send(handoff)
+                .means_peer_left("processor branch handoff requester");
         }
         Some(ProcessorBranchStopMode::Detach) | None => {}
     }
@@ -761,10 +798,11 @@ pub(super) async fn stop_processor_branch_task(
     mode: ProcessorBranchStopMode,
 ) {
     let processor = processor.into();
-    let _ = entry
+    entry
         .commands
         .send(ProcessorBranchCommand::Stop(mode))
-        .await;
+        .await
+        .means_shutdown("processor branch task");
     let Some(mut task) = entry.task.lock().take() else {
         return;
     };

@@ -11,6 +11,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use nervix_recovery::NoReceiver as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
@@ -222,7 +223,7 @@ impl AckHandle {
 
     fn finish_completion(&self, result: AckOutcome) {
         if let Some(sender) = self.0.sender.lock().take() {
-            let _ = sender.send(result);
+            sender.send(result).means_peer_left("ack completion waiter");
         }
     }
 

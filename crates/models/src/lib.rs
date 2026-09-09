@@ -15,6 +15,7 @@
 //! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
 
 mod canonical;
+mod domain_clock;
 mod expression;
 mod message_error;
 mod model_index;
@@ -33,6 +34,10 @@ pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
     alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
     expression_to_nspl, ingest_quiesce_to_nspl,
+};
+pub use domain_clock::{
+    DomainClockAdvancement, DomainClockBoundary, DomainClockError, DomainClockPeriod,
+    DomainClockState, DomainTimeRate,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -96,36 +101,36 @@ pub use statement::{
     CreateWindowProcessor, DeleteSubscription, DescribeCorrelator, DescribeDeduplicator,
     DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
     DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor,
-    DomainClockState, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-    DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink, EmitterAckWindow,
-    EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, FlushPolicy,
-    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
-    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    InferencerTensorSchemaError, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, InputCollectPolicy, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model,
-    ModelKind, MongoDbConfigEntry, MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping,
-    NatsConfigEntry, NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
-    OwnershipTransition, PlacementGroupSchedule, PlacementPolicy, PostgresConfigEntry,
-    PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, ResolvedCodecWireFormat, RetryPolicy,
-    S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
-    ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
-    ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
-    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UniquelyKindedModel, UploadResource,
-    VhostTlsResource, WasmProcessorLimits, WebsocketsConfigEntry, WebsocketsIngestMode,
-    WindowBound, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
+    DomainPace, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode,
+    DropModel, DropNode, EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode,
+    EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    IcebergCatalog, IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, InferencerTensorSchemaError, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, InputCollectPolicy, KafkaConfigEntry, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, MaterializedRelayState,
+    MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry, MongoDbConflictAction,
+    MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
+    MySqlConflictAction, MySqlValueMapping, NatsConfigEntry, NatsIngestMode,
+    OtelAggregationTemporality, OtelConfigEntry, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelValueMapping, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule, PlacementPolicy,
+    PostgresConfigEntry, PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry,
+    PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
+    RedisPubSubIngestMode, RelayBranching, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResolvedCodecWireFormat, RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode,
+    ScheduledNodes, SentryConfigEntry, ShowClusterStatus, ShowCreate, ShowPlacements,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsConfigEntry, SqsFifoGroup, SqsIngestMode, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry,
+    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaLookup, ZeroMqConfigEntry,
+    ZeroMqIngestMode, default_relay_buffer,
 };
-pub use timestamp::Timestamp;
+pub use timestamp::{Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

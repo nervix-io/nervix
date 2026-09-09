@@ -82,7 +82,12 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
    maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, read-only statements,
    subscriptions, uploads, and node administration remain outside the transaction.
-5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
+5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
+   paced `START` establishes one replicated clock generation that joining nodes install before
+   execution; automatic ALTER quiescing preserves that generation and its progress.
+   Explicit start timestamps must fit the inclusive signed Unix-nanosecond range from
+   `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, and `TIME RATE` must
+   be positive and finite.
 
 Within the graph transaction, declare dependencies before consumers:
 

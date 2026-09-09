@@ -369,7 +369,10 @@ impl RelayConsumerFanout {
         if self.subscriptions.receiver_count() == 0 {
             return;
         }
-        let _ = self.subscriptions.broadcast(batch.detached()).await;
+        self.subscriptions
+            .broadcast(batch.detached())
+            .await
+            .means_peer_left("relay subscription");
     }
 
     pub(super) async fn dispatch_runtime_consumers(
@@ -1268,22 +1271,10 @@ impl Runtime {
     pub(in crate::runtime) fn current_stream_expiration_time(
         &self,
         domain: &DomainName,
-    ) -> Result<Option<Timestamp>, String> {
-        let wall_now = current_timestamp();
-        let Some(state) = self.inner.domains.get(domain) else {
-            return Ok(Some(wall_now));
-        };
-        match state.config.pace {
-            DomainPace::Unpaced => Ok(Some(wall_now)),
-            DomainPace::Paced => {
-                let latest_tick = state.ticks.lock().back().cloned();
-                if let Some(clock) = state.clock.as_ref() {
-                    current_domain_logical_time(clock, latest_tick.as_ref(), wall_now).map(Some)
-                } else {
-                    Ok(latest_tick.map(|tick| tick.logical_timestamp))
-                }
-            }
-        }
+    ) -> DomainClockAccessResult<Timestamp> {
+        let clock = self.bind_domain_clock(domain)?;
+        let snapshot = clock.snapshot()?;
+        Ok(snapshot.now())
     }
 
     pub(in crate::runtime) fn touch_stream_key(
@@ -1335,7 +1326,6 @@ impl Runtime {
         let now = self
             .current_stream_expiration_time(domain)
             .ok()
-            .flatten()
             .unwrap_or_else(current_timestamp);
         branches.registry.touch(&batch.key, now);
         self.touch_stream_key(domain, relay, &batch.key, now);
@@ -1502,7 +1492,7 @@ impl Runtime {
                             break;
                         };
                         let _completion = services.begin_owner_batch_completion();
-                        let _ = runtime
+                        runtime
                             .fanout_relay_owner_batch(
                                 &domain,
                                 &relay,
@@ -1510,7 +1500,11 @@ impl Runtime {
                                 &mut branches,
                                 &batch,
                             )
-                            .await;
+                            .await
+                            .discarded(
+                                "the batch is acknowledged inside the fanout, and the owner task \
+                                 has no second consumer for a rejected copy",
+                            );
                     }
                     _ = async {
                         if branch_ttl.is_some() {
@@ -1522,7 +1516,6 @@ impl Runtime {
                         let now = runtime
                             .current_stream_expiration_time(&domain)
                             .ok()
-                            .flatten()
                             .unwrap_or_else(current_timestamp);
                         for (expired_key, _) in branches.instances.expire(
                             now,
@@ -1551,9 +1544,13 @@ impl Runtime {
                     }
                 };
                 let _completion = services.begin_owner_batch_completion();
-                let _ = runtime
+                runtime
                     .fanout_relay_owner_batch(&domain, &relay, &services, &mut branches, &batch)
-                    .await;
+                    .await
+                    .discarded(
+                        "the batch is acknowledged inside the fanout, and the owner task has no \
+                         second consumer for a rejected copy",
+                    );
             }
             services.observe_owner_buffer_length(
                 &runtime.inner.metrics,
@@ -1622,7 +1619,6 @@ impl Runtime {
                     let now = runtime
                         .current_stream_expiration_time(&domain)
                         .ok()
-                        .flatten()
                         .unwrap_or_else(current_timestamp);
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         tokio::task::consume_budget().await;
@@ -1697,7 +1693,6 @@ impl Runtime {
                 let now = runtime
                     .current_stream_expiration_time(&domain)
                     .ok()
-                    .flatten()
                     .unwrap_or_else(current_timestamp);
                 branch_instances
                     .get_or_try_create_with(branch_key.clone(), now, |_| {
@@ -2142,6 +2137,10 @@ mod tests {
     async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
         let schema = named::<SchemaName>("notification");
         let relay = named::<RelayName>("notifications");
 
@@ -2284,6 +2283,7 @@ mod tests {
                 schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                 passive_only: false,
                 start_version: 0,
+                domain_clock: test_domain_clock(&domain),
                 shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
                 relay_registries,
@@ -2506,6 +2506,7 @@ mod tests {
                     schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
                     passive_only: false,
                     start_version: 0,
+                    domain_clock: test_domain_clock(&domain),
                     shutdown,
                     graph: StdArc::new(ArcSwapOption::empty()),
                     relay_registries: HashMap::default(),

@@ -26,13 +26,16 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use meticulous::ResultExt as _;
 use nervix_execution::{ChargedBytes, Executor};
+#[cfg(test)]
+use nervix_models::Timestamp;
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainName, DomainTick, EmitterName,
-    FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName, RemoteAckRegistration,
+    ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainClockPeriod, DomainClockState,
+    DomainName, DomainTick, EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName,
+    NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
-    SubscriptionBinding, Timestamp,
+    SubscriptionBinding,
 };
+use nervix_recovery::{Discarded as _, Reported as _};
 use rand_core::OsRng;
 use rkyv::{Archive, Deserialize, Serialize};
 use rustls::{
@@ -306,9 +309,8 @@ pub struct RuntimeErrorEvent {
 pub struct DomainClockStart {
     pub domain_id: DomainName,
     pub owner_node_id: ClusterNodeName,
-    pub wall_started_at: Timestamp,
-    pub logical_start: Timestamp,
-    pub time_rate: String,
+    pub clock: DomainClockState,
+    pub period: DomainClockPeriod,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -1230,11 +1232,12 @@ impl Transport {
             for reconnect in reconnects {
                 reconnect.cancel();
             }
-            let _ = timeout(
+            timeout(
                 self.inner.options.connection_setup_timeout,
                 self.inner.tasks.wait(),
             )
-            .await;
+            .await
+            .reported("waiting for cancelled interconnect tasks to finish");
         }
         self.inner.outbound.clear();
         self.inner.connected_peers.clear();
@@ -1319,7 +1322,12 @@ fn introduction_message(node_id: &ClusterNodeName) -> Vec<u8> {
 pub fn install_rustls_crypto_provider() {
     static PROVIDER: OnceLock<()> = OnceLock::new();
     PROVIDER.get_or_init(|| {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .discarded(
+                "a provider the host installed first is the one this transport would have \
+                 installed",
+            );
     });
 }
 

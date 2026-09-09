@@ -11,9 +11,11 @@ workspace = true
 [dependencies]
 arch-into = { workspace = true }
 bytes = { workspace = true }
+error-stack = { workspace = true }
 flatbuffers = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 nonzero_ext = { workspace = true }
 parking_lot = { workspace = true }

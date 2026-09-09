@@ -242,7 +242,6 @@ impl RelayProcessorNode {
                 .runtime
                 .current_stream_expiration_time(&branch.domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp);
             let Some(collector) = self.input_collectors.get_mut(incoming_relay) else {
                 self.execute(graph, branch, incoming_relay, batch).await;
@@ -453,7 +452,6 @@ impl RelayProcessorNode {
                 .runtime
                 .current_stream_expiration_time(&branch.domain)
                 .ok()
-                .flatten()
                 .unwrap_or_else(current_timestamp),
             materialized_state,
         )
@@ -549,7 +547,6 @@ impl RelayProcessorNode {
                         .runtime
                         .current_stream_expiration_time(&branch.domain)
                         .ok()
-                        .flatten()
                         .unwrap_or_else(current_timestamp);
 
                     if compiled_key_program.is_none() {
@@ -960,7 +957,6 @@ impl RelayProcessorNode {
                         .runtime
                         .current_stream_expiration_time(&branch.domain)
                         .ok()
-                        .flatten()
                         .unwrap_or_else(current_timestamp);
                     let lookup_columns = HashMap::default();
                     let vm_batch = match project_vm_input_batch(
@@ -1140,7 +1136,6 @@ impl RelayProcessorNode {
                         .runtime
                         .current_stream_expiration_time(&branch.domain)
                         .ok()
-                        .flatten()
                         .unwrap_or_else(current_timestamp);
                     if compiled_where_program.is_none() {
                         let Some(left_relay) = left_relays.first() else {
@@ -1640,7 +1635,6 @@ impl RelayProcessorNode {
                         .runtime
                         .current_stream_expiration_time(&branch.domain)
                         .ok()
-                        .flatten()
                         .unwrap_or_else(current_timestamp);
                     let route_batches = batch.into_attached_fanout(output_routes.routes.len());
                     let mut due_outputs = Vec::new();
@@ -2137,7 +2131,7 @@ impl RelayProcessorNode {
                 return;
             }
             let output_key = branch.key.clone();
-            let _ = dispatch_wasm_output_envelopes(
+            dispatch_wasm_output_envelopes(
                 WasmOutputContext {
                     graph,
                     branch,
@@ -2154,7 +2148,10 @@ impl RelayProcessorNode {
                 outputs,
                 ack_map,
             )
-            .await;
+            .await
+            .discarded(
+                "the processor error policy already handled every failure this dispatch produced",
+            );
         })
     }
 

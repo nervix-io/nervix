@@ -22,6 +22,7 @@ nervix-dataflow-graph = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-proto = { workspace = true }
+nervix-recovery = { workspace = true }
 prost = { workspace = true }
 url = { workspace = true }
 wasm-bindgen = { workspace = true }

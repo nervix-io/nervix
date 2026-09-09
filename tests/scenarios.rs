@@ -12612,6 +12612,28 @@ async fn then_timestamp_placeholder_is_not_before(
     );
 }
 
+#[then(expr = "timestamp placeholder {string} is before {string}")]
+async fn then_timestamp_placeholder_is_before(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+    upper_bound: String,
+) {
+    let value = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{placeholder}' is not defined"));
+    let value = chrono::DateTime::parse_from_rfc3339(value).unwrap_or_else(|error| {
+        panic!("timestamp placeholder '{placeholder}' is invalid: {error}")
+    });
+    let upper_bound = chrono::DateTime::parse_from_rfc3339(&upper_bound)
+        .unwrap_or_else(|error| panic!("timestamp upper bound is invalid: {error}"));
+
+    assert!(
+        value < upper_bound,
+        "timestamp placeholder '{placeholder}' was {value}, expected a value before {upper_bound}"
+    );
+}
+
 #[then(expr = "the last relay subscription payload masks field {string}")]
 async fn then_last_stream_subscription_payload_masks_field(
     world: &mut ScenarioWorld,

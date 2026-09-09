@@ -645,7 +645,7 @@ impl Statement {
                     time_rate,
                 } => format!(
                     "START AT {} TIME RATE {time_rate};",
-                    string_literal(timestamp)
+                    string_literal(&timestamp.as_datetime().to_rfc3339())
                 ),
             }),
             Self::StopDomain(_) => Ok("STOP;".to_string()),

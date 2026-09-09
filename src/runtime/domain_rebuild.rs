@@ -278,6 +278,12 @@ impl Runtime {
             self.clear_domain_graph_handle(domain).await;
             return Ok(());
         }
+        let domain_clock =
+            self.bind_domain_clock(domain)
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
         let domain_graph = self.domain_graph_handle(domain).await;
         domain_graph.store(None);
         let (shutdown_tx, _) = watch::channel(false);
@@ -1037,6 +1043,7 @@ impl Runtime {
                 schedule: schedule.clone(),
                 passive_only: false,
                 start_version: desired_start_version,
+                domain_clock,
                 shutdown: shutdown_tx,
                 graph: domain_graph.clone(),
                 relay_registries,
@@ -1113,6 +1120,12 @@ impl Runtime {
         domain: &DomainName,
         schedule: &DomainSchedule,
     ) -> Result<DomainExecution, RuntimeError> {
+        let domain_clock = self.bind_passive_domain_clock(domain).map_err(|error| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: error.to_string(),
+            }
+        })?;
         let udf_executor = self
             .compile_domain_udfs(
                 domain,
@@ -1275,6 +1288,7 @@ impl Runtime {
             schedule: schedule.clone(),
             passive_only: true,
             start_version,
+            domain_clock,
             shutdown,
             graph,
             relay_registries,

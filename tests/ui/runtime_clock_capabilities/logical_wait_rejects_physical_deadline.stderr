@@ -1,0 +1,7 @@
+error[E0308]: mismatched types
+ --> $DIR/logical_wait_rejects_physical_deadline.rs:7:37
+  |
+7 |     let deadline: LogicalDeadline = deadline;
+  |                   ---------------   ^^^^^^^^ expected `LogicalDeadline`, found `PhysicalDeadline`
+  |                   |
+  |                   expected due to this

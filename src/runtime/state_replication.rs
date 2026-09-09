@@ -1795,6 +1795,12 @@ impl Runtime {
             )
             .await
             .map_err(OwnershipHandoffError::wasm_restore)?;
+        let domain_clock = self.bind_domain_clock(domain).map_err(|error| {
+            OwnershipHandoffError::wasm_restore(format!(
+                "failed to bind WASM processor '{}' to the domain clock: {error}",
+                processor.name.as_str()
+            ))
+        })?;
         for (placement, snapshot) in checkpoints {
             tokio::task::consume_budget().await;
             if placement.state != RuntimeStateKind::WasmProcessor {
@@ -1813,10 +1819,12 @@ impl Runtime {
                     .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
                     .collect(),
             };
-            let clock = RuntimeWasmDomainClock {
-                runtime: self.clone(),
-                domain: domain.clone(),
-            };
+            let clock = RuntimeWasmDomainClock::new(domain_clock.clone()).map_err(|error| {
+                OwnershipHandoffError::wasm_restore(format!(
+                    "failed to snapshot WASM processor '{}' domain clock: {error}",
+                    processor.name.as_str()
+                ))
+            })?;
             let restored_state =
                 (!snapshot.payload.is_empty()).then_some(snapshot.payload.as_slice());
             compiled
@@ -2479,7 +2487,7 @@ impl Runtime {
         let Some((_, tx)) = self.inner.pending_state_syncs.remove(&correlation_id) else {
             return;
         };
-        let _ = tx.send(result);
+        tx.send(result).means_peer_left("state sync requester");
     }
 
     pub(crate) fn handle_state_replication_ack(

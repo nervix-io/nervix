@@ -23,9 +23,11 @@ use std::{
 
 use arch_into::ArchInto as _;
 use bytes::Bytes;
+use error_stack::Report;
 use flatbuffers::{Allocator, FlatBufferBuilder};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
+use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -44,6 +46,10 @@ const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(1);
 const DEFAULT_EPOCH_DEADLINE_TICKS: u64 = 1;
 const DEFAULT_MAX_GUEST_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
+
+tokio::task_local! {
+    static INVOCATION_NOW: Timestamp;
+}
 
 #[derive(Debug, Error)]
 pub enum WasmProcessorError {
@@ -663,6 +669,25 @@ pub trait DomainClock: Send + Sync {
     fn now(&self) -> Timestamp;
 }
 
+/// The domain time chosen by the data plane for one guest invocation.
+///
+/// Runtime lifecycle and clock-generation validation happen before this engine boundary. The WASM
+/// host receives only the resulting timestamp and remains independent of domains and graphs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WasmExecutionContext {
+    now: Timestamp,
+}
+
+impl WasmExecutionContext {
+    pub const fn new(now: Timestamp) -> Self {
+        Self { now }
+    }
+
+    pub const fn now(self) -> Timestamp {
+        self.now
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FixedDomainClock {
     now: Arc<Mutex<Timestamp>>,
@@ -1183,7 +1208,10 @@ impl BranchStore {
     }
 
     fn now(&self) -> Timestamp {
-        self.clock.now()
+        match INVOCATION_NOW.try_with(|now| *now) {
+            Ok(now) => now,
+            Err(_) => self.clock.now(),
+        }
     }
 
     fn timeout_after(&mut self, delay_nanos: i64) -> i64 {
@@ -1356,6 +1384,17 @@ impl WasmBranchInstance {
         ensure_success("nervix_init", code)
     }
 
+    pub async fn init_in_context(
+        &mut self,
+        init: WasmBranchInit,
+        context: WasmExecutionContext,
+    ) -> Result<(), Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.init(init))
+            .await
+            .map_err(Report::new)
+    }
+
     pub async fn current_domain_time(&mut self) -> Result<Timestamp, WasmProcessorError> {
         self.begin_operation("domain-time read")?;
         let nanos = self
@@ -1368,12 +1407,31 @@ impl WasmBranchInstance {
         Ok(Timestamp::from_unix_nanos(nanos))
     }
 
+    pub async fn current_domain_time_in_context(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<Timestamp, Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.current_domain_time())
+            .await
+            .map_err(Report::new)
+    }
+
     pub async fn process_batch(
         &mut self,
         arrow_ipc_batch: &[u8],
     ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
         let envelope = WasmEnvelope::input_arrow_only(arrow_ipc_batch.to_vec());
         self.process_envelope(&envelope).await
+    }
+
+    pub async fn process_batch_in_context(
+        &mut self,
+        arrow_ipc_batch: &[u8],
+        context: WasmExecutionContext,
+    ) -> Result<Vec<WasmEnvelope>, Report<WasmProcessorError>> {
+        let envelope = WasmEnvelope::input_arrow_only(arrow_ipc_batch.to_vec());
+        self.process_envelope_in_context(&envelope, context).await
     }
 
     pub async fn process_envelope(
@@ -1409,6 +1467,17 @@ impl WasmBranchInstance {
         self.read_pending_emit().await
     }
 
+    pub async fn process_envelope_in_context(
+        &mut self,
+        envelope: &WasmEnvelope,
+        context: WasmExecutionContext,
+    ) -> Result<Vec<WasmEnvelope>, Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.process_envelope(envelope))
+            .await
+            .map_err(Report::new)
+    }
+
     pub async fn on_timeout(
         &mut self,
         handle: WasmTimeoutHandle,
@@ -1440,6 +1509,17 @@ impl WasmBranchInstance {
         self.read_pending_emit().await
     }
 
+    pub async fn on_timeout_in_context(
+        &mut self,
+        handle: WasmTimeoutHandle,
+        context: WasmExecutionContext,
+    ) -> Result<Vec<WasmEnvelope>, Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.on_timeout(handle))
+            .await
+            .map_err(Report::new)
+    }
+
     /// Asks the guest to release everything it is holding because the host is quiescing this
     /// branch. Returns the output envelopes the guest emitted, which the caller must dispatch
     /// before snapshotting so a handoff neither loses nor duplicates them.
@@ -1465,6 +1545,16 @@ impl WasmBranchInstance {
         self.read_pending_emit().await
     }
 
+    pub async fn flush_in_context(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<Vec<WasmEnvelope>, Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.flush())
+            .await
+            .map_err(Report::new)
+    }
+
     pub async fn save_state(&mut self) -> Result<Vec<u8>, WasmProcessorError> {
         self.begin_operation("state snapshot")?;
         let size = self
@@ -1473,6 +1563,16 @@ impl WasmBranchInstance {
             .await
             .map_err(|source| wasm_call_error(self.limits, "nervix_dump_state", source))?;
         self.read_guest_buffer(size).await
+    }
+
+    pub async fn save_state_in_context(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<Vec<u8>, Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.save_state())
+            .await
+            .map_err(Report::new)
     }
 
     pub async fn load_state(&mut self, state: &[u8]) -> Result<(), WasmProcessorError> {
@@ -1486,6 +1586,17 @@ impl WasmBranchInstance {
         ensure_success("nervix_load_state", code)
     }
 
+    pub async fn load_state_in_context(
+        &mut self,
+        state: &[u8],
+        context: WasmExecutionContext,
+    ) -> Result<(), Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.load_state(state))
+            .await
+            .map_err(Report::new)
+    }
+
     pub async fn reset_state(&mut self) -> Result<(), WasmProcessorError> {
         self.begin_operation("state reset")?;
         let code = self
@@ -1494,6 +1605,16 @@ impl WasmBranchInstance {
             .await
             .map_err(|source| wasm_call_error(self.limits, "nervix_reset_state", source))?;
         ensure_success("nervix_reset_state", code)
+    }
+
+    pub async fn reset_state_in_context(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> Result<(), Report<WasmProcessorError>> {
+        INVOCATION_NOW
+            .scope(context.now(), self.reset_state())
+            .await
+            .map_err(Report::new)
     }
 
     pub fn timeout_requests(&self) -> &[WasmTimeoutRequest] {
@@ -1751,7 +1872,9 @@ impl WasmBranchInstance {
             let batch = WasmEnvelope::decode_owned(self.read_guest_buffer(size).await?)
                 .map_err(|error| WasmProcessorError::GuestGlobalError(error.to_string()))?;
             if let Some(sender) = self.store.data().emitted_batch_sender.as_ref() {
-                let _ = sender.send(batch.clone());
+                sender
+                    .send(batch.clone())
+                    .means_peer_left("emitted batch observer");
             }
             batches.push(batch);
         }
@@ -1802,6 +1925,9 @@ where
     Params: wasmtime::WasmParams,
     Results: wasmtime::WasmResults,
 {
+    // A guest that does not define the export, and one that defines it with another signature,
+    // are the same thing to the host: this optional capability is not available on this module.
+    // The host has no second reading to give the error, and every caller answers both the same.
     match instance.get_typed_func(&mut *store, name) {
         Ok(export) => Ok(Some(export)),
         Err(_) => Ok(None),
@@ -3567,6 +3693,49 @@ mod tests {
         assert_eq!(
             right.timeout_requests()[0].requested_at,
             Timestamp::from_unix_nanos(200)
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_invocation_context_owns_guest_time() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(TEST_WASM)
+            .await
+            .expect("module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(100))),
+                None,
+            )
+            .await
+            .expect("branch must instantiate");
+
+        let observed = branch
+            .current_domain_time_in_context(WasmExecutionContext::new(Timestamp::from_unix_nanos(
+                500,
+            )))
+            .await
+            .expect("explicit clock read must work");
+        branch
+            .process_batch_in_context(
+                b"context batch",
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(600)),
+            )
+            .await
+            .expect("context batch must process");
+        let unscoped = branch
+            .current_domain_time()
+            .await
+            .expect("the fixture clock must remain readable");
+
+        assert_eq!(observed, Timestamp::from_unix_nanos(500));
+        assert_eq!(unscoped, Timestamp::from_unix_nanos(100));
+        assert_eq!(
+            branch.timeout_requests()[0].requested_at,
+            Timestamp::from_unix_nanos(600)
         );
     }
 

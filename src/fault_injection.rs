@@ -19,6 +19,7 @@ use ahash::RandomState;
 use dashmap::DashMap;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{Notify, broadcast};
 use triomphe::Arc;
@@ -232,17 +233,25 @@ impl FaultInjection {
             let executor = executor.clone();
             let started = started.clone();
             tokio::spawn(async move {
-                let _ = executor
+                executor
                     .run_cpu(
                         CpuClass::Bulk,
                         reservation,
                         move |_charge, _cancellation| {
                             started.fetch_add(1, Ordering::AcqRel);
-                            // Park until the scenario drops the holder so occupancy consumes no CPU.
-                            let _ = held.recv();
+                            // Park until the scenario drops the holder so occupancy consumes no
+                            // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
+                            // than a failure.
+                            held.recv().discarded(
+                                "dropping the holder is how the scenario releases this worker",
+                            );
                         },
                     )
-                    .await;
+                    .await
+                    .discarded(
+                        "this job exists to hold a worker until the scenario releases it; its \
+                         outcome is not what the scenario reads",
+                    );
             });
         }
         while started.load(Ordering::Acquire) < workers {
@@ -419,13 +428,13 @@ impl FaultInjection {
         from_node_id: ClusterNodeName,
         to_node_id: ClusterNodeName,
     ) {
-        let _ = self
-            .inner
+        self.inner
             .leadership_transfers
             .send(LeadershipTransferRequest {
                 from_node_id,
                 to_node_id,
-            });
+            })
+            .means_shutdown("leadership transfer watcher");
     }
 
     pub(crate) fn emitter_should_fail(&self, emitter: &EmitterName) -> bool {
