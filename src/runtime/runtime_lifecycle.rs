@@ -59,6 +59,8 @@ impl Runtime {
                 ingestor_reconnect_backoffs: DashMap::default(),
                 ingestor_readiness: DashMap::default(),
                 emitter_transient_errors: DashMap::default(),
+                shared_clients: DashMap::default(),
+                pool_waits: DashMap::default(),
                 emitter_retry_statuses: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),
                 executions: DashMap::default(),

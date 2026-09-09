@@ -610,9 +610,17 @@ impl IngestorStartPlan {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::ClientPoolBounds;
+    use nonzero_ext::nonzero;
     use rstest::rstest;
 
     use super::*;
+
+    /// Pool bounds for the client fixtures, whose subject is the ingestor start plan rather than
+    /// the declared capacity.
+    fn pool_bounds() -> ClientPoolBounds {
+        ClientPoolBounds::new(1, nonzero!(4u32)).assured("one does not exceed four")
+    }
 
     fn named<T>(value: &str) -> T
     where
@@ -753,6 +761,7 @@ mod tests {
                 },
                 Model::ClientRedis(CreateClientRedis {
                     name: named("upstream"),
+                    pool: pool_bounds(),
                     mount,
                     config,
                 }),

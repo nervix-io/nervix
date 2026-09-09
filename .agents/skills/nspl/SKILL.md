@@ -170,6 +170,19 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
+- Declare connection-pool bounds on every `POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` client, after
+  `TYPE` and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
+  with the minimum no greater than the maximum. The clause is required even when only ingestors
+  reference the client, and no other client type accepts it. Never put pool sizing in connector
+  `CONFIG` or an address query parameter. One pool serves every local user of a named client on one
+  node, so size it for the node's whole workload rather than per emitter, and expect one pool per
+  node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
+  documentation entry before choosing values.
+- Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that selects
+  either `sslmode=disable` or `sslmode=verify-full`; no other mode is accepted and there is no
+  opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the
+  TLS-file interface, certificate and key must be supplied together, and TLS files require
+  `verify-full`.
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.
 - Add a route-local message error policy. Add the required general/global policy for the chosen

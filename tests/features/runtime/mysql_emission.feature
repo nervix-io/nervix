@@ -43,6 +43,7 @@ Feature: MySQL emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT mysql_client
         TYPE MYSQL
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
@@ -122,6 +123,7 @@ Feature: MySQL emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT mysql_client
         TYPE MYSQL
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
@@ -210,7 +212,7 @@ Feature: MySQL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT mysql_client TYPE MYSQL CONFIG {
+      CREATE CLIENT mysql_client TYPE MYSQL POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{mysql_addr}}'
       };
       CREATE EMITTER to_mysql

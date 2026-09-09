@@ -679,14 +679,11 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let port = mapped_port(&container, 5432, "Postgres").await?;
         self.endpoints.insert(
             POSTGRES_ADDR,
-            format!("host=127.0.0.1 port={port} user=postgres password=nervix dbname=postgres"),
+            format!("postgresql://postgres:nervix@127.0.0.1:{port}/postgres?sslmode=disable"),
         );
         self.endpoints.insert(
             POSTGRES_TLS_ADDR,
-            format!(
-                "host=127.0.0.1 port={port} user=postgres password=nervix dbname=postgres \
-                 sslmode=require"
-            ),
+            format!("postgresql://postgres:nervix@localhost:{port}/postgres?sslmode=verify-full"),
         );
         self.containers.push(RunningContainer::Generic(container));
         Ok(())

@@ -30,6 +30,7 @@ include = [
   "jaq-reference.md",
   "common.md",
   "syslog.md",
+  "database-client-pools.md",
   "resources.md",
   "relay.md",
   "ingestors.md",

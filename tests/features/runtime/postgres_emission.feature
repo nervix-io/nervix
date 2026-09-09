@@ -43,6 +43,7 @@ Feature: Postgres emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT postgres_client
         TYPE POSTGRES
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
@@ -122,6 +123,7 @@ Feature: Postgres emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT postgres_client
         TYPE POSTGRES
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
@@ -204,6 +206,7 @@ Feature: Postgres emission
       ON GENERAL ERROR LOG;
       CREATE CLIENT postgres_client
       TYPE POSTGRES
+      POOL SIZE MIN 2 MAX 8
       CONFIG {
         'addr' = '{{postgres_addr}}'
       };
@@ -302,6 +305,7 @@ Feature: Postgres emission
       ON GENERAL ERROR LOG;
       CREATE CLIENT postgres_client
       TYPE POSTGRES
+      POOL SIZE MIN 2 MAX 8
       CONFIG {
         'addr' = '{{postgres_addr}}'
       };
@@ -382,7 +386,7 @@ Feature: Postgres emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_client TYPE POSTGRES CONFIG {
+      CREATE CLIENT postgres_client TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{postgres_addr}}'
       };
       CREATE EMITTER to_pg

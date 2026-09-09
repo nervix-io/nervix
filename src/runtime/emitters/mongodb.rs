@@ -1,5 +1,6 @@
+pub(in crate::runtime) use ::mongodb::Client as MongoDbClient;
 use ::mongodb::{
-    Client as MongoDbClient, Namespace as MongoDbNamespace,
+    Namespace as MongoDbNamespace,
     bson::{
         Bson as MongoDbBson, Document as MongoDbDocument, doc as mongodb_doc,
         to_bson as mongodb_to_bson,
@@ -19,9 +20,107 @@ pub(in crate::runtime) struct MongoDbEmitter {
     program: Option<CompiledSqlValuesProgram>,
 }
 
+/// This emitter's interest in the node's shared MongoDB client.
+///
+/// The driver owns one application pool per server in the topology, and that topology belongs to
+/// the client rather than to any one emitter, so every local emitter of this client shares it.
 struct MongoDbEmitterClient {
-    client: MongoDbClient,
+    lease: SharedClientLease,
+    /// The client borrowed from, named in this emitter's diagnostics.
+    client: ClientName,
     database: String,
+}
+
+impl MongoDbEmitterClient {
+    /// The shared driver client this emitter writes through.
+    fn driver(&self) -> Result<&MongoDbClient, Report<EmitterRuntimeError>> {
+        match self.lease.client().mongodb(&self.client) {
+            Ok(client) => Ok(client),
+            Err(error) => Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
+                .attach_printable(error.to_string())),
+        }
+    }
+}
+
+/// The database an emitter writes into, from the client's own configuration.
+///
+/// The database belongs to the client's configuration rather than to its connections, so it is
+/// read per user while the driver client itself is shared.
+fn mongodb_database(
+    config: &[nervix_models::ClientConfigEntry],
+) -> Result<String, Report<OpenClientError>> {
+    if let Some(database) = optional_client_config_value(config, "database") {
+        return Ok(database.to_owned());
+    }
+    let missing = || {
+        Report::new(OpenClientError::MissingConfig {
+            transport: "MongoDB",
+            key: "database",
+        })
+    };
+    let Some(addr) = optional_client_config_value(config, "addr") else {
+        return Err(Report::new(OpenClientError::MissingConfig {
+            transport: "MongoDB",
+            key: "addr",
+        }));
+    };
+    let Some((_, tail)) = addr.rsplit_once('/') else {
+        return Err(missing());
+    };
+    let database = tail.split('?').next().unwrap_or_default();
+    if database.is_empty() {
+        Err(missing())
+    } else {
+        Ok(database.to_string())
+    }
+}
+
+/// Open the node's shared MongoDB client for one named client, sized by its declared bounds.
+///
+/// The driver keeps one application pool per server in the topology and applies both bounds to
+/// each, so the ceiling is enforced by the driver rather than by any emitter counting its own.
+pub(in crate::runtime) async fn open_mongodb_client(
+    config: &[nervix_models::ClientConfigEntry],
+    bounds: ClientPoolBounds,
+) -> Result<MongoDbClient, Report<OpenClientError>> {
+    let Some(addr) = optional_client_config_value(config, "addr") else {
+        return Err(Report::new(OpenClientError::MissingConfig {
+            transport: "MongoDB",
+            key: "addr",
+        }));
+    };
+    let mut options = MongoDbClientOptions::parse(addr).await.map_err(|source| {
+        Report::new(OpenClientError::InvalidConfig {
+            transport: "MongoDB",
+            reason: format!("failed to parse client addr: {source}"),
+        })
+    })?;
+    if let Some(ca_file) = optional_client_config_value(config, "tls_ca_file") {
+        options.tls = Some(MongoDbTls::Enabled(
+            MongoDbTlsOptions::builder()
+                .ca_file_path(PathBuf::from(ca_file))
+                .build(),
+        ));
+    }
+    options.min_pool_size = Some(bounds.minimum());
+    options.max_pool_size = Some(bounds.maximum().get());
+    let client = MongoDbClient::with_options(options).map_err(|source| {
+        Report::new(OpenClientError::InvalidConfig {
+            transport: "MongoDB",
+            reason: source.to_string(),
+        })
+    })?;
+    client
+        .database("admin")
+        .run_command(mongodb_doc! { "ping": 1 })
+        .await
+        .map_err(|source| {
+            Report::new(OpenClientError::Connect {
+                transport: "MongoDB",
+                reason: format!("failed to validate connection: {source}"),
+            })
+        })?;
+    Ok(client)
 }
 
 impl MongoDbEmitter {
@@ -30,21 +129,32 @@ impl MongoDbEmitter {
     }
 
     pub(in crate::runtime) async fn new(
+        model: &Model,
         client: &nervix_models::CreateClientMongoDb,
         resolved: Option<&ResolvedClientConfig>,
         context: &EmitterSinkContext,
         values: &[MongoDbValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let client = match Self::client_from_config(client_config_entries(
-            resolved,
-            client.config.as_slice(),
-        ))
-        .await
-        {
-            Ok(client) => Some(client),
+        let config = client_config_entries(resolved, client.config.as_slice());
+        let client = match mongodb_database(config) {
+            Ok(database) => match context
+                .runtime
+                .lease_shared_client(&context.domain, &client.name, model, resolved)
+                .await
+            {
+                Ok(lease) => Some(MongoDbEmitterClient {
+                    lease,
+                    client: client.name.clone(),
+                    database,
+                }),
+                Err(error) => {
+                    context.report_init_error("mongodb", &error.to_string());
+                    None
+                }
+            },
             Err(error) => {
-                context.report_init_error("mongodb", &emitter_error_message(&error));
+                context.report_init_error("mongodb", &error.to_string());
                 None
             }
         };
@@ -68,44 +178,6 @@ impl MongoDbEmitter {
             }
         };
         Self { client, program }
-    }
-
-    async fn client_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<MongoDbEmitterClient> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing MongoDB client config key 'addr'".to_string()
-        })?;
-        let mut options = MongoDbClientOptions::parse(&addr).await.map_err(|source| {
-            emitter_config_error(format!("failed to parse MongoDB client addr: {source}"))
-        })?;
-        if let Some(ca_file) = optional_client_config_value(config, "tls_ca_file") {
-            options.tls = Some(MongoDbTls::Enabled(
-                MongoDbTlsOptions::builder()
-                    .ca_file_path(PathBuf::from(ca_file))
-                    .build(),
-            ));
-        }
-        let database = match optional_client_config_value(config, "database") {
-            Some(database) => Some(database.to_owned()),
-            None => options.default_database.clone(),
-        };
-        let Some(database) = database else {
-            return Err(emitter_config_error(
-                "missing MongoDB client config key 'database'",
-            ));
-        };
-        let client = MongoDbClient::with_options(options).map_err(|source| {
-            emitter_init_error(format!("failed to build MongoDB client: {source}"))
-        })?;
-        client
-            .database("admin")
-            .run_command(mongodb_doc! { "ping": 1 })
-            .await
-            .map_err(|source| {
-                emitter_init_error(format!("failed to validate MongoDB connection: {source}"))
-            })?;
-        Ok(MongoDbEmitterClient { client, database })
     }
 
     fn value(value: &serde_json::Value) -> MongoDbBson {
@@ -383,7 +455,14 @@ impl MongoDbEmitter {
         if pending_chunks.is_empty() {
             return outcome;
         }
-        let database = client.client.database(&client.database);
+        let driver = match client.driver() {
+            Ok(driver) => driver,
+            Err(error) => {
+                outcome.fail(error);
+                return outcome;
+            }
+        };
+        let database = driver.database(&client.database);
         let request_acks = batch.merged_acks();
         let collection_names = match await_emitter_confirmation(&request_acks, async {
             database
@@ -482,8 +561,7 @@ impl MongoDbEmitter {
                         }
                     };
                     match await_emitter_confirmation(&request_acks, async {
-                        client
-                            .client
+                        driver
                             .bulk_write(models)
                             .ordered(false)
                             .verbose_results()

@@ -1333,7 +1333,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY normal_telemetry SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT telemetry_ingress ON edge PATH '/telemetry' TYPE HTTP;
-      CREATE CLIENT redis_alerts TYPE REDIS CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE INGESTOR http_telemetry
+      CREATE CLIENT redis_alerts TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE INGESTOR http_telemetry
         FROM ENDPOINT telemetry_ingress MODE NO_ACK SEQUENTIAL
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TO telemetry_by_site

@@ -103,6 +103,7 @@ CREATE CLIENT kafka_local
 
 CREATE CLIENT redis_local
   TYPE REDIS
+  POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
   };
@@ -215,6 +216,7 @@ CREATE CLIENT kafka_local
 
 CREATE CLIENT redis_local
   TYPE REDIS
+  POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
   };
