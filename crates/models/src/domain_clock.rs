@@ -22,6 +22,9 @@ use thiserror::Error;
 
 use crate::{ClusterNodeIdentity, Timestamp};
 
+mod admission;
+pub use admission::DomainAdmissionWindow;
+
 #[derive(Debug, Error)]
 pub enum DomainClockError {
     #[error("time rate '{value}' must be a positive finite number")]

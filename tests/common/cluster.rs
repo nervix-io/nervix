@@ -1277,6 +1277,14 @@ impl Cluster {
         Ok(handle.spec.web_console_url())
     }
 
+    pub(crate) fn http_uri(&self, node_id: &str, path: &str) -> io::Result<String> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        Ok(handle.spec.http_uri(path))
+    }
+
     pub(crate) fn web_console_url_with_password(
         &self,
         node_id: &str,

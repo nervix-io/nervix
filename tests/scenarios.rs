@@ -93,6 +93,7 @@ use crate::common::{
 };
 
 mod common;
+mod ingestion_time;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -14772,15 +14773,8 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
 }
 
 async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
-    let mut cli =
+    let cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
-    if cli.tags_filter.is_none() {
-        cli.tags_filter = Some(
-            "not @clock_contract_expected_failure"
-                .parse()
-                .assured("the built-in clock-contract tag expression is valid"),
-        );
-    }
     let concurrency_factor = cli.custom.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli

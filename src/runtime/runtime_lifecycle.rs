@@ -129,6 +129,7 @@ impl Runtime {
                 state_checkpoint_notifications: DashMap::default(),
                 pending_state_replica_syncs: DashMap::default(),
                 pending_state_checkpoint_announcements: DashMap::default(),
+                state_replication_tasks: TaskTracker::new(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 replicated_branch_lru_snapshots: DashMap::default(),
                 prepared_runtime_state_handoffs,
@@ -418,6 +419,10 @@ impl Runtime {
         self.inner.endpoint_bindings.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.ingestor_readiness.clear();
+        self.inner.pending_state_replica_syncs.clear();
+        self.inner.pending_state_checkpoint_announcements.clear();
+        self.inner.state_replication_tasks.close();
+        self.inner.state_replication_tasks.wait().await;
         self.inner.expiring_stream_states.clear();
         self.inner.replicated_deduplicator_states.clear();
         self.inner.replicated_kafka_offset_states.clear();
