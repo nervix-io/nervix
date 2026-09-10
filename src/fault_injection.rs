@@ -55,6 +55,9 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     entity_gate_pauses: DashMap<String, Arc<EntityGatePause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
+    remote_relay_admission_pauses:
+        DashMap<RemoteRelayAdmissionPauseKey, Arc<RemoteRelayAdmissionPause>, RandomState>,
+    /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     ownership_handoff_preparation_pauses:
         DashMap<String, Arc<OwnershipHandoffPreparationPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -101,6 +104,20 @@ struct EntityGatePause {
     released: AtomicBool,
     reached_notify: Notify,
     release_notify: Notify,
+}
+
+#[derive(Debug, Default)]
+struct RemoteRelayAdmissionPause {
+    reached: AtomicBool,
+    released: AtomicBool,
+    reached_notify: Notify,
+    release_notify: Notify,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RemoteRelayAdmissionPauseKey {
+    domain: String,
+    branch: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -157,6 +174,7 @@ impl Default for FaultInjection {
                 bulk_executions: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
+                remote_relay_admission_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
@@ -406,6 +424,67 @@ impl FaultInjection {
         pause.release_notify.notify_waiters();
     }
 
+    pub fn pause_remote_relay_admission(&self, domain: impl Into<String>) {
+        self.pause_remote_relay_admission_for_branch(domain, None);
+    }
+
+    pub fn pause_remote_relay_admission_for_branch(
+        &self,
+        domain: impl Into<String>,
+        branch: Option<String>,
+    ) {
+        self.inner.remote_relay_admission_pauses.insert(
+            RemoteRelayAdmissionPauseKey {
+                domain: domain.into().to_ascii_lowercase(),
+                branch,
+            },
+            Arc::new(RemoteRelayAdmissionPause::default()),
+        );
+    }
+
+    pub async fn wait_for_remote_relay_admission_pause(&self, domain: &str) {
+        self.wait_for_remote_relay_admission_pause_for_branch(domain, None)
+            .await;
+    }
+
+    pub async fn wait_for_remote_relay_admission_pause_for_branch(
+        &self,
+        domain: &str,
+        branch: Option<&str>,
+    ) {
+        let key = RemoteRelayAdmissionPauseKey {
+            domain: domain.to_ascii_lowercase(),
+            branch: branch.map(str::to_string),
+        };
+        let pause = self.remote_relay_admission_pause(&key);
+        while !pause.reached.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = pause.reached_notify.notified();
+            if pause.reached.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn release_remote_relay_admission_pause(&self, domain: &str) {
+        self.release_remote_relay_admission_pause_for_branch(domain, None);
+    }
+
+    pub fn release_remote_relay_admission_pause_for_branch(
+        &self,
+        domain: &str,
+        branch: Option<&str>,
+    ) {
+        let key = RemoteRelayAdmissionPauseKey {
+            domain: domain.to_ascii_lowercase(),
+            branch: branch.map(str::to_string),
+        };
+        let pause = self.remote_relay_admission_pause(&key);
+        pause.released.store(true, Ordering::Release);
+        pause.release_notify.notify_waiters();
+    }
+
     pub fn pause_ownership_handoff_after_preparation(&self, domain: impl Into<String>) {
         self.inner.ownership_handoff_preparation_pauses.insert(
             domain.into().to_ascii_lowercase(),
@@ -636,6 +715,52 @@ impl FaultInjection {
         self.inner.entity_gate_pauses.remove(&key);
     }
 
+    pub(crate) async fn pause_remote_relay_admission_if_armed(
+        &self,
+        domain: &DomainName,
+        branch: Option<&str>,
+    ) {
+        let exact_key = RemoteRelayAdmissionPauseKey {
+            domain: domain.as_str().to_ascii_lowercase(),
+            branch: branch.map(str::to_string),
+        };
+        let exact_pause = self
+            .inner
+            .remote_relay_admission_pauses
+            .get(&exact_key)
+            .map(|pause| pause.value().clone());
+        let (key, pause) = if let Some(pause) = exact_pause {
+            (exact_key, pause)
+        } else if exact_key.branch.is_some() {
+            let domain_key = RemoteRelayAdmissionPauseKey {
+                domain: exact_key.domain,
+                branch: None,
+            };
+            let Some(pause) = self
+                .inner
+                .remote_relay_admission_pauses
+                .get(&domain_key)
+                .map(|pause| pause.value().clone())
+            else {
+                return;
+            };
+            (domain_key, pause)
+        } else {
+            return;
+        };
+        pause.reached.store(true, Ordering::Release);
+        pause.reached_notify.notify_waiters();
+        while !pause.released.load(Ordering::Acquire) {
+            tokio::task::consume_budget().await;
+            let notified = pause.release_notify.notified();
+            if pause.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        self.inner.remote_relay_admission_pauses.remove(&key);
+    }
+
     pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
         &self,
         domain: &DomainName,
@@ -815,6 +940,19 @@ impl FaultInjection {
     fn entity_gate_pause(&self, key: &str) -> Arc<EntityGatePause> {
         let Some(pause) = self.inner.entity_gate_pauses.get(key) else {
             panic!("entity gate pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn remote_relay_admission_pause(
+        &self,
+        key: &RemoteRelayAdmissionPauseKey,
+    ) -> Arc<RemoteRelayAdmissionPause> {
+        let Some(pause) = self.inner.remote_relay_admission_pauses.get(key) else {
+            panic!(
+                "remote relay admission pause for domain '{}' and branch {:?} is not armed",
+                key.domain, key.branch
+            );
         };
         pause.value().clone()
     }

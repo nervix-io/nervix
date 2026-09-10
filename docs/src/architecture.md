@@ -69,7 +69,8 @@ an endpoint SAN. A connection is accepted only when its CA trust, cluster identi
 advertised endpoint, and HTTP/2 ALPN all agree.
 
 Each peer has independent HTTP/2 pools for membership and management events, commands, Raft
-replication, Arrow relay batches and their acknowledgements, and bulk transfers. Every pool except
+replication, Arrow relay batches, and bulk transfers. Relay progress, cancellation, status, and
+terminal admission acknowledgements use reserved management capacity. Every pool except
 bulk is connected before a peer is reported ready, with capacity reserved in both directions. This
 keeps gossip, heartbeats, elections, administrative operations, and the first remote batch and its
 acknowledgement from waiting behind another traffic class. Gossip exchanges, Raft records,
@@ -83,5 +84,26 @@ address, its prior slots are retired. Replacing credentials starts HTTP/2 gracef
 inbound connections and creates new pools with the replacement certificate. Node shutdown stops
 new admission, drains active streams for the configured interval, and then closes anything still
 active; an incomplete TLS handshake cannot extend that bound.
+
+Relay transfer has three observable boundaries. A successful relay-body response means the Arrow
+bytes reached the receiving process. A terminal admission response means the concrete runtime
+branch accepted the batch. Attached record acknowledgements report downstream processing
+completion. Receiver reservations include capacity for their terminal admission response, and
+progress responses may be coalesced while that terminal capacity remains reserved.
+
+Each sender orders batches by authenticated peer, payload kind, domain, destination relay, and
+concrete branch. Different channels run concurrently, while one channel preserves FIFO order and
+has at most one batch waiting for runtime admission. A delivery identity combines both process
+epochs with a channel incarnation and sequence. Reconnecting to the same receiver process queries
+that identity before sending bytes again. A receiver process change makes an unresolved result
+indeterminate and prevents automatic replay. A later source retry opens a fresh channel
+incarnation, so it is explicitly a new attempt.
+
+Cancellation and runtime admission share one atomic transition. Cancellation that wins before
+admission permanently fences that delivery identity. Cancellation after admission reports the
+known admitted outcome and does not reverse work already handed to the runtime. Branch and domain
+waits therefore retain their own admitted memory while leaving unrelated channels and the reserved
+management operations runnable. Evicting a branch cancels its unadmitted generation; if the branch
+appears again, its delivery channel opens with a fresh incarnation and sequence.
 
 The rest of this section splits control-plane semantics from data-plane semantics because that distinction is fundamental to how Nervix behaves.

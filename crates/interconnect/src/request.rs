@@ -2,8 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Deadlines, handler dispatch, response validation, and membership cancellation for
-//!   typed internal requests.
+//! - **Owns.** Deadlines, reserved request quotas, handler dispatch, response validation, and
+//!   membership cancellation for typed internal requests.
 //! - **Depends on.** The authenticated HTTP/2 transport and rkyv payload vocabulary.
 //! - **Must not know.** The runtime meaning of a request or response.
 
@@ -167,6 +167,10 @@ where
 pub enum RequestSubquota {
     Shared,
     Discovery,
+    Liveness,
+    Admission,
+    Cancellation,
+    Terminal,
 }
 
 /// One typed request message and the response type its handler produces.
@@ -232,8 +236,11 @@ pub enum RequestError {
 pub enum HandlerRegistrationError {
     #[error("a handler for interconnect request '{request}' is already registered")]
     AlreadyRegistered { request: &'static str },
-    #[error("discovery request '{request}' must use the management pool")]
-    DiscoveryRequiresManagement { request: &'static str },
+    #[error("{subquota:?} request '{request}' must use the management pool")]
+    ReservedRequiresManagement {
+        request: &'static str,
+        subquota: RequestSubquota,
+    },
 }
 
 pub(crate) struct HandledResponse {
@@ -252,59 +259,72 @@ pub(crate) struct RequestState {
     live_nodes: DashMap<ClusterNodeName, (), RandomState>,
     live_nodes_observed: AtomicBool,
     membership_changed: Notify,
-    outbound_requests: StdArc<Semaphore>,
-    outbound_discovery: StdArc<Semaphore>,
-    inbound_requests: StdArc<Semaphore>,
-    inbound_discovery: StdArc<Semaphore>,
+    outbound: RequestQuotas,
+    inbound: RequestQuotas,
 }
 
 struct RequestAdmission {
-    _request: Option<OwnedSemaphorePermit>,
-    _subquota: Option<OwnedSemaphorePermit>,
+    _permit: OwnedSemaphorePermit,
+}
+
+struct RequestQuotas {
+    shared: StdArc<Semaphore>,
+    discovery: StdArc<Semaphore>,
+    liveness: StdArc<Semaphore>,
+    admission: StdArc<Semaphore>,
+    cancellation: StdArc<Semaphore>,
+    terminal: StdArc<Semaphore>,
+}
+
+impl RequestQuotas {
+    fn new(capacity: usize) -> Self {
+        Self {
+            shared: StdArc::new(Semaphore::new(capacity)),
+            discovery: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
+            liveness: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
+            admission: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
+            cancellation: StdArc::new(Semaphore::new(capacity.clamp(1, 4))),
+            terminal: StdArc::new(Semaphore::new(capacity.clamp(1, 4))),
+        }
+    }
+
+    fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
+        match subquota {
+            RequestSubquota::Shared => &self.shared,
+            RequestSubquota::Discovery => &self.discovery,
+            RequestSubquota::Liveness => &self.liveness,
+            RequestSubquota::Admission => &self.admission,
+            RequestSubquota::Cancellation => &self.cancellation,
+            RequestSubquota::Terminal => &self.terminal,
+        }
+    }
+
+    fn try_admit(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
+        let permit = StdArc::clone(self.for_subquota(subquota))
+            .try_acquire_owned()
+            .ok()?;
+        Some(RequestAdmission { _permit: permit })
+    }
 }
 
 impl RequestState {
     pub(crate) fn new(capacity: usize) -> Self {
-        let discovery_capacity = capacity.clamp(1, 8);
         Self {
             handlers: DashMap::default(),
             live_nodes: DashMap::default(),
             live_nodes_observed: AtomicBool::new(false),
             membership_changed: Notify::new(),
-            outbound_requests: StdArc::new(Semaphore::new(capacity)),
-            outbound_discovery: StdArc::new(Semaphore::new(discovery_capacity)),
-            inbound_requests: StdArc::new(Semaphore::new(capacity)),
-            inbound_discovery: StdArc::new(Semaphore::new(discovery_capacity)),
+            outbound: RequestQuotas::new(capacity),
+            inbound: RequestQuotas::new(capacity),
         }
     }
 
-    fn try_admit(
-        requests: &StdArc<Semaphore>,
-        discovery: &StdArc<Semaphore>,
-        subquota: RequestSubquota,
-    ) -> Option<RequestAdmission> {
-        let (request, subquota_permit) = match subquota {
-            RequestSubquota::Shared => {
-                let permit = StdArc::clone(requests).try_acquire_owned().ok()?;
-                (Some(permit), None)
-            }
-            RequestSubquota::Discovery => {
-                let permit = StdArc::clone(discovery).try_acquire_owned().ok()?;
-                (None, Some(permit))
-            }
-        };
-        Some(RequestAdmission {
-            _request: request,
-            _subquota: subquota_permit,
-        })
-    }
-
     fn try_admit_outbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        Self::try_admit(&self.outbound_requests, &self.outbound_discovery, subquota)
+        self.outbound.try_admit(subquota)
     }
 
     fn try_admit_inbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        Self::try_admit(&self.inbound_requests, &self.inbound_discovery, subquota)
+        self.inbound.try_admit(subquota)
     }
 }
 
@@ -376,9 +396,12 @@ impl RequestState {
         H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
         F: Future<Output = M::Response> + Send + 'static,
     {
-        if M::SUBQUOTA == RequestSubquota::Discovery && M::CLASS != PoolClass::Management {
+        if M::SUBQUOTA != RequestSubquota::Shared && M::CLASS != PoolClass::Management {
             return Err(Report::new(
-                HandlerRegistrationError::DiscoveryRequiresManagement { request: M::NAME },
+                HandlerRegistrationError::ReservedRequiresManagement {
+                    request: M::NAME,
+                    subquota: M::SUBQUOTA,
+                },
             ));
         }
         let erased: Box<dyn ErasedRequestHandler> = Box::new(TypedRequestHandler::<M, H> {
@@ -575,7 +598,7 @@ impl Transport {
             });
             let response = self
                 .inner
-                .round_trip_control(node, request, timeout_duration)
+                .round_trip_control(node, request, M::SUBQUOTA, timeout_duration)
                 .await
                 .map_err(|error| match error {
                     super::TransportError::ShuttingDown => {

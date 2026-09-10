@@ -23,14 +23,16 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use super::{PoolClass, RelayPayload, RelayPayloadKind, TransportError};
+use super::{
+    PoolClass, RelayAdmissionStatus, RelayDelivery, RelayPayload, RelayPayloadKind, TransportError,
+};
 
 const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
 
 /// Changes whenever the one supported interconnect contract changes.
 pub(crate) const WIRE_CONTRACT_FINGERPRINT: [u8; 32] = [
-    0x1d, 0x7a, 0x0d, 0xa4, 0xc9, 0xbc, 0x7f, 0x4f, 0x1f, 0xdb, 0x1e, 0xd2, 0x02, 0xd5, 0x8a, 0x1e,
-    0x37, 0xd3, 0xab, 0xc7, 0x36, 0x99, 0xb4, 0x96, 0xf0, 0xa2, 0xd0, 0xa6, 0xf3, 0xd8, 0x27, 0x5c,
+    0xdd, 0x35, 0x20, 0x0e, 0xf4, 0x13, 0x33, 0xbd, 0x6b, 0xc5, 0x9a, 0xa9, 0x2c, 0x83, 0x57, 0xef,
+    0xc8, 0x8f, 0xbe, 0xba, 0xea, 0xb0, 0x77, 0xc8, 0xf7, 0x38, 0xdb, 0x75, 0xa6, 0xa8, 0x79, 0x01,
 ];
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,15 +54,38 @@ pub(crate) struct ConnectionAccepted {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub(crate) struct RelayGrantRequest {
     pub(crate) sender_epoch: u64,
-    pub(crate) attempt: u64,
+    pub(crate) delivery: RelayDelivery,
     pub(crate) body_bytes: u64,
     pub(crate) metadata: RelayMetadata,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RelayGrantResponse {
-    pub(crate) grant_id: u64,
     pub(crate) receiver_epoch: u64,
+    pub(crate) disposition: RelayGrantDisposition,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum RelayGrantDisposition {
+    SendBody { grant_id: u64 },
+    BodyReceived,
+    Admitted,
+    Rejected(String),
+    Cancelled,
+    Retired,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RelayAdmissionRequest {
+    pub(crate) sender_epoch: u64,
+    pub(crate) receiver_epoch: u64,
+    pub(crate) delivery: RelayDelivery,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RelayAdmissionResponse {
+    pub(crate) receiver_epoch: u64,
+    pub(crate) status: RelayAdmissionStatus,
 }
 
 /// A decoded value together with the charge that covers its retained allocations.
@@ -116,8 +141,13 @@ impl RelayMetadata {
         }
     }
 
-    pub(crate) fn into_payload(self, batch_ipc: ChargedBytes) -> RelayPayload {
+    pub(crate) fn into_payload(
+        self,
+        delivery: RelayDelivery,
+        batch_ipc: ChargedBytes,
+    ) -> RelayPayload {
         RelayPayload {
+            delivery,
             kind: self.kind,
             domain: self.domain,
             relay: self.relay,
