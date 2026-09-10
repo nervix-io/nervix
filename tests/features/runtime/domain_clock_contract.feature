@@ -224,7 +224,7 @@ Feature: Domain clock contract regressions
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE PACED DOMAIN {{domain}} WITH PERIOD 10s SKEW 2s;
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD <clock_interval> SKEW <clock_interval>;
       """
     And domain clock progress for domain "{{domain}}" is paused before delivery
     When these NSPL commands are executed
@@ -289,9 +289,9 @@ Feature: Domain clock contract regressions
     And timestamp placeholder "after_progress" is not before timestamp placeholder "before_progress"
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
+      | cluster_size | replica_count | clock_interval |
+      | 1            | 0             | 10s            |
+      | 3            | 0             | 10s            |
 
   Scenario Outline: Out-of-range paced starts and projections return typed timestamp diagnostics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
