@@ -3,6 +3,14 @@
 //! Codecs and websocket signaling protocols both express boundary behavior as jaq programs over
 //! self-describing payloads. This module owns compiling those programs once, running them, and
 //! converting each supported format to and from the JSON values programs operate on.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The compiled program, its execution, and the conversion of every supported
+//!   schemaless format to and from the JSON values a program operates on.
+//! - **Depends on.** `jaq` and the wire-format crates.
+//! - **Must not know.** Schemas, relays or branches. Its callers decide what a program means; this
+//!   module only runs it.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -19,6 +27,7 @@ use jaq_fmts::{
 use jaq_json::{Num as JaqNum, Val as JaqVal};
 use nervix_models::{CodecJaqFormat, SignalingWireFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use strum::IntoStaticStr;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -223,45 +232,76 @@ pub enum JaqFormatError {
     },
 }
 
-/// A self-describing wire format that jaq programs read from and write to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JaqNativeFormat {
-    Json,
-    Yaml,
-    Toml,
-    Xml,
-    Cbor,
-    Raw,
+macro_rules! declare_jaq_native_formats {
+    (
+        common {$($Common:ident => $common_binary:literal,)+}
+        signaling_only {$($SignalingOnly:ident => $signaling_binary:literal,)+}
+    ) => {
+        /// A self-describing wire format that jaq programs read from and write to.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
+        #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+        pub enum JaqNativeFormat {
+            $($Common,)+
+            $($SignalingOnly,)+
+        }
+
+        impl JaqNativeFormat {
+            pub fn name(self) -> &'static str {
+                self.into()
+            }
+
+            /// Whether values of this format travel as binary rather than text frames.
+            pub fn is_binary(self) -> bool {
+                match self {
+                    $(Self::$Common => $common_binary,)+
+                    $(Self::$SignalingOnly => $signaling_binary,)+
+                }
+            }
+
+            fn jaq_format(self) -> JaqFormat {
+                match self {
+                    $(Self::$Common => JaqFormat::$Common,)+
+                    $(Self::$SignalingOnly => JaqFormat::$SignalingOnly,)+
+                }
+            }
+        }
+
+        impl From<CodecJaqFormat> for JaqNativeFormat {
+            fn from(format: CodecJaqFormat) -> Self {
+                match format {
+                    $(CodecJaqFormat::$Common => Self::$Common,)+
+                }
+            }
+        }
+
+        impl TryFrom<&SignalingWireFormat> for JaqNativeFormat {
+            type Error = ();
+
+            fn try_from(format: &SignalingWireFormat) -> Result<Self, Self::Error> {
+                match format {
+                    $(SignalingWireFormat::$Common => Ok(Self::$Common),)+
+                    $(SignalingWireFormat::$SignalingOnly => Ok(Self::$SignalingOnly),)+
+                    SignalingWireFormat::Protobuf(_) => Err(()),
+                }
+            }
+        }
+    };
+}
+
+declare_jaq_native_formats! {
+    common {
+        Json => false,
+        Yaml => false,
+        Toml => false,
+        Xml => false,
+        Cbor => true,
+    }
+    signaling_only {
+        Raw => false,
+    }
 }
 
 impl JaqNativeFormat {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Json => "JSON",
-            Self::Yaml => "YAML",
-            Self::Toml => "TOML",
-            Self::Xml => "XML",
-            Self::Cbor => "CBOR",
-            Self::Raw => "RAW",
-        }
-    }
-
-    /// Whether values of this format travel as binary rather than text frames.
-    pub fn is_binary(self) -> bool {
-        matches!(self, Self::Cbor)
-    }
-
-    fn jaq_format(self) -> JaqFormat {
-        match self {
-            Self::Json => JaqFormat::Json,
-            Self::Yaml => JaqFormat::Yaml,
-            Self::Toml => JaqFormat::Toml,
-            Self::Xml => JaqFormat::Xml,
-            Self::Cbor => JaqFormat::Cbor,
-            Self::Raw => JaqFormat::Raw,
-        }
-    }
-
     /// Decode a payload into the single value it represents.
     ///
     /// `RAW` slurps the whole payload into one string rather than splitting it into lines, because
@@ -317,34 +357,6 @@ impl JaqNativeFormat {
         JaqFormatError::Encode {
             format: self.name(),
             reason: reason.to_string(),
-        }
-    }
-}
-
-impl From<CodecJaqFormat> for JaqNativeFormat {
-    fn from(format: CodecJaqFormat) -> Self {
-        match format {
-            CodecJaqFormat::Json => Self::Json,
-            CodecJaqFormat::Yaml => Self::Yaml,
-            CodecJaqFormat::Toml => Self::Toml,
-            CodecJaqFormat::Xml => Self::Xml,
-            CodecJaqFormat::Cbor => Self::Cbor,
-        }
-    }
-}
-
-impl TryFrom<&SignalingWireFormat> for JaqNativeFormat {
-    type Error = ();
-
-    fn try_from(format: &SignalingWireFormat) -> Result<Self, Self::Error> {
-        match format {
-            SignalingWireFormat::Json => Ok(Self::Json),
-            SignalingWireFormat::Yaml => Ok(Self::Yaml),
-            SignalingWireFormat::Toml => Ok(Self::Toml),
-            SignalingWireFormat::Xml => Ok(Self::Xml),
-            SignalingWireFormat::Cbor => Ok(Self::Cbor),
-            SignalingWireFormat::Raw => Ok(Self::Raw),
-            SignalingWireFormat::Protobuf(_) => Err(()),
         }
     }
 }

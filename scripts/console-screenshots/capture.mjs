@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(HERE, "../..");
 
 // Matches the single node the quickstart starts, so the console the reader sees
 // here is the console they get by following it.
@@ -120,8 +121,11 @@ async function startServer(serverBinary, ports, dbPath) {
       NERVIX_HTTPS_LISTEN_ADDR: `127.0.0.1:${ports.https}`,
       NERVIX_OBSERVABILITY_LISTEN_ADDR: `127.0.0.1:${ports.observability}`,
       NERVIX_WEB_CONSOLE_LISTEN_ADDR: `127.0.0.1:${ports.console}`,
-      NERVIX_CLUSTER_API_LISTEN_ADDR: `127.0.0.1:${ports.clusterApi}`,
-      NERVIX_CLUSTER_API_ADVERTISE_ADDR: `127.0.0.1:${ports.clusterApi}`,
+      NERVIX_INTERCONNECT_LISTEN_ADDR: `127.0.0.1:${ports.interconnect}`,
+      NERVIX_INTERCONNECT_ADVERTISE_ADDR: `127.0.0.1:${ports.interconnect}`,
+      NERVIX_INTERCONNECT_TLS_CA: join(REPO_ROOT, "tls/dev/ca.pem"),
+      NERVIX_INTERCONNECT_TLS_CERT: join(REPO_ROOT, "tls/dev/node.pem"),
+      NERVIX_INTERCONNECT_TLS_KEY: join(REPO_ROOT, "tls/dev/node-key.pem"),
       NERVIX_DB_PATH: dbPath,
       NERVIX_INIT_DEFAULT_USER_PASSWORD: PASSWORD,
     },
@@ -328,6 +332,7 @@ async function main() {
     }
   }
   const output = resolve(options.output);
+  await run("bash", ["scripts/generate_dev_tls.sh"], { cwd: REPO_ROOT });
   await rm(output, { recursive: true, force: true });
   await mkdir(output, { recursive: true });
 
@@ -337,7 +342,7 @@ async function main() {
     https: await freePort(),
     observability: await freePort(),
     console: await freePort(),
-    clusterApi: await freePort(),
+    interconnect: await freePort(),
   };
   const stateDir = await mkdtemp(join(tmpdir(), "nervix-console-screenshots-"));
 

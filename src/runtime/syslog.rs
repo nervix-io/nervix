@@ -1,6 +1,7 @@
-use std::sync::Arc as StdArc;
+use std::{num::NonZeroUsize, sync::Arc as StdArc};
 
 use ahash::HashSet;
+use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use thiserror::Error;
@@ -8,7 +9,7 @@ use url::Url;
 
 use super::{RustlsClientConfigSource, client_tls_paths, read_tls_file};
 
-pub(super) const DEFAULT_MAX_MESSAGE_SIZE: usize = 131_072;
+pub(super) const DEFAULT_MAX_MESSAGE_SIZE: NonZeroUsize = nonzero!(131_072usize);
 pub(super) const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,8 +59,6 @@ pub(super) enum SyslogConfigError {
         #[source]
         source: std::num::ParseIntError,
     },
-    #[error("invalid Syslog client config key 'max_message_size': value must be greater than zero")]
-    ZeroMessageSize,
     #[error("invalid Syslog client config key 'addr' value '{value}': {source}")]
     AddressParse {
         value: String,
@@ -93,7 +92,7 @@ pub(super) struct SyslogClientConfig {
     pub(super) protocol: SyslogProtocol,
     pub(super) addr: String,
     pub(super) server_name: String,
-    pub(super) max_message_size: usize,
+    pub(super) max_message_size: NonZeroUsize,
     pub(super) framing: SyslogFraming,
     entries: Vec<nervix_models::ClientConfigEntry>,
 }
@@ -120,7 +119,7 @@ impl SyslogClientConfig {
         let max_message_size = Self::optional_value(entries, "max_message_size")
             .map(|value| {
                 value
-                    .parse::<usize>()
+                    .parse::<NonZeroUsize>()
                     .map_err(|source| SyslogConfigError::MessageSize {
                         value: value.to_string(),
                         source,
@@ -128,9 +127,6 @@ impl SyslogClientConfig {
             })
             .transpose()?
             .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE);
-        if max_message_size == 0 {
-            return Err(SyslogConfigError::ZeroMessageSize);
-        }
         let explicit_framing = Self::optional_value(entries, "framing");
         let framing = match explicit_framing.unwrap_or("octet-counting") {
             "octet-counting" => SyslogFraming::OctetCounting,
@@ -210,9 +206,10 @@ impl SyslogClientConfig {
         entries: &[nervix_models::ClientConfigEntry],
         key: &'static str,
     ) -> Result<String, SyslogConfigError> {
-        Self::optional_value(entries, key)
-            .map(str::to_string)
-            .ok_or(SyslogConfigError::MissingKey { key })
+        match Self::optional_value(entries, key) {
+            Some(value) => Ok(value.to_string()),
+            None => Err(SyslogConfigError::MissingKey { key }),
+        }
     }
 
     fn optional_value<'a>(

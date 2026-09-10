@@ -7,12 +7,13 @@
 
 use std::{cell::UnsafeCell, ops::Range, panic::AssertUnwindSafe};
 
+use meticulous::OptionExt as _;
 use nervix_wasm_protocol::GuestSnapshot;
 
 use crate::{
     context::{BranchContext, GuestContext, TimeoutHandle},
     envelope::InputBatch,
-    error::{ERR_ERROR_STATE, ERR_INVALID_SIZE, GuestError, SUCCESS},
+    error::{ERR_ERROR_STATE, ERR_INVALID_SIZE, ERR_OUT_OF_BOUNDS, GuestError, SUCCESS},
     processor::Processor,
 };
 
@@ -81,14 +82,14 @@ impl RuntimeCore {
             self.buffer.reserve_exact(size - self.buffer.capacity());
         }
         self.buffer.resize(size, 0);
-        self.buffer.as_mut_ptr() as i32
+        abi_pointer(self.buffer.as_mut_ptr())
     }
 
     fn buffer_range(&self, ptr: i32, size: i32) -> Result<Range<usize>, GuestError> {
         let ptr = usize::try_from(ptr).map_err(|_| GuestError::OutOfBounds)?;
         let size = usize::try_from(size).map_err(|_| GuestError::InvalidSize)?;
         let end = ptr.checked_add(size).ok_or(GuestError::OutOfBounds)?;
-        let base = self.buffer.as_ptr() as usize;
+        let base = self.buffer.as_ptr().addr();
         if ptr < base || end > base + self.buffer.len() {
             return Err(GuestError::OutOfBounds);
         }
@@ -215,15 +216,33 @@ fn guarded(
 }
 
 pub fn buffer_ptr() -> i32 {
-    CORE.with(|core| core.buffer.as_mut_ptr() as i32)
+    CORE.with(|core| abi_pointer(core.buffer.as_mut_ptr()))
+}
+
+fn abi_size(size: usize) -> i32 {
+    match i32::try_from(size) {
+        Ok(size) => size,
+        Err(_) => ERR_INVALID_SIZE,
+    }
+}
+
+/// Renders a guest address as the `i32` the C ABI passes addresses in.
+///
+/// A wasm32 guest addresses at most four gigabytes, so an address the ABI cannot express is a
+/// buffer the host could never read back.
+fn abi_pointer<T>(ptr: *const T) -> i32 {
+    match i32::try_from(ptr.addr()) {
+        Ok(address) => address,
+        Err(_) => ERR_OUT_OF_BOUNDS,
+    }
 }
 
 pub fn buffer_len() -> i32 {
-    CORE.with(|core| core.buffer.len() as i32)
+    CORE.with(|core| abi_size(core.buffer.len()))
 }
 
 pub fn buffer_capacity() -> i32 {
-    CORE.with(|core| core.buffer.capacity() as i32)
+    CORE.with(|core| abi_size(core.buffer.capacity()))
 }
 
 pub fn alloc(size: i32) -> i32 {
@@ -238,13 +257,13 @@ pub fn global_error_ptr() -> i32 {
         if core.global_error.is_empty() {
             0
         } else {
-            core.global_error.as_mut_ptr() as i32
+            abi_pointer(core.global_error.as_mut_ptr())
         }
     })
 }
 
 pub fn global_error_len() -> i32 {
-    CORE.with(|core| core.global_error.len() as i32)
+    CORE.with(|core| abi_size(core.global_error.len()))
 }
 
 pub fn clear_global_error() -> i32 {
@@ -278,8 +297,14 @@ pub fn process_batch<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) 
             return Err(GuestError::NotInitialized);
         }
         let input = InputBatch::from_envelope_bytes(core.read_buffer(ptr, size)?)?;
-        core.processed_batches = core.processed_batches.saturating_add(1);
-        core.processed_rows = core.processed_rows.saturating_add(input.row_count());
+        core.processed_batches = core
+            .processed_batches
+            .checked_add(1)
+            .assured("a guest cannot process 2^64 batches in the lifetime of an instance");
+        core.processed_rows = core
+            .processed_rows
+            .checked_add(input.row_count())
+            .assured("a guest cannot process 2^64 rows in the lifetime of an instance");
         let mut ctx = core.guest_context()?;
         slot.with(|instance| {
             let Some(instance) = instance.as_mut() else {
@@ -329,14 +354,16 @@ pub fn read_emit() -> i32 {
         let envelope = core.pending_emit.remove(0);
         core.buffer.clear();
         core.buffer.extend_from_slice(&envelope);
-        Ok(core.buffer.len() as i32)
+        i32::try_from(core.buffer.len()).map_err(|_| GuestError::InvalidSize)
     })
 }
 
 pub fn dump_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     guarded(false, |core| {
-        let saved_state =
-            slot.with(|instance| instance.as_ref().map(P::save_state).unwrap_or_default());
+        let saved_state = slot.with(|instance| match instance.as_ref() {
+            Some(instance) => P::save_state(instance),
+            None => Vec::new(),
+        });
         let snapshot = GuestSnapshot {
             processed_batches: core.processed_batches,
             processed_rows: core.processed_rows,
@@ -349,7 +376,7 @@ pub fn dump_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
             error_state: core.error_state.clone(),
         };
         core.buffer = snapshot.encode();
-        Ok(core.buffer.len() as i32)
+        i32::try_from(core.buffer.len()).map_err(|_| GuestError::InvalidSize)
     })
 }
 

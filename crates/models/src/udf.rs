@@ -1,35 +1,54 @@
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumString, IntoStaticStr};
 
-use crate::{Identifier, ParseAsType};
+use crate::{FieldName, ParseAsType, UdfName};
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumString,
+    IntoStaticStr,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum UdfLanguage {
-    #[strum(serialize = "ROTO_0_11")]
-    Roto0_11,
+    #[strum(serialize = "ROTO_0_13")]
+    Roto0_13,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct UdfArgument {
-    pub name: Identifier,
+    pub name: FieldName,
     pub ty: ParseAsType,
     #[serde(default)]
     pub optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct UdfReturn {
     pub ty: ParseAsType,
     #[serde(default)]
     pub optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateUdf {
-    pub name: Identifier,
+    pub name: UdfName,
     pub language: UdfLanguage,
     pub arguments: Vec<UdfArgument>,
     pub returns: UdfReturn,
@@ -41,7 +60,7 @@ pub struct CreateUdf {
 
 impl CreateUdf {
     pub fn new(
-        name: Identifier,
+        name: UdfName,
         language: UdfLanguage,
         arguments: Vec<UdfArgument>,
         returns: UdfReturn,

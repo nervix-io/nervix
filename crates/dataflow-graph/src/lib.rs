@@ -1,3 +1,16 @@
+//! The description of an execution graph, produced once and rendered many times.
+//!
+//! Layer: vocabulary.
+//!
+//! - **Owns.** What a graph is when it is described rather than run: nodes, edges, roles, branch
+//!   identity, per-node and per-branch statistics, and the ASCII rendering of the whole.
+//! - **Depends on.** Serialization and rendering crates.
+//! - **Must not know.** How a graph is validated, scheduled or executed. The registry fills this
+//!   in; the console, the CLI and the API read it.
+//!
+//! This crate breaks its own contract: it names nothing in Nervix, so its domain, node and schema
+//! identities are `String` where the vocabulary already has typed names for them.
+
 use std::collections::BTreeMap;
 
 use ascii_dag::{Graph, LayoutConfig, RenderMode};
@@ -135,7 +148,20 @@ pub enum DataflowNodeKind {
 pub enum DataflowNodeStatus {
     #[default]
     Ok,
+    /// The node is healthy but holds no connection: it has asked a shared client's pool for one
+    /// and has not been given it yet. A full pool is a waiting state, not a failure, so this is
+    /// distinct from both a working node and a broken one.
+    Waiting,
     Error,
+}
+
+/// How one graph node is currently doing: whether it is healthy, what went wrong when it is not,
+/// and how long it will wait before reconnecting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DataflowNodeHealth {
+    pub status: DataflowNodeStatus,
+    pub detail: Option<String>,
+    pub reconnect_wait_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

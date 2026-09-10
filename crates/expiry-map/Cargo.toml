@@ -1,4 +1,5 @@
 [package]
+description = "A hash-indexed map that keeps its values in a caller-defined expiration order"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-expiry-map"
@@ -10,4 +11,5 @@ workspace = true
 [dependencies]
 ahash = { workspace = true }
 intrusive-collections = { workspace = true }
+meticulous = { workspace = true }
 triomphe = { workspace = true }

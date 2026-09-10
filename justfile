@@ -61,6 +61,12 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
+test-runtime-state-capabilities: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --features testing --test runtime_state_capabilities
+
 # Validate the small unsafe boundary used by deduplicator expiration tracking.
 test-expiry-map:
     cargo test --package nervix-expiry-map
@@ -238,6 +244,10 @@ lint: build-web-console lint-inner proto-lint
 audit:
     cargo audit
 
+# Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
+ratchet *args:
+    python3 scripts/ratchet.py {{ args }}
+
 validate: fmt lint validate-skill validate-nspl-docs
 
 validate-ci: fmt-check lint validate-skill validate-nspl-docs
@@ -344,7 +354,11 @@ deps:
 deps-down:
     docker compose down --remove-orphans --volumes
 
-server *args: build-deps
+server *args: build-deps generate-dev-tls
+    NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \
+    NERVIX_INTERCONNECT_TLS_CA="${NERVIX_INTERCONNECT_TLS_CA:-tls/dev/ca.pem}" \
+    NERVIX_INTERCONNECT_TLS_CERT="${NERVIX_INTERCONNECT_TLS_CERT:-tls/dev/node.pem}" \
+    NERVIX_INTERCONNECT_TLS_KEY="${NERVIX_INTERCONNECT_TLS_KEY:-tls/dev/node-key.pem}" \
     cargo run --package nervix-server --bin nervix-server -- {{ args }}
 
 client *args: build-deps
@@ -357,10 +371,10 @@ build-web-console:
     env -u NO_COLOR trunk build --release
 
 build-server:
-    CARGO_TARGET_DIR={{cargo_target_dir}}/server cargo build {{release_flag}} --package nervix-server --bin nervix-server
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server
 
 build-cli:
-    CARGO_TARGET_DIR={{cargo_target_dir}}/cli cargo build {{release_flag}} --package nervix-cli --bin nervix-cli
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/cli cargo build {{ release_flag }} --package nervix-cli --bin nervix-cli
 
 [parallel]
 build-apps: build-cli build-server
@@ -492,8 +506,8 @@ cluster-dashboard: build-all
         /*) ;;
         *) target_dir="${PWD}/${target_dir}" ;;
     esac
-    cli_bin_dir="${target_dir}/cli/{{build_mode}}"
-    server_bin_dir="${target_dir}/server/{{build_mode}}"
+    cli_bin_dir="${target_dir}/cli/{{ build_mode }}"
+    server_bin_dir="${target_dir}/server/{{ build_mode }}"
     export PATH="${cli_bin_dir}:${server_bin_dir}:${PATH}"
     exec zellij --layout .zellij/layouts/local-3-nodes.kdl
 
@@ -567,7 +581,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.15.1}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.19.0}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \

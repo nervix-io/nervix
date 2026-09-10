@@ -1,4 +1,4 @@
-use std::{io::Write, str::FromStr};
+use std::{io::Write, num::NonZeroU64, str::FromStr};
 
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
@@ -7,6 +7,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, TimeUnit};
 use flate2::{Compression as GzipLevel, write::GzEncoder};
+use nervix_models::EmitterName;
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::{
@@ -104,8 +105,8 @@ enum OtelTransport {
 
 struct OtelClient {
     transport: OtelTransport,
-    fault_injector: Arc<OtelClientFaultInjector>,
-    emitter: Identifier,
+    fault_injection: ConfiguredFaultInjection,
+    emitter: EmitterName,
 }
 
 enum OtelExportRequest {
@@ -217,16 +218,15 @@ impl OtelClientSettings {
             }
         };
         let timeout = optional_client_config_value(config, "timeout_ms")
-            .map(|raw| {
-                let millis = raw.parse::<u64>().map_err(|_| {
-                    emitter_config_error(format!("invalid OTEL timeout_ms '{raw}'"))
+            .map(|raw| -> EmitterRuntimeResult<Duration> {
+                // `NonZeroU64` rejects both a non-number and a zero, so a request budget that
+                // could never allow a request is not representable past this point.
+                let millis = raw.parse::<NonZeroU64>().map_err(|_| {
+                    emitter_config_error(format!(
+                        "invalid OTEL timeout_ms '{raw}'; expected a positive integer"
+                    ))
                 })?;
-                if millis == 0 {
-                    return Err(emitter_config_error(
-                        "OTEL timeout_ms must be greater than zero",
-                    ));
-                }
-                Ok(Duration::from_millis(millis))
+                Ok(Duration::from_millis(millis.get()))
             })
             .transpose()?;
         let headers = optional_client_config_value(config, "headers")
@@ -278,13 +278,11 @@ impl OtelEmitter {
             scope,
             input_schema,
         } = init;
-        let config = resolved
-            .map(|config| config.entries.as_slice())
-            .unwrap_or(client.config.as_slice());
+        let config = client_config_entries(resolved, client.config.as_slice());
         let client = match Self::transport_from_config(config) {
             Ok(transport) => Some(OtelClient {
                 transport,
-                fault_injector: context.runtime.otel_client_faults.clone(),
+                fault_injection: context.runtime.inner.fault_injection.clone(),
                 emitter: context.emitter.clone(),
             }),
             Err(error) => {
@@ -353,10 +351,10 @@ impl OtelEmitter {
                 }
                 let tls = client_tls_paths(config);
                 if settings.endpoint.scheme() == "https" {
-                    let host = settings
-                        .endpoint
-                        .host_str()
-                        .expect("validated OTEL URL must retain its host");
+                    let host = settings.endpoint.host_str().verified(
+                        "the check above accepted an https endpoint, and the url crate always \
+                         gives a special-scheme URL a host",
+                    );
                     let mut tls_config = ClientTlsConfig::new()
                         .with_webpki_roots()
                         .domain_name(host.to_string());
@@ -647,11 +645,7 @@ impl OtelEmitter {
                 return outcome;
             }
         };
-        let mapped = OtelMappedBatch {
-            output: &output,
-            values,
-            attributes,
-        };
+        let mapped = OtelMappedBatch::new(&output, values, attributes);
         let observed_time =
             match Self::timestamp_to_unix_nano(current_timestamp().unix_nanos(), "observed_time") {
                 Ok(value) => value,
@@ -667,17 +661,30 @@ impl OtelEmitter {
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row) {
-                        outcome.reject_structured((batch_index, *row), error);
+                        outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error,
+                        );
                         continue;
                     }
                     match mapped.log_record(*row, observed_time) {
                         Ok(record) => {
                             records.push(record);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 OtelExportRequest::Logs(ExportLogsServiceRequest {
@@ -697,17 +704,30 @@ impl OtelEmitter {
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row) {
-                        outcome.reject_structured((batch_index, *row), error);
+                        outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error,
+                        );
                         continue;
                     }
                     match mapped.span(*row) {
                         Ok(span) => {
                             spans.push(span);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 OtelExportRequest::Traces(ExportTraceServiceRequest {
@@ -727,7 +747,13 @@ impl OtelEmitter {
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
                     if let Some(error) = Self::side_error(program, &output, *row) {
-                        outcome.reject_structured((batch_index, *row), error);
+                        outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error,
+                        );
                     } else {
                         metric_rows.push(*row);
                     }
@@ -811,7 +837,10 @@ impl OtelEmitter {
 
 impl OtelClient {
     async fn export(&self, request: OtelExportRequest) -> OtelTransportOutcome {
-        if self.fault_injector.is_unavailable(&self.emitter) {
+        if self
+            .fault_injection
+            .otel_client_is_unavailable(&self.emitter)
+        {
             let reason = match &self.transport {
                 OtelTransport::Grpc { .. } => {
                     "OTEL client fault injector returned gRPC UNAVAILABLE"
@@ -934,20 +963,34 @@ impl OtelTransport {
         compression: OtelCompression,
         request: OtelExportRequest,
     ) -> OtelTransportOutcome {
-        let (path, body, response_kind) = match request {
-            OtelExportRequest::Logs(request) => {
-                ("logs", request.encode_to_vec(), OtelHttpResponseKind::Logs)
-            }
-            OtelExportRequest::Traces(request) => (
-                "traces",
-                request.encode_to_vec(),
-                OtelHttpResponseKind::Traces,
-            ),
-            OtelExportRequest::Metrics(request) => (
-                "metrics",
-                request.encode_to_vec(),
-                OtelHttpResponseKind::Metrics,
-            ),
+        /// One OTLP signal encoded for HTTP export: the path segment it posts to, its protobuf
+        /// body, and the response type the receiver answers with.
+        struct EncodedSignal {
+            path: &'static str,
+            body: Vec<u8>,
+            response_kind: OtelHttpResponseKind,
+        }
+
+        let EncodedSignal {
+            path,
+            body,
+            response_kind,
+        } = match request {
+            OtelExportRequest::Logs(request) => EncodedSignal {
+                path: "logs",
+                body: request.encode_to_vec(),
+                response_kind: OtelHttpResponseKind::Logs,
+            },
+            OtelExportRequest::Traces(request) => EncodedSignal {
+                path: "traces",
+                body: request.encode_to_vec(),
+                response_kind: OtelHttpResponseKind::Traces,
+            },
+            OtelExportRequest::Metrics(request) => EncodedSignal {
+                path: "metrics",
+                body: request.encode_to_vec(),
+                response_kind: OtelHttpResponseKind::Metrics,
+            },
         };
         let body = match Self::http_body(body, compression) {
             Ok(body) => body,
@@ -1036,83 +1079,89 @@ impl OtelTransport {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Option<Duration> {
         let value = value?.trim();
-        value
-            .parse::<f64>()
+        if let Ok(seconds) = value.parse::<f64>()
+            && seconds.is_finite()
+            && seconds >= 0.0
+            && let Ok(delay) = Duration::try_from_secs_f64(seconds)
+        {
+            return Some(delay);
+        }
+        let Ok(deadline) = chrono::DateTime::parse_from_rfc2822(value) else {
+            return None;
+        };
+        deadline
+            .with_timezone(&chrono::Utc)
+            .signed_duration_since(now)
+            .to_std()
             .ok()
-            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-            .or_else(|| {
-                chrono::DateTime::parse_from_rfc2822(value)
-                    .ok()
-                    .and_then(|deadline| {
-                        deadline
-                            .with_timezone(&chrono::Utc)
-                            .signed_duration_since(now)
-                            .to_std()
-                            .ok()
-                    })
-            })
     }
 }
 
-enum OtelHttpResponseKind {
-    Logs,
-    Traces,
-    Metrics,
-}
-
-impl OtelHttpResponseKind {
-    fn decode(&self, body: &[u8]) -> Result<Option<OtelPartialSuccess>, otel_prost::DecodeError> {
-        match self {
-            Self::Logs => Ok(ExportLogsServiceResponse::decode(body)?
-                .partial_success
-                .map(Into::into)),
-            Self::Traces => Ok(ExportTraceServiceResponse::decode(body)?
-                .partial_success
-                .map(Into::into)),
-            Self::Metrics => Ok(ExportMetricsServiceResponse::decode(body)?
-                .partial_success
-                .map(Into::into)),
+macro_rules! declare_otel_http_response_kinds {
+    ($($Kind:ident => $Response:ident, $PartialSuccess:ident, $rejected:ident;)+) => {
+        enum OtelHttpResponseKind {
+            $($Kind,)+
         }
-    }
+
+        impl OtelHttpResponseKind {
+            fn decode(
+                &self,
+                body: &[u8],
+            ) -> Result<Option<OtelPartialSuccess>, otel_prost::DecodeError> {
+                match self {
+                    $(Self::$Kind => Ok($Response::decode(body)?
+                        .partial_success
+                        .map(Into::into)),)+
+                }
+            }
+        }
+
+        $(impl From<$PartialSuccess> for OtelPartialSuccess {
+            fn from(value: $PartialSuccess) -> Self {
+                Self {
+                    rejected: value.$rejected,
+                    error_message: value.error_message,
+                }
+            }
+        })+
+    };
 }
 
-impl From<ExportLogsPartialSuccess> for OtelPartialSuccess {
-    fn from(value: ExportLogsPartialSuccess) -> Self {
-        Self {
-            rejected: value.rejected_log_records,
-            error_message: value.error_message,
-        }
-    }
-}
-
-impl From<ExportTracePartialSuccess> for OtelPartialSuccess {
-    fn from(value: ExportTracePartialSuccess) -> Self {
-        Self {
-            rejected: value.rejected_spans,
-            error_message: value.error_message,
-        }
-    }
-}
-
-impl From<ExportMetricsPartialSuccess> for OtelPartialSuccess {
-    fn from(value: ExportMetricsPartialSuccess) -> Self {
-        Self {
-            rejected: value.rejected_data_points,
-            error_message: value.error_message,
-        }
-    }
+declare_otel_http_response_kinds! {
+    Logs => ExportLogsServiceResponse, ExportLogsPartialSuccess, rejected_log_records;
+    Traces => ExportTraceServiceResponse, ExportTracePartialSuccess, rejected_spans;
+    Metrics => ExportMetricsServiceResponse, ExportMetricsPartialSuccess, rejected_data_points;
 }
 
 struct OtelMappedBatch<'a> {
     output: &'a VmTypedBatch,
     values: &'a [OtelValueMapping],
     attributes: &'a [OtelValueMapping],
+    value_columns: HashMap<&'a str, usize>,
 }
 
-impl OtelMappedBatch<'_> {
+impl<'a> OtelMappedBatch<'a> {
+    fn new(
+        output: &'a VmTypedBatch,
+        values: &'a [OtelValueMapping],
+        attributes: &'a [OtelValueMapping],
+    ) -> Self {
+        let mut value_columns = HashMap::with_capacity(values.len());
+        for (index, mapping) in values.iter().enumerate() {
+            value_columns
+                .entry(mapping.column.as_str())
+                .or_insert(index);
+        }
+        Self {
+            output,
+            values,
+            attributes,
+            value_columns,
+        }
+    }
+
     fn value_array(&self, key: &str) -> Result<Option<ArrayRef>, OtelRecordError> {
-        let Some(index) = self.values.iter().position(|mapping| mapping.column == key) else {
+        let Some(index) = self.value_columns.get(key).copied() else {
             return Ok(None);
         };
         let array = self.output.columns().get(index).ok_or_else(|| {
@@ -1234,12 +1283,12 @@ impl OtelMappedBatch<'_> {
 
     fn span(&self, row: usize) -> Result<Span, OtelRecordError> {
         let kind = match self.optional_string("kind", row)?.as_deref() {
-            None => span::SpanKind::Unspecified as i32,
-            Some("INTERNAL") => span::SpanKind::Internal as i32,
-            Some("SERVER") => span::SpanKind::Server as i32,
-            Some("CLIENT") => span::SpanKind::Client as i32,
-            Some("PRODUCER") => span::SpanKind::Producer as i32,
-            Some("CONSUMER") => span::SpanKind::Consumer as i32,
+            None => i32::from(span::SpanKind::Unspecified),
+            Some("INTERNAL") => i32::from(span::SpanKind::Internal),
+            Some("SERVER") => i32::from(span::SpanKind::Server),
+            Some("CLIENT") => i32::from(span::SpanKind::Client),
+            Some("PRODUCER") => i32::from(span::SpanKind::Producer),
+            Some("CONSUMER") => i32::from(span::SpanKind::Consumer),
             Some(_) => {
                 return Err(OtelRecordError::new(
                     "kind",
@@ -1249,9 +1298,9 @@ impl OtelMappedBatch<'_> {
         };
         let status_code = match self.optional_string("status_code", row)?.as_deref() {
             None => None,
-            Some("UNSET") => Some(status::StatusCode::Unset as i32),
-            Some("OK") => Some(status::StatusCode::Ok as i32),
-            Some("ERROR") => Some(status::StatusCode::Error as i32),
+            Some("UNSET") => Some(i32::from(status::StatusCode::Unset)),
+            Some("OK") => Some(i32::from(status::StatusCode::Ok)),
+            Some("ERROR") => Some(i32::from(status::StatusCode::Error)),
             Some(_) => {
                 return Err(OtelRecordError::new(
                     "status_code",
@@ -1264,7 +1313,7 @@ impl OtelMappedBatch<'_> {
             (None, None) => None,
             (code, message) => Some(Status {
                 message: message.unwrap_or_default(),
-                code: code.unwrap_or(status::StatusCode::Unset as i32),
+                code: code.unwrap_or(i32::from(status::StatusCode::Unset)),
             }),
         };
         Ok(Span {
@@ -1314,11 +1363,18 @@ impl OtelMappedBatch<'_> {
                     match self.number_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 match &model.kind {
@@ -1344,11 +1400,18 @@ impl OtelMappedBatch<'_> {
                     match self.histogram_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push((batch_index, *row));
+                            positions.push(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            });
                         }
-                        Err(error) => {
-                            outcome.reject_structured((batch_index, *row), error.structured())
-                        }
+                        Err(error) => outcome.reject_structured(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.structured(),
+                        ),
                     }
                 }
                 metric::Data::Histogram(Histogram {
@@ -1496,8 +1559,8 @@ impl OtelMappedBatch<'_> {
 
 fn aggregation_temporality(value: OtelAggregationTemporality) -> i32 {
     match value {
-        OtelAggregationTemporality::Delta => AggregationTemporality::Delta as i32,
-        OtelAggregationTemporality::Cumulative => AggregationTemporality::Cumulative as i32,
+        OtelAggregationTemporality::Delta => i32::from(AggregationTemporality::Delta),
+        OtelAggregationTemporality::Cumulative => i32::from(AggregationTemporality::Cumulative),
     }
 }
 
@@ -1528,8 +1591,14 @@ fn parse_hex_id(value: &str, byte_len: usize, key: &str) -> Result<Vec<u8>, Otel
         .0
         .iter()
         .map(|digits| {
-            let digits = std::str::from_utf8(digits).expect("validated hex is ASCII");
-            u8::from_str_radix(digits, 16).expect("validated hex pair must decode")
+            let digits = std::str::from_utf8(digits).verified(
+                "the guard above rejected every value that is not an even-length run of ASCII hex \
+                 digits",
+            );
+            u8::from_str_radix(digits, 16).verified(
+                "the guard above rejected every value that is not an even-length run of ASCII hex \
+                 digits",
+            )
         })
         .collect::<Vec<_>>();
     if decoded.iter().all(|byte| *byte == 0) {
@@ -1559,16 +1628,16 @@ fn list_value(array: &ArrayRef, row: usize) -> Result<Option<ArrayRef>, String> 
         return Ok(None);
     }
     match array.data_type() {
-        DataType::List(_) => array
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .map(|array| Some(array.value(row)))
-            .ok_or_else(|| "OTEL array value has an invalid Arrow representation".to_string()),
-        DataType::FixedSizeList(_, _) => array
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .map(|array| Some(array.value(row)))
-            .ok_or_else(|| "OTEL array value has an invalid Arrow representation".to_string()),
+        DataType::List(_) => match array.as_any().downcast_ref::<ListArray>() {
+            Some(array) => Ok(Some(array.value(row))),
+            None => Err("OTEL array value has an invalid Arrow representation".to_string()),
+        },
+        DataType::FixedSizeList(_, _) => {
+            match array.as_any().downcast_ref::<FixedSizeListArray>() {
+                Some(array) => Ok(Some(array.value(row))),
+                None => Err("OTEL array value has an invalid Arrow representation".to_string()),
+            }
+        }
         ty => Err(format!("OTEL value requires ARRAY or VEC, found {ty}")),
     }
 }
@@ -1578,51 +1647,75 @@ fn integer_as_i64(array: &ArrayRef, row: usize) -> Result<i64, String> {
         DataType::UInt8 => Ok(array
             .as_any()
             .downcast_ref::<UInt8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Int8 => Ok(array
             .as_any()
             .downcast_ref::<Int8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt16 => Ok(array
             .as_any()
             .downcast_ref::<UInt16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Int16 => Ok(array
             .as_any()
             .downcast_ref::<Int16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt32 => Ok(array
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Int32 => Ok(array
             .as_any()
             .downcast_ref::<Int32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt64 => i64::try_from(
             array
                 .as_any()
                 .downcast_ref::<UInt64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL integer exceeds the OTLP signed 64-bit range".to_string()),
         DataType::Int64 => Ok(array
             .as_any()
             .downcast_ref::<Int64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)),
         ty => Err(format!(
             "OTEL value requires an integer-family type, found {ty}"
@@ -1635,31 +1728,46 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
         DataType::UInt8 => Ok(array
             .as_any()
             .downcast_ref::<UInt8Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt16 => Ok(array
             .as_any()
             .downcast_ref::<UInt16Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt32 => Ok(array
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::UInt64 => Ok(array
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)),
         DataType::Int8 => u64::try_from(
             array
                 .as_any()
                 .downcast_ref::<Int8Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1667,7 +1775,10 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
             array
                 .as_any()
                 .downcast_ref::<Int16Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1675,7 +1786,10 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
             array
                 .as_any()
                 .downcast_ref::<Int32Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1683,7 +1797,10 @@ fn integer_as_u64(array: &ArrayRef, row: usize) -> Result<u64, String> {
             array
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )
         .map_err(|_| "OTEL unsigned value cannot be negative".to_string()),
@@ -1698,54 +1815,98 @@ fn numeric_as_f64(array: &ArrayRef, row: usize) -> Result<f64, String> {
         DataType::Float32 => Ok(array
             .as_any()
             .downcast_ref::<Float32Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)
             .into()),
         DataType::Float64 => Ok(array
             .as_any()
             .downcast_ref::<Float64Array>()
-            .unwrap()
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
             .value(row)),
-        DataType::UInt8 => Ok(array
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap()
-            .value(row) as f64),
-        DataType::Int8 => Ok(array
-            .as_any()
-            .downcast_ref::<Int8Array>()
-            .unwrap()
-            .value(row) as f64),
-        DataType::UInt16 => Ok(array
-            .as_any()
-            .downcast_ref::<UInt16Array>()
-            .unwrap()
-            .value(row) as f64),
-        DataType::Int16 => Ok(array
-            .as_any()
-            .downcast_ref::<Int16Array>()
-            .unwrap()
-            .value(row) as f64),
-        DataType::UInt32 => Ok(array
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap()
-            .value(row) as f64),
-        DataType::Int32 => Ok(array
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .value(row) as f64),
+        DataType::UInt8 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::Int8 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::UInt16 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::Int16 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::UInt32 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
+        DataType::Int32 => Ok(f64::from(
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
+                .value(row),
+        )),
         DataType::UInt64 => Ok(array
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .value(row) as f64),
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
+            .value(row)
+            .approx_into()),
         DataType::Int64 => Ok(array
             .as_any()
             .downcast_ref::<Int64Array>()
-            .unwrap()
-            .value(row) as f64),
+            .verified(
+                "the match arm above narrowed this array's data type, which fixes its concrete \
+                 Arrow array type",
+            )
+            .value(row)
+            .approx_into()),
         ty => Err(format!("OTEL value requires a numeric type, found {ty}")),
     }
 }
@@ -1756,7 +1917,10 @@ fn number_value_at(array: &ArrayRef, row: usize) -> Result<number_data_point::Va
             array
                 .as_any()
                 .downcast_ref::<Float32Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row)
                 .into(),
         )),
@@ -1764,7 +1928,10 @@ fn number_value_at(array: &ArrayRef, row: usize) -> Result<number_data_point::Va
             array
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         )),
         ty if OtelEmitter::is_integer_type(ty) => {
@@ -1785,7 +1952,10 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             array
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row)
                 .to_string(),
         ),
@@ -1793,14 +1963,20 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         ),
         DataType::Float32 => any_value::Value::DoubleValue(
             array
                 .as_any()
                 .downcast_ref::<Float32Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row)
                 .into(),
         ),
@@ -1808,7 +1984,10 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             array
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .unwrap()
+                .verified(
+                    "the match arm above narrowed this array's data type, which fixes its \
+                     concrete Arrow array type",
+                )
                 .value(row),
         ),
         ty if OtelEmitter::is_integer_type(ty) => {
@@ -1825,7 +2004,9 @@ fn any_value_at(array: &ArrayRef, row: usize) -> Result<Option<AnyValue>, String
             )
         }
         DataType::List(_) | DataType::FixedSizeList(_, _) => {
-            let values = list_value(array, row)?.expect("non-null list must contain a child array");
+            let values = list_value(array, row)?.verified(
+                "any_value_at returns early for a null row, so this list value is present",
+            );
             let mut converted = Vec::with_capacity(values.len());
             for index in 0..values.len() {
                 converted.push(any_value_at(&values, index)?.ok_or_else(|| {
@@ -1893,11 +2074,12 @@ mod tests {
         assert!(emitter_publish_error_is_retryable(&error));
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn client_fault_injector_returns_retryable_unavailable_without_a_server() {
-        let emitter = Identifier::parse("otel_output").expect("valid emitter name");
-        let fault_injector = Arc::new(OtelClientFaultInjector::default());
-        fault_injector.fail_unavailable(emitter.as_str());
+    async fn client_fault_injection_returns_retryable_unavailable_without_a_server() {
+        let emitter = EmitterName::parse("otel_output").expect("valid emitter name");
+        let fault_injection = ConfiguredFaultInjection::default();
+        fault_injection.fail_otel_client_unavailable(emitter.as_str());
         let client = OtelClient {
             transport: OtelEmitter::transport_from_config(&config(&[
                 ("endpoint", "http://127.0.0.1:0"),
@@ -1905,7 +2087,7 @@ mod tests {
                 ("timeout_ms", "1"),
             ]))
             .expect("lazy gRPC client must initialize"),
-            fault_injector,
+            fault_injection,
             emitter,
         };
 
@@ -1942,7 +2124,7 @@ mod tests {
         let unsigned: ArrayRef = StdArc::new(UInt64Array::from(vec![u64::MAX]));
         assert_eq!(
             numeric_as_f64(&unsigned, 0).expect("histogram numerics accept the U64 range"),
-            u64::MAX as f64
+            u64::MAX.approx_into::<f64>()
         );
     }
 

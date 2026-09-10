@@ -1,16 +1,29 @@
+//! A client session against a Nervix server.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** Connecting to the session service, TLS selection, submitting statements, transaction
+//!   state, completion suggestions, subscription streams and resource upload.
+//! - **Depends on.** The proto wire types, the language layer — an edge may name the parser, and
+//!   this one does so for client-side parsing and completion — and the vocabulary.
+//! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
+//!   it learns arrives over the session API.
+
 use std::{
     collections::VecDeque,
-    fmt,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use meticulous::OptionExt as _;
 pub use nervix_models::SubscriptionDeliveryBehavior;
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use proto::{
     AttachTransactionRequest, CommandRequest, ListDomainsRequest, SessionRequest,
     session_service_client::SessionServiceClient,
@@ -38,6 +51,26 @@ pub struct Diagnostic {
     pub message: String,
     pub span_start: u32,
     pub span_end: u32,
+}
+
+#[derive(Debug, Error)]
+#[error("failed to parse the statement batch: {message}")]
+pub struct QuerySplitError {
+    message: String,
+}
+
+/// Splits a batch into the exact NSPL source slices that should be submitted separately.
+pub fn split_query_statements(query: &str) -> Result<Vec<&str>, QuerySplitError> {
+    nervix_nspl::client_statement::parse_client_statement_sources(query)
+        .map(|statements| {
+            statements
+                .iter()
+                .map(|statement| statement.source(query))
+                .collect()
+        })
+        .map_err(|error| QuerySplitError {
+            message: error.to_string(),
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +154,8 @@ pub struct SubscriptionEvent {
     pub payload: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerEventLevel {
     Unspecified,
     Info,
@@ -283,7 +317,10 @@ impl GrpcConnector {
             return Err(ClientError::TlsRequired);
         }
         if is_https {
-            let _ = aws_lc_rs::default_provider().install_default();
+            aws_lc_rs::default_provider().install_default().discarded(
+                "a provider another client installed first is the one this client would have \
+                 installed",
+            );
             let mut tls = ClientTlsConfig::new();
             if let Some(pem) = self.options.ca_certificate_pem.clone() {
                 tls = tls.ca_certificate(Certificate::from_pem(pem));
@@ -333,7 +370,7 @@ impl Client {
         let (domain_tx, domain_rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let known_servers = current_server.iter().cloned().collect();
-        let request_tx = start_session(
+        let session = start_session(
             channel,
             connect_options.basic_authorization(),
             pending.clone(),
@@ -347,11 +384,11 @@ impl Client {
             current_server: Mutex::new(current_server),
             known_servers: Mutex::new(known_servers),
             grpc_connector: GrpcConnector::new(connect_options),
-            request_tx: Mutex::new(request_tx.0),
+            request_tx: Mutex::new(session.request_tx),
             pending,
             command_lock: Mutex::new(()),
             transaction: Mutex::new(None),
-            response_task: Mutex::new(Some(request_tx.1)),
+            response_task: Mutex::new(Some(session.response_task)),
             subscription_tx,
             subscription_rx: Mutex::new(subscription_rx),
             server_tx,
@@ -430,7 +467,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -533,7 +572,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -587,7 +628,7 @@ impl Client {
             let parsed = statements
                 .into_iter()
                 .next()
-                .expect("non-empty parsed statements must contain one statement");
+                .verified("the empty and multi-statement cases above already returned");
             let source = parsed.source(query).to_string();
             return self
                 .execute_client_statement(parsed.statement, &source)
@@ -645,7 +686,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -716,7 +759,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -746,23 +791,35 @@ impl Client {
             let progress_callback = on_progress.clone();
             tokio::spawn(async move {
                 let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+                // A build that fails or panics drops its end of the pipe, so the loop below sees
+                // a short archive and the server rejects the upload. That rejection is the report
+                // for a build error, which is why the build's own result is discarded; a panic
+                // escapes it, so the join below is what keeps that one visible.
                 let build_task = tokio::spawn(async move {
-                    let _ = relay_upload_archive(&request_directory, writer).await;
+                    relay_upload_archive(&request_directory, writer)
+                        .await
+                        .discarded(
+                            "a build that fails drops its end of the pipe, and upload_resource \
+                             reports the short archive that produces",
+                        );
                 });
-                let _ = tx
-                    .send(proto::UploadResourceRequest {
-                        event: Some(proto::upload_resource_request::Event::Start(
-                            proto::UploadResourceStart {
-                                name: request_identifier,
-                                total_bytes: 0,
-                                domain: request_domain,
-                            },
-                        )),
-                    })
-                    .await;
+                tx.send(proto::UploadResourceRequest {
+                    event: Some(proto::upload_resource_request::Event::Start(
+                        proto::UploadResourceStart {
+                            name: request_identifier,
+                            total_bytes: 0,
+                            domain: request_domain,
+                        },
+                    )),
+                })
+                .await
+                .means_peer_left("resource upload stream");
                 let mut buffer = vec![0u8; 64 * 1024];
                 loop {
                     tokio::task::consume_budget().await;
+                    // The pipe's other end is the build task above. A read failure means it
+                    // stopped writing, which the server sees as a short archive and reports as a
+                    // rejected upload; the join at the end of this task is what surfaces a panic.
                     let read = match reader.read(&mut buffer).await {
                         Ok(read) => read,
                         Err(_) => return,
@@ -770,7 +827,7 @@ impl Client {
                     if read == 0 {
                         break;
                     }
-                    progress_callback(u64::try_from(read).unwrap_or(0));
+                    progress_callback(read.arch_into());
                     if tx
                         .send(proto::UploadResourceRequest {
                             event: Some(proto::upload_resource_request::Event::Chunk(
@@ -783,7 +840,9 @@ impl Client {
                         return;
                     }
                 }
-                let _ = build_task.await;
+                build_task
+                    .await
+                    .reported("building the resource archive to upload");
             });
             let response = client
                 .upload_resource(request_with_auth(
@@ -851,7 +910,10 @@ impl Client {
 
     async fn reconnect(&self, server: &str) -> Result<(), ClientError> {
         let channel = self.inner.grpc_connector.connect(server).await?;
-        let (request_tx, response_task) = start_session(
+        let StartedSession {
+            request_tx,
+            response_task,
+        } = start_session(
             channel,
             self.inner.grpc_connector.options.basic_authorization(),
             self.inner.pending.clone(),
@@ -917,7 +979,7 @@ async fn start_session(
     subscription_tx: mpsc::Sender<SubscriptionEvent>,
     server_tx: mpsc::Sender<ServerEvent>,
     domain_tx: mpsc::Sender<Vec<DomainInfo>>,
-) -> Result<(mpsc::Sender<SessionRequest>, JoinHandle<()>), ClientError> {
+) -> Result<StartedSession, ClientError> {
     let mut client = SessionServiceClient::new(channel);
     let (request_tx, request_rx) = mpsc::channel(32);
     let mut response = client
@@ -932,6 +994,8 @@ async fn start_session(
         while let Ok(Some(session_response)) = response.message().await {
             tokio::task::consume_budget().await;
             match session_response.event {
+                // A caller that stopped reading its events has left the session, and ending
+                // this loop is what closes it. The send is the only place that fact arrives.
                 Some(proto::session_response::Event::Subscription(event)) => {
                     match subscription_tx.send(event.into()).await {
                         Ok(()) => {}
@@ -947,7 +1011,7 @@ async fn start_session(
                 Some(proto::session_response::Event::Result(result)) => {
                     let pending = pending.lock().await.pop_front();
                     if let Some(PendingResponse::Command(tx)) = pending {
-                        let _ = tx.send(result.into());
+                        tx.send(result.into()).means_peer_left("command requester");
                     }
                 }
                 Some(proto::session_response::Event::Domains(domains)) => {
@@ -956,7 +1020,7 @@ async fn start_session(
                     if response_to_request {
                         let pending = pending.lock().await.pop_front();
                         if let Some(PendingResponse::DomainList(tx)) = pending {
-                            let _ = tx.send(domains);
+                            tx.send(domains).means_peer_left("domain list requester");
                         }
                     } else if domain_tx.send(domains).await.is_err() {
                         break;
@@ -979,7 +1043,7 @@ async fn start_session(
                                 },
                             })
                             .collect();
-                        let _ = tx.send(suggestions);
+                        tx.send(suggestions).means_peer_left("suggestion requester");
                     }
                 }
                 #[cfg(not(feature = "autocomplete"))]
@@ -991,7 +1055,16 @@ async fn start_session(
         }
         clear_pending_responses(&pending).await;
     });
-    Ok((request_tx, response_task))
+    Ok(StartedSession {
+        request_tx,
+        response_task,
+    })
+}
+
+/// A live session: the channel commands are written to, and the task draining its responses.
+struct StartedSession {
+    request_tx: mpsc::Sender<SessionRequest>,
+    response_task: JoinHandle<()>,
 }
 
 fn request_with_auth<T>(
@@ -1016,9 +1089,10 @@ fn expand_user_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     if raw == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
+        return match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home),
+            None => path.to_path_buf(),
+        };
     }
     if let Some(stripped) = raw.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
@@ -1205,11 +1279,10 @@ fn recovered_transaction_outcome(mut outcome: CommandOutcome) -> CommandOutcome 
             .map(|result| result.message.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        outcome.diagnostics = outcome
-            .results
-            .last()
-            .map(|result| result.diagnostics.clone())
-            .unwrap_or_default();
+        outcome.diagnostics = match outcome.results.last() {
+            Some(result) => result.diagnostics.clone(),
+            None => Vec::new(),
+        };
     }
     if outcome.transaction.as_ref().map(|status| status.state) == Some(TransactionState::Committed)
     {
@@ -1372,18 +1445,6 @@ impl CommandOutcomeKind {
     }
 }
 
-impl fmt::Display for ServerEventLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::Unspecified => "UNSPECIFIED",
-            Self::Info => "INFO",
-            Self::Warn => "WARN",
-            Self::Error => "ERROR",
-        };
-        f.write_str(label)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1391,6 +1452,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use meticulous::ResultExt as _;
     use tokio::sync::{Mutex, mpsc, oneshot};
     use triomphe::Arc;
 
@@ -1399,8 +1461,19 @@ mod tests {
         Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
         SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
         TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
-        recovered_transaction_outcome, transaction_operation_was_observed,
+        recovered_transaction_outcome, split_query_statements, transaction_operation_was_observed,
     };
+
+    #[test]
+    fn statement_splitting_returns_exact_source_slices() {
+        let query = "USE prod; LIST DOMAINS;";
+
+        assert_eq!(
+            split_query_statements(query)
+                .assured("the literal statement batch is valid current NSPL"),
+            ["USE prod;", "LIST DOMAINS;"]
+        );
+    }
 
     fn test_client(domain: &str) -> Client {
         let (request_tx, request_rx) = mpsc::channel(1);
@@ -1514,7 +1587,7 @@ mod tests {
                 span_start: 3,
                 span_end: 7,
             }],
-            kind: proto::CommandResultKind::NotLeader as i32,
+            kind: i32::from(proto::CommandResultKind::NotLeader),
             leader: "node-2".to_string(),
             leader_grpc_uri: "http://127.0.0.1:47393".to_string(),
             already_existed: true,
@@ -1523,7 +1596,7 @@ mod tests {
             transaction: Some(proto::TransactionStatus {
                 id: "tx-1".to_string(),
                 domain: "tenant".to_string(),
-                state: proto::TransactionState::Open as i32,
+                state: i32::from(proto::TransactionState::Open),
                 pending_count: 2,
                 completed_count: 0,
                 total_count: 2,
@@ -1565,7 +1638,7 @@ mod tests {
         assert_eq!(subscription.payload, "{\"id\":42}");
 
         let server = ServerEvent::from(proto::ServerEvent {
-            level: proto::ServerEventLevel::Warn as i32,
+            level: i32::from(proto::ServerEventLevel::Warn),
             message: "watch out".to_string(),
         });
         assert_eq!(

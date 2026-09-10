@@ -152,18 +152,22 @@ impl Processor for GeoIpResolver {
         };
 
         let mut output = OutputEnvelope::new();
-        let columns = (0..self.input_columns)
-            .map(|column_index| OutputColumnRef::Input {
-                column_index: column_index as u32,
+        let input_columns = (0..self.input_columns)
+            .map(|column_index| {
+                Ok(OutputColumnRef::Input {
+                    column_index: u32::try_from(column_index)
+                        .map_err(|_| GuestError::InvalidSize)?,
+                })
             })
-            .chain(
-                self.enrich(batch)?
-                    .into_iter()
-                    .map(|array| OutputColumnRef::Generated {
-                        column_index: output.add_generated_column(array, false),
-                    }),
-            )
+            .collect::<Result<Vec<_>, GuestError>>()?;
+        let generated_columns = self
+            .enrich(batch)?
+            .into_iter()
+            .map(|array| OutputColumnRef::Generated {
+                column_index: output.add_generated_column(array, false),
+            })
             .collect::<Vec<_>>();
+        let columns = input_columns.into_iter().chain(generated_columns).collect();
 
         // Every destination receives the same rows, but only the first carries the ACK, NACK, and
         // message-error sets so one input row is never settled twice.

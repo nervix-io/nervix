@@ -51,7 +51,7 @@ Build configuration in dependency order:
    UDFs as needed.
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
-7. Define placement rules after every referenced runtime node and materialized relay exists.
+7. Define placement rules after every referenced runtime node, including each relay, exists.
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
@@ -66,6 +66,9 @@ applying effects; a queued model mutation reports its statement-local quiesce le
 `COMMIT` reports only the maximum level actually executed and does not repeat statement outputs.
 Correct a rejected statement and continue the same transaction. Do not imply that one undivided
 request can mix those phases.
+
+For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
+and recovery` before suggesting a retry.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
@@ -87,6 +90,23 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 
 ## Preserve NSPL semantics
 
+- For paced domains, use a positive `PERIOD` no larger than `18446744073709551615ns`; `SKEW` may
+  be zero but must fit the same nanosecond duration range. `START AT <timestamp>` is limited to the
+  inclusive signed Unix-nanosecond range `1677-09-21T00:12:43.145224192Z` through
+  `2262-04-11T23:47:16.854775807Z`. `TIME RATE` must be a positive finite `f64`; scientific notation
+  is valid. Tick notifications report progress and never redefine the committed start mapping.
+  The mapping is installed on every live node before domain execution and remains bound to its
+  `START` generation across joins and automatic ALTER pauses. One replicated authority revision
+  identifies the producing node incarnation; owner changes preserve the mapping, and progress is
+  accepted only from the matching committed incarnation and authenticated peer after every live
+  node installs that revision. `STOP` revokes the authority, while automatic ALTER quiescing leaves
+  it running. Never describe a missing, stopped, uninstalled, or stale paced clock as falling back
+  to wall time. Unpaced domains receive actual UTC through the same domain-time capability.
+- For ingestion, read `Domains And Time` → `Ingestion Timestamps`: `TIMESTAMP NOW` uses domain
+  time at delivery, including after quiescing; explicit source times remain unchanged. Check
+  admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
+  of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
+  an unreached future center.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
@@ -130,6 +150,18 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
+- Treat every relay as a scheduled runtime node with one owner. `CAPACITY` bounds its one owner
+  buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
+  in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
+  separate runtime-node kind. All relays are valid placement members and corridor hops.
+- Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
+  including an outbound WebSocket client, is single-owner and keeps its live assignment across
+  ordinary schedule recomputation; use drain, `RELOCATE`, or a hard colocation requirement when it
+  must move.
+- Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
+  chosen work onto a named cluster node. The selection is a kind-qualified list or a
+  `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in
+  one gated handoff or not at all. It is a one-time move, not pinning.
 - An emitter may list multiple `FROM <relay> [WHERE <expr>]` inputs when every relay declares the
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one
@@ -146,6 +178,19 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
+- Declare connection-pool bounds on every `POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` client, after
+  `TYPE` and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
+  with the minimum no greater than the maximum. The clause is required even when only ingestors
+  reference the client, and no other client type accepts it. Never put pool sizing in connector
+  `CONFIG` or an address query parameter. One pool serves every local user of a named client on one
+  node, so size it for the node's whole workload rather than per emitter, and expect one pool per
+  node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
+  documentation entry before choosing values.
+- Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that selects
+  either `sslmode=disable` or `sslmode=verify-full`; no other mode is accepted and there is no
+  opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the
+  TLS-file interface, certificate and key must be supplied together, and TLS files require
+  `verify-full`.
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.
 - Add a route-local message error policy. Add the required general/global policy for the chosen
@@ -158,7 +203,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
   one-message batch guarantee. `MAX BATCH SIZE` counts logical Arrow value, offset, and validity
   bytes, not unused buffer capacity or object overhead. Windows use `WIDTH` and `STEP`; WASM output
-  cadence is controlled by the guest.
+  cadence is controlled by the guest. Choose `FLUSH` values as latency and boundary-cost controls,
+  not as a throughput lever: `MAX BATCH SIZE` only clamps a batch, and the flush tuning guidance
+  in the docs records which sinks benefit from larger batches.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
   never accepts `MAX`.
 - End every ingestor source specification with an explicit source-supported `ON QUIESCE` body
@@ -199,11 +246,15 @@ When authoring a graph, provide:
 4. A short verification sequence using the relevant `SHOW`, `DESCRIBE`, lookup, or subscription
    commands.
 
-Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
+Use `DESCRIBE RELAY <relay>;` to verify its owner and optional state replicas; an ordinary relay
+reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification should include a junction's stored
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
-coverage, effective claims, colocation groups, and the domain default.
+coverage, effective claims, colocation groups, and the domain default. Use
+`DESCRIBE RELOCATION ...;` with the clauses of a planned `RELOCATE` to inspect the unit it would
+move, its quiesce level, the relays its hold would gate, and the preferences it would leave
+unsatisfied.
 
 Before returning the configuration, trace every reference to its declaration and check schema,
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.

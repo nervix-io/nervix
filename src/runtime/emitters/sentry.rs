@@ -23,9 +23,7 @@ impl SentryEmitter {
         client: &CreateClientSentry,
         resolved: Option<&ResolvedClientConfig>,
     ) -> EmitterRuntimeResult<Self> {
-        let config = resolved
-            .map(|config| config.entries.as_slice())
-            .unwrap_or(client.config.as_slice());
+        let config = client_config_entries(resolved, client.config.as_slice());
         let dsn = emitter_config_value(config, "dsn", || {
             "missing Sentry client config key 'dsn'".to_string()
         })?
@@ -61,7 +59,7 @@ impl SentryEmitter {
 
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let body = match Self::encode_envelope(&record.payload) {
                 Ok(body) => body,
                 Err(error) => {
@@ -131,34 +129,50 @@ impl SentryEmitter {
         sentry_rate_limits: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Option<Duration> {
-        let retry_after = retry_after.and_then(|value| {
-            value
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-                .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-                .or_else(|| {
-                    chrono::DateTime::parse_from_rfc2822(value.trim())
-                        .ok()
-                        .and_then(|deadline| {
-                            deadline
-                                .with_timezone(&chrono::Utc)
-                                .signed_duration_since(now)
-                                .to_std()
-                                .ok()
-                        })
-                })
-        });
-        let sentry_rate_limits = sentry_rate_limits.and_then(|value| {
-            value
-                .split(',')
-                .filter_map(|quota| quota.trim().split(':').next())
-                .filter_map(|seconds| seconds.trim().parse::<f64>().ok())
-                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-                .filter_map(|seconds| Duration::try_from_secs_f64(seconds).ok())
-                .max()
-        });
+        let retry_after = if let Some(value) = retry_after {
+            let value = value.trim();
+            if let Ok(seconds) = value.parse::<f64>()
+                && seconds.is_finite()
+                && seconds >= 0.0
+                && let Ok(delay) = Duration::try_from_secs_f64(seconds)
+            {
+                Some(delay)
+            } else if let Ok(deadline) = chrono::DateTime::parse_from_rfc2822(value) {
+                deadline
+                    .with_timezone(&chrono::Utc)
+                    .signed_duration_since(now)
+                    .to_std()
+                    .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let sentry_rate_limits = if let Some(value) = sentry_rate_limits {
+            let mut longest: Option<Duration> = None;
+            for quota in value.split(',') {
+                let Some(seconds) = quota.trim().split(':').next() else {
+                    continue;
+                };
+                let Ok(seconds) = seconds.trim().parse::<f64>() else {
+                    continue;
+                };
+                if !seconds.is_finite() || seconds < 0.0 {
+                    continue;
+                }
+                let Ok(delay) = Duration::try_from_secs_f64(seconds) else {
+                    continue;
+                };
+                longest = Some(match longest {
+                    Some(current) => current.max(delay),
+                    None => delay,
+                });
+            }
+            longest
+        } else {
+            None
+        };
         retry_after.into_iter().chain(sentry_rate_limits).max()
     }
 

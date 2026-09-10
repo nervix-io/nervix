@@ -18,6 +18,7 @@ emitter_flush_each = "10ms"
 emitter_max_batch_size = "8MiB"
 ingestor_flush_each = "10ms"
 ingestor_max_batch_size = "8MiB"
+ingestor_mode = "NO_ACK PARALLEL"
 
 [implementations.nervix]
 kind = "nervix"

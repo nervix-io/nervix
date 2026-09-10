@@ -3,9 +3,13 @@
 Nervix exposes runtime graph metrics in two forms:
 
 - raw Prometheus metrics at the observability server's `/metrics` endpoint
-- local summarized metrics in `DESCRIBE` command output
+- owner-routed summarized metrics in `DESCRIBE` command output
 
-The two surfaces use the same semantic labels where they overlap, but they use separate storage. Prometheus receives raw counters and histogram buckets through a Prometheus registry for external aggregation. `DESCRIBE` reads Nervix runtime state and includes derived values such as rates and recent percentiles.
+The two surfaces use the same semantic labels where they overlap, but they use separate storage.
+Prometheus receives raw counters and histogram buckets through a Prometheus registry for external
+aggregation. `DESCRIBE` reads Nervix runtime state and includes derived values such as rates and
+recent percentiles. Relay descriptions are routed to the scheduled relay owner; nonowners do not
+maintain relay metrics.
 
 ## Observability Server
 
@@ -106,7 +110,10 @@ quiesce buffers do not migrate during termination or failover.
 
 ## DESCRIBE Metrics
 
-`DESCRIBE` commands include local metric summaries for the described target when metrics exist. Node traffic is grouped under `incoming_edges` and `outgoing_edges`; relay descriptions keep relay-local buffer utilization under `relay_buffers` rather than mixing relay traffic into the relay node:
+`DESCRIBE` commands include metric summaries for the described target when metrics exist. For a
+scheduled target, the request is answered from its owner. Node traffic is grouped under
+`incoming_edges` and `outgoing_edges`; relay descriptions keep owner-buffer utilization under
+`relay_buffers` rather than mixing relay traffic into the relay node:
 
 ```nspl
 DESCRIBE RELAY notifications WHERE (user_id = 42);
@@ -124,6 +131,12 @@ DESCRIBE DOMAIN;
 `input_output` section aggregates ingestor and emitter metrics. Its `processed`
 section aggregates metrics for all runtime nodes in the domain, including
 processing nodes.
+
+`DESCRIBE EMITTER` reports a `status:` of `OK`, `WAITING`, or `ERROR`, with a `detail:` line
+explaining anything other than ordinary operation. `WAITING` means the emitter is healthy but holds
+no connection because it has asked a shared client's pool for one and has not been given it yet;
+see [Database Client Connection Pools](database-client-pools.md). A full pool is a waiting state,
+not a failure, so an acquisition timeout or a lost connection is reported as `ERROR` instead.
 
 `DESCRIBE INGESTOR` also reports the declared `quiesce:` policy, current `quiesce state:`, and all
 four quiesce values using their Prometheus family names. A connected ingestor in any active mode is
@@ -147,14 +160,12 @@ Histogram summaries include:
 
 Histogram `DESCRIBE` lines do not include raw `count` / `sum` values or rates. For `messages_per_batch`, the raw observation count is the batch count and the raw sum is the message count; those are already reported clearly by `batches_total` and `messages_total`. The histogram answers distribution questions such as typical and tail batch size. Percentiles are rendered as decimal estimates interpolated within the configured histogram bucket range rather than as raw bucket boundary labels. The same rule applies to delivery latency: `messages_total` and `batches_total` answer throughput questions, while `delivery_latency_seconds` answers latency distribution questions.
 
-Relay buffer summaries use `relay_buffer_len`. The percentile values are queued
-batch slots observed on the relay consumer fan-out channel, and `capacity=<n>`
-shows the bounded channel capacity for that runtime buffer. Branched relays
-observe the internal branch-collapse fan-out channel; unbranched relays
-observe their direct consumer fan-out without inserting a collapse node. A
-branched relay can receive interleaved concrete branches through the same
-collapse point, so `DESCRIBE RELAY` reports observed buffer lengths as
-percentiles instead of trying to render one current number per branch.
+Relay buffer summaries use `relay_buffer_len`. The percentile values are queued batch slots
+observed in the single buffer on the relay owner, and `capacity=<n>` shows that buffer's declared
+bound. A branched relay can hold interleaved concrete branches in the same owner buffer, so
+`DESCRIBE RELAY` reports observed lengths as percentiles instead of rendering a separate current
+depth per branch. The fixed one-batch producer and consumer-node dispatch slots are not additional
+relay-buffer metric series.
 
 A `-` value means the derived value is not available. This is common for domain-clock values when no domain timestamp has been observed or when the observed domain-time span is zero.
 
@@ -171,8 +182,11 @@ Prometheus exposes branch lifecycle state without a concrete branch-key label:
   idle expiration.
 
 Normal shutdown, schedule replacement, and runtime detachment reduce the live gauge but do not
-increment the eviction counter. Lifecycle metrics are live process-local Prometheus state and are
-not persisted or replicated.
+increment the eviction counter. Relay branch presence and its TTL or LRU decisions exist only on
+the relay owner, so a relay-owner failure loses those live values. A schedule replacement reduces
+state only for runtime nodes whose assignment changed; a drain, failover, or colocation
+consolidation leaves unaffected owners continuous. Lifecycle metrics are live process-local
+Prometheus state and are not persisted or replicated.
 
 Concrete branch-local inspection remains available through `DESCRIBE RELAY <relay> WHERE (...)`.
 `DESCRIBE` does not provide a common branch inventory or eviction history. Prometheus deliberately
@@ -192,13 +206,24 @@ The moving rates and percentile windows are online exponential summaries rather 
 
 ## Replication And Drain Behavior
 
-Nervix maintains two internal metric sets for `DESCRIBE`, edge statistics, and runtime recovery:
+Nervix maintains internal metric state for `DESCRIBE`, edge statistics, and runtime recovery.
+Stateful processor summaries may use their node-owned snapshot path. Relay metrics are different:
+the relay owner is their sole authority, and buffer, traffic, concrete-presence, and branch-local
+relay summaries are neither persisted nor replicated.
 
-- global branch-aggregated metrics for node edge reporting
-- concrete branch metrics for branch-local runtime state and `DESCRIBE RELAY ... WHERE (...)`
+`DESCRIBE RELAY` and `DESCRIBE RELAY ... WHERE (...)` are routed to that authority. A planned move
+fences the moved subgraph, drains admitted work, and activates the committed revision before the
+gate opens. Relay metrics start fresh on the new owner because they do not travel with materialized
+state. When a state-replica slot exists, a live former primary becomes the first replica candidate
+after the move.
 
-Branch-aggregated metrics are replicated as branch-aggregated runtime state. Concrete branch metrics travel with the concrete branch state they describe. This is why `DESCRIBE` and graph edge metrics survive node drain and restart paths in the same way as other replicated runtime state.
+Only moved runtime nodes cross that boundary. Internal `DESCRIBE` and edge metrics for unaffected
+nodes and concrete branches remain continuous during drain, graceful-shutdown drain, and placement
+consolidation. A timed-out precommit handoff leaves the schedule and metric authority unchanged.
+Unexpected owner loss continues through failover immediately and starts fresh relay metrics on the
+new owner.
 
 Prometheus export is a separate, live process-local registry. Traffic metrics ignore branch
 identity, while lifecycle metrics retain only the bounded declared branch name. Prometheus
-registry values are not snapshotted into Nervix internal metric state.
+registry values are not snapshotted into Nervix internal metric state and do not migrate during a
+planned handoff or failover.

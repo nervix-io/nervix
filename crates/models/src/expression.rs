@@ -1,7 +1,7 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{Identifier, ParseAsType};
+use crate::{BranchName, BuiltinFunctionName, FieldName, ParseAsType, RelayName, UdfName};
 
 /// An executable NSPL expression with parser-only spans removed.
 #[derive(
@@ -34,12 +34,12 @@ pub enum Expression {
         target: ParseAsType,
     },
     Call {
-        function: Identifier,
+        function: BuiltinFunctionName,
         #[rkyv(omit_bounds)]
         arguments: Vec<Self>,
     },
     UdfCall {
-        function: Identifier,
+        function: UdfName,
         #[rkyv(omit_bounds)]
         arguments: Vec<Self>,
     },
@@ -131,7 +131,7 @@ impl Expression {
         }
     }
 
-    pub fn visit_calls(&self, visitor: &mut impl FnMut(&Identifier, &[Self])) {
+    pub fn visit_calls(&self, visitor: &mut impl FnMut(&BuiltinFunctionName, &[Self])) {
         match self {
             Self::Literal(_) | Self::Field(_) => {}
             Self::Unary { expression, .. } | Self::Cast { expression, .. } => {
@@ -188,7 +188,7 @@ impl Expression {
         }
     }
 
-    pub fn visit_udf_calls(&self, visitor: &mut impl FnMut(&Identifier, &[Self])) {
+    pub fn visit_udf_calls(&self, visitor: &mut impl FnMut(&UdfName, &[Self])) {
         match self {
             Self::Literal(_) | Self::Field(_) => {}
             Self::Unary { expression, .. } | Self::Cast { expression, .. } => {
@@ -298,18 +298,18 @@ impl Float64Literal {
 )]
 pub struct FieldReference {
     pub scope: FieldScope,
-    pub field: Identifier,
+    pub field: FieldName,
 }
 
 impl FieldReference {
-    pub fn bare(field: Identifier) -> Self {
+    pub fn bare(field: FieldName) -> Self {
         Self {
             scope: FieldScope::Bare,
             field,
         }
     }
 
-    pub fn scoped(scope: FieldScope, field: Identifier) -> Self {
+    pub fn scoped(scope: FieldScope, field: FieldName) -> Self {
         Self { scope, field }
     }
 }
@@ -334,7 +334,7 @@ pub enum FieldScope {
     Branch,
     Left,
     Right,
-    RelayState { relay: Identifier },
+    RelayState { relay: RelayName },
     Metadata,
     PartialOutput,
     Error,
@@ -409,11 +409,11 @@ pub struct Assignment {
 )]
 pub struct AssignmentTarget {
     pub scope: AssignmentTargetScope,
-    pub field: Identifier,
+    pub field: FieldName,
 }
 
 impl AssignmentTarget {
-    pub fn bare(field: Identifier) -> Self {
+    pub fn bare(field: FieldName) -> Self {
         Self {
             scope: AssignmentTargetScope::Bare,
             field,
@@ -446,7 +446,7 @@ pub enum AssignmentTargetScope {
 )]
 pub enum Inheritance {
     All,
-    AllExcept(Vec<Identifier>),
+    AllExcept(Vec<FieldName>),
     Fields(Vec<InheritedField>),
 }
 
@@ -454,7 +454,7 @@ pub enum Inheritance {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct InheritedField {
-    pub field: Identifier,
+    pub field: FieldName,
     pub leak_sensitive: bool,
 }
 
@@ -462,7 +462,7 @@ pub struct InheritedField {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct Invocation {
-    pub function: Identifier,
+    pub function: BuiltinFunctionName,
     pub arguments: Vec<Expression>,
 }
 
@@ -519,7 +519,7 @@ pub enum MaterializedStatePolicy {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct MaterializedStateDependency {
-    pub relay: Identifier,
+    pub relay: RelayName,
     pub policy: MaterializedStatePolicy,
 }
 
@@ -528,14 +528,14 @@ pub struct MaterializedStateDependency {
 )]
 pub enum OutputBranch {
     BranchedBy {
-        branch: Identifier,
+        branch: BranchName,
         assignments: Vec<Assignment>,
     },
     Unbranched,
 }
 
 impl OutputBranch {
-    pub fn branch(&self) -> Option<&Identifier> {
+    pub fn branch(&self) -> Option<&BranchName> {
         match self {
             Self::BranchedBy { branch, .. } => Some(branch),
             Self::Unbranched => None,

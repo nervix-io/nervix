@@ -1,19 +1,32 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    ops::{Deref, DerefMut},
+};
 
+use error_stack::Report;
+use indexmap::IndexMap;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
 use thiserror::Error;
 
 use crate::{
-    AlterSchema, AlterWireSchema, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
-    CreateJsonWireSchema, CreateSchema, CreateUdf, Domain, Identifier, JsonType, ParseAsType,
-    Timestamp,
+    AlterSchema, AlterWireSchema, AvroType, BranchName, CborType, ChannelName, ClientName,
+    ClusterNodeName, CodecName, CollectionName, ConsumerGroupName, CorrelatorName,
+    CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf,
+    DeduplicatorName, DomainClockState, DomainName, DomainTimeRate, EmitterName, EndpointName,
+    FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
+    ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
+    QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, Timestamp, TopicName, UdfName,
+    UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
-pub type DomainId = Domain;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum Statement {
     CreateDomain(CreateStatement<CreateDomain>),
     AlterDomain(AlterDomain),
@@ -41,6 +54,8 @@ pub enum Statement {
     CordonNode(CordonNode),
     UncordonNode(UncordonNode),
     DrainNode(DrainNode),
+    Relocate(Relocation),
+    DescribeRelocation(Relocation),
     DescribeRelay(DescribeRelay),
     DescribeDomain(DescribeDomain),
     DescribeIngestor(DescribeIngestor),
@@ -95,6 +110,8 @@ impl Statement {
             | Self::CordonNode(_)
             | Self::UncordonNode(_)
             | Self::DrainNode(_)
+            | Self::Relocate(_)
+            | Self::DescribeRelocation(_)
             | Self::DescribeRelay(_)
             | Self::DescribeDomain(_)
             | Self::DescribeIngestor(_)
@@ -122,7 +139,9 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateStatement<T> {
     #[serde(default)]
     pub if_not_exists: bool,
@@ -235,8 +254,6 @@ pub enum ModelKind {
     Reingestor,
     #[strum(props(completion_label = "ref:relay", keyword = "RELAY"))]
     Relay,
-    #[strum(props(completion_label = "ref:materializer", keyword = "MATERIALIZER"))]
-    Materializer,
     #[strum(props(completion_label = "ref:lookup", keyword = "HASH MAP"))]
     Lookup,
     #[strum(props(completion_label = "ref:junction", keyword = "JUNCTION"))]
@@ -263,13 +280,13 @@ pub enum ModelKind {
 impl ModelKind {
     pub fn completion_label(self) -> &'static str {
         self.get_str("completion_label")
-            .expect("every model kind must define a completion_label")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     /// The NSPL keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
-            .expect("every model kind must define a keyword phrase")
+            .assured("the strum property is declared on every variant of this enum")
     }
 
     pub fn from_completion_label(label: &str) -> Option<Self> {
@@ -279,68 +296,118 @@ impl ModelKind {
     pub fn as_str(self) -> &'static str {
         self.into()
     }
+
+    pub fn is_processor(self) -> bool {
+        matches!(
+            self,
+            Self::Inferencer
+                | Self::WasmProcessor
+                | Self::Junction
+                | Self::Deduplicator
+                | Self::Correlator
+                | Self::Reorderer
+                | Self::WindowProcessor
+        )
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowCreate {
     pub kind: ModelKind,
-    pub name: Identifier,
+    pub name: ModelName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowClusterStatus;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowTransactions;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowUdfs;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowPlacements;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowRelayMaterializedState {
-    pub relay: Identifier,
+    pub relay: RelayName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateDomain {
-    pub id: DomainId,
+    pub id: DomainName,
     pub config: DomainConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterDomain {
     pub policy: PlacementPolicy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateUser {
-    pub name: Identifier,
+    pub name: UserName,
     pub password: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateResource {
-    pub identifier: Identifier,
+    pub identifier: ResourceName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct UploadResource {
-    pub identifier: Identifier,
+    pub identifier: ResourceName,
     pub source_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct StartDomain {
     pub start: DomainStartPoint,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct StopDomain;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DomainConfig {
     pub pace: DomainPace,
     pub period: String,
@@ -357,6 +424,9 @@ pub struct DomainConfig {
     Hash,
     Serialize,
     Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
     Default,
     AsRefStr,
     strum::Display,
@@ -374,7 +444,19 @@ pub enum PlacementPolicy {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+    EnumString,
+    IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum DomainPace {
@@ -382,21 +464,56 @@ pub enum DomainPace {
     Unpaced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum DomainStartPoint {
     #[default]
     Resume,
     Now {
-        time_rate: String,
+        time_rate: DomainTimeRate,
     },
     At {
-        timestamp: String,
-        time_rate: String,
+        timestamp: Timestamp,
+        time_rate: DomainTimeRate,
     },
 }
 
+impl DomainStartPoint {
+    pub const fn resolve_at(&self, wall_started_at: Timestamp) -> (Timestamp, DomainTimeRate) {
+        match self {
+            Self::Resume => (wall_started_at, DomainTimeRate::ONE),
+            Self::Now { time_rate } => (wall_started_at, *time_rate),
+            Self::At {
+                timestamp,
+                time_rate,
+            } => (*timestamp, *time_rate),
+        }
+    }
+}
+
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumString,
+    IntoStaticStr,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum DomainStatus {
@@ -412,19 +529,14 @@ pub struct DomainTick {
     pub tick_id: u64,
     pub logical_timestamp: Timestamp,
     pub wall_clock: Timestamp,
-    pub duration_ms: u64,
+    pub period: crate::DomainClockPeriod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DomainClockState {
-    pub wall_started_at: Timestamp,
-    pub logical_start: Timestamp,
-    pub time_rate: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DomainState {
-    pub id: DomainId,
+    pub id: DomainName,
     pub config: DomainConfig,
     pub status: DomainStatus,
     pub start_version: u64,
@@ -432,30 +544,190 @@ pub struct DomainState {
     pub clock: Option<DomainClockState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DropModel {
     pub kind: ModelKind,
-    pub name: Identifier,
+    pub name: ModelName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DropNode {
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CordonNode {
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct UncordonNode {
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DrainNode {
-    pub node_id: String,
+    pub node_id: ClusterNodeName,
+}
+
+/// One kind-qualified runtime node named by a relocation selection or `FOR` override.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct RelocationMember {
+    pub kind: ModelKind,
+    pub name: ModelName,
+}
+
+impl RelocationMember {
+    pub fn new(kind: ModelKind, name: ModelName) -> Self {
+        Self { kind, name }
+    }
+
+    /// The `<kind> <name>` spelling used in canonical NSPL and in diagnostics.
+    pub fn to_nspl(&self) -> String {
+        format!("{} {}", self.kind.keyword_phrase(), self.name.as_str())
+    }
+}
+
+/// How a relocation selects the runtime nodes it moves.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RelocationSelection {
+    /// The listed runtime nodes, which need not be connected.
+    List(Vec<RelocationMember>),
+    /// Every runtime node covered by a directed corridor between the endpoints.
+    Corridor {
+        from: Vec<RelocationMember>,
+        to: Vec<RelocationMember>,
+    },
+}
+
+impl RelocationSelection {
+    /// Every member written in the statement, in written order.
+    pub fn members(&self) -> Vec<&RelocationMember> {
+        match self {
+            Self::List(members) => members.iter().collect(),
+            Self::Corridor { from, to } => from.iter().chain(to).collect(),
+        }
+    }
+
+    fn to_nspl(&self) -> String {
+        match self {
+            Self::List(members) => format_relocation_members(members),
+            Self::Corridor { from, to } => format!(
+                "FROM {} TO {}",
+                format_relocation_members(from),
+                format_relocation_members(to)
+            ),
+        }
+    }
+}
+
+/// Whether a hard group's soft preferences shape the relocation plan.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumProperty,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[strum(serialize_all = "lowercase")]
+pub enum RelocationPreferenceStrategy {
+    #[strum(props(keyword = "FOLLOW PREFERENCES"))]
+    Follow,
+    #[strum(props(keyword = "IGNORE PREFERENCES"))]
+    Ignore,
+}
+
+impl RelocationPreferenceStrategy {
+    /// The composed NSPL keyword phrase that spells this strategy.
+    pub fn keyword_phrase(self) -> &'static str {
+        self.get_str("keyword")
+            .assured("the strum property is declared on every variant of this enum")
+    }
+
+    pub fn follows_preferences(self) -> bool {
+        matches!(self, Self::Follow)
+    }
+}
+
+/// A `FOR <kind> <name> FOLLOW|IGNORE PREFERENCES` clause, which sets the strategy of the named
+/// runtime node's whole hard group.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RelocationPreferenceOverride {
+    pub member: RelocationMember,
+    pub strategy: RelocationPreferenceStrategy,
+}
+
+/// The relocation both `RELOCATE` and `DESCRIBE RELOCATION` describe.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct Relocation {
+    pub selection: RelocationSelection,
+    pub destination: ClusterNodeName,
+    pub strategy: RelocationPreferenceStrategy,
+    pub overrides: Vec<RelocationPreferenceOverride>,
+}
+
+impl Relocation {
+    /// Renders the clauses shared by both statements, with the default strategy before any
+    /// `FOR` override and members in written order.
+    pub fn to_nspl_clauses(&self) -> String {
+        let mut rendered = format!(
+            "{} ONTO NODE {} {}",
+            self.selection.to_nspl(),
+            self.destination,
+            self.strategy.keyword_phrase()
+        );
+        for override_clause in &self.overrides {
+            rendered.push_str(&format!(
+                " FOR {} {}",
+                override_clause.member.to_nspl(),
+                override_clause.strategy.keyword_phrase()
+            ));
+        }
+        rendered
+    }
+}
+
+fn format_relocation_members(members: &[RelocationMember]) -> String {
+    members
+        .iter()
+        .map(RelocationMember::to_nspl)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(
@@ -473,8 +745,8 @@ fn default_subscription_delivery_behavior() -> SubscriptionDeliveryBehavior {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSubscription {
-    pub name: Identifier,
-    pub relay: Identifier,
+    pub name: SubscriptionName,
+    pub relay: RelayName,
     #[serde(default = "default_subscription_delivery_behavior")]
     pub delivery_behavior: SubscriptionDeliveryBehavior,
     #[serde(default)]
@@ -485,92 +757,135 @@ pub struct CreateSubscription {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteSubscription {
-    pub name: Identifier,
+    pub name: SubscriptionName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeRelay {
-    pub relay: Identifier,
+    pub relay: RelayName,
     pub bindings: Vec<SubscriptionBinding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct DescribeDomain;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeIngestor {
-    pub ingestor: Identifier,
+    pub ingestor: IngestorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeResource {
-    pub identifier: Identifier,
+    pub identifier: ResourceName,
     pub version: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeLookup {
-    pub name: Identifier,
+    pub name: LookupName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeJunction {
-    pub name: Identifier,
+    pub name: JunctionName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeDeduplicator {
-    pub name: Identifier,
+    pub name: DeduplicatorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeReingestor {
-    pub name: Identifier,
+    pub name: ReingestorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeCorrelator {
-    pub name: Identifier,
+    pub name: CorrelatorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeEndpoint {
-    pub name: Identifier,
+    pub name: EndpointName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeReorderer {
-    pub name: Identifier,
+    pub name: ReordererName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeEmitter {
-    pub name: Identifier,
+    pub name: EmitterName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeWindowProcessor {
-    pub name: Identifier,
+    pub name: WindowProcessorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeWasmProcessor {
-    pub name: Identifier,
+    pub name: WasmProcessorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeUdf {
-    pub name: Identifier,
+    pub name: UdfName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribePlacement {
-    pub name: Identifier,
+    pub name: PlacementName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct LookupQuery {
-    pub name: Identifier,
+    pub name: LookupName,
     pub key: SubscriptionLiteral,
 }
 
@@ -578,7 +893,7 @@ pub struct LookupQuery {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct SubscriptionBinding {
-    pub field: Identifier,
+    pub field: FieldName,
     pub value: SubscriptionLiteral,
 }
 
@@ -591,36 +906,42 @@ pub enum SubscriptionLiteral {
     Bool(bool),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreatePlacement {
-    pub name: Identifier,
-    pub from: Vec<Identifier>,
-    pub to: Vec<Identifier>,
+    pub name: PlacementName,
+    pub from: Vec<ModelName>,
+    pub to: Vec<ModelName>,
     pub policy: PlacementPolicy,
-    pub rank: Option<u64>,
+    pub rank: Option<NonZeroU64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterPlacement {
-    pub placement: Identifier,
+    pub placement: PlacementName,
     pub operations: Vec<AlterPlacementOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterPlacementOperation {
     SetPolicy {
         policy: PlacementPolicy,
     },
     SetRank {
-        rank: u64,
+        rank: NonZeroU64,
     },
     DropRank,
     SetMembers {
-        from: Vec<Identifier>,
-        to: Vec<Identifier>,
+        from: Vec<ModelName>,
+        to: Vec<ModelName>,
     },
     RenameTo {
-        name: Identifier,
+        name: PlacementName,
     },
 }
 
@@ -628,24 +949,22 @@ pub enum AlterPlacementOperation {
 pub enum AlterPlacementError {
     #[error("ALTER targets placement `{requested}`, but the stored placement is `{stored}`")]
     PlacementNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: PlacementName,
+        requested: PlacementName,
     },
     #[error("a placement must declare at least one FROM member")]
     EmptyFrom,
     #[error("a placement must declare at least one TO member")]
     EmptyTo,
-    #[error("placement RANK 0 is invalid; RANK must be greater than zero")]
-    RankZero,
 }
 
 impl CreatePlacement {
     pub fn new(
-        name: Identifier,
-        from: Vec<Identifier>,
-        to: Vec<Identifier>,
+        name: PlacementName,
+        from: Vec<ModelName>,
+        to: Vec<ModelName>,
         policy: PlacementPolicy,
-        rank: Option<u64>,
+        rank: Option<NonZeroU64>,
     ) -> Result<Self, AlterPlacementError> {
         let mut placement = Self {
             name,
@@ -693,9 +1012,6 @@ impl CreatePlacement {
         if self.to.is_empty() {
             return Err(AlterPlacementError::EmptyTo);
         }
-        if self.rank == Some(0) {
-            return Err(AlterPlacementError::RankZero);
-        }
         Ok(())
     }
 
@@ -705,7 +1021,7 @@ impl CreatePlacement {
     }
 }
 
-fn deduplicate_identifiers(identifiers: &mut Vec<Identifier>) {
+fn deduplicate_identifiers(identifiers: &mut Vec<ModelName>) {
     let mut seen = Vec::new();
     identifiers.retain(|identifier| {
         if seen.contains(identifier) {
@@ -717,55 +1033,153 @@ fn deduplicate_identifiers(identifiers: &mut Vec<Identifier>) {
     });
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Model {
-    Schema(CreateSchema),
-    WireJsonSchema(CreateJsonWireSchema),
-    WireCborSchema(CreateCborWireSchema),
-    WireAvroSchema(CreateAvroWireSchema),
-    Codec(CreateCodec),
-    ClientKafka(CreateClientKafka),
-    ClientPulsar(CreateClientPulsar),
-    ClientHttp(CreateClientHttp),
-    ClientSentry(CreateClientSentry),
-    ClientOtel(CreateClientOtel),
-    ClientPrometheus(CreateClientPrometheus),
-    ClientMqtt(CreateClientMqtt),
-    ClientNats(CreateClientNats),
-    ClientRabbitMq(CreateClientRabbitMq),
-    ClientRedis(CreateClientRedis),
-    ClientZeroMq(CreateClientZeroMq),
-    ClientSqs(CreateClientSqs),
-    ClientWebsockets(CreateClientWebsockets),
-    ClientSyslog(CreateClientSyslog),
-    ClientClickHouse(CreateClientClickHouse),
-    ClientPostgres(CreateClientPostgres),
-    ClientMySql(CreateClientMySql),
-    ClientMongoDb(CreateClientMongoDb),
-    ClientS3(CreateClientS3),
-    ClientGcs(CreateClientGcs),
-    ClientAzureBlob(CreateClientAzureBlob),
-    ClientIcebergRest(CreateClientIcebergRest),
-    Vhost(CreateVhost),
-    Branch(CreateBranch),
-    Endpoint(CreateEndpoint),
-    SignalingProtocol(CreateSignalingProtocol),
-    Generator(CreateGenerator),
-    Inferencer(CreateInferencer),
-    WasmProcessor(CreateWasmProcessor),
-    Ingestor(CreateIngestor),
-    Reingestor(CreateReingestor),
-    Relay(CreateRelay),
-    Materializer(CreateMaterializer),
-    Lookup(CreateLookup),
-    Junction(CreateJunction),
-    Deduplicator(CreateDeduplicator),
-    Correlator(CreateCorrelator),
-    Reorderer(CreateReorderer),
-    WindowProcessor(CreateWindowProcessor),
-    Emitter(CreateEmitter),
-    Placement(CreatePlacement),
-    Udf(CreateUdf),
+/// A model shape that its [`ModelKind`] names, and that names its kind back.
+///
+/// A store keyed by kind reads a model whose kind the caller has already named, so the caller
+/// receives that shape and never re-checks what it asked for. The projection below is where the
+/// union is narrowed, and only a store that owns the kind-to-shape invariant calls it.
+///
+/// Two families of model stay outside this pairing and are read as the [`Model`] union they
+/// genuinely are. [`ModelKind::Client`] configures one model per external system, so naming that
+/// kind does not name a shape. The JSON and CBOR wire schemas are the same shape under two kinds,
+/// so that shape does not name a kind.
+pub trait UniquelyKindedModel: Sized {
+    /// The kind whose stored models all have this shape.
+    const KIND: ModelKind;
+
+    /// This shape, when `model` holds it.
+    fn from_model(model: Model) -> Option<Self>;
+
+    /// The borrowing form of [`Self::from_model`].
+    fn from_model_ref(model: &Model) -> Option<&Self>;
+
+    /// The mutable form of [`Self::from_model_ref`], for altering a stored model in place.
+    fn from_model_mut(model: &mut Model) -> Option<&mut Self>;
+}
+
+/// Declares the [`Model`] union.
+///
+/// Each line ends in whether its kind and its shape name each other one-to-one. `paired` earns the
+/// [`UniquelyKindedModel`] projection. `shared` says the pairing is broken in one direction or the
+/// other, so naming the kind leaves the union as the only honest answer.
+macro_rules! declare_models {
+    ($($Variant:ident($Model:ty) => $Kind:ident, $client_label:expr, $family:ident;)+) => {
+        #[derive(
+            Debug,
+            Clone,
+            PartialEq,
+            Eq,
+            Serialize,
+            Deserialize,
+            Archive,
+            RkyvSerialize,
+            RkyvDeserialize,
+        )]
+        pub enum Model {
+            $($Variant($Model),)+
+        }
+
+        impl Model {
+            pub fn kind(&self) -> ModelKind {
+                match self {
+                    $(Self::$Variant(_) => ModelKind::$Kind,)+
+                }
+            }
+
+            pub fn name(&self) -> ModelName {
+                match self {
+                    $(Self::$Variant(model) => (&model.name).into(),)+
+                }
+            }
+
+            pub fn client_type_label(&self) -> Option<&'static str> {
+                match self {
+                    $(Self::$Variant(_) => $client_label,)+
+                }
+            }
+        }
+
+        $(declare_models!(@family $family $Variant($Model) => $Kind);)+
+    };
+    (@family paired $Variant:ident($Model:ty) => $Kind:ident) => {
+        impl UniquelyKindedModel for $Model {
+            const KIND: ModelKind = ModelKind::$Kind;
+
+            fn from_model(model: Model) -> Option<Self> {
+                if let Model::$Variant(model) = model {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+
+            fn from_model_ref(model: &Model) -> Option<&Self> {
+                if let Model::$Variant(model) = model {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+
+            fn from_model_mut(model: &mut Model) -> Option<&mut Self> {
+                if let Model::$Variant(model) = model {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+        }
+    };
+    (@family shared $Variant:ident($Model:ty) => $Kind:ident) => {};
+}
+
+declare_models! {
+    Schema(CreateSchema) => Schema, None, paired;
+    WireJsonSchema(CreateJsonWireSchema) => WireJsonSchema, None, shared;
+    WireCborSchema(CreateCborWireSchema) => WireCborSchema, None, shared;
+    WireAvroSchema(CreateAvroWireSchema) => WireAvroSchema, None, paired;
+    Codec(CreateCodec) => Codec, None, paired;
+    ClientKafka(CreateClientKafka) => Client, Some("KAFKA"), shared;
+    ClientPulsar(CreateClientPulsar) => Client, Some("PULSAR"), shared;
+    ClientHttp(CreateClientHttp) => Client, Some("HTTP"), shared;
+    ClientSentry(CreateClientSentry) => Client, Some("SENTRY"), shared;
+    ClientOtel(CreateClientOtel) => Client, Some("OTEL"), shared;
+    ClientPrometheus(CreateClientPrometheus) => Client, Some("PROMETHEUS"), shared;
+    ClientMqtt(CreateClientMqtt) => Client, Some("MQTT"), shared;
+    ClientNats(CreateClientNats) => Client, Some("NATS"), shared;
+    ClientRabbitMq(CreateClientRabbitMq) => Client, Some("RABBITMQ"), shared;
+    ClientRedis(CreateClientRedis) => Client, Some("REDIS"), shared;
+    ClientZeroMq(CreateClientZeroMq) => Client, Some("ZEROMQ"), shared;
+    ClientSqs(CreateClientSqs) => Client, Some("SQS"), shared;
+    ClientWebsockets(CreateClientWebsockets) => Client, Some("WEBSOCKETS"), shared;
+    ClientSyslog(CreateClientSyslog) => Client, Some("SYSLOG"), shared;
+    ClientClickHouse(CreateClientClickHouse) => Client, Some("CLICKHOUSE"), shared;
+    ClientPostgres(CreateClientPostgres) => Client, Some("POSTGRES"), shared;
+    ClientMySql(CreateClientMySql) => Client, Some("MYSQL"), shared;
+    ClientMongoDb(CreateClientMongoDb) => Client, Some("MONGODB"), shared;
+    ClientS3(CreateClientS3) => Client, Some("S3"), shared;
+    ClientGcs(CreateClientGcs) => Client, Some("GCS"), shared;
+    ClientAzureBlob(CreateClientAzureBlob) => Client, Some("AZURE_BLOB"), shared;
+    ClientIcebergRest(CreateClientIcebergRest) => Client, Some("ICEBERG_REST"), shared;
+    Vhost(CreateVhost) => Vhost, None, paired;
+    Branch(CreateBranch) => Branch, None, paired;
+    Endpoint(CreateEndpoint) => Endpoint, None, paired;
+    SignalingProtocol(CreateSignalingProtocol) => SignalingProtocol, None, paired;
+    Generator(CreateGenerator) => Generator, None, paired;
+    Inferencer(CreateInferencer) => Inferencer, None, paired;
+    WasmProcessor(CreateWasmProcessor) => WasmProcessor, None, paired;
+    Ingestor(CreateIngestor) => Ingestor, None, paired;
+    Reingestor(CreateReingestor) => Reingestor, None, paired;
+    Relay(CreateRelay) => Relay, None, paired;
+    Lookup(CreateLookup) => Lookup, None, paired;
+    Junction(CreateJunction) => Junction, None, paired;
+    Deduplicator(CreateDeduplicator) => Deduplicator, None, paired;
+    Correlator(CreateCorrelator) => Correlator, None, paired;
+    Reorderer(CreateReorderer) => Reorderer, None, paired;
+    WindowProcessor(CreateWindowProcessor) => WindowProcessor, None, paired;
+    Emitter(CreateEmitter) => Emitter, None, paired;
+    Placement(CreatePlacement) => Placement, None, paired;
+    Udf(CreateUdf) => Udf, None, paired;
 }
 
 impl Model {
@@ -777,61 +1191,9 @@ impl Model {
         }
     }
 
-    pub fn kind(&self) -> ModelKind {
-        match self {
-            Self::Schema(_) => ModelKind::Schema,
-            Self::WireJsonSchema(_) => ModelKind::WireJsonSchema,
-            Self::WireCborSchema(_) => ModelKind::WireCborSchema,
-            Self::WireAvroSchema(_) => ModelKind::WireAvroSchema,
-            Self::Codec(_) => ModelKind::Codec,
-            Self::ClientKafka(_)
-            | Self::ClientPulsar(_)
-            | Self::ClientHttp(_)
-            | Self::ClientSentry(_)
-            | Self::ClientOtel(_)
-            | Self::ClientPrometheus(_)
-            | Self::ClientMqtt(_)
-            | Self::ClientNats(_)
-            | Self::ClientRabbitMq(_)
-            | Self::ClientRedis(_)
-            | Self::ClientZeroMq(_)
-            | Self::ClientSqs(_)
-            | Self::ClientWebsockets(_)
-            | Self::ClientSyslog(_)
-            | Self::ClientClickHouse(_)
-            | Self::ClientPostgres(_)
-            | Self::ClientMySql(_)
-            | Self::ClientMongoDb(_)
-            | Self::ClientS3(_)
-            | Self::ClientGcs(_)
-            | Self::ClientAzureBlob(_)
-            | Self::ClientIcebergRest(_) => ModelKind::Client,
-            Self::Vhost(_) => ModelKind::Vhost,
-            Self::Branch(_) => ModelKind::Branch,
-            Self::Endpoint(_) => ModelKind::Endpoint,
-            Self::SignalingProtocol(_) => ModelKind::SignalingProtocol,
-            Self::Generator(_) => ModelKind::Generator,
-            Self::Inferencer(_) => ModelKind::Inferencer,
-            Self::WasmProcessor(_) => ModelKind::WasmProcessor,
-            Self::Ingestor(_) => ModelKind::Ingestor,
-            Self::Reingestor(_) => ModelKind::Reingestor,
-            Self::Relay(_) => ModelKind::Relay,
-            Self::Materializer(_) => ModelKind::Materializer,
-            Self::Lookup(_) => ModelKind::Lookup,
-            Self::Junction(_) => ModelKind::Junction,
-            Self::Deduplicator(_) => ModelKind::Deduplicator,
-            Self::Correlator(_) => ModelKind::Correlator,
-            Self::Reorderer(_) => ModelKind::Reorderer,
-            Self::WindowProcessor(_) => ModelKind::WindowProcessor,
-            Self::Emitter(_) => ModelKind::Emitter,
-            Self::Placement(_) => ModelKind::Placement,
-            Self::Udf(_) => ModelKind::Udf,
-        }
-    }
-
     /// The relays this model reads as materialized state. State is resolved by key rather than
     /// delivered as records, so these are dependencies and not record inputs.
-    pub fn materialized_state_relays(&self) -> Vec<&Identifier> {
+    pub fn materialized_state_relays(&self) -> Vec<&RelayName> {
         let dependencies = match self {
             Self::Generator(generator) => return vec![&generator.materialized_relay],
             Self::Emitter(model) => &model.materialized_state,
@@ -868,122 +1230,35 @@ impl Model {
         }
     }
 
-    pub fn identifier(&self) -> &Identifier {
-        match self {
-            Self::Schema(v) => &v.name,
-            Self::WireJsonSchema(v) => &v.name,
-            Self::WireCborSchema(v) => &v.name,
-            Self::WireAvroSchema(v) => &v.name,
-            Self::Codec(v) => &v.name,
-            Self::ClientKafka(v) => &v.name,
-            Self::ClientPulsar(v) => &v.name,
-            Self::ClientHttp(v) => &v.name,
-            Self::ClientSentry(v) => &v.name,
-            Self::ClientOtel(v) => &v.name,
-            Self::ClientPrometheus(v) => &v.name,
-            Self::ClientMqtt(v) => &v.name,
-            Self::ClientNats(v) => &v.name,
-            Self::ClientRabbitMq(v) => &v.name,
-            Self::ClientRedis(v) => &v.name,
-            Self::ClientZeroMq(v) => &v.name,
-            Self::ClientSqs(v) => &v.name,
-            Self::ClientWebsockets(v) => &v.name,
-            Self::ClientSyslog(v) => &v.name,
-            Self::ClientClickHouse(v) => &v.name,
-            Self::ClientPostgres(v) => &v.name,
-            Self::ClientMySql(v) => &v.name,
-            Self::ClientMongoDb(v) => &v.name,
-            Self::ClientS3(v) => &v.name,
-            Self::ClientGcs(v) => &v.name,
-            Self::ClientAzureBlob(v) => &v.name,
-            Self::ClientIcebergRest(v) => &v.name,
-            Self::Vhost(v) => &v.name,
-            Self::Branch(v) => &v.name,
-            Self::Endpoint(v) => &v.name,
-            Self::SignalingProtocol(v) => &v.name,
-            Self::Generator(v) => &v.name,
-            Self::Inferencer(v) => &v.name,
-            Self::WasmProcessor(v) => &v.name,
-            Self::Ingestor(v) => &v.name,
-            Self::Reingestor(v) => &v.name,
-            Self::Relay(v) => &v.name,
-            Self::Materializer(v) => &v.relay,
-            Self::Lookup(v) => &v.name,
-            Self::Junction(v) => &v.name,
-            Self::Deduplicator(v) => &v.name,
-            Self::Correlator(v) => &v.name,
-            Self::Reorderer(v) => &v.name,
-            Self::WindowProcessor(v) => &v.name,
-            Self::Emitter(v) => &v.name,
-            Self::Placement(v) => &v.name,
-            Self::Udf(v) => &v.name,
-        }
-    }
-
-    pub fn client_type_label(&self) -> Option<&'static str> {
-        match self {
-            Self::ClientKafka(_) => Some("KAFKA"),
-            Self::ClientPulsar(_) => Some("PULSAR"),
-            Self::ClientHttp(_) => Some("HTTP"),
-            Self::ClientSentry(_) => Some("SENTRY"),
-            Self::ClientOtel(_) => Some("OTEL"),
-            Self::ClientPrometheus(_) => Some("PROMETHEUS"),
-            Self::ClientMqtt(_) => Some("MQTT"),
-            Self::ClientNats(_) => Some("NATS"),
-            Self::ClientRabbitMq(_) => Some("RABBITMQ"),
-            Self::ClientRedis(_) => Some("REDIS"),
-            Self::ClientZeroMq(_) => Some("ZEROMQ"),
-            Self::ClientSqs(_) => Some("SQS"),
-            Self::ClientWebsockets(_) => Some("WEBSOCKETS"),
-            Self::ClientSyslog(_) => Some("SYSLOG"),
-            Self::ClientClickHouse(_) => Some("CLICKHOUSE"),
-            Self::ClientPostgres(_) => Some("POSTGRES"),
-            Self::ClientMySql(_) => Some("MYSQL"),
-            Self::ClientMongoDb(_) => Some("MONGODB"),
-            Self::ClientS3(_) => Some("S3"),
-            Self::ClientGcs(_) => Some("GCS"),
-            Self::ClientAzureBlob(_) => Some("AZURE_BLOB"),
-            Self::ClientIcebergRest(_) => Some("ICEBERG_REST"),
-            Self::Schema(_)
-            | Self::WireJsonSchema(_)
-            | Self::WireCborSchema(_)
-            | Self::WireAvroSchema(_)
-            | Self::Codec(_)
-            | Self::Vhost(_)
-            | Self::Branch(_)
-            | Self::Endpoint(_)
-            | Self::SignalingProtocol(_)
-            | Self::Generator(_)
-            | Self::Inferencer(_)
-            | Self::WasmProcessor(_)
-            | Self::Ingestor(_)
-            | Self::Reingestor(_)
-            | Self::Relay(_)
-            | Self::Materializer(_)
-            | Self::Lookup(_)
-            | Self::Junction(_)
-            | Self::Deduplicator(_)
-            | Self::Correlator(_)
-            | Self::Reorderer(_)
-            | Self::WindowProcessor(_)
-            | Self::Emitter(_)
-            | Self::Placement(_)
-            | Self::Udf(_) => None,
-        }
+    /// How this model is addressed: the kind it is and the name it carries, together.
+    pub fn node_ref(&self) -> NodeRef {
+        NodeRef::new(self.kind(), self.name())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateCodec {
-    pub name: Identifier,
+    pub name: CodecName,
     pub wire_format: CodecWireFormat,
-    pub wire_schema: Option<Identifier>,
-    pub schema: Identifier,
+    pub schema: SchemaName,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub encoding_rules: Vec<CodecEncodingRule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Default,
+)]
 pub struct CodecJaqTransformations {
     pub on_ingestion: Option<String>,
     pub on_emitting: Option<String>,
@@ -995,7 +1270,19 @@ impl CodecJaqTransformations {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum CodecJaqFormat {
     Json,
@@ -1005,11 +1292,19 @@ pub enum CodecJaqFormat {
     Cbor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum CodecWireFormat {
-    Json,
-    Cbor,
-    Avro,
+    Json {
+        wire_schema: WireSchemaName,
+    },
+    Cbor {
+        wire_schema: WireSchemaName,
+    },
+    Avro {
+        wire_schema: WireSchemaName,
+    },
     Syslog,
     JaqNative {
         format: CodecJaqFormat,
@@ -1019,18 +1314,57 @@ pub enum CodecWireFormat {
 }
 
 impl CodecWireFormat {
-    pub const fn wire_schema_kind(&self) -> Option<ModelKind> {
+    /// The wire schema this format reads, as one reference whose kind and identifier are chosen
+    /// together. Formats that carry their own decoding contract name no wire schema at all.
+    pub fn wire_schema_reference(&self) -> Option<NodeRef> {
         match self {
-            Self::Json => Some(ModelKind::WireJsonSchema),
-            Self::Cbor => Some(ModelKind::WireCborSchema),
-            Self::Avro => Some(ModelKind::WireAvroSchema),
+            Self::Json { wire_schema } => Some(NodeRef::new(
+                ModelKind::WireJsonSchema,
+                ModelName::from(wire_schema),
+            )),
+            Self::Cbor { wire_schema } => Some(NodeRef::new(
+                ModelKind::WireCborSchema,
+                ModelName::from(wire_schema),
+            )),
+            Self::Avro { wire_schema } => Some(NodeRef::new(
+                ModelKind::WireAvroSchema,
+                ModelName::from(wire_schema),
+            )),
             Self::Syslog | Self::JaqNative { .. } | Self::Protobuf(_) => None,
+        }
+    }
+
+    /// Pairs this format with the wire schema `lookup` holds for it. Formats that carry their own
+    /// decoding contract resolve without consulting the lookup at all.
+    pub fn resolve<'a, L>(&'a self, lookup: &'a L) -> Result<ResolvedCodecWireFormat<'a>, L::Error>
+    where
+        L: WireSchemaLookup,
+    {
+        match self {
+            Self::Json { wire_schema } => lookup
+                .json_wire_schema(wire_schema)
+                .map(ResolvedCodecWireFormat::Json),
+            Self::Cbor { wire_schema } => lookup
+                .cbor_wire_schema(wire_schema)
+                .map(ResolvedCodecWireFormat::Cbor),
+            Self::Avro { wire_schema } => lookup
+                .avro_wire_schema(wire_schema)
+                .map(ResolvedCodecWireFormat::Avro),
+            Self::Syslog => Ok(ResolvedCodecWireFormat::Syslog),
+            Self::JaqNative {
+                format,
+                transformations,
+            } => Ok(ResolvedCodecWireFormat::JaqNative {
+                format: *format,
+                transformations,
+            }),
+            Self::Protobuf(config) => Ok(ResolvedCodecWireFormat::Protobuf(config)),
         }
     }
 
     pub fn supports_decoding(&self) -> bool {
         match self {
-            Self::Json | Self::Cbor | Self::Avro | Self::Syslog => true,
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
             Self::JaqNative {
                 transformations, ..
             }
@@ -1042,7 +1376,7 @@ impl CodecWireFormat {
 
     pub fn supports_encoding(&self) -> bool {
         match self {
-            Self::Json | Self::Cbor | Self::Avro | Self::Syslog => true,
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
             Self::JaqNative {
                 transformations, ..
             }
@@ -1053,9 +1387,46 @@ impl CodecWireFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A codec's wire format with the wire schema it names already looked up. Resolving into one
+/// variant is what keeps a format and a wire schema of another kind from travelling together, so
+/// validation and compilation read the definition their format actually describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedCodecWireFormat<'a> {
+    Json(&'a CreateJsonWireSchema),
+    Cbor(&'a CreateCborWireSchema),
+    Avro(&'a CreateAvroWireSchema),
+    Syslog,
+    JaqNative {
+        format: CodecJaqFormat,
+        transformations: &'a CodecJaqTransformations,
+    },
+    Protobuf(&'a CodecProtobufConfig),
+}
+
+/// Where the wire schema a codec's format names is found.
+///
+/// One method per schemaful wire format keeps the pairing in the type system: a JSON codec can
+/// only ask for a JSON wire schema, so no store can answer a format with a definition of another
+/// kind and no caller has to check that it did not.
+pub trait WireSchemaLookup {
+    /// Why a named wire schema could not be produced.
+    type Error;
+
+    fn json_wire_schema(&self, name: &WireSchemaName)
+    -> Result<&CreateJsonWireSchema, Self::Error>;
+
+    fn cbor_wire_schema(&self, name: &WireSchemaName)
+    -> Result<&CreateCborWireSchema, Self::Error>;
+
+    fn avro_wire_schema(&self, name: &WireSchemaName)
+    -> Result<&CreateAvroWireSchema, Self::Error>;
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CodecProtobufConfig {
-    pub resource: Identifier,
+    pub resource: ResourceName,
     pub resource_version: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<ClientConfigEntry>,
@@ -1063,27 +1434,40 @@ pub struct CodecProtobufConfig {
     pub transformations: CodecJaqTransformations,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CodecEncodingRule {
-    pub field: Identifier,
+    pub field: FieldName,
     pub encoding: CodecEncoding,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum CodecEncoding {
     Rfc3339,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateEmitter {
-    pub name: Identifier,
+    pub name: EmitterName,
     pub from: ProcessorInputs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encode_using_codec: Option<Identifier>,
+    pub encode_using_codec: Option<CodecName>,
     pub sink: Box<EmitSink>,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
+    pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
     pub publishing_mode: EmitterPublishingMode,
     #[serde(default)]
@@ -1094,10 +1478,6 @@ pub struct CreateEmitter {
 }
 
 impl CreateEmitter {
-    pub fn flush_policy(&self) -> (&str, Option<&str>) {
-        (self.flush_each.as_str(), self.max_batch_size.as_deref())
-    }
-
     pub fn apply_alter(&mut self, alter: &AlterEmitter) -> Result<(), AlterEmitterError> {
         if self.name != alter.emitter {
             return Err(AlterEmitterError::EmitterNameMismatch {
@@ -1185,9 +1565,7 @@ impl CreateEmitter {
                         mode: publishing_mode.kind_label().to_string(),
                     });
                 }
-                let mut sink = sink.clone();
-                sink.copy_flush_policy_from(self);
-                self.sink = sink;
+                self.sink = sink.clone();
                 self.publishing_mode = publishing_mode.clone();
             }
             AlterEmitterOperation::SetClient { client } => {
@@ -1219,15 +1597,8 @@ impl CreateEmitter {
                 }
                 self.publishing_mode = mode.clone();
             }
-            AlterEmitterOperation::SetFlush {
-                flush_each,
-                max_batch_size,
-            } => {
-                self.flush_each = flush_each.clone();
-                self.max_batch_size = max_batch_size.clone();
-                let mut sink = self.sink.clone();
-                sink.copy_flush_policy_from(self);
-                self.sink = sink;
+            AlterEmitterOperation::SetFlush { flush_policy } => {
+                self.flush_policy = flush_policy.clone();
             }
             AlterEmitterOperation::SetCommit {
                 commit_each,
@@ -1248,7 +1619,7 @@ impl CreateEmitter {
         Ok(())
     }
 
-    fn input_index(&self, relay: &Identifier) -> Result<usize, AlterEmitterError> {
+    fn input_index(&self, relay: &RelayName) -> Result<usize, AlterEmitterError> {
         self.from
             .from
             .iter()
@@ -1258,7 +1629,7 @@ impl CreateEmitter {
             })
     }
 
-    fn ensure_input_absent(&self, relay: &Identifier) -> Result<(), AlterEmitterError> {
+    fn ensure_input_absent(&self, relay: &RelayName) -> Result<(), AlterEmitterError> {
         if self.from.from.iter().any(|candidate| candidate == relay) {
             Err(AlterEmitterError::InputAlreadyExists {
                 relay: relay.clone(),
@@ -1269,37 +1640,41 @@ impl CreateEmitter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterEmitter {
-    pub emitter: Identifier,
+    pub emitter: EmitterName,
     pub operations: Vec<AlterEmitterOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterEmitterOperation {
     AddFrom {
-        relay: Identifier,
+        relay: RelayName,
         where_clause: Option<crate::Expression>,
     },
     DropFrom {
-        relay: Identifier,
+        relay: RelayName,
     },
     AlterFromSetWhere {
-        relay: Identifier,
+        relay: RelayName,
         where_clause: crate::Expression,
     },
     AlterFromDropWhere {
-        relay: Identifier,
+        relay: RelayName,
     },
     SetSink {
         sink: Box<EmitSink>,
         publishing_mode: EmitterPublishingMode,
     },
     SetClient {
-        client: Identifier,
+        client: ClientName,
     },
     SetEncodeUsing {
-        codec: Identifier,
+        codec: CodecName,
     },
     DropEncode,
     SetCollect {
@@ -1313,8 +1688,7 @@ pub enum AlterEmitterOperation {
         mode: EmitterPublishingMode,
     },
     SetFlush {
-        flush_each: String,
-        max_batch_size: Option<String>,
+        flush_policy: FlushPolicy,
     },
     SetCommit {
         commit_each: String,
@@ -1326,15 +1700,15 @@ pub enum AlterEmitterOperation {
 pub enum AlterEmitterError {
     #[error("ALTER targets emitter `{requested}`, but the stored emitter is `{stored}`")]
     EmitterNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: EmitterName,
+        requested: EmitterName,
     },
     #[error("input relay `{relay}` is already configured")]
-    InputAlreadyExists { relay: Identifier },
+    InputAlreadyExists { relay: RelayName },
     #[error("input relay `{relay}` is not configured")]
-    InputNotFound { relay: Identifier },
+    InputNotFound { relay: RelayName },
     #[error("input relay `{relay}` has no WHERE clause")]
-    InputWhereNotConfigured { relay: Identifier },
+    InputWhereNotConfigured { relay: RelayName },
     #[error("an emitter must retain at least one input")]
     CannotDropLastInput,
     #[error("emitter encoding is not configured")]
@@ -1345,28 +1719,34 @@ pub enum AlterEmitterError {
     PublishingModeUnsupported { sink: String, mode: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateGenerator {
-    pub name: Identifier,
-    pub materialized_relay: Identifier,
+    pub name: GeneratorName,
+    pub materialized_relay: RelayName,
     pub branched_by: BranchSelection,
     pub each: String,
     pub output_routes: ProcessorOutputs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterGenerator {
-    pub generator: Identifier,
+    pub generator: GeneratorName,
     pub operations: Vec<AlterGeneratorOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterGeneratorOperation {
-    SetMaterializedState { relay: Identifier },
+    SetMaterializedState { relay: RelayName },
     SetEach { each: String },
     SetBranching { branching: BranchSelection },
     AddRoute { route: ProcessorOutput },
-    DropRoute { relay: Identifier },
+    DropRoute { relay: RelayName },
     ReplaceRoute { route: ProcessorOutput },
 }
 
@@ -1374,13 +1754,13 @@ pub enum AlterGeneratorOperation {
 pub enum AlterGeneratorError {
     #[error("ALTER targets generator `{requested}`, but the stored generator is `{stored}`")]
     GeneratorNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: GeneratorName,
+        requested: GeneratorName,
     },
     #[error("route target `{relay}` is not configured")]
-    RouteTargetNotFound { relay: Identifier },
+    RouteTargetNotFound { relay: RelayName },
     #[error("route target `{relay}` is ambiguous because it is configured more than once")]
-    RouteTargetAmbiguous { relay: Identifier },
+    RouteTargetAmbiguous { relay: RelayName },
     #[error("a generator must retain at least one route")]
     CannotDropLastRoute,
 }
@@ -1426,7 +1806,7 @@ impl CreateGenerator {
         Ok(())
     }
 
-    fn unique_route_index(&self, relay: &Identifier) -> Result<usize, AlterGeneratorError> {
+    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterGeneratorError> {
         let mut indexes = self
             .output_routes
             .routes
@@ -1447,7 +1827,9 @@ impl CreateGenerator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ErrorPolicies {
     pub message: MessageErrorPolicy,
     pub general: GeneralErrorPolicy,
@@ -1462,73 +1844,90 @@ impl ErrorPolicies {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MessageErrorPolicy {
     Ignore,
     Log,
     Dlq {
-        relay: Identifier,
+        relay: RelayName,
         assignments: Vec<crate::Assignment>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum GeneralErrorPolicy {
     Ignore,
     Log,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SqsFifoGroup {
     FromBranch,
     Expression(crate::Expression),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
     Kafka {
-        client: Identifier,
-        topic: Identifier,
+        client: ClientName,
+        topic: TopicName,
     },
     Pulsar {
-        client: Identifier,
-        topic: Identifier,
+        client: ClientName,
+        topic: TopicName,
     },
     #[strum(serialize = "RABBITMQ")]
     RabbitMq {
-        client: Identifier,
-        queue: Identifier,
+        client: ClientName,
+        queue: QueueName,
     },
     Redis {
-        client: Identifier,
-        channel: Identifier,
+        client: ClientName,
+        channel: ChannelName,
     },
     Mqtt {
-        client: Identifier,
-        topic: Identifier,
+        client: ClientName,
+        topic: TopicName,
     },
     Nats {
-        client: Identifier,
-        subject: Identifier,
+        client: ClientName,
+        subject: SubjectName,
     },
     #[strum(serialize = "ZEROMQ")]
     ZeroMq {
-        client: Identifier,
+        client: ClientName,
     },
     Sqs {
-        client: Identifier,
+        client: ClientName,
         queue: String,
         fifo_group: Option<SqsFifoGroup>,
     },
     Sentry {
-        client: Identifier,
+        client: ClientName,
     },
     Syslog {
-        client: Identifier,
+        client: ClientName,
     },
     Otel {
-        client: Identifier,
+        client: ClientName,
         signal: OtelSignal,
         values: Vec<OtelValueMapping>,
         attributes: Vec<OtelValueMapping>,
@@ -1537,47 +1936,41 @@ pub enum EmitSink {
     },
     #[strum(serialize = "CLICKHOUSE")]
     ClickHouse {
-        client: Identifier,
-        table: Identifier,
+        client: ClientName,
+        table: TableName,
         values: Vec<ClickHouseValueMapping>,
-        max_batch: u64,
-        flush_each: String,
+        max_batch: NonZeroU64,
     },
     Postgres {
-        client: Identifier,
-        table: Identifier,
+        client: ClientName,
+        table: TableName,
         values: Vec<PostgresValueMapping>,
         conflict_action: PostgresConflictAction,
-        max_batch: u64,
-        flush_each: String,
+        max_batch: NonZeroU64,
     },
     #[strum(serialize = "MYSQL")]
     MySql {
-        client: Identifier,
-        table: Identifier,
+        client: ClientName,
+        table: TableName,
         values: Vec<MySqlValueMapping>,
         conflict_action: MySqlConflictAction,
-        max_batch: u64,
-        flush_each: String,
+        max_batch: NonZeroU64,
     },
     #[strum(serialize = "MONGODB")]
     MongoDb {
-        client: Identifier,
-        collection: Identifier,
+        client: ClientName,
+        collection: CollectionName,
         values: Vec<MongoDbValueMapping>,
         conflict_action: MongoDbConflictAction,
-        max_batch: u64,
-        flush_each: String,
+        max_batch: NonZeroU64,
     },
     Iceberg {
         backend: IcebergStorageBackend,
-        client: Identifier,
-        table: Identifier,
+        client: ClientName,
+        table: TableName,
         values: Vec<IcebergValueMapping>,
         location: String,
         catalog: IcebergCatalog,
-        flush_each: String,
-        max_batch_size: Option<String>,
         commit_each: String,
         max_commit_size: String,
     },
@@ -1588,7 +1981,7 @@ impl EmitSink {
         self.as_ref()
     }
 
-    pub fn client(&self) -> &Identifier {
+    pub fn client(&self) -> &ClientName {
         match self {
             Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
@@ -1646,7 +2039,7 @@ impl EmitSink {
         }
     }
 
-    fn client_mut(&mut self) -> &mut Identifier {
+    fn client_mut(&mut self) -> &mut ClientName {
         match self {
             Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
@@ -1667,37 +2060,7 @@ impl EmitSink {
         }
     }
 
-    fn copy_flush_policy_from(&mut self, emitter: &CreateEmitter) {
-        match self {
-            Self::ClickHouse { flush_each, .. }
-            | Self::Postgres { flush_each, .. }
-            | Self::MySql { flush_each, .. }
-            | Self::MongoDb { flush_each, .. } => {
-                *flush_each = emitter.flush_each.clone();
-            }
-            Self::Iceberg {
-                flush_each,
-                max_batch_size,
-                ..
-            } => {
-                *flush_each = emitter.flush_each.clone();
-                *max_batch_size = emitter.max_batch_size.clone();
-            }
-            Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. } => {}
-        }
-    }
-
-    pub fn iceberg_catalog_client(&self) -> Option<&Identifier> {
+    pub fn iceberg_catalog_client(&self) -> Option<&ClientName> {
         if let Self::Iceberg {
             catalog: IcebergCatalog::Rest { client },
             ..
@@ -1804,31 +2167,6 @@ impl EmitSink {
         }
     }
 
-    pub fn flush_policy(&self) -> Option<(&str, Option<&str>)> {
-        match self {
-            Self::ClickHouse { flush_each, .. }
-            | Self::Postgres { flush_each, .. }
-            | Self::MySql { flush_each, .. }
-            | Self::MongoDb { flush_each, .. } => Some((flush_each.as_str(), None)),
-            Self::Iceberg {
-                flush_each,
-                max_batch_size,
-                ..
-            } => Some((flush_each.as_str(), max_batch_size.as_deref())),
-            Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. } => None,
-        }
-    }
-
     pub fn commit_policy(&self) -> Option<(&str, &str)> {
         match self {
             Self::Iceberg {
@@ -1855,7 +2193,9 @@ impl EmitSink {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ClickHouseValueMapping {
     pub column: String,
     pub expression: crate::Expression,
@@ -1863,14 +2203,18 @@ pub struct ClickHouseValueMapping {
 
 pub type OtelValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum OtelSignal {
     Logs,
     Traces,
     Metric(OtelMetric),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct OtelMetric {
     pub name: String,
     pub unit: String,
@@ -1878,7 +2222,9 @@ pub struct OtelMetric {
     pub kind: OtelMetricKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum OtelMetricKind {
     Gauge,
     Sum {
@@ -1890,14 +2236,28 @@ pub enum OtelMetricKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum OtelAggregationTemporality {
     Delta,
     Cumulative,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct OtelScope {
     pub name: String,
     pub version: Option<String>,
@@ -1905,7 +2265,9 @@ pub struct OtelScope {
 
 pub type PostgresValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum PostgresConflictAction {
     None,
     DoNothing { target: Vec<String> },
@@ -1914,7 +2276,9 @@ pub enum PostgresConflictAction {
 
 pub type MySqlValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MySqlConflictAction {
     None,
     DoNothing,
@@ -1924,12 +2288,26 @@ pub enum MySqlConflictAction {
 pub type MongoDbValueMapping = ClickHouseValueMapping;
 pub type IcebergValueMapping = ClickHouseValueMapping;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum IcebergCatalog {
-    Rest { client: Identifier },
+    Rest { client: ClientName },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum IcebergStorageBackend {
     S3,
@@ -1939,227 +2317,204 @@ pub enum IcebergStorageBackend {
     AzureBlob,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MongoDbConflictAction {
     None,
     DoNothing { target: Vec<String> },
     DoUpdate { target: Vec<String> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientKafka {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientPulsar {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientHttp {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientSentry {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientOtel {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientPrometheus {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientMqtt {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientNats {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientRabbitMq {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientRedis {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientZeroMq {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientSqs {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientWebsockets {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub signaling_protocol: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientSyslog {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientClickHouse {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientPostgres {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientMySql {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientMongoDb {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientS3 {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientGcs {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientAzureBlob {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientIcebergRest {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ClientConfigEntry {
     pub key: String,
     pub value: String,
 }
 
-pub type KafkaConfigEntry = ClientConfigEntry;
-pub type PulsarConfigEntry = ClientConfigEntry;
-pub type HttpConfigEntry = ClientConfigEntry;
-pub type SentryConfigEntry = ClientConfigEntry;
-pub type OtelConfigEntry = ClientConfigEntry;
-pub type RabbitMqConfigEntry = ClientConfigEntry;
-pub type RedisConfigEntry = ClientConfigEntry;
-pub type MqttConfigEntry = ClientConfigEntry;
-pub type NatsConfigEntry = ClientConfigEntry;
-pub type PrometheusConfigEntry = ClientConfigEntry;
-pub type ZeroMqConfigEntry = ClientConfigEntry;
-pub type SqsConfigEntry = ClientConfigEntry;
-pub type WebsocketsConfigEntry = ClientConfigEntry;
-pub type SyslogConfigEntry = ClientConfigEntry;
-pub type ClickHouseConfigEntry = ClientConfigEntry;
-pub type PostgresConfigEntry = ClientConfigEntry;
-pub type MySqlConfigEntry = ClientConfigEntry;
-pub type MongoDbConfigEntry = ClientConfigEntry;
-pub type S3ConfigEntry = ClientConfigEntry;
-pub type GcsConfigEntry = ClientConfigEntry;
-pub type AzureBlobConfigEntry = ClientConfigEntry;
-pub type IcebergRestConfigEntry = ClientConfigEntry;
+/// Why a declared pair of connection-pool sizes is not a usable bound.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ClientPoolBoundsError {
+    #[error("minimum pool size {minimum} must not exceed maximum pool size {maximum}")]
+    MinimumExceedsMaximum { minimum: u32, maximum: NonZeroU32 },
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The connection-pool bounds a database client declares.
+///
+/// The two counts only mean anything together: a minimum above its maximum asks for a maintained
+/// size the ceiling forbids. [`ClientPoolBounds::new`] is the one place that ordering is decided,
+/// so every holder of a pair already knows its minimum is reachable.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct ClientPoolBounds {
+    minimum: u32,
+    maximum: NonZeroU32,
+}
+
+impl ClientPoolBounds {
+    /// Pair a declared minimum with its maximum, rejecting a minimum the ceiling cannot reach.
+    pub fn new(minimum: u32, maximum: NonZeroU32) -> Result<Self, Report<ClientPoolBoundsError>> {
+        if minimum > maximum.get() {
+            return Err(Report::new(ClientPoolBoundsError::MinimumExceedsMaximum {
+                minimum,
+                maximum,
+            }));
+        }
+        Ok(Self { minimum, maximum })
+    }
+
+    /// The declared number of established, usable connections to keep available.
+    pub const fn minimum(&self) -> u32 {
+        self.minimum
+    }
+
+    /// The declared ceiling on managed connections, counting those being established or retired.
+    pub const fn maximum(&self) -> NonZeroU32 {
+        self.maximum
+    }
+}
+
+/// Declare clients that share the connector-owned name, mount and configuration shape.
+///
+/// A pooled client carries its declared [`ClientPoolBounds`] as well, because connection capacity
+/// belongs to the client itself rather than to the connector's string configuration.
+macro_rules! declare_clients {
+    (
+        unpooled { $($Client:ident => $Config:ident,)+ }
+        pooled { $($PooledClient:ident => $PooledConfig:ident,)+ }
+    ) => {
+        $(
+            #[derive(
+                Debug,
+                Clone,
+                PartialEq,
+                Eq,
+                Serialize,
+                Deserialize,
+                Archive,
+                RkyvSerialize,
+                RkyvDeserialize,
+            )]
+            pub struct $Client {
+                pub name: ClientName,
+                pub mount: Option<ResourceName>,
+                pub config: Vec<ClientConfigEntry>,
+            }
+
+            pub type $Config = ClientConfigEntry;
+        )+
+        $(
+            #[derive(
+                Debug,
+                Clone,
+                PartialEq,
+                Eq,
+                Serialize,
+                Deserialize,
+                Archive,
+                RkyvSerialize,
+                RkyvDeserialize,
+            )]
+            pub struct $PooledClient {
+                pub name: ClientName,
+                pub pool: ClientPoolBounds,
+                pub mount: Option<ResourceName>,
+                pub config: Vec<ClientConfigEntry>,
+            }
+
+            pub type $PooledConfig = ClientConfigEntry;
+        )+
+    };
+}
+
+declare_clients! {
+    unpooled {
+        CreateClientKafka => KafkaConfigEntry,
+        CreateClientPulsar => PulsarConfigEntry,
+        CreateClientHttp => HttpConfigEntry,
+        CreateClientSentry => SentryConfigEntry,
+        CreateClientOtel => OtelConfigEntry,
+        CreateClientPrometheus => PrometheusConfigEntry,
+        CreateClientMqtt => MqttConfigEntry,
+        CreateClientNats => NatsConfigEntry,
+        CreateClientRabbitMq => RabbitMqConfigEntry,
+        CreateClientZeroMq => ZeroMqConfigEntry,
+        CreateClientSqs => SqsConfigEntry,
+        CreateClientSyslog => SyslogConfigEntry,
+        CreateClientClickHouse => ClickHouseConfigEntry,
+        CreateClientS3 => S3ConfigEntry,
+        CreateClientGcs => GcsConfigEntry,
+        CreateClientAzureBlob => AzureBlobConfigEntry,
+        CreateClientIcebergRest => IcebergRestConfigEntry,
+    }
+    pooled {
+        CreateClientRedis => RedisConfigEntry,
+        CreateClientPostgres => PostgresConfigEntry,
+        CreateClientMySql => MySqlConfigEntry,
+        CreateClientMongoDb => MongoDbConfigEntry,
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct CreateClientWebsockets {
+    pub name: ClientName,
+    pub mount: Option<ResourceName>,
+    pub signaling_protocol: Option<SignalingProtocolName>,
+    pub config: Vec<ClientConfigEntry>,
+}
+
+pub type WebsocketsConfigEntry = ClientConfigEntry;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateBranch {
-    pub name: Identifier,
-    pub schema: Identifier,
+    pub name: BranchName,
+    pub schema: SchemaName,
     pub ttl: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eviction: Option<BranchEviction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum BranchEviction {
-    Lru { max_instances: u64 },
+    Lru { max_instances: NonZeroU64 },
 }
 
 impl BranchEviction {
-    pub const fn max_instances(&self) -> u64 {
+    pub const fn max_instances(&self) -> NonZeroU64 {
         match self {
             Self::Lru { max_instances } => *max_instances,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum BranchSelection {
-    BranchedBy { branch: Identifier },
+    BranchedBy { branch: BranchName },
     Unbranched,
 }
 
 impl BranchSelection {
-    pub fn branched_by(branch: Identifier) -> Self {
+    pub fn branched_by(branch: BranchName) -> Self {
         Self::BranchedBy { branch }
     }
 
@@ -2167,7 +2522,7 @@ impl BranchSelection {
         Self::Unbranched
     }
 
-    pub fn branch(&self) -> Option<&Identifier> {
+    pub fn branch(&self) -> Option<&BranchName> {
         match self {
             Self::BranchedBy { branch } => Some(branch),
             Self::Unbranched => None,
@@ -2182,11 +2537,13 @@ impl BranchSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateIngestor {
-    pub name: Identifier,
+    pub name: IngestorName,
     pub output_routes: ProcessorOutputs,
-    pub decode_using_codec: Identifier,
+    pub decode_using_codec: CodecName,
     pub timestamp_source: Option<IngestTimestampSource>,
     pub source: IngestSource,
     pub general_error_policy: GeneralErrorPolicy,
@@ -2258,7 +2615,7 @@ impl CreateIngestor {
         Ok(())
     }
 
-    fn unique_route_index(&self, relay: &Identifier) -> Result<usize, AlterIngestorError> {
+    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterIngestorError> {
         let mut indexes = self
             .output_routes
             .routes
@@ -2279,23 +2636,27 @@ impl CreateIngestor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterIngestor {
-    pub ingestor: Identifier,
+    pub ingestor: IngestorName,
     pub operations: Vec<AlterIngestorOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterIngestorOperation {
     SetSource { source: IngestSource },
     SetQuiesce { quiesce: IngestQuiesceMode },
-    SetDecodeUsing { codec: Identifier },
+    SetDecodeUsing { codec: CodecName },
     SetTimestamp { source: IngestTimestampSource },
     DropTimestamp,
     SetFilterWhere { where_clause: crate::Expression },
     DropFilterWhere,
     AddRoute { route: ProcessorOutput },
-    DropRoute { relay: Identifier },
+    DropRoute { relay: RelayName },
     ReplaceRoute { route: ProcessorOutput },
     SetGeneralError { policy: GeneralErrorPolicy },
 }
@@ -2304,54 +2665,71 @@ pub enum AlterIngestorOperation {
 pub enum AlterIngestorError {
     #[error("ALTER targets ingestor `{requested}`, but the stored ingestor is `{stored}`")]
     IngestorNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: IngestorName,
+        requested: IngestorName,
     },
     #[error("route target `{relay}` is not configured")]
-    RouteTargetNotFound { relay: Identifier },
+    RouteTargetNotFound { relay: RelayName },
     #[error("route target `{relay}` is ambiguous because it is configured more than once")]
-    RouteTargetAmbiguous { relay: Identifier },
+    RouteTargetAmbiguous { relay: RelayName },
     #[error("an ingestor must retain at least one route")]
     CannotDropLastRoute,
     #[error("{transport} ingestors do not support ON QUIESCE {mode}")]
     UnsupportedQuiesceMode { transport: String, mode: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorOutput {
-    pub relay: Identifier,
+    pub relay: RelayName,
     #[serde(default)]
     pub construction: crate::RouteConstruction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flush_policy: Option<OutputFlushPolicy>,
+    pub flush_policy: Option<FlushPolicy>,
     pub message_error_policy: MessageErrorPolicy,
     pub branch: Option<crate::OutputBranch>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputFlushPolicy {
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
+/// How a route or an emitter releases what it has buffered.
+///
+/// `FLUSH IMMEDIATE` releases each message as it arrives, so there is no batch left to bound.
+/// `FLUSH EACH` releases on a cadence and always bounds the batch it releases. One variant per
+/// form is what keeps a cadence without a bound, and a bound without a cadence, out of the model.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum FlushPolicy {
+    Immediate,
+    Each {
+        interval: String,
+        max_batch_size: String,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InputCollectPolicy {
     pub collect_for: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorInputWhere {
-    pub relay: Identifier,
+    pub relay: RelayName,
     pub where_clause: crate::Expression,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorInputs {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub from: Vec<Identifier>,
+    pub from: Vec<RelayName>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub r#where: Vec<ProcessorInputWhere>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2359,7 +2737,7 @@ pub struct ProcessorInputs {
 }
 
 impl ProcessorInputs {
-    pub fn new(from: Vec<Identifier>, r#where: Vec<ProcessorInputWhere>) -> Self {
+    pub fn new(from: Vec<RelayName>, r#where: Vec<ProcessorInputWhere>) -> Self {
         Self {
             from,
             r#where,
@@ -2367,7 +2745,7 @@ impl ProcessorInputs {
         }
     }
 
-    pub fn single(relay: Identifier) -> Self {
+    pub fn single(relay: RelayName) -> Self {
         Self {
             from: vec![relay],
             r#where: Vec::new(),
@@ -2387,11 +2765,11 @@ impl ProcessorInputs {
         self
     }
 
-    pub fn first(&self) -> Option<&Identifier> {
+    pub fn first(&self) -> Option<&RelayName> {
         self.from.first()
     }
 
-    pub fn relays(&self) -> &[Identifier] {
+    pub fn relays(&self) -> &[RelayName] {
         &self.from
     }
 
@@ -2405,7 +2783,7 @@ impl ProcessorInputs {
 }
 
 impl ProcessorOutput {
-    pub fn new(relay: Identifier) -> Self {
+    pub fn new(relay: RelayName) -> Self {
         Self {
             relay,
             construction: crate::RouteConstruction::default(),
@@ -2415,18 +2793,11 @@ impl ProcessorOutput {
         }
     }
 
-    pub fn with_flush_policy(
-        relay: Identifier,
-        flush_each: String,
-        max_batch_size: Option<String>,
-    ) -> Self {
+    pub fn with_flush_policy(relay: RelayName, flush_policy: FlushPolicy) -> Self {
         Self {
             relay,
             construction: crate::RouteConstruction::default(),
-            flush_policy: Some(OutputFlushPolicy {
-                flush_each,
-                max_batch_size,
-            }),
+            flush_policy: Some(flush_policy),
             message_error_policy: MessageErrorPolicy::Log,
             branch: None,
         }
@@ -2438,7 +2809,9 @@ impl ProcessorOutput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ProcessorOutputs {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<ProcessorOutput>,
@@ -2449,18 +2822,15 @@ impl ProcessorOutputs {
         Self { routes }
     }
 
-    pub fn single(relay: Identifier) -> Self {
+    pub fn single(relay: RelayName) -> Self {
         Self {
             routes: vec![ProcessorOutput::new(relay)],
         }
     }
 
-    pub fn with_flush_policy(mut self, flush_each: String, max_batch_size: Option<String>) -> Self {
+    pub fn with_flush_policy(mut self, flush_policy: FlushPolicy) -> Self {
         for output in &mut self.routes {
-            output.flush_policy = Some(OutputFlushPolicy {
-                flush_each: flush_each.clone(),
-                max_batch_size: max_batch_size.clone(),
-            });
+            output.flush_policy = Some(flush_policy.clone());
         }
         self
     }
@@ -2472,7 +2842,7 @@ impl ProcessorOutputs {
         self
     }
 
-    pub fn relays(&self) -> impl Iterator<Item = &Identifier> {
+    pub fn relays(&self) -> impl Iterator<Item = &RelayName> {
         self.outputs().map(|output| &output.relay)
     }
 
@@ -2485,15 +2855,19 @@ impl ProcessorOutputs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum IngestTimestampSource {
     Now,
-    At(Identifier),
+    At(FieldName),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateReingestor {
-    pub name: Identifier,
+    pub name: ReingestorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub mode: AckMode,
@@ -2502,9 +2876,11 @@ pub struct CreateReingestor {
     pub filter_where: Option<crate::Expression>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterReingestor {
-    pub reingestor: Identifier,
+    pub reingestor: ReingestorName,
     pub operations: Vec<AlterProcessorOperation>,
 }
 
@@ -2512,8 +2888,8 @@ pub struct AlterReingestor {
 pub enum AlterReingestorError {
     #[error("ALTER targets reingestor `{requested}`, but the stored reingestor is `{stored}`")]
     ReingestorNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: ReingestorName,
+        requested: ReingestorName,
     },
     #[error(transparent)]
     Processor(#[from] AlterProcessorError),
@@ -2548,13 +2924,15 @@ impl CreateReingestor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateInferencer {
-    pub name: Identifier,
+    pub name: InferencerName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
-    pub resource: Identifier,
+    pub resource: ResourceName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_version: Option<u64>,
     pub file: String,
@@ -2623,13 +3001,15 @@ pub enum InferencerTensorSchemaError {
     ElementCountOverflow { tensor: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateWasmProcessor {
-    pub name: Identifier,
+    pub name: WasmProcessorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
-    pub resource: Identifier,
+    pub resource: ResourceName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_version: Option<u64>,
     pub file: String,
@@ -2642,26 +3022,43 @@ pub struct CreateWasmProcessor {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct WasmProcessorLimits {
-    pub max_fuel: u64,
-    pub max_memory_bytes: u64,
+    pub max_fuel: NonZeroU64,
+    pub max_memory_bytes: NonZeroU64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InferencerTensorMapping {
     pub tensor: String,
     pub schema: InferencerTensorSchema,
     pub expression: crate::Expression,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InferencerTensorDeclaration {
     pub tensor: String,
     pub schema: InferencerTensorSchema,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct InferencerTensorSchema {
     pub representation: InferencerTensorRepresentation,
     pub element_type: InferencerTensorElementType,
@@ -2686,7 +3083,10 @@ impl InferencerTensorSchema {
         self.dimensions
             .iter()
             .filter_map(|dimension| match dimension {
-                InferencerTensorDimension::Fixed(size) => Some(*size as usize),
+                InferencerTensorDimension::Fixed(size) => Some(
+                    usize::try_from(size.get())
+                        .assured("u32 fits usize on every architecture supported by the models"),
+                ),
                 InferencerTensorDimension::Dynamic | InferencerTensorDimension::Batch => None,
             })
             .try_fold(1_usize, usize::checked_mul)
@@ -2734,21 +3134,56 @@ impl InferencerTensorSchema {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum InferencerTensorRepresentation {
     Dense,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum InferencerTensorElementType {
     F32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum InferencerTensorDimension {
-    Fixed(u32),
+    Fixed(NonZeroU32),
     Dynamic,
     Batch,
 }
@@ -2759,43 +3194,74 @@ impl InferencerTensorDimension {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateVhost {
-    pub name: Identifier,
+    pub name: VhostName,
     pub hostnames: Vec<String>,
     pub tls: Option<VhostTlsResource>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct VhostTlsResource {
-    pub resource: Identifier,
+    pub resource: ResourceName,
     pub version: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateEndpoint {
-    pub name: Identifier,
-    pub on_vhost: Identifier,
+    pub name: EndpointName,
+    pub on_vhost: VhostName,
     pub path: String,
     pub endpoint_type: EndpointType,
-    pub signaling_protocol: Option<Identifier>,
+    pub signaling_protocol: Option<SignalingProtocolName>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EndpointType {
     Websockets,
     Http,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateSignalingProtocol {
-    pub name: Identifier,
+    pub name: SignalingProtocolName,
     pub format: SignalingWireFormat,
     pub on_connect: SignalingProtocolOnConnect,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum SignalingWireFormat {
     Json,
@@ -2807,9 +3273,11 @@ pub enum SignalingWireFormat {
     Protobuf(SignalingProtobufConfig),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SignalingProtobufConfig {
-    pub resource: Identifier,
+    pub resource: ResourceName,
     pub resource_version: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<ClientConfigEntry>,
@@ -2817,7 +3285,9 @@ pub struct SignalingProtobufConfig {
     pub wait_message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SignalingProtocolOnConnect {
     /// Whether payload streams to the relay from the moment the connection opens.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2834,13 +3304,17 @@ pub struct SignalingProtocolOnConnect {
 ///
 /// A step completes before the next begins, which is what makes a request able to depend on an
 /// earlier reply.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SignalingStep {
     Send(Vec<String>),
     Wait(SignalingWaitStep),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SignalingWaitStep {
     /// Matchers that must all be satisfied, in any arrival order, for the step to complete.
     pub matchers: Vec<String>,
@@ -2890,91 +3364,102 @@ impl SignalingProtocolOnConnect {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum IngestSource {
     Http {
-        client: Identifier,
+        client: ClientName,
         every: String,
         quiesce: IngestQuiesceMode,
     },
     Kafka {
-        client: Identifier,
-        topic: Identifier,
+        client: ClientName,
+        topic: TopicName,
         offset_mode: KafkaOffsetMode,
-        instances: u64,
+        instances: NonZeroU64,
         mode: KafkaIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Pulsar {
-        client: Identifier,
-        topic: Identifier,
-        subscription: Identifier,
-        instances: u64,
+        client: ClientName,
+        topic: TopicName,
+        subscription: PulsarSubscriptionName,
+        instances: NonZeroU64,
         mode: PulsarIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Mqtt {
-        client: Identifier,
+        client: ClientName,
         topic: String,
-        instances: u64,
+        instances: NonZeroU64,
         mode: MqttIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Nats {
-        client: Identifier,
-        subject: Identifier,
-        queue_group: Identifier,
-        instances: u64,
+        client: ClientName,
+        subject: SubjectName,
+        queue_group: QueueGroupName,
+        instances: NonZeroU64,
         mode: NatsIngestMode,
         quiesce: IngestQuiesceMode,
     },
     #[strum(serialize = "RABBITMQ")]
     RabbitMq {
-        client: Identifier,
-        queue: Identifier,
-        instances: u64,
+        client: ClientName,
+        queue: QueueName,
+        instances: NonZeroU64,
         mode: RabbitMqIngestMode,
         quiesce: IngestQuiesceMode,
     },
     #[strum(serialize = "REDIS")]
     RedisPubSub {
-        client: Identifier,
-        channel: Identifier,
+        client: ClientName,
+        channel: ChannelName,
         mode: RedisPubSubIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Prometheus {
-        client: Identifier,
+        client: ClientName,
         query: String,
         every: String,
         quiesce: IngestQuiesceMode,
     },
     #[strum(serialize = "ZEROMQ")]
     ZeroMq {
-        client: Identifier,
+        client: ClientName,
         mode: ZeroMqIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Sqs {
-        client: Identifier,
-        queue: Identifier,
-        instances: u64,
+        client: ClientName,
+        queue: QueueName,
+        instances: NonZeroU64,
         mode: SqsIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Endpoint {
-        endpoint: Identifier,
+        endpoint: EndpointName,
         mode: EndpointIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Websockets {
-        client: Identifier,
+        client: ClientName,
         mode: WebsocketsIngestMode,
         quiesce: IngestQuiesceMode,
     },
     Syslog {
-        client: Identifier,
+        client: ClientName,
         quiesce: IngestQuiesceMode,
     },
 }
@@ -3001,7 +3486,7 @@ impl IngestSource {
         self.as_ref()
     }
 
-    pub fn source_ref(&self) -> &Identifier {
+    pub fn source_ref(&self) -> ModelName {
         match self {
             Self::Http { client, .. }
             | Self::Kafka { client, .. }
@@ -3014,8 +3499,8 @@ impl IngestSource {
             | Self::ZeroMq { client, .. }
             | Self::Sqs { client, .. }
             | Self::Websockets { client, .. }
-            | Self::Syslog { client, .. } => client,
-            Self::Endpoint { endpoint, .. } => endpoint,
+            | Self::Syslog { client, .. } => client.into(),
+            Self::Endpoint { endpoint, .. } => endpoint.into(),
         }
     }
 
@@ -3133,13 +3618,26 @@ impl IngestSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum IngestQuiesceOverflow {
     DropOldest,
     DropNewest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum IngestQuiesceMode {
     Suspend,
     Buffer {
@@ -3166,34 +3664,33 @@ impl IngestQuiesceMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum KafkaOffsetMode {
-    ConsumerGroup(Identifier),
+    ConsumerGroup(ConsumerGroupName),
     Domain,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct RetryPolicy {
     pub backoff: String,
     pub max_backoff: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum EmitterAckWindow {
     Sequential,
-    Parallel { max: u64 },
+    Parallel { max: NonZeroU64 },
 }
 
-impl EmitterAckWindow {
-    pub fn max_in_flight(&self) -> u64 {
-        match self {
-            Self::Sequential => 1,
-            Self::Parallel { max } => *max,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum EmitterPublishingMode {
     NoAck {
         retry_policy: RetryPolicy,
@@ -3247,20 +3744,6 @@ impl EmitterPublishingMode {
         }
     }
 
-    pub fn ack_window(&self) -> Option<&EmitterAckWindow> {
-        match self {
-            Self::BrokerAck { window, .. }
-            | Self::MqttQos1 { window, .. }
-            | Self::MqttQos2 { window, .. }
-            | Self::NatsJetStream { window, .. } => Some(window),
-            Self::NoAck { .. }
-            | Self::MqttQos0 { .. }
-            | Self::SqsSingle { .. }
-            | Self::SqsBatch { .. }
-            | Self::RequestAck { .. } => None,
-        }
-    }
-
     pub fn ack_timeout(&self) -> Option<&str> {
         match self {
             Self::BrokerAck { ack_timeout, .. }
@@ -3290,10 +3773,12 @@ impl EmitterPublishingMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum KafkaIngestMode {
     AckParallel {
-        max: u64,
+        max: NonZeroU64,
         batch_timeout: String,
         timeout: String,
         retry_policy: RetryPolicy,
@@ -3307,14 +3792,37 @@ pub enum KafkaIngestMode {
 
 pub type PulsarIngestMode = KafkaIngestMode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum MqttSession {
     Clean,
     Persistent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum MqttQos {
     AtMostOnce,
     AtLeastOnce,
@@ -3329,7 +3837,9 @@ impl MqttQos {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MqttIngestMode {
     NoAckSequential {
         session: MqttSession,
@@ -3344,7 +3854,7 @@ pub enum MqttIngestMode {
         retry_policy: RetryPolicy,
     },
     AckParallel {
-        max: u64,
+        max: NonZeroU64,
         batch_timeout: String,
         timeout: String,
         retry_policy: RetryPolicy,
@@ -3374,12 +3884,16 @@ impl MqttIngestMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum NatsIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum RabbitMqIngestMode {
     AckSequential {
         timeout: String,
@@ -3387,17 +3901,23 @@ pub enum RabbitMqIngestMode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum RedisPubSubIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum ZeroMqIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SqsIngestMode {
     AckSequential {
         timeout: String,
@@ -3405,22 +3925,28 @@ pub enum SqsIngestMode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum EndpointIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum WebsocketsIngestMode {
     NoAckSequential,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateRelay {
-    pub name: Identifier,
-    pub schema: Identifier,
+    pub name: RelayName,
+    pub schema: SchemaName,
     #[serde(default = "default_relay_buffer")]
-    pub buffer: usize,
+    pub buffer: NonZeroUsize,
     pub branching: RelayBranching,
     #[serde(default)]
     pub materialized_state: Option<MaterializedRelayState>,
@@ -3449,9 +3975,6 @@ impl CreateRelay {
     ) -> Result<(), AlterRelayError> {
         match operation {
             AlterRelayOperation::SetCapacity { capacity } => {
-                if *capacity == 0 {
-                    return Err(AlterRelayError::InvalidCapacity);
-                }
                 self.buffer = *capacity;
             }
             AlterRelayOperation::SetSchema { schema } => {
@@ -3473,16 +3996,20 @@ impl CreateRelay {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterRelay {
-    pub relay: Identifier,
+    pub relay: RelayName,
     pub operations: Vec<AlterRelayOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterRelayOperation {
-    SetCapacity { capacity: usize },
-    SetSchema { schema: Identifier },
+    SetCapacity { capacity: NonZeroUsize },
+    SetSchema { schema: SchemaName },
     SetBranching { branching: RelayBranching },
     SetMaterializedState,
     DropMaterializedState,
@@ -3492,27 +4019,27 @@ pub enum AlterRelayOperation {
 pub enum AlterRelayError {
     #[error("ALTER targets relay `{requested}`, but the stored relay is `{stored}`")]
     RelayNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: RelayName,
+        requested: RelayName,
     },
-    #[error("relay capacity must be greater than 0")]
-    InvalidCapacity,
     #[error("relay materialized state is not configured")]
     MaterializedStateNotConfigured,
 }
 
-pub const fn default_relay_buffer() -> usize {
-    1
+pub const fn default_relay_buffer() -> NonZeroUsize {
+    NonZeroUsize::MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum RelayBranching {
-    BranchedBy { branch: Identifier },
+    BranchedBy { branch: BranchName },
     Unbranched,
 }
 
 impl RelayBranching {
-    pub fn branched_by(branch: Identifier) -> Self {
+    pub fn branched_by(branch: BranchName) -> Self {
         Self::BranchedBy { branch }
     }
 
@@ -3520,7 +4047,7 @@ impl RelayBranching {
         Self::Unbranched
     }
 
-    pub fn branch(&self) -> Option<&Identifier> {
+    pub fn branch(&self) -> Option<&BranchName> {
         match self {
             Self::BranchedBy { branch } => Some(branch),
             Self::Unbranched => None,
@@ -3535,57 +4062,208 @@ impl RelayBranching {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum MaterializedRelayState {
     LastByTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ClusterSchedule {
-    pub domains: Vec<DomainSchedule>,
+    pub domains: BTreeMap<DomainName, DomainSchedule>,
 }
 
 impl ClusterSchedule {
-    pub fn domain(&self, domain: &Domain) -> Option<&DomainSchedule> {
-        self.domains.iter().find(|item| item.domain == *domain)
+    pub fn domain(&self, domain: &DomainName) -> Option<&DomainSchedule> {
+        self.domains.get(domain)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl FromIterator<DomainSchedule> for ClusterSchedule {
+    fn from_iter<I: IntoIterator<Item = DomainSchedule>>(schedules: I) -> Self {
+        Self {
+            domains: schedules
+                .into_iter()
+                .map(|schedule| (schedule.domain.clone(), schedule))
+                .collect(),
+        }
+    }
+}
+
+/// A domain's scheduled nodes, in the order the registry emitted them and keyed by runtime node
+/// identity so callers resolve a node by kind and identifier without scanning the sequence.
+pub type ScheduledNodes = IndexMap<NodeRef, ScheduledNode>;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DomainSchedule {
-    pub domain: Domain,
-    pub nodes: Vec<ScheduledNode>,
+    pub domain: DomainName,
+    pub nodes: ScheduledNodes,
     pub placement_groups: Vec<PlacementGroupSchedule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PlacementRuntimeNode {
-    pub kind: ModelKind,
-    pub identifier: Identifier,
-}
+impl DomainSchedule {
+    /// Builds a schedule from the registry's emitted node sequence, keeping that order and keying
+    /// each node by its runtime identity.
+    pub fn new(
+        domain: DomainName,
+        nodes: impl IntoIterator<Item = ScheduledNode>,
+        placement_groups: Vec<PlacementGroupSchedule>,
+    ) -> Self {
+        Self {
+            domain,
+            nodes: nodes
+                .into_iter()
+                .map(|node| (node.identity(), node))
+                .collect(),
+            placement_groups,
+        }
+    }
 
-impl PlacementRuntimeNode {
-    pub fn new(kind: ModelKind, identifier: Identifier) -> Self {
-        Self { kind, identifier }
+    /// The `M` named `identifier` this schedule places, when it places one.
+    ///
+    /// Every entry is keyed by the kind of the configuration it carries, so an entry found under
+    /// `M`'s kind carries an `M` and a reader has only the missing node to answer for.
+    pub fn configured<M: UniquelyKindedModel>(
+        &self,
+        identifier: impl Into<ModelName>,
+    ) -> Option<&M> {
+        self.scheduled(identifier).map(|scheduled| scheduled.config)
+    }
+
+    /// The `M` named `identifier` together with the entry that places it.
+    ///
+    /// Readers that need both the configuration and where it runs take them from one lookup, so
+    /// the two can never come from different entries.
+    pub fn scheduled<M: UniquelyKindedModel>(
+        &self,
+        identifier: impl Into<ModelName>,
+    ) -> Option<ScheduledModel<'_, M>> {
+        let node = self.nodes.get(&NodeRef::new(M::KIND, identifier.into()))?;
+        Some(ScheduledModel {
+            config: M::from_model_ref(&node.config)
+                .assured("a schedule keys every entry by the kind of the configuration it carries"),
+            node,
+        })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlacementGroupSchedule {
-    pub members: Vec<PlacementRuntimeNode>,
-    pub primary_node: Option<String>,
+/// One scheduled node with its configuration already narrowed to the shape its kind names.
+#[derive(Debug, Clone, Copy)]
+pub struct ScheduledModel<'a, M> {
+    pub config: &'a M,
+    pub node: &'a ScheduledNode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct PlacementGroupSchedule {
+    pub members: Vec<NodeRef>,
+    pub primary_node: Option<ClusterNodeName>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct KafkaPartitionSchedule {
     pub observed_partitions: Vec<i32>,
     pub rebalance_epoch: u64,
     pub instance_assignments: Vec<Vec<i32>>,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum OwnershipStateComponent {
+    BranchAggregated,
+    BranchLifecycle,
+    Deduplicator,
+    KafkaOffsets,
+    MaterializedRelay,
+    WasmProcessor,
+    WindowProcessor,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum OwnershipStateRecoveryOutcome {
+    Complete,
+    Unverified,
+    Reset,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum OwnershipStateResetCause {
+    MissingCheckpoint,
+    InvalidCheckpoint,
+    ConflictingCheckpoint,
+    ExpiredBranchMetadata,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+pub struct OwnershipStateReset {
+    pub component: OwnershipStateComponent,
+    pub cause: OwnershipStateResetCause,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct OwnershipTransition {
+    pub id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub state_recovery: OwnershipStateRecoveryOutcome,
+    pub resets: Vec<OwnershipStateReset>,
+}
+
 impl KafkaPartitionSchedule {
-    pub fn new(instances: u64, observed_partitions: Vec<i32>, rebalance_epoch: u64) -> Self {
-        let shard_count = usize::try_from(instances.max(1)).unwrap_or(usize::MAX);
+    pub fn new(instances: NonZeroU64, observed_partitions: Vec<i32>, rebalance_epoch: u64) -> Self {
+        let shard_count = usize::try_from(instances.get()).unwrap_or(usize::MAX);
         let mut observed_partitions = observed_partitions;
         observed_partitions.sort_unstable();
         let mut instance_assignments = vec![Vec::new(); shard_count];
@@ -3603,60 +4281,172 @@ impl KafkaPartitionSchedule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One runtime node of a domain schedule: the configuration it runs and where it is placed.
+///
+/// The kind and the identifier are read from the configuration when the entry is built, so an
+/// entry can never describe itself as a node its configuration is not. That is why every reader
+/// resolving an entry by kind receives the shape that kind names, with nothing left to reject.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[non_exhaustive]
 pub struct ScheduledNode {
-    pub identifier: Identifier,
-    pub kind: ModelKind,
+    pub identifier: ModelName,
     pub config: Box<Model>,
-    pub effective_branching: Option<Vec<Identifier>>,
-    pub effective_branching_schema: Option<Identifier>,
+    pub effective_branching: Option<Vec<FieldName>>,
+    pub effective_branching_schema: Option<SchemaName>,
     #[serde(default)]
     pub schema_fingerprint: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_partition_schedule: Option<KafkaPartitionSchedule>,
     #[serde(default)]
-    pub primary_node: Option<String>,
+    pub primary_node: Option<ClusterNodeName>,
     #[serde(default)]
-    pub assigned_nodes: Vec<String>,
+    pub assigned_nodes: Vec<ClusterNodeName>,
+    pub ownership_transition: Option<OwnershipTransition>,
 }
 
 impl ScheduledNode {
+    /// An unplaced entry for `config`, before a scheduler decides which cluster nodes run it.
+    pub fn new(config: Model) -> Self {
+        Self {
+            identifier: config.name(),
+            config: Box::new(config),
+            effective_branching: None,
+            effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
+            kafka_partition_schedule: None,
+            primary_node: None,
+            assigned_nodes: Vec::new(),
+            ownership_transition: None,
+        }
+    }
+
+    /// The branch fields and branch schema the registry resolved for this node.
+    #[must_use]
+    pub fn with_effective_branching(
+        mut self,
+        fields: Option<Vec<FieldName>>,
+        schema: Option<SchemaName>,
+    ) -> Self {
+        self.effective_branching = fields;
+        self.effective_branching_schema = schema;
+        self
+    }
+
+    /// The fingerprint of the schema this node produces, as the registry computed it.
+    #[must_use]
+    pub fn with_schema_fingerprint(mut self, fingerprint: [u8; 32]) -> Self {
+        self.schema_fingerprint = fingerprint;
+        self
+    }
+
+    /// The Kafka partitions the leader observed for this node, and how they are shared out.
+    #[must_use]
+    pub fn with_kafka_partitions(mut self, partitions: KafkaPartitionSchedule) -> Self {
+        self.kafka_partition_schedule = Some(partitions);
+        self
+    }
+
+    /// The cluster nodes this entry is placed on, with `primary` owning its state.
+    #[must_use]
+    pub fn placed_on(
+        mut self,
+        primary: Option<ClusterNodeName>,
+        assigned: Vec<ClusterNodeName>,
+    ) -> Self {
+        self.primary_node = primary;
+        self.assigned_nodes = assigned;
+        self
+    }
+
+    /// The kind of runtime node this entry configures.
+    pub fn kind(&self) -> ModelKind {
+        self.config.kind()
+    }
+
+    pub fn wasm_processor(&self) -> Option<&CreateWasmProcessor> {
+        let Model::WasmProcessor(processor) = self.config.as_ref() else {
+            return None;
+        };
+        Some(processor)
+    }
+
+    pub fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {
+        let mut components = Vec::new();
+        if self.kind() != ModelKind::Relay {
+            components.push(OwnershipStateComponent::BranchAggregated);
+        }
+        if let Model::Relay(relay) = self.config.as_ref()
+            && relay.materialized_state.is_some()
+        {
+            components.push(OwnershipStateComponent::MaterializedRelay);
+        }
+        if let Model::Ingestor(ingestor) = self.config.as_ref()
+            && let IngestSource::Kafka {
+                offset_mode: KafkaOffsetMode::Domain,
+                ..
+            } = &ingestor.source
+        {
+            components.push(OwnershipStateComponent::KafkaOffsets);
+        }
+        if self.kind().is_processor()
+            || matches!(self.kind(), ModelKind::Ingestor | ModelKind::Reingestor)
+        {
+            components.push(OwnershipStateComponent::BranchLifecycle);
+        }
+        match self.kind() {
+            ModelKind::Deduplicator => {
+                components.push(OwnershipStateComponent::Deduplicator);
+            }
+            ModelKind::WasmProcessor => {
+                components.push(OwnershipStateComponent::WasmProcessor);
+            }
+            ModelKind::WindowProcessor => {
+                components.push(OwnershipStateComponent::WindowProcessor);
+            }
+            _ => {}
+        }
+        components.sort();
+        components
+    }
+
+    /// The runtime node this scheduled entry configures. Kind and identifier together name a node
+    /// in a domain, and this is the key its schedule is stored under.
+    pub fn identity(&self) -> NodeRef {
+        NodeRef::new(self.kind(), self.identifier.clone())
+    }
+
     fn executes_on_every_cluster_node(&self) -> bool {
         self.config.executes_on_every_cluster_node()
     }
 
-    pub fn is_assigned_to(&self, node_id: &str) -> bool {
+    pub fn is_assigned_to(&self, node_id: &ClusterNodeName) -> bool {
         self.assigned_nodes
             .iter()
             .any(|assigned| assigned == node_id)
     }
 
-    pub fn assigned_single_node(&self) -> Option<&str> {
+    pub fn assigned_single_node(&self) -> Option<&ClusterNodeName> {
         match self.assigned_nodes.as_slice() {
-            [node_id] => Some(node_id.as_str()),
+            [node_id] => Some(node_id),
             _ => None,
         }
     }
 
-    pub fn primary_node(&self) -> Option<&str> {
-        self.primary_node.as_deref()
+    pub fn primary_node(&self) -> Option<&ClusterNodeName> {
+        self.primary_node.as_ref()
     }
 
-    pub fn replica_nodes(&self) -> Vec<&str> {
+    pub fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
         let primary = self.primary_node();
         self.assigned_nodes
             .iter()
-            .filter_map(|node_id| {
-                if Some(node_id.as_str()) == primary {
-                    None
-                } else {
-                    Some(node_id.as_str())
-                }
-            })
+            .filter(|node_id| Some(*node_id) != primary)
             .collect()
     }
 
-    pub fn is_primary_on(&self, node_id: &str) -> bool {
+    pub fn is_primary_on(&self, node_id: &ClusterNodeName) -> bool {
         if let Some(primary_node) = self.primary_node() {
             primary_node == node_id
         } else {
@@ -3664,7 +4454,7 @@ impl ScheduledNode {
         }
     }
 
-    pub fn execution_node(&self) -> Option<&str> {
+    pub fn execution_node(&self) -> Option<&ClusterNodeName> {
         if self.executes_on_every_cluster_node() {
             None
         } else {
@@ -3672,33 +4462,38 @@ impl ScheduledNode {
         }
     }
 
-    pub fn executes_on(&self, node_id: &str) -> bool {
+    pub fn executes_on(&self, node_id: &ClusterNodeName) -> bool {
         if self.executes_on_every_cluster_node() {
             self.is_assigned_to(node_id)
         } else {
             self.is_primary_on(node_id)
         }
     }
+
+    /// True when `other` gives this runtime node the same primary owner and the same replica set.
+    /// A schedule difference that fails this check is an assignment change, which activates
+    /// narrowly instead of rebuilding the domain.
+    pub fn has_same_assignment_as(&self, other: &Self) -> bool {
+        self.primary_node == other.primary_node && self.assigned_nodes == other.assigned_nodes
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateMaterializer {
-    pub relay: Identifier,
-    pub state: MaterializedRelayState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateLookup {
-    pub name: Identifier,
-    pub key_field: Identifier,
-    pub resource: Identifier,
+    pub name: LookupName,
+    pub key_field: FieldName,
+    pub resource: ResourceName,
     pub path: String,
-    pub decode_using_codec: Identifier,
+    pub decode_using_codec: CodecName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateJunction {
-    pub name: Identifier,
+    pub name: JunctionName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
@@ -3709,9 +4504,11 @@ pub struct CreateJunction {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterJunction {
-    pub junction: Identifier,
+    pub junction: JunctionName,
     pub operations: Vec<AlterProcessorOperation>,
 }
 
@@ -3719,8 +4516,8 @@ pub struct AlterJunction {
 pub enum AlterJunctionError {
     #[error("ALTER targets junction `{requested}`, but the stored junction is `{stored}`")]
     JunctionNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: JunctionName,
+        requested: JunctionName,
     },
     #[error(transparent)]
     Processor(#[from] AlterProcessorError),
@@ -3755,9 +4552,11 @@ impl CreateJunction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateDeduplicator {
-    pub name: Identifier,
+    pub name: DeduplicatorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
@@ -3770,13 +4569,17 @@ pub struct CreateDeduplicator {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterDeduplicator {
-    pub deduplicator: Identifier,
+    pub deduplicator: DeduplicatorName,
     pub operations: Vec<AlterDeduplicatorOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterDeduplicatorOperation {
     Processor(Box<AlterProcessorOperation>),
     SetDeduplicateOn { expressions: Vec<crate::Expression> },
@@ -3787,8 +4590,8 @@ pub enum AlterDeduplicatorOperation {
 pub enum AlterDeduplicatorError {
     #[error("ALTER targets deduplicator `{requested}`, but the stored deduplicator is `{stored}`")]
     DeduplicatorNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: DeduplicatorName,
+        requested: DeduplicatorName,
     },
     #[error(transparent)]
     Processor(#[from] AlterProcessorError),
@@ -3833,9 +4636,11 @@ impl CreateDeduplicator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateCorrelator {
-    pub name: Identifier,
+    pub name: CorrelatorName,
     pub left: ProcessorInputs,
     pub right: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -3852,7 +4657,19 @@ pub struct CreateCorrelator {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumString,
+    IntoStaticStr,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum CorrelatorMatchPolicy {
@@ -3860,21 +4677,27 @@ pub enum CorrelatorMatchPolicy {
     Latest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CorrelationTimeoutPolicy {
     pub left: CorrelationTimeoutAction,
     pub right: CorrelationTimeoutAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum CorrelationTimeoutAction {
     Drop,
-    SendTo { relay: Identifier },
+    SendTo { relay: RelayName },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateReorderer {
-    pub name: Identifier,
+    pub name: ReordererName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
@@ -3887,13 +4710,17 @@ pub struct CreateReorderer {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterReorderer {
-    pub reorderer: Identifier,
+    pub reorderer: ReordererName,
     pub operations: Vec<AlterReordererOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterReordererOperation {
     Processor(Box<AlterProcessorOperation>),
     SetOrderBy { expressions: Vec<crate::Expression> },
@@ -3904,8 +4731,8 @@ pub enum AlterReordererOperation {
 pub enum AlterReordererError {
     #[error("ALTER targets reorderer `{requested}`, but the stored reorderer is `{stored}`")]
     ReordererNameMismatch {
-        stored: Identifier,
-        requested: Identifier,
+        stored: ReordererName,
+        requested: ReordererName,
     },
     #[error(transparent)]
     Processor(#[from] AlterProcessorError),
@@ -3950,21 +4777,23 @@ impl CreateReorderer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterProcessorOperation {
     AddFrom {
-        relay: Identifier,
+        relay: RelayName,
         where_clause: Option<crate::Expression>,
     },
     DropFrom {
-        relay: Identifier,
+        relay: RelayName,
     },
     AlterFromSetWhere {
-        relay: Identifier,
+        relay: RelayName,
         where_clause: crate::Expression,
     },
     AlterFromDropWhere {
-        relay: Identifier,
+        relay: RelayName,
     },
     SetCollect {
         policy: InputCollectPolicy,
@@ -3984,17 +4813,17 @@ pub enum AlterProcessorOperation {
         dependency: crate::MaterializedStateDependency,
     },
     DropMaterializedState {
-        relay: Identifier,
+        relay: RelayName,
     },
     AlterMaterializedState {
-        relay: Identifier,
+        relay: RelayName,
         policy: crate::MaterializedStatePolicy,
     },
     AddRoute {
         route: ProcessorOutput,
     },
     DropRoute {
-        relay: Identifier,
+        relay: RelayName,
     },
     ReplaceRoute {
         route: ProcessorOutput,
@@ -4004,21 +4833,21 @@ pub enum AlterProcessorOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AlterProcessorError {
     #[error("input relay `{relay}` is already configured")]
-    InputAlreadyExists { relay: Identifier },
+    InputAlreadyExists { relay: RelayName },
     #[error("input relay `{relay}` is not configured")]
-    InputNotFound { relay: Identifier },
+    InputNotFound { relay: RelayName },
     #[error("input relay `{relay}` has no WHERE clause")]
-    InputWhereNotConfigured { relay: Identifier },
+    InputWhereNotConfigured { relay: RelayName },
     #[error("a processor must retain at least one input")]
     CannotDropLastInput,
     #[error("materialized-state dependency `{relay}` is already configured")]
-    MaterializedStateAlreadyConfigured { relay: Identifier },
+    MaterializedStateAlreadyConfigured { relay: RelayName },
     #[error("materialized-state dependency `{relay}` is not configured")]
-    MaterializedStateNotConfigured { relay: Identifier },
+    MaterializedStateNotConfigured { relay: RelayName },
     #[error("route target `{relay}` is not configured")]
-    RouteTargetNotFound { relay: Identifier },
+    RouteTargetNotFound { relay: RelayName },
     #[error("route target `{relay}` is ambiguous because it is configured more than once")]
-    RouteTargetAmbiguous { relay: Identifier },
+    RouteTargetAmbiguous { relay: RelayName },
     #[error("a processor must retain at least one route")]
     CannotDropLastRoute,
     #[error("this processor configures branching per route")]
@@ -4152,7 +4981,7 @@ impl ProcessorAlterTarget<'_> {
         Ok(())
     }
 
-    fn input_index(&self, relay: &Identifier) -> Result<usize, AlterProcessorError> {
+    fn input_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
         self.from
             .from
             .iter()
@@ -4162,7 +4991,7 @@ impl ProcessorAlterTarget<'_> {
             })
     }
 
-    fn ensure_input_absent(&self, relay: &Identifier) -> Result<(), AlterProcessorError> {
+    fn ensure_input_absent(&self, relay: &RelayName) -> Result<(), AlterProcessorError> {
         if self.from.from.iter().any(|candidate| candidate == relay) {
             Err(AlterProcessorError::InputAlreadyExists {
                 relay: relay.clone(),
@@ -4172,7 +5001,7 @@ impl ProcessorAlterTarget<'_> {
         }
     }
 
-    fn materialized_state_index(&self, relay: &Identifier) -> Result<usize, AlterProcessorError> {
+    fn materialized_state_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
         self.materialized_state
             .iter()
             .position(|dependency| dependency.relay == *relay)
@@ -4181,7 +5010,7 @@ impl ProcessorAlterTarget<'_> {
             })
     }
 
-    fn unique_route_index(&self, relay: &Identifier) -> Result<usize, AlterProcessorError> {
+    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
         let mut indexes = self
             .output_routes
             .routes
@@ -4202,9 +5031,11 @@ impl ProcessorAlterTarget<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateWindowProcessor {
-    pub name: Identifier,
+    pub name: WindowProcessorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
@@ -4217,7 +5048,9 @@ pub struct CreateWindowProcessor {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct WindowBound {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages: Option<u64>,
@@ -4284,6 +5117,8 @@ pub enum AckMode {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::{
         AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
         AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
@@ -4292,26 +5127,51 @@ mod tests {
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
         AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
-        ClusterSchedule, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
-        CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
-        EmitterPublishingMode, ErrorPolicies, GeneralErrorPolicy, InferencerTensorDimension,
+        ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule, CreateDeduplicator,
+        CreateEmitter, CreateGenerator, CreatePlacement, CreateReingestor, CreateRelay,
+        CreateReorderer, CreateSchema, DomainSchedule, EmitSink, EmitterPublishingMode,
+        ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDimension,
         InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
-        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, OutputFlushPolicy,
-        PlacementPolicy, RelayBranching, RetryPolicy, ScheduledNode,
+        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, PlacementPolicy,
+        RelayBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
-        CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Expression, Identifier,
-        IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
+        ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
+        Expression, IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
         MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         SchemaField,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::try_from(raw).expect("valid identifier")
+    #[test]
+    fn pool_bounds_accept_a_minimum_up_to_the_maximum_and_reject_one_above_it() {
+        let bounds = ClientPoolBounds::new(0, nonzero!(1u32)).expect("zero is below one");
+        assert_eq!(bounds.minimum(), 0);
+        assert_eq!(bounds.maximum(), nonzero!(1u32));
+
+        let bounds = ClientPoolBounds::new(3, nonzero!(3u32)).expect("equal bounds are allowed");
+        assert_eq!(bounds.minimum(), 3);
+        assert_eq!(bounds.maximum(), nonzero!(3u32));
+
+        let error = ClientPoolBounds::new(4, nonzero!(3u32)).expect_err("four exceeds three");
+        assert_eq!(
+            error.current_context(),
+            &ClientPoolBoundsError::MinimumExceedsMaximum {
+                minimum: 4,
+                maximum: nonzero!(3u32),
+            }
+        );
     }
 
-    fn domain(raw: &str) -> Domain {
-        Domain::try_from(raw).expect("valid domain")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
+    }
+
+    fn domain(raw: &str) -> DomainName {
+        DomainName::try_from(raw).expect("valid domain")
     }
 
     #[test]
@@ -4366,22 +5226,22 @@ mod tests {
             representation: InferencerTensorRepresentation::Dense,
             element_type: InferencerTensorElementType::F32,
             dimensions: vec![
-                InferencerTensorDimension::Fixed(2),
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
                 InferencerTensorDimension::Dynamic,
-                InferencerTensorDimension::Fixed(3),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
             ],
         };
         let exact = ParseAsType::Array {
-            len: 2,
+            len: nonzero!(2u32),
             element: Box::new(ParseAsType::Vec {
                 element: Box::new(ParseAsType::Array {
-                    len: 3,
+                    len: nonzero!(3u32),
                     element: Box::new(ParseAsType::F32),
                 }),
             }),
         };
         let flattened = ParseAsType::Array {
-            len: 6,
+            len: nonzero!(6u32),
             element: Box::new(ParseAsType::F32),
         };
 
@@ -4392,19 +5252,9 @@ mod tests {
 
     #[test]
     fn cluster_schedule_returns_matching_domain() {
-        let alpha = DomainSchedule {
-            domain: domain("alpha"),
-            nodes: Vec::new(),
-            placement_groups: Vec::new(),
-        };
-        let beta = DomainSchedule {
-            domain: domain("beta"),
-            nodes: Vec::new(),
-            placement_groups: Vec::new(),
-        };
-        let schedule = ClusterSchedule {
-            domains: vec![alpha.clone(), beta],
-        };
+        let alpha = DomainSchedule::new(domain("alpha"), Vec::new(), Vec::new());
+        let beta = DomainSchedule::new(domain("beta"), Vec::new(), Vec::new());
+        let schedule = ClusterSchedule::from_iter([alpha.clone(), beta]);
 
         assert_eq!(schedule.domain(&domain("alpha")), Some(&alpha));
         assert_eq!(schedule.domain(&domain("gamma")), None);
@@ -4412,74 +5262,63 @@ mod tests {
 
     #[test]
     fn scheduled_node_assignment_checks_exact_node_id() {
-        let node = ScheduledNode {
-            identifier: identifier("orders_ingestor"),
-            kind: ModelKind::Schema,
-            config: Box::new(Model::Schema(CreateSchema {
-                name: identifier("orders"),
-                fields: vec![SchemaField {
-                    name: identifier("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                }],
-            })),
-            effective_branching: Some(vec![identifier("tenant")]),
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string()],
-        };
+        let node = ScheduledNode::new(Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }))
+        .with_effective_branching(Some(vec![named("tenant")]), None)
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![named::<ClusterNodeName>("node-a")],
+        );
 
-        assert!(node.is_assigned_to("node-a"));
-        assert!(!node.is_assigned_to("node-b"));
+        assert!(node.is_assigned_to(&named::<ClusterNodeName>("node-a")));
+        assert!(!node.is_assigned_to(&named::<ClusterNodeName>("node-b")));
         assert!(
-            !ScheduledNode {
-                assigned_nodes: Vec::new(),
-                ..node
-            }
-            .is_assigned_to("node-a")
+            !node
+                .clone()
+                .placed_on(Some(named::<ClusterNodeName>("node-a")), Vec::new())
+                .is_assigned_to(&named::<ClusterNodeName>("node-a"))
         );
     }
 
     #[test]
     fn scheduled_node_single_assignment_only_when_exactly_one_node_is_present() {
-        let node = ScheduledNode {
-            identifier: identifier("orders_ingestor"),
-            kind: ModelKind::Schema,
-            config: Box::new(Model::Schema(CreateSchema {
-                name: identifier("orders"),
-                fields: vec![SchemaField {
-                    name: identifier("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                }],
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string()],
-        };
+        let node = ScheduledNode::new(Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![named::<ClusterNodeName>("node-a")],
+        );
 
-        assert_eq!(node.assigned_single_node(), Some("node-a"));
+        assert_eq!(node.assigned_single_node(), Some(&named("node-a")));
         assert_eq!(
-            ScheduledNode {
-                assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
-                ..node.clone()
-            }
-            .assigned_single_node(),
+            node.clone()
+                .placed_on(
+                    Some(named::<ClusterNodeName>("node-a")),
+                    vec![
+                        named::<ClusterNodeName>("node-a"),
+                        named::<ClusterNodeName>("node-b")
+                    ]
+                )
+                .assigned_single_node(),
             None
         );
         assert_eq!(
-            ScheduledNode {
-                assigned_nodes: Vec::new(),
-                ..node
-            }
-            .assigned_single_node(),
+            node.placed_on(Some(named::<ClusterNodeName>("node-a")), Vec::new())
+                .assigned_single_node(),
             None
         );
     }
@@ -4491,137 +5330,131 @@ mod tests {
 
     #[test]
     fn scheduled_node_exposes_primary_and_replicas() {
-        let node = ScheduledNode {
-            identifier: identifier("orders_ingestor"),
-            kind: ModelKind::Schema,
-            config: Box::new(Model::Schema(CreateSchema {
-                name: identifier("orders"),
-                fields: vec![SchemaField {
-                    name: identifier("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                }],
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec![
-                "node-a".to_string(),
-                "node-b".to_string(),
-                "node-c".to_string(),
+        let node = ScheduledNode::new(Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+                named::<ClusterNodeName>("node-c"),
             ],
-        };
+        );
 
-        assert_eq!(node.primary_node(), Some("node-a"));
-        assert_eq!(node.replica_nodes(), vec!["node-b", "node-c"]);
-        assert!(node.is_primary_on("node-a"));
-        assert!(!node.is_primary_on("node-b"));
+        assert_eq!(node.primary_node(), Some(&named("node-a")));
+        assert_eq!(
+            node.replica_nodes(),
+            vec![&named("node-b"), &named("node-c")]
+        );
+        assert!(node.is_primary_on(&named::<ClusterNodeName>("node-a")));
+        assert!(!node.is_primary_on(&named::<ClusterNodeName>("node-b")));
     }
 
     #[test]
     fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() {
-        let replicated_junction = ScheduledNode {
-            identifier: identifier("orders_merge"),
-            kind: ModelKind::Junction,
-            config: Box::new(Model::Junction(CreateJunction {
-                name: identifier("orders_merge"),
-                from: ProcessorInputs::new(
-                    vec![identifier("orders_in_a"), identifier("orders_in_b")],
-                    Vec::new(),
-                ),
-                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    identifier("orders_out"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
-                )]),
-                branched_by: BranchSelection::unbranched(),
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
-        };
-        let endpoint_ingestor = ScheduledNode {
-            identifier: identifier("orders_http"),
-            kind: ModelKind::Ingestor,
-            config: Box::new(Model::Ingestor(CreateIngestor {
-                name: identifier("orders_http"),
-                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    identifier("orders_out"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
-                )]),
-                decode_using_codec: identifier("codec"),
-                timestamp_source: None,
-                source: IngestSource::Endpoint {
-                    endpoint: identifier("public_http"),
-                    mode: EndpointIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::EndpointBuffer {
-                        max_size: "1MiB".to_string(),
-                    },
+        let replicated_junction = ScheduledNode::new(Model::Junction(CreateJunction {
+            name: named("orders_merge"),
+            from: ProcessorInputs::new(
+                vec![named("orders_in_a"), named("orders_in_b")],
+                Vec::new(),
+            ),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
                 },
-                general_error_policy: GeneralErrorPolicy::Log,
-
-                filter_where: None,
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
-        };
-        let syslog_ingestor = ScheduledNode {
-            identifier: identifier("orders_syslog"),
-            kind: ModelKind::Ingestor,
-            config: Box::new(Model::Ingestor(CreateIngestor {
-                name: identifier("orders_syslog"),
-                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                    identifier("orders_out"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
-                )]),
-                decode_using_codec: identifier("codec"),
-                timestamp_source: None,
-                source: IngestSource::Syslog {
-                    client: identifier("syslog_listener"),
-                    quiesce: IngestQuiesceMode::Suspend,
+            )]),
+            branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+            ],
+        );
+        let endpoint_ingestor = ScheduledNode::new(Model::Ingestor(CreateIngestor {
+            name: named("orders_http"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
                 },
-                general_error_policy: GeneralErrorPolicy::Log,
-                filter_where: None,
-            })),
-            effective_branching: None,
-            effective_branching_schema: None,
-            schema_fingerprint: [0; 32],
-            kafka_partition_schedule: None,
-            primary_node: Some("node-a".to_string()),
-            assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
-        };
+            )]),
+            decode_using_codec: named("codec"),
+            timestamp_source: None,
+            source: IngestSource::Endpoint {
+                endpoint: named("public_http"),
+                mode: EndpointIngestMode::NoAckSequential,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
 
-        assert_eq!(replicated_junction.execution_node(), Some("node-a"));
-        assert!(replicated_junction.executes_on("node-a"));
-        assert!(!replicated_junction.executes_on("node-b"));
+            filter_where: None,
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+            ],
+        );
+        let syslog_ingestor = ScheduledNode::new(Model::Ingestor(CreateIngestor {
+            name: named("orders_syslog"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
+            )]),
+            decode_using_codec: named("codec"),
+            timestamp_source: None,
+            source: IngestSource::Syslog {
+                client: named("syslog_listener"),
+                quiesce: IngestQuiesceMode::Suspend,
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        }))
+        .placed_on(
+            Some(named::<ClusterNodeName>("node-a")),
+            vec![
+                named::<ClusterNodeName>("node-a"),
+                named::<ClusterNodeName>("node-b"),
+            ],
+        );
+
+        assert_eq!(replicated_junction.execution_node(), Some(&named("node-a")));
+        assert!(replicated_junction.executes_on(&named::<ClusterNodeName>("node-a")));
+        assert!(!replicated_junction.executes_on(&named::<ClusterNodeName>("node-b")));
 
         assert_eq!(endpoint_ingestor.execution_node(), None);
-        assert!(endpoint_ingestor.executes_on("node-a"));
-        assert!(endpoint_ingestor.executes_on("node-b"));
+        assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
+        assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
 
         assert_eq!(syslog_ingestor.execution_node(), None);
-        assert!(syslog_ingestor.executes_on("node-a"));
-        assert!(syslog_ingestor.executes_on("node-b"));
+        assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
+        assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
     }
 
     #[test]
     fn kafka_partition_schedule_assigns_partitions_round_robin_by_instance() {
-        let schedule = KafkaPartitionSchedule::new(2, vec![3, 1, 2, 0], 7);
+        let schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![3, 1, 2, 0], 7);
 
         assert_eq!(schedule.observed_partitions, vec![0, 1, 2, 3]);
         assert_eq!(schedule.rebalance_epoch, 7);
@@ -4631,27 +5464,31 @@ mod tests {
     #[test]
     fn relay_alter_applies_operations_in_order_and_is_atomic() {
         let mut relay = CreateRelay {
-            name: identifier("events"),
-            schema: identifier("event_v1"),
-            buffer: 1,
+            name: named("events"),
+            schema: named("event_v1"),
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
         relay
             .apply_alter(&AlterRelay {
-                relay: identifier("events"),
+                relay: named("events"),
                 operations: vec![
-                    AlterRelayOperation::SetCapacity { capacity: 8 },
-                    AlterRelayOperation::SetSchema {
-                        schema: identifier("event_v2"),
+                    AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(8usize),
                     },
-                    AlterRelayOperation::SetCapacity { capacity: 16 },
+                    AlterRelayOperation::SetSchema {
+                        schema: named("event_v2"),
+                    },
+                    AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(16usize),
+                    },
                     AlterRelayOperation::SetMaterializedState,
                 ],
             })
             .expect("relay alter should apply");
-        assert_eq!(relay.buffer, 16);
-        assert_eq!(relay.schema, identifier("event_v2"));
+        assert_eq!(relay.buffer, nonzero!(16usize));
+        assert_eq!(relay.schema, named("event_v2"));
         assert_eq!(
             relay.materialized_state,
             Some(MaterializedRelayState::LastByTimestamp)
@@ -4660,9 +5497,11 @@ mod tests {
         let before = relay.clone();
         let error = relay
             .apply_alter(&AlterRelay {
-                relay: identifier("events"),
+                relay: named("events"),
                 operations: vec![
-                    AlterRelayOperation::SetCapacity { capacity: 32 },
+                    AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(32usize),
+                    },
                     AlterRelayOperation::DropMaterializedState,
                     AlterRelayOperation::DropMaterializedState,
                 ],
@@ -4675,18 +5514,22 @@ mod tests {
     #[test]
     fn junction_alter_preserves_order_and_rejects_ambiguous_routes_atomically() {
         let mut junction = CreateJunction {
-            name: identifier("route_events"),
-            from: ProcessorInputs::new(vec![identifier("incoming")], Vec::new()),
+            name: named("route_events"),
+            from: ProcessorInputs::new(vec![named("incoming")], Vec::new()),
             output_routes: ProcessorOutputs::new(vec![
                 ProcessorOutput::with_flush_policy(
-                    identifier("accepted"),
-                    "100ms".to_string(),
-                    Some("1MiB".to_string()),
+                    named("accepted"),
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
                 ),
                 ProcessorOutput::with_flush_policy(
-                    identifier("accepted"),
-                    "200ms".to_string(),
-                    Some("2MiB".to_string()),
+                    named("accepted"),
+                    FlushPolicy::Each {
+                        interval: "200ms".to_string(),
+                        max_batch_size: "2MiB".to_string(),
+                    },
                 ),
             ]),
             branched_by: BranchSelection::unbranched(),
@@ -4697,13 +5540,13 @@ mod tests {
         let before = junction.clone();
         let error = junction
             .apply_alter(&AlterJunction {
-                junction: identifier("route_events"),
+                junction: named("route_events"),
                 operations: vec![
                     AlterProcessorOperation::SetMode {
                         mode: AckMode::Detached,
                     },
                     AlterProcessorOperation::DropRoute {
-                        relay: identifier("accepted"),
+                        relay: named("accepted"),
                     },
                 ],
             })
@@ -4711,7 +5554,7 @@ mod tests {
         assert_eq!(
             error,
             AlterJunctionError::Processor(AlterProcessorError::RouteTargetAmbiguous {
-                relay: identifier("accepted"),
+                relay: named("accepted"),
             })
         );
         assert_eq!(junction, before, "failed ALTER must not partially apply");
@@ -4720,12 +5563,14 @@ mod tests {
     #[test]
     fn junction_alter_applies_ordered_collection_filter_dependency_and_route_updates() {
         let mut junction = CreateJunction {
-            name: identifier("route_events"),
-            from: ProcessorInputs::single(identifier("incoming_a")),
+            name: named("route_events"),
+            from: ProcessorInputs::single(named("incoming_a")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("accepted"),
-                "100ms".to_string(),
-                Some("1MiB".to_string()),
+                named("accepted"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
@@ -4735,20 +5580,22 @@ mod tests {
         let true_expression = Expression::Literal(Literal::Bool(true));
         let false_expression = Expression::Literal(Literal::Bool(false));
         let replacement = ProcessorOutput::with_flush_policy(
-            identifier("accepted"),
-            "250ms".to_string(),
-            Some("2MiB".to_string()),
+            named("accepted"),
+            FlushPolicy::Each {
+                interval: "250ms".to_string(),
+                max_batch_size: "2MiB".to_string(),
+            },
         );
         junction
             .apply_alter(&AlterJunction {
-                junction: identifier("route_events"),
+                junction: named("route_events"),
                 operations: vec![
                     AlterProcessorOperation::AddFrom {
-                        relay: identifier("incoming_b"),
+                        relay: named("incoming_b"),
                         where_clause: Some(true_expression.clone()),
                     },
                     AlterProcessorOperation::AlterFromSetWhere {
-                        relay: identifier("incoming_b"),
+                        relay: named("incoming_b"),
                         where_clause: false_expression.clone(),
                     },
                     AlterProcessorOperation::SetFilterWhere {
@@ -4759,25 +5606,27 @@ mod tests {
                     },
                     AlterProcessorOperation::AddMaterializedState {
                         dependency: MaterializedStateDependency {
-                            relay: identifier("profiles"),
+                            relay: named("profiles"),
                             policy: MaterializedStatePolicy::RequiredWait,
                         },
                     },
                     AlterProcessorOperation::AddMaterializedState {
                         dependency: MaterializedStateDependency {
-                            relay: identifier("accounts"),
+                            relay: named("accounts"),
                             policy: MaterializedStatePolicy::RequiredSkip,
                         },
                     },
                     AlterProcessorOperation::AlterMaterializedState {
-                        relay: identifier("profiles"),
+                        relay: named("profiles"),
                         policy: MaterializedStatePolicy::RequiredSkip,
                     },
                     AlterProcessorOperation::AddRoute {
                         route: ProcessorOutput::with_flush_policy(
-                            identifier("audit"),
-                            "100ms".to_string(),
-                            Some("1MiB".to_string()),
+                            named("audit"),
+                            FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            },
                         ),
                     },
                     AlterProcessorOperation::ReplaceRoute {
@@ -4792,7 +5641,7 @@ mod tests {
 
         assert_eq!(
             junction.from.from,
-            vec![identifier("incoming_a"), identifier("incoming_b")]
+            vec![named("incoming_a"), named("incoming_b")]
         );
         assert_eq!(junction.from.r#where[0].where_clause, false_expression);
         assert_eq!(
@@ -4805,7 +5654,7 @@ mod tests {
                 .iter()
                 .map(|dependency| dependency.relay.clone())
                 .collect::<Vec<_>>(),
-            vec![identifier("profiles"), identifier("accounts")]
+            vec![named("profiles"), named("accounts")]
         );
         assert_eq!(
             junction.materialized_state[0].policy,
@@ -4818,7 +5667,7 @@ mod tests {
                 .iter()
                 .map(|route| route.relay.clone())
                 .collect::<Vec<_>>(),
-            vec![identifier("accepted"), identifier("audit")]
+            vec![named("accepted"), named("audit")]
         );
         assert_eq!(junction.output_routes.routes[0], replacement);
         assert_eq!(junction.mode, AckMode::Detached);
@@ -4827,33 +5676,28 @@ mod tests {
     #[test]
     fn relay_alter_reports_each_typed_error() {
         let relay = CreateRelay {
-            name: identifier("events"),
-            schema: identifier("event"),
-            buffer: 1,
+            name: named("events"),
+            schema: named("event"),
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
         let cases = [
             (
                 AlterRelay {
-                    relay: identifier("other"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 2 }],
+                    relay: named("other"),
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(2usize),
+                    }],
                 },
                 AlterRelayError::RelayNameMismatch {
-                    stored: identifier("events"),
-                    requested: identifier("other"),
+                    stored: named("events"),
+                    requested: named("other"),
                 },
             ),
             (
                 AlterRelay {
-                    relay: identifier("events"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 0 }],
-                },
-                AlterRelayError::InvalidCapacity,
-            ),
-            (
-                AlterRelay {
-                    relay: identifier("events"),
+                    relay: named("events"),
                     operations: vec![AlterRelayOperation::DropMaterializedState],
                 },
                 AlterRelayError::MaterializedStateNotConfigured,
@@ -4869,14 +5713,14 @@ mod tests {
     #[test]
     fn junction_alter_reports_each_typed_lookup_and_last_element_error() {
         let base = CreateJunction {
-            name: identifier("route_events"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::single(identifier("accepted")),
+            name: named("route_events"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::single(named("accepted")),
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: vec![MaterializedStateDependency {
-                relay: identifier("profiles"),
+                relay: named("profiles"),
                 policy: MaterializedStatePolicy::RequiredWait,
             }],
         };
@@ -4884,103 +5728,103 @@ mod tests {
         let cases = vec![
             (
                 AlterJunction {
-                    junction: identifier("other"),
+                    junction: named("other"),
                     operations: Vec::new(),
                 },
                 AlterJunctionError::JunctionNameMismatch {
-                    stored: identifier("route_events"),
-                    requested: identifier("other"),
+                    stored: named("route_events"),
+                    requested: named("other"),
                 },
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AddFrom {
-                        relay: identifier("incoming"),
+                        relay: named("incoming"),
                         where_clause: None,
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::InputAlreadyExists {
-                    relay: identifier("incoming"),
+                    relay: named("incoming"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::DropFrom {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::InputNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AlterFromDropWhere {
-                        relay: identifier("incoming"),
+                        relay: named("incoming"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::InputWhereNotConfigured {
-                    relay: identifier("incoming"),
+                    relay: named("incoming"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::DropFrom {
-                        relay: identifier("incoming"),
+                        relay: named("incoming"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::CannotDropLastInput),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AddMaterializedState {
                         dependency: MaterializedStateDependency {
-                            relay: identifier("profiles"),
+                            relay: named("profiles"),
                             policy: MaterializedStatePolicy::RequiredSkip,
                         },
                     }],
                 },
                 AlterJunctionError::Processor(
                     AlterProcessorError::MaterializedStateAlreadyConfigured {
-                        relay: identifier("profiles"),
+                        relay: named("profiles"),
                     },
                 ),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::AlterMaterializedState {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                         policy: MaterializedStatePolicy::RequiredSkip,
                     }],
                 },
                 AlterJunctionError::Processor(
                     AlterProcessorError::MaterializedStateNotConfigured {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     },
                 ),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::ReplaceRoute {
-                        route: ProcessorOutput::new(identifier("missing")),
+                        route: ProcessorOutput::new(named("missing")),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::RouteTargetNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 }),
             ),
             (
                 AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::DropRoute {
-                        relay: identifier("accepted"),
+                        relay: named("accepted"),
                     }],
                 },
                 AlterJunctionError::Processor(AlterProcessorError::CannotDropLastRoute),
@@ -4996,9 +5840,9 @@ mod tests {
         let mut with_where = base.clone();
         with_where
             .apply_alter(&AlterJunction {
-                junction: identifier("route_events"),
+                junction: named("route_events"),
                 operations: vec![AlterProcessorOperation::AlterFromSetWhere {
-                    relay: identifier("incoming"),
+                    relay: named("incoming"),
                     where_clause: true_expression,
                 }],
             })
@@ -5008,14 +5852,16 @@ mod tests {
     #[test]
     fn emitter_alter_applies_operations_in_order_and_is_atomic() {
         let mut emitter = CreateEmitter {
-            name: identifier("event_sink"),
-            from: ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("event_codec")),
+            name: named("event_sink"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("event_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("sink_a"),
+                client: named("sink_a"),
             }),
-            flush_each: "1s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -5029,25 +5875,26 @@ mod tests {
         };
         emitter
             .apply_alter(&AlterEmitter {
-                emitter: identifier("event_sink"),
+                emitter: named("event_sink"),
                 operations: vec![
                     AlterEmitterOperation::AddFrom {
-                        relay: identifier("backup_events"),
+                        relay: named("backup_events"),
                         where_clause: Some(Expression::Literal(Literal::Bool(true))),
                     },
                     AlterEmitterOperation::AlterFromDropWhere {
-                        relay: identifier("backup_events"),
+                        relay: named("backup_events"),
                     },
                     AlterEmitterOperation::SetClient {
-                        client: identifier("sink_b"),
+                        client: named("sink_b"),
                     },
                     AlterEmitterOperation::SetFlush {
-                        flush_each: "2s".to_string(),
-                        max_batch_size: Some("2MiB".to_string()),
+                        flush_policy: FlushPolicy::Each {
+                            interval: "2s".to_string(),
+                            max_batch_size: "2MiB".to_string(),
+                        },
                     },
                     AlterEmitterOperation::SetFlush {
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
+                        flush_policy: FlushPolicy::Immediate,
                     },
                     AlterEmitterOperation::SetAttachment {
                         mode: AckMode::Detached,
@@ -5055,22 +5902,22 @@ mod tests {
                 ],
             })
             .expect("emitter alter should apply");
-        assert_eq!(emitter.sink.client(), &identifier("sink_b"));
-        assert_eq!(emitter.flush_policy(), ("IMMEDIATE", None));
+        assert_eq!(emitter.sink.client(), &named("sink_b"));
+        assert_eq!(emitter.flush_policy, FlushPolicy::Immediate);
         assert_eq!(emitter.mode, AckMode::Detached);
         assert_eq!(
             emitter.from.relays(),
-            &[identifier("events"), identifier("backup_events")]
+            &[named("events"), named("backup_events")]
         );
         assert!(emitter.from.where_clauses().is_empty());
 
         let before = emitter.clone();
         let error = emitter
             .apply_alter(&AlterEmitter {
-                emitter: identifier("event_sink"),
+                emitter: named("event_sink"),
                 operations: vec![
                     AlterEmitterOperation::SetClient {
-                        client: identifier("sink_c"),
+                        client: named("sink_c"),
                     },
                     AlterEmitterOperation::DropEncode,
                     AlterEmitterOperation::DropEncode,
@@ -5084,14 +5931,13 @@ mod tests {
     #[test]
     fn emitter_alter_reports_name_and_commit_policy_errors() {
         let emitter = CreateEmitter {
-            name: identifier("event_sink"),
-            from: ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("event_codec")),
+            name: named("event_sink"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("event_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("sink"),
+                client: named("sink"),
             }),
-            flush_each: "IMMEDIATE".to_string(),
-            max_batch_size: None,
+            flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -5106,17 +5952,17 @@ mod tests {
         let cases = [
             (
                 AlterEmitter {
-                    emitter: identifier("other"),
+                    emitter: named("other"),
                     operations: Vec::new(),
                 },
                 AlterEmitterError::EmitterNameMismatch {
-                    stored: identifier("event_sink"),
-                    requested: identifier("other"),
+                    stored: named("event_sink"),
+                    requested: named("other"),
                 },
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::SetCommit {
                         commit_each: "1m".to_string(),
                         max_commit_size: "1GiB".to_string(),
@@ -5126,32 +5972,32 @@ mod tests {
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::AddFrom {
-                        relay: identifier("events"),
+                        relay: named("events"),
                         where_clause: None,
                     }],
                 },
                 AlterEmitterError::InputAlreadyExists {
-                    relay: identifier("events"),
+                    relay: named("events"),
                 },
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::DropFrom {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     }],
                 },
                 AlterEmitterError::InputNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 },
             ),
             (
                 AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::DropFrom {
-                        relay: identifier("events"),
+                        relay: named("events"),
                     }],
                 },
                 AlterEmitterError::CannotDropLastInput,
@@ -5167,22 +6013,22 @@ mod tests {
     #[test]
     fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
         let route = ProcessorOutput {
-            relay: identifier("events"),
+            relay: named("events"),
             construction: crate::RouteConstruction::default(),
-            flush_policy: Some(OutputFlushPolicy {
-                flush_each: "1s".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+            flush_policy: Some(FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
             }),
             message_error_policy: super::MessageErrorPolicy::Log,
             branch: Some(crate::OutputBranch::Unbranched),
         };
         let mut ingestor = CreateIngestor {
-            name: identifier("event_source"),
+            name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: identifier("event_codec"),
+            decode_using_codec: named("event_codec"),
             timestamp_source: None,
             source: IngestSource::Endpoint {
-                endpoint: identifier("ingress_a"),
+                endpoint: named("ingress_a"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
@@ -5193,11 +6039,11 @@ mod tests {
         };
         ingestor
             .apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![
                     AlterIngestorOperation::SetSource {
                         source: IngestSource::Endpoint {
-                            endpoint: identifier("ingress_b"),
+                            endpoint: named("ingress_b"),
                             mode: EndpointIngestMode::NoAckSequential,
                             quiesce: IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
@@ -5205,7 +6051,7 @@ mod tests {
                         },
                     },
                     AlterIngestorOperation::SetDecodeUsing {
-                        codec: identifier("event_codec_v2"),
+                        codec: named("event_codec_v2"),
                     },
                     AlterIngestorOperation::SetTimestamp {
                         source: super::IngestTimestampSource::Now,
@@ -5215,17 +6061,14 @@ mod tests {
                     },
                     AlterIngestorOperation::ReplaceRoute {
                         route: ProcessorOutput {
-                            relay: identifier("events"),
-                            flush_policy: Some(OutputFlushPolicy {
-                                flush_each: "IMMEDIATE".to_string(),
-                                max_batch_size: None,
-                            }),
+                            relay: named("events"),
+                            flush_policy: Some(FlushPolicy::Immediate),
                             ..route.clone()
                         },
                     },
                     AlterIngestorOperation::AddRoute {
                         route: ProcessorOutput {
-                            relay: identifier("audit"),
+                            relay: named("audit"),
                             ..route.clone()
                         },
                     },
@@ -5239,14 +6082,14 @@ mod tests {
         assert_eq!(
             ingestor.source,
             IngestSource::Endpoint {
-                endpoint: identifier("ingress_b"),
+                endpoint: named("ingress_b"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
                 },
             }
         );
-        assert_eq!(ingestor.decode_using_codec, identifier("event_codec_v2"));
+        assert_eq!(ingestor.decode_using_codec, named("event_codec_v2"));
         assert_eq!(
             ingestor.timestamp_source,
             Some(super::IngestTimestampSource::Now)
@@ -5257,13 +6100,13 @@ mod tests {
         let before = ingestor.clone();
         let error = ingestor
             .apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![
                     AlterIngestorOperation::SetDecodeUsing {
-                        codec: identifier("event_codec_v3"),
+                        codec: named("event_codec_v3"),
                     },
                     AlterIngestorOperation::DropRoute {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     },
                 ],
             })
@@ -5271,7 +6114,7 @@ mod tests {
         assert_eq!(
             error,
             AlterIngestorError::RouteTargetNotFound {
-                relay: identifier("missing")
+                relay: named("missing")
             }
         );
         assert_eq!(ingestor, before, "failed ALTER must not partially apply");
@@ -5279,14 +6122,14 @@ mod tests {
 
     #[test]
     fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
-        let route = ProcessorOutput::new(identifier("events"));
+        let route = ProcessorOutput::new(named("events"));
         let base = CreateIngestor {
-            name: identifier("event_source"),
+            name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: identifier("event_codec"),
+            decode_using_codec: named("event_codec"),
             timestamp_source: None,
             source: IngestSource::Endpoint {
-                endpoint: identifier("ingress"),
+                endpoint: named("ingress"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
@@ -5299,12 +6142,12 @@ mod tests {
         let mut candidate = base.clone();
         assert_eq!(
             candidate.apply_alter(&AlterIngestor {
-                ingestor: identifier("other"),
+                ingestor: named("other"),
                 operations: Vec::new(),
             }),
             Err(AlterIngestorError::IngestorNameMismatch {
-                stored: identifier("event_source"),
-                requested: identifier("other"),
+                stored: named("event_source"),
+                requested: named("other"),
             })
         );
         assert_eq!(candidate, base);
@@ -5312,9 +6155,9 @@ mod tests {
         let mut candidate = base.clone();
         assert_eq!(
             candidate.apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: identifier("events"),
+                    relay: named("events"),
                 }],
             }),
             Err(AlterIngestorError::CannotDropLastRoute)
@@ -5326,13 +6169,13 @@ mod tests {
         let before = ambiguous.clone();
         assert_eq!(
             ambiguous.apply_alter(&AlterIngestor {
-                ingestor: identifier("event_source"),
+                ingestor: named("event_source"),
                 operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: identifier("events"),
+                    relay: named("events"),
                 }],
             }),
             Err(AlterIngestorError::RouteTargetAmbiguous {
-                relay: identifier("events"),
+                relay: named("events"),
             })
         );
         assert_eq!(ambiguous, before);
@@ -5340,11 +6183,9 @@ mod tests {
 
     fn deduplicator() -> CreateDeduplicator {
         CreateDeduplicator {
-            name: identifier("dedup_events"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(identifier(
-                "outgoing",
-            ))]),
+            name: named("dedup_events"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
             branched_by: BranchSelection::unbranched(),
             deduplicate_on: vec![Expression::Literal(Literal::I64(1))],
             max_time: "10m".to_string(),
@@ -5356,11 +6197,9 @@ mod tests {
 
     fn reorderer() -> CreateReorderer {
         CreateReorderer {
-            name: identifier("order_events"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(identifier(
-                "outgoing",
-            ))]),
+            name: named("order_events"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
             branched_by: BranchSelection::unbranched(),
             order_by: vec![Expression::Literal(Literal::I64(1))],
             max_time: "10m".to_string(),
@@ -5375,11 +6214,11 @@ mod tests {
         let mut candidate = deduplicator();
         candidate
             .apply_alter(&AlterDeduplicator {
-                deduplicator: identifier("dedup_events"),
+                deduplicator: named("dedup_events"),
                 operations: vec![
                     AlterDeduplicatorOperation::Processor(Box::new(
                         AlterProcessorOperation::AddFrom {
-                            relay: identifier("secondary"),
+                            relay: named("secondary"),
                             where_clause: Some(Expression::Literal(Literal::Bool(true))),
                         },
                     )),
@@ -5406,7 +6245,7 @@ mod tests {
 
         assert_eq!(
             candidate.from.from,
-            vec![identifier("incoming"), identifier("secondary")]
+            vec![named("incoming"), named("secondary")]
         );
         assert_eq!(
             candidate.deduplicate_on,
@@ -5421,7 +6260,7 @@ mod tests {
         let mut candidate = reorderer();
         candidate
             .apply_alter(&AlterReorderer {
-                reorderer: identifier("order_events"),
+                reorderer: named("order_events"),
                 operations: vec![
                     AlterReordererOperation::SetOrderBy {
                         expressions: vec![Expression::Literal(Literal::I64(2))],
@@ -5461,21 +6300,21 @@ mod tests {
         let original = deduplicator.clone();
         assert_eq!(
             deduplicator.apply_alter(&AlterDeduplicator {
-                deduplicator: identifier("dedup_events"),
+                deduplicator: named("dedup_events"),
                 operations: vec![
                     AlterDeduplicatorOperation::SetMaxTime {
                         max_time: "1s".to_string(),
                     },
                     AlterDeduplicatorOperation::Processor(Box::new(
                         AlterProcessorOperation::DropRoute {
-                            relay: identifier("missing"),
+                            relay: named("missing"),
                         },
                     )),
                 ],
             }),
             Err(AlterDeduplicatorError::Processor(
                 AlterProcessorError::RouteTargetNotFound {
-                    relay: identifier("missing"),
+                    relay: named("missing"),
                 }
             ))
         );
@@ -5485,12 +6324,12 @@ mod tests {
         let original = reorderer.clone();
         assert_eq!(
             reorderer.apply_alter(&AlterReorderer {
-                reorderer: identifier("other"),
+                reorderer: named("other"),
                 operations: Vec::new(),
             }),
             Err(AlterReordererError::ReordererNameMismatch {
-                stored: identifier("order_events"),
-                requested: identifier("other"),
+                stored: named("order_events"),
+                requested: named("other"),
             })
         );
         assert_eq!(reorderer, original);
@@ -5499,24 +6338,22 @@ mod tests {
     #[test]
     fn reingestor_alter_is_ordered_atomic_and_rejects_node_branching() {
         let mut reingestor = CreateReingestor {
-            name: identifier("repartition"),
-            from: ProcessorInputs::single(identifier("incoming")),
-            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(identifier(
-                "outgoing",
-            ))]),
+            name: named("repartition"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
             mode: AckMode::Attached,
             materialized_state: Vec::new(),
             filter_where: None,
         };
         reingestor
             .apply_alter(&AlterReingestor {
-                reingestor: identifier("repartition"),
+                reingestor: named("repartition"),
                 operations: vec![
                     AlterProcessorOperation::SetMode {
                         mode: AckMode::Detached,
                     },
                     AlterProcessorOperation::AddFrom {
-                        relay: identifier("secondary"),
+                        relay: named("secondary"),
                         where_clause: Some(Expression::Literal(Literal::Bool(true))),
                     },
                     AlterProcessorOperation::SetFilterWhere {
@@ -5532,7 +6369,7 @@ mod tests {
         let before = reingestor.clone();
         assert_eq!(
             reingestor.apply_alter(&AlterReingestor {
-                reingestor: identifier("repartition"),
+                reingestor: named("repartition"),
                 operations: vec![
                     AlterProcessorOperation::SetMode {
                         mode: AckMode::Attached,
@@ -5551,17 +6388,17 @@ mod tests {
 
     #[test]
     fn generator_alter_is_ordered_atomic_and_reports_route_errors() {
-        let route = ProcessorOutput::new(identifier("outgoing"));
+        let route = ProcessorOutput::new(named("outgoing"));
         let mut generator = CreateGenerator {
-            name: identifier("synth"),
-            materialized_relay: identifier("state"),
+            name: named("synth"),
+            materialized_relay: named("state"),
             branched_by: BranchSelection::unbranched(),
             each: "1s".to_string(),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
         };
         generator
             .apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![
                     AlterGeneratorOperation::SetEach {
                         each: "500ms".to_string(),
@@ -5570,33 +6407,33 @@ mod tests {
                         each: "250ms".to_string(),
                     },
                     AlterGeneratorOperation::SetMaterializedState {
-                        relay: identifier("state_v2"),
+                        relay: named("state_v2"),
                     },
                     AlterGeneratorOperation::AddRoute {
-                        route: ProcessorOutput::new(identifier("audit")),
+                        route: ProcessorOutput::new(named("audit")),
                     },
                 ],
             })
             .expect("generator alter should apply");
         assert_eq!(generator.each, "250ms");
-        assert_eq!(generator.materialized_relay, identifier("state_v2"));
+        assert_eq!(generator.materialized_relay, named("state_v2"));
         assert_eq!(generator.output_routes.routes.len(), 2);
 
         let before = generator.clone();
         assert_eq!(
             generator.apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![
                     AlterGeneratorOperation::SetEach {
                         each: "10ms".to_string(),
                     },
                     AlterGeneratorOperation::DropRoute {
-                        relay: identifier("missing"),
+                        relay: named("missing"),
                     },
                 ],
             }),
             Err(AlterGeneratorError::RouteTargetNotFound {
-                relay: identifier("missing")
+                relay: named("missing")
             })
         );
         assert_eq!(generator, before, "failed ALTER must not partially apply");
@@ -5607,9 +6444,9 @@ mod tests {
         };
         assert_eq!(
             single.apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: identifier("outgoing"),
+                    relay: named("outgoing"),
                 }],
             }),
             Err(AlterGeneratorError::CannotDropLastRoute)
@@ -5618,13 +6455,13 @@ mod tests {
         single.output_routes.routes.push(route);
         assert_eq!(
             single.apply_alter(&AlterGenerator {
-                generator: identifier("synth"),
+                generator: named("synth"),
                 operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: identifier("outgoing"),
+                    relay: named("outgoing"),
                 }],
             }),
             Err(AlterGeneratorError::RouteTargetAmbiguous {
-                relay: identifier("outgoing")
+                relay: named("outgoing")
             })
         );
     }
@@ -5632,66 +6469,70 @@ mod tests {
     #[test]
     fn placement_creation_collapses_duplicate_members() {
         let placement = CreatePlacement::new(
-            identifier("corridor"),
-            vec![identifier("ingest"), identifier("ingest")],
-            vec![identifier("emit"), identifier("emit")],
+            named("corridor"),
+            vec![named("ingest"), named("ingest")],
+            vec![named("emit"), named("emit")],
             PlacementPolicy::PreferColocation,
             None,
         )
         .expect("placement should be valid");
 
-        assert_eq!(placement.from, vec![identifier("ingest")]);
-        assert_eq!(placement.to, vec![identifier("emit")]);
+        assert_eq!(placement.from, vec![named("ingest")]);
+        assert_eq!(placement.to, vec![named("emit")]);
     }
 
     #[test]
     fn placement_alter_applies_operations_in_order_and_is_atomic() {
         let mut placement = CreatePlacement::new(
-            identifier("corridor"),
-            vec![identifier("ingest")],
-            vec![identifier("emit")],
+            named("corridor"),
+            vec![named("ingest")],
+            vec![named("emit")],
             PlacementPolicy::PreferColocation,
             None,
         )
         .expect("placement should be valid");
         placement
             .apply_alter(&AlterPlacement {
-                placement: identifier("corridor"),
+                placement: named("corridor"),
                 operations: vec![
-                    AlterPlacementOperation::SetRank { rank: 3 },
-                    AlterPlacementOperation::SetRank { rank: 1 },
+                    AlterPlacementOperation::SetRank {
+                        rank: nonzero!(3u64),
+                    },
+                    AlterPlacementOperation::SetRank {
+                        rank: nonzero!(1u64),
+                    },
                     AlterPlacementOperation::SetPolicy {
                         policy: PlacementPolicy::RequireColocation,
                     },
                     AlterPlacementOperation::SetMembers {
-                        from: vec![identifier("source"), identifier("source")],
-                        to: vec![identifier("sink")],
+                        from: vec![named("source"), named("source")],
+                        to: vec![named("sink")],
                     },
                     AlterPlacementOperation::RenameTo {
-                        name: identifier("critical"),
+                        name: named("critical"),
                     },
                 ],
             })
             .expect("placement alter should apply");
 
-        assert_eq!(placement.name, identifier("critical"));
-        assert_eq!(placement.rank, Some(1));
+        assert_eq!(placement.name, named("critical"));
+        assert_eq!(placement.rank, Some(nonzero!(1u64)));
         assert_eq!(placement.policy, PlacementPolicy::RequireColocation);
-        assert_eq!(placement.from, vec![identifier("source")]);
-        assert_eq!(placement.to, vec![identifier("sink")]);
+        assert_eq!(placement.from, vec![named("source")]);
+        assert_eq!(placement.to, vec![named("sink")]);
 
         let before = placement.clone();
         assert_eq!(
             placement.apply_alter(&AlterPlacement {
-                placement: identifier("critical"),
-                operations: vec![
-                    AlterPlacementOperation::SetPolicy {
-                        policy: PlacementPolicy::Neutral,
-                    },
-                    AlterPlacementOperation::SetRank { rank: 0 },
-                ],
+                placement: named("other"),
+                operations: vec![AlterPlacementOperation::SetPolicy {
+                    policy: PlacementPolicy::Neutral,
+                }],
             }),
-            Err(AlterPlacementError::RankZero)
+            Err(AlterPlacementError::PlacementNameMismatch {
+                stored: named("critical"),
+                requested: named("other"),
+            })
         );
         assert_eq!(placement, before, "failed ALTER must not partially apply");
     }

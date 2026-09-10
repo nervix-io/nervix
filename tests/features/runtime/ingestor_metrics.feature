@@ -225,6 +225,7 @@ Feature: Ingestor metrics
         };
         CREATE CLIENT redis_main
         TYPE REDIS
+        POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
@@ -421,6 +422,7 @@ Feature: Ingestor metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_remote_owner_metrics_source;
         CREATE CLIENT redis_main
         TYPE REDIS
+        POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
         };

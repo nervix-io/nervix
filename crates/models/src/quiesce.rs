@@ -1,11 +1,14 @@
+use std::num::NonZeroUsize;
+
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    Identifier, MessageErrorPolicy, Model, ModelKind, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs,
+    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayName,
 };
 
 #[derive(
@@ -18,6 +21,9 @@ use crate::{
     Ord,
     Serialize,
     Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
     AsRefStr,
     IntoStaticStr,
 )]
@@ -29,12 +35,8 @@ pub enum QuiesceLevel {
 }
 
 impl QuiesceLevel {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Dynamic => "DYNAMIC",
-            Self::EntityPause => "ENTITY_PAUSE",
-            Self::DomainPause => "DOMAIN_PAUSE",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     pub const fn requires_domain_pause(self) -> bool {
@@ -49,94 +51,17 @@ impl QuiesceLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DynamicModelUpdate {
     RelayCapacity {
-        relay: Identifier,
-        capacity: usize,
+        relay: RelayName,
+        capacity: NonZeroUsize,
     },
     Processor {
         kind: ModelKind,
-        processor: Identifier,
+        processor: ModelName,
     },
     Emitter {
-        emitter: Identifier,
+        emitter: EmitterName,
         config: Box<CreateEmitter>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelChangeAspect {
-    RelayCapacity,
-    RelaySchema,
-    RelayBranching,
-    RelayMaterializedState,
-    ProcessorFilter,
-    ProcessorInputWhere,
-    ProcessorRouteConstruction,
-    ProcessorRouteFlushPolicy,
-    ProcessorCollectPolicy,
-    ProcessorMessageErrorPolicy,
-    ProcessorErrorRouteTargets,
-    ProcessorInputs,
-    ProcessorRoutes,
-    ProcessorMode,
-    ProcessorBranching,
-    ProcessorMaterializedState,
-    DeduplicatorKeyspace,
-    DeduplicatorMaxTime,
-    ReordererOrdering,
-    ReordererMaxTime,
-    EmitterInput,
-    EmitterInputWhere,
-    EmitterSink,
-    EmitterClient,
-    EmitterCodec,
-    EmitterCollectPolicy,
-    EmitterMode,
-    EmitterPublishingMode,
-    EmitterFlushPolicy,
-    EmitterConstruction,
-    EmitterErrorPolicies,
-    EmitterMaterializedState,
-    IngestorSource,
-    IngestorCodec,
-    IngestorTimestamp,
-    IngestorFilter,
-    IngestorRoutes,
-    IngestorGeneralError,
-    ReingestorInputs,
-    ReingestorRoutes,
-    ReingestorMode,
-    ReingestorFilter,
-    ReingestorMaterializedState,
-    GeneratorMaterializedState,
-    GeneratorCadence,
-    GeneratorBranching,
-    GeneratorRoutes,
-    CorrelatorCorrelation,
-    CorrelatorMatchPolicy,
-    CorrelatorMaxTime,
-    CorrelatorTimeoutPolicy,
-    WindowBounds,
-    InferencerBinding,
-    InferencerTensors,
-    WasmBinding,
-    WasmLimits,
-    WasmGlobalError,
-    SchemaDefinition,
-    WireSchemaDefinition,
-    CodecDefinition,
-    ClientConfig,
-    VhostHostnames,
-    VhostTls,
-    EndpointDefinition,
-    SignalingProtocolDefinition,
-    LookupDefinition,
-    BranchSchema,
-    BranchLifecycle,
-    UdfDefinition,
-    PlacementDefinition,
-    EntityReplaced,
-    EntityCreated,
-    EntityDropped,
 }
 
 /// Node-owned runtime state that a model change makes meaningless even though the schemas around
@@ -151,103 +76,111 @@ pub enum StatePurge {
     WasmGuestState,
 }
 
-impl ModelChangeAspect {
-    /// The runtime state this change invalidates, if any. Schema-driven staleness is already
-    /// handled by keying persisted state on the schema fingerprint; this covers the changes that
-    /// keep the schema identical but redefine what the retained state means.
-    pub const fn state_purge(self) -> Option<StatePurge> {
-        match self {
-            Self::DeduplicatorKeyspace => Some(StatePurge::DeduplicatorKeyspace),
-            Self::ReordererOrdering => Some(StatePurge::ReordererBuffer),
-            Self::WindowBounds => Some(StatePurge::WindowAccumulator),
-            Self::CorrelatorCorrelation | Self::CorrelatorMatchPolicy => {
-                Some(StatePurge::CorrelationBuffer)
-            }
-            Self::InferencerBinding | Self::InferencerTensors => {
-                Some(StatePurge::InferencerWarmState)
-            }
-            Self::WasmBinding => Some(StatePurge::WasmGuestState),
-            _ => None,
+macro_rules! declare_model_change_aspects {
+    ($($Aspect:ident => $Level:ident, $state_purge:expr, $control_plane_only:literal;)+) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ModelChangeAspect {
+            $($Aspect,)+
         }
-    }
 
-    pub const fn quiesce_level(self) -> QuiesceLevel {
-        match self {
-            Self::RelayCapacity
-            | Self::ProcessorFilter
-            | Self::ProcessorInputWhere
-            | Self::ProcessorRouteConstruction
-            | Self::ProcessorRouteFlushPolicy
-            | Self::ProcessorCollectPolicy
-            | Self::ProcessorMessageErrorPolicy
-            | Self::DeduplicatorMaxTime
-            | Self::ReordererMaxTime
-            | Self::EmitterFlushPolicy
-            | Self::PlacementDefinition
-            | Self::EntityReplaced
-            | Self::EntityCreated
-            | Self::EntityDropped => QuiesceLevel::Dynamic,
-            Self::RelayMaterializedState
-            | Self::ProcessorErrorRouteTargets
-            | Self::ProcessorInputs
-            | Self::ProcessorRoutes
-            | Self::ProcessorMode
-            | Self::ProcessorBranching
-            | Self::ProcessorMaterializedState
-            | Self::DeduplicatorKeyspace
-            | Self::ReordererOrdering
-            | Self::EmitterSink
-            | Self::EmitterClient
-            | Self::EmitterCodec
-            | Self::EmitterInputWhere
-            | Self::EmitterCollectPolicy
-            | Self::EmitterMode
-            | Self::EmitterPublishingMode
-            | Self::EmitterConstruction
-            | Self::EmitterErrorPolicies
-            | Self::EmitterMaterializedState
-            | Self::IngestorSource
-            | Self::IngestorCodec
-            | Self::IngestorTimestamp
-            | Self::IngestorFilter
-            | Self::IngestorRoutes
-            | Self::IngestorGeneralError
-            | Self::ReingestorInputs
-            | Self::ReingestorRoutes
-            | Self::ReingestorMode
-            | Self::ReingestorFilter
-            | Self::ReingestorMaterializedState
-            | Self::GeneratorMaterializedState
-            | Self::GeneratorCadence
-            | Self::GeneratorBranching
-            | Self::GeneratorRoutes
-            | Self::CorrelatorCorrelation
-            | Self::CorrelatorMatchPolicy
-            | Self::CorrelatorMaxTime
-            | Self::CorrelatorTimeoutPolicy
-            | Self::WindowBounds
-            | Self::InferencerBinding
-            | Self::InferencerTensors
-            | Self::WasmBinding
-            | Self::WasmLimits
-            | Self::WasmGlobalError => QuiesceLevel::EntityPause,
-            Self::RelaySchema
-            | Self::RelayBranching
-            | Self::EmitterInput
-            | Self::SchemaDefinition
-            | Self::WireSchemaDefinition
-            | Self::CodecDefinition
-            | Self::ClientConfig
-            | Self::VhostHostnames
-            | Self::VhostTls
-            | Self::EndpointDefinition
-            | Self::SignalingProtocolDefinition
-            | Self::LookupDefinition
-            | Self::BranchSchema
-            | Self::BranchLifecycle
-            | Self::UdfDefinition => QuiesceLevel::DomainPause,
+        impl ModelChangeAspect {
+            /// True when this change only redefines a control-plane scheduling input.
+            pub const fn is_control_plane_only(self) -> bool {
+                match self {
+                    $(Self::$Aspect => $control_plane_only,)+
+                }
+            }
+
+            /// The runtime state this change invalidates, if any.
+            pub const fn state_purge(self) -> Option<StatePurge> {
+                match self {
+                    $(Self::$Aspect => $state_purge,)+
+                }
+            }
+
+            pub const fn quiesce_level(self) -> QuiesceLevel {
+                match self {
+                    $(Self::$Aspect => QuiesceLevel::$Level,)+
+                }
+            }
         }
-    }
+    };
+}
+
+declare_model_change_aspects! {
+    RelayCapacity => Dynamic, None, false;
+    RelaySchema => DomainPause, None, false;
+    RelayBranching => DomainPause, None, false;
+    RelayMaterializedState => EntityPause, None, false;
+    ProcessorFilter => Dynamic, None, false;
+    ProcessorInputWhere => Dynamic, None, false;
+    ProcessorRouteConstruction => Dynamic, None, false;
+    ProcessorRouteFlushPolicy => Dynamic, None, false;
+    ProcessorCollectPolicy => Dynamic, None, false;
+    ProcessorMessageErrorPolicy => Dynamic, None, false;
+    ProcessorErrorRouteTargets => EntityPause, None, false;
+    ProcessorInputs => EntityPause, None, false;
+    ProcessorRoutes => EntityPause, None, false;
+    ProcessorMode => EntityPause, None, false;
+    ProcessorBranching => EntityPause, None, false;
+    ProcessorMaterializedState => EntityPause, None, false;
+    DeduplicatorKeyspace => EntityPause, Some(StatePurge::DeduplicatorKeyspace), false;
+    DeduplicatorMaxTime => Dynamic, None, false;
+    ReordererOrdering => EntityPause, Some(StatePurge::ReordererBuffer), false;
+    ReordererMaxTime => Dynamic, None, false;
+    EmitterInput => DomainPause, None, false;
+    EmitterInputWhere => EntityPause, None, false;
+    EmitterSink => EntityPause, None, false;
+    EmitterClient => EntityPause, None, false;
+    EmitterCodec => EntityPause, None, false;
+    EmitterCollectPolicy => EntityPause, None, false;
+    EmitterMode => EntityPause, None, false;
+    EmitterPublishingMode => EntityPause, None, false;
+    EmitterFlushPolicy => Dynamic, None, false;
+    EmitterConstruction => EntityPause, None, false;
+    EmitterErrorPolicies => EntityPause, None, false;
+    EmitterMaterializedState => EntityPause, None, false;
+    IngestorSource => EntityPause, None, false;
+    IngestorCodec => EntityPause, None, false;
+    IngestorTimestamp => EntityPause, None, false;
+    IngestorFilter => EntityPause, None, false;
+    IngestorRoutes => EntityPause, None, false;
+    IngestorGeneralError => EntityPause, None, false;
+    ReingestorInputs => EntityPause, None, false;
+    ReingestorRoutes => EntityPause, None, false;
+    ReingestorMode => EntityPause, None, false;
+    ReingestorFilter => EntityPause, None, false;
+    ReingestorMaterializedState => EntityPause, None, false;
+    GeneratorMaterializedState => EntityPause, None, false;
+    GeneratorCadence => EntityPause, None, false;
+    GeneratorBranching => EntityPause, None, false;
+    GeneratorRoutes => EntityPause, None, false;
+    CorrelatorCorrelation => EntityPause, Some(StatePurge::CorrelationBuffer), false;
+    CorrelatorMatchPolicy => EntityPause, Some(StatePurge::CorrelationBuffer), false;
+    CorrelatorMaxTime => EntityPause, None, false;
+    CorrelatorTimeoutPolicy => EntityPause, None, false;
+    WindowBounds => EntityPause, Some(StatePurge::WindowAccumulator), false;
+    InferencerBinding => EntityPause, Some(StatePurge::InferencerWarmState), false;
+    InferencerTensors => EntityPause, Some(StatePurge::InferencerWarmState), false;
+    WasmBinding => EntityPause, Some(StatePurge::WasmGuestState), false;
+    WasmLimits => EntityPause, None, false;
+    WasmGlobalError => EntityPause, None, false;
+    SchemaDefinition => DomainPause, None, false;
+    WireSchemaDefinition => DomainPause, None, false;
+    CodecDefinition => DomainPause, None, false;
+    ClientConfig => DomainPause, None, false;
+    VhostHostnames => DomainPause, None, false;
+    VhostTls => DomainPause, None, false;
+    EndpointDefinition => DomainPause, None, false;
+    SignalingProtocolDefinition => DomainPause, None, false;
+    LookupDefinition => DomainPause, None, false;
+    BranchSchema => DomainPause, None, false;
+    BranchLifecycle => DomainPause, None, false;
+    UdfDefinition => DomainPause, None, false;
+    PlacementDefinition => Dynamic, None, true;
+    EntityReplaced => Dynamic, None, false;
+    EntityCreated => Dynamic, None, false;
+    EntityDropped => Dynamic, None, false;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -280,6 +213,18 @@ impl ModelChangeAspects {
 
     pub fn is_empty(&self) -> bool {
         self.aspects.is_empty()
+    }
+
+    /// True when the change set only redefines control-plane scheduling inputs. Such a change has
+    /// no runtime work of its own: whatever it decides reaches the runtime as the published
+    /// schedule's assignments.
+    pub fn is_control_plane_only(&self) -> bool {
+        !self.aspects.is_empty()
+            && self
+                .aspects
+                .iter()
+                .copied()
+                .all(ModelChangeAspect::is_control_plane_only)
     }
 
     pub fn quiesce_level(&self) -> QuiesceLevel {
@@ -316,6 +261,16 @@ impl Model {
     pub fn change_aspects_against(&self, candidate: &Self) -> ModelChangeAspects {
         if self == candidate {
             return ModelChangeAspects::default();
+        }
+
+        if self.kind() == ModelKind::Client {
+            let is_same_client_type = candidate.kind() == ModelKind::Client
+                && std::mem::discriminant(self) == std::mem::discriminant(candidate);
+            return if is_same_client_type && self.name() == candidate.name() {
+                definition_change_aspect(ModelChangeAspect::ClientConfig)
+            } else {
+                ModelChangeAspects::replaced()
+            };
         }
 
         match (self, candidate) {
@@ -422,81 +377,7 @@ impl Model {
                     ModelChangeAspects::replaced()
                 }
             }
-            (Self::ClientKafka(_), Self::ClientKafka(_))
-            | (Self::ClientPulsar(_), Self::ClientPulsar(_))
-            | (Self::ClientHttp(_), Self::ClientHttp(_))
-            | (Self::ClientSentry(_), Self::ClientSentry(_))
-            | (Self::ClientOtel(_), Self::ClientOtel(_))
-            | (Self::ClientPrometheus(_), Self::ClientPrometheus(_))
-            | (Self::ClientMqtt(_), Self::ClientMqtt(_))
-            | (Self::ClientNats(_), Self::ClientNats(_))
-            | (Self::ClientRabbitMq(_), Self::ClientRabbitMq(_))
-            | (Self::ClientRedis(_), Self::ClientRedis(_))
-            | (Self::ClientZeroMq(_), Self::ClientZeroMq(_))
-            | (Self::ClientSqs(_), Self::ClientSqs(_))
-            | (Self::ClientWebsockets(_), Self::ClientWebsockets(_))
-            | (Self::ClientSyslog(_), Self::ClientSyslog(_))
-            | (Self::ClientClickHouse(_), Self::ClientClickHouse(_))
-            | (Self::ClientPostgres(_), Self::ClientPostgres(_))
-            | (Self::ClientMySql(_), Self::ClientMySql(_))
-            | (Self::ClientMongoDb(_), Self::ClientMongoDb(_))
-            | (Self::ClientS3(_), Self::ClientS3(_))
-            | (Self::ClientGcs(_), Self::ClientGcs(_))
-            | (Self::ClientAzureBlob(_), Self::ClientAzureBlob(_))
-            | (Self::ClientIcebergRest(_), Self::ClientIcebergRest(_)) => {
-                if self.identifier() == candidate.identifier() {
-                    definition_change_aspect(ModelChangeAspect::ClientConfig)
-                } else {
-                    ModelChangeAspects::replaced()
-                }
-            }
-            (Self::Codec(_), _)
-            | (Self::ClientKafka(_), _)
-            | (Self::ClientPulsar(_), _)
-            | (Self::ClientHttp(_), _)
-            | (Self::ClientSentry(_), _)
-            | (Self::ClientOtel(_), _)
-            | (Self::ClientPrometheus(_), _)
-            | (Self::ClientMqtt(_), _)
-            | (Self::ClientNats(_), _)
-            | (Self::ClientRabbitMq(_), _)
-            | (Self::ClientRedis(_), _)
-            | (Self::ClientZeroMq(_), _)
-            | (Self::ClientSqs(_), _)
-            | (Self::ClientWebsockets(_), _)
-            | (Self::ClientSyslog(_), _)
-            | (Self::ClientClickHouse(_), _)
-            | (Self::ClientPostgres(_), _)
-            | (Self::ClientMySql(_), _)
-            | (Self::ClientMongoDb(_), _)
-            | (Self::ClientS3(_), _)
-            | (Self::ClientGcs(_), _)
-            | (Self::ClientAzureBlob(_), _)
-            | (Self::ClientIcebergRest(_), _)
-            | (Self::Vhost(_), _)
-            | (Self::Branch(_), _)
-            | (Self::Endpoint(_), _)
-            | (Self::SignalingProtocol(_), _)
-            | (Self::Generator(_), _)
-            | (Self::Inferencer(_), _)
-            | (Self::WasmProcessor(_), _)
-            | (Self::Ingestor(_), _)
-            | (Self::Reingestor(_), _)
-            | (Self::Materializer(_), _)
-            | (Self::Lookup(_), _)
-            | (Self::Deduplicator(_), _)
-            | (Self::Correlator(_), _)
-            | (Self::Reorderer(_), _)
-            | (Self::WindowProcessor(_), _)
-            | (Self::Emitter(_), _)
-            | (Self::Udf(_), _)
-            | (Self::Placement(_), _)
-            | (Self::Relay(_), _)
-            | (Self::Junction(_), _)
-            | (Self::Schema(_), _)
-            | (Self::WireJsonSchema(_), _)
-            | (Self::WireCborSchema(_), _)
-            | (Self::WireAvroSchema(_), _) => ModelChangeAspects::replaced(),
+            _ => ModelChangeAspects::replaced(),
         }
     }
 }
@@ -727,7 +608,7 @@ fn junction_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Junction,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -796,7 +677,7 @@ fn deduplicator_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Deduplicator,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -865,7 +746,7 @@ fn reorderer_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Reorderer,
-            processor: candidate_name.clone(),
+            processor: candidate_name.into(),
         });
     }
     changes
@@ -929,7 +810,7 @@ fn correlator_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Correlator,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -971,7 +852,7 @@ fn window_processor_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::WindowProcessor,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1019,7 +900,7 @@ fn inferencer_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::Inferencer,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1070,7 +951,7 @@ fn wasm_processor_change_aspects(
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
             kind: ModelKind::WasmProcessor,
-            processor: candidate.name.clone(),
+            processor: (&candidate.name).into(),
         });
     }
     changes
@@ -1272,7 +1153,7 @@ fn routes_are_permutation(base: &[ProcessorOutput], candidate: &[ProcessorOutput
     true
 }
 
-fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&Identifier> {
+fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&RelayName> {
     let mut targets = routes
         .iter()
         .filter_map(|route| match &route.message_error_policy {
@@ -1291,8 +1172,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         from: base_from,
         encode_using_codec: base_codec,
         sink: base_sink,
-        flush_each: base_flush_each,
-        max_batch_size: base_max_batch_size,
+        flush_policy: base_flush_policy,
         error_policies: base_error_policies,
         publishing_mode: base_publishing_mode,
         mode: base_mode,
@@ -1304,8 +1184,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         from: candidate_from,
         encode_using_codec: candidate_codec,
         sink: candidate_sink,
-        flush_each: candidate_flush_each,
-        max_batch_size: candidate_max_batch_size,
+        flush_policy: candidate_flush_policy,
         error_policies: candidate_error_policies,
         publishing_mode: candidate_publishing_mode,
         mode: candidate_mode,
@@ -1351,7 +1230,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_materialized_state != candidate_materialized_state {
         changes.push(ModelChangeAspect::EmitterMaterializedState);
     }
-    if base_flush_each != candidate_flush_each || base_max_batch_size != candidate_max_batch_size {
+    if base_flush_policy != candidate_flush_policy {
         changes.push_dynamic(
             ModelChangeAspect::EmitterFlushPolicy,
             DynamicModelUpdate::Emitter {
@@ -1470,14 +1349,12 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 table: base_table,
                 values: base_values,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::ClickHouse {
                 client: _,
                 table: candidate_table,
                 values: candidate_values,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_table == candidate_table
@@ -1491,7 +1368,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 conflict_action: base_conflict,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::Postgres {
                 client: _,
@@ -1499,7 +1375,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 conflict_action: candidate_conflict,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_table == candidate_table
@@ -1514,7 +1389,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 conflict_action: base_conflict,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::MySql {
                 client: _,
@@ -1522,7 +1396,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 conflict_action: candidate_conflict,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_table == candidate_table
@@ -1537,7 +1410,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 conflict_action: base_conflict,
                 max_batch: base_max_batch,
-                flush_each: _,
             },
             EmitSink::MongoDb {
                 client: _,
@@ -1545,7 +1417,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 conflict_action: candidate_conflict,
                 max_batch: candidate_max_batch,
-                flush_each: _,
             },
         ) => {
             base_collection == candidate_collection
@@ -1561,8 +1432,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: base_values,
                 location: base_location,
                 catalog: base_catalog,
-                flush_each: _,
-                max_batch_size: _,
                 commit_each: base_commit_each,
                 max_commit_size: base_max_commit_size,
             },
@@ -1573,8 +1442,6 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 values: candidate_values,
                 location: candidate_location,
                 catalog: candidate_catalog,
-                flush_each: _,
-                max_batch_size: _,
                 commit_each: candidate_commit_each,
                 max_commit_size: candidate_max_commit_size,
             },
@@ -1625,25 +1492,31 @@ fn wire_schema_change_aspects<T>(
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
         IngestSource, IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
         MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-        ModelChangeAspect, ModelKind, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
+        ModelChangeAspect, ModelKind, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn relay() -> CreateRelay {
         CreateRelay {
-            name: identifier("events"),
-            schema: identifier("event"),
-            buffer: 1,
+            name: named("events"),
+            schema: named("event"),
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         }
@@ -1651,12 +1524,14 @@ mod tests {
 
     fn junction() -> CreateJunction {
         CreateJunction {
-            name: identifier("merge"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("merge"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                named("output"),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
@@ -1667,12 +1542,14 @@ mod tests {
 
     fn deduplicator() -> CreateDeduplicator {
         CreateDeduplicator {
-            name: identifier("dedup"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("dedup"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                named("output"),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             deduplicate_on: vec![crate::Expression::Literal(Literal::I64(1))],
@@ -1685,12 +1562,14 @@ mod tests {
 
     fn reorderer() -> CreateReorderer {
         CreateReorderer {
-            name: identifier("order"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("order"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                named("output"),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             branched_by: BranchSelection::unbranched(),
             order_by: vec![crate::Expression::Literal(Literal::I64(1))],
@@ -1703,14 +1582,16 @@ mod tests {
 
     fn emitter() -> CreateEmitter {
         CreateEmitter {
-            name: identifier("emit"),
-            from: ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("event_codec")),
+            name: named("emit"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("event_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("sink"),
+                client: named("sink"),
             }),
-            flush_each: "1s".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -1726,12 +1607,14 @@ mod tests {
 
     fn reingestor() -> CreateReingestor {
         CreateReingestor {
-            name: identifier("repartition"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("repartition"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                named("output"),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
             mode: AckMode::Attached,
             materialized_state: Vec::new(),
@@ -1741,30 +1624,34 @@ mod tests {
 
     fn generator() -> CreateGenerator {
         CreateGenerator {
-            name: identifier("synth"),
-            materialized_relay: identifier("state"),
+            name: named("synth"),
+            materialized_relay: named("state"),
             branched_by: BranchSelection::unbranched(),
             each: "1s".to_string(),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("output"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                named("output"),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
         }
     }
 
     fn ingestor() -> CreateIngestor {
         CreateIngestor {
-            name: identifier("ingest"),
+            name: named("ingest"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-                identifier("events"),
-                "1s".to_string(),
-                Some("1MiB".to_string()),
+                named("events"),
+                FlushPolicy::Each {
+                    interval: "1s".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
             )]),
-            decode_using_codec: identifier("event_codec"),
+            decode_using_codec: named("event_codec"),
             timestamp_source: None,
             source: IngestSource::Endpoint {
-                endpoint: identifier("ingress_a"),
+                endpoint: named("ingress_a"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
@@ -1799,7 +1686,7 @@ mod tests {
         let base = relay();
 
         let mut capacity = base.clone();
-        capacity.buffer = 5;
+        capacity.buffer = nonzero!(5usize);
         assert_single_aspect(
             Model::Relay(base.clone()),
             Model::Relay(capacity),
@@ -1808,7 +1695,7 @@ mod tests {
         );
 
         let mut schema = base.clone();
-        schema.schema = identifier("event_v2");
+        schema.schema = named("event_v2");
         assert_single_aspect(
             Model::Relay(base.clone()),
             Model::Relay(schema),
@@ -1817,7 +1704,7 @@ mod tests {
         );
 
         let mut branching = base.clone();
-        branching.branching = RelayBranching::branched_by(identifier("tenant"));
+        branching.branching = RelayBranching::branched_by(named("tenant"));
         assert_single_aspect(
             Model::Relay(base.clone()),
             Model::Relay(branching),
@@ -1850,7 +1737,7 @@ mod tests {
 
         let mut input_where = base.clone();
         input_where.from.r#where.push(ProcessorInputWhere {
-            relay: identifier("input"),
+            relay: named("input"),
             where_clause: crate::Expression::Literal(crate::Literal::Bool(true)),
         });
         assert_single_aspect(
@@ -1884,9 +1771,9 @@ mod tests {
         );
 
         let mut flush = base.clone();
-        flush.output_routes.routes[0].flush_policy = Some(OutputFlushPolicy {
-            flush_each: "2s".to_string(),
-            max_batch_size: Some("2MiB".to_string()),
+        flush.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+            interval: "2s".to_string(),
+            max_batch_size: "2MiB".to_string(),
         });
         assert_single_aspect(
             Model::Junction(base.clone()),
@@ -1910,7 +1797,7 @@ mod tests {
         let base = junction();
 
         let mut inputs = base.clone();
-        inputs.from.from.push(identifier("input_two"));
+        inputs.from.from.push(named("input_two"));
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(inputs),
@@ -1922,7 +1809,7 @@ mod tests {
         routes
             .output_routes
             .routes
-            .push(ProcessorOutput::new(identifier("other")));
+            .push(ProcessorOutput::new(named("other")));
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(routes),
@@ -1934,7 +1821,7 @@ mod tests {
         reordered
             .output_routes
             .routes
-            .push(ProcessorOutput::new(identifier("other")));
+            .push(ProcessorOutput::new(named("other")));
         let mut reordered_candidate = reordered.clone();
         reordered_candidate.output_routes.routes.swap(0, 1);
         assert_single_aspect(
@@ -1954,7 +1841,7 @@ mod tests {
         );
 
         let mut branching = base.clone();
-        branching.branched_by = BranchSelection::branched_by(identifier("tenant"));
+        branching.branched_by = BranchSelection::branched_by(named("tenant"));
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(branching),
@@ -1966,7 +1853,7 @@ mod tests {
         materialized
             .materialized_state
             .push(MaterializedStateDependency {
-                relay: identifier("state"),
+                relay: named("state"),
                 policy: MaterializedStatePolicy::RequiredSkip,
             });
         assert_single_aspect(
@@ -1978,7 +1865,7 @@ mod tests {
 
         let mut dlq = base;
         dlq.output_routes.routes[0].message_error_policy = MessageErrorPolicy::Dlq {
-            relay: identifier("errors"),
+            relay: named("errors"),
             assignments: Vec::new(),
         };
         assert_single_aspect(
@@ -2003,7 +1890,7 @@ mod tests {
             changes.dynamic_updates(),
             &[super::DynamicModelUpdate::Processor {
                 kind: ModelKind::Deduplicator,
-                processor: identifier("dedup"),
+                processor: named("dedup"),
             }]
         );
 
@@ -2031,7 +1918,7 @@ mod tests {
             changes.dynamic_updates(),
             &[super::DynamicModelUpdate::Processor {
                 kind: ModelKind::Reorderer,
-                processor: identifier("order"),
+                processor: named("order"),
             }]
         );
 
@@ -2050,8 +1937,7 @@ mod tests {
         let base = emitter();
 
         let mut flush = base.clone();
-        flush.flush_each = "IMMEDIATE".to_string();
-        flush.max_batch_size = None;
+        flush.flush_policy = FlushPolicy::Immediate;
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(flush.clone()),
@@ -2063,7 +1949,7 @@ mod tests {
 
         let mut client = base.clone();
         client.sink = Box::new(EmitSink::ZeroMq {
-            client: identifier("sink_two"),
+            client: named("sink_two"),
         });
         assert_single_aspect(
             Model::Emitter(base.clone()),
@@ -2074,8 +1960,8 @@ mod tests {
 
         let mut sink = base.clone();
         sink.sink = Box::new(EmitSink::Nats {
-            client: identifier("sink"),
-            subject: identifier("events"),
+            client: named("sink"),
+            subject: named("events"),
         });
         assert_single_aspect(
             Model::Emitter(base.clone()),
@@ -2085,7 +1971,7 @@ mod tests {
         );
 
         let mut codec = base.clone();
-        codec.encode_using_codec = Some(identifier("event_codec_v2"));
+        codec.encode_using_codec = Some(named("event_codec_v2"));
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(codec),
@@ -2107,7 +1993,7 @@ mod tests {
 
         let mut source_where = base.clone();
         source_where.from.r#where = vec![ProcessorInputWhere {
-            relay: identifier("events"),
+            relay: named("events"),
             where_clause: crate::Expression::Literal(Literal::Bool(true)),
         }];
         assert_single_aspect(
@@ -2141,7 +2027,7 @@ mod tests {
         );
 
         let mut source = base;
-        source.from.from = vec![identifier("other_events")];
+        source.from.from = vec![named("other_events")];
         assert_single_aspect(
             Model::Emitter(emitter()),
             Model::Emitter(source),
@@ -2171,7 +2057,7 @@ mod tests {
                 {
                     let mut candidate = base.clone();
                     candidate.source = IngestSource::Endpoint {
-                        endpoint: identifier("ingress_b"),
+                        endpoint: named("ingress_b"),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
@@ -2184,7 +2070,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.decode_using_codec = identifier("event_codec_v2");
+                    candidate.decode_using_codec = named("event_codec_v2");
                     candidate
                 },
                 ModelChangeAspect::IngestorCodec,
@@ -2209,11 +2095,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.output_routes.routes[0]
-                        .flush_policy
-                        .as_mut()
-                        .expect("test route has a flush policy")
-                        .flush_each = "2s".to_string();
+                    candidate.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+                        interval: "2s".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::IngestorRoutes,
@@ -2245,7 +2130,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.from.from.push(identifier("secondary"));
+                    candidate.from.from.push(named("secondary"));
                     candidate
                 },
                 ModelChangeAspect::ReingestorInputs,
@@ -2253,11 +2138,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.output_routes.routes[0]
-                        .flush_policy
-                        .as_mut()
-                        .expect("test route has a flush policy")
-                        .flush_each = "2s".to_string();
+                    candidate.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+                        interval: "2s".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::ReingestorRoutes,
@@ -2285,7 +2169,7 @@ mod tests {
                     candidate
                         .materialized_state
                         .push(MaterializedStateDependency {
-                            relay: identifier("state"),
+                            relay: named("state"),
                             policy: MaterializedStatePolicy::RequiredSkip,
                         });
                     candidate
@@ -2316,7 +2200,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.materialized_relay = identifier("state_v2");
+                    candidate.materialized_relay = named("state_v2");
                     candidate
                 },
                 ModelChangeAspect::GeneratorMaterializedState,
@@ -2332,7 +2216,7 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.branched_by = BranchSelection::branched_by(identifier("tenant"));
+                    candidate.branched_by = BranchSelection::branched_by(named("tenant"));
                     candidate
                 },
                 ModelChangeAspect::GeneratorBranching,
@@ -2340,11 +2224,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.output_routes.routes[0]
-                        .flush_policy
-                        .as_mut()
-                        .expect("test route has a flush policy")
-                        .flush_each = "2s".to_string();
+                    candidate.output_routes.routes[0].flush_policy = Some(FlushPolicy::Each {
+                        interval: "2s".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::GeneratorRoutes,
@@ -2369,17 +2252,23 @@ mod tests {
 
 #[cfg(test)]
 mod catch_all_kind_tests {
+    use nonzero_ext::nonzero;
+
     use crate::{
         AckMode, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
         CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
         CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, GeneralErrorPolicy, Identifier, Literal, Model, ModelChangeAspect,
+        CreateWindowProcessor, FlushPolicy, GeneralErrorPolicy, Literal, Model, ModelChangeAspect,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
         WasmProcessorLimits, WindowBound,
     };
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
     fn expression(value: i64) -> crate::Expression {
@@ -2388,9 +2277,11 @@ mod catch_all_kind_tests {
 
     fn outputs() -> ProcessorOutputs {
         ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
-            identifier("output"),
-            "1s".to_string(),
-            Some("1MiB".to_string()),
+            named("output"),
+            FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
         )])
     }
 
@@ -2407,9 +2298,9 @@ mod catch_all_kind_tests {
 
     fn correlator() -> CreateCorrelator {
         CreateCorrelator {
-            name: identifier("correlate"),
-            left: ProcessorInputs::single(identifier("left_input")),
-            right: ProcessorInputs::single(identifier("right_input")),
+            name: named("correlate"),
+            left: ProcessorInputs::single(named("left_input")),
+            right: ProcessorInputs::single(named("right_input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
             correlate_where: expression(1),
@@ -2427,10 +2318,11 @@ mod catch_all_kind_tests {
 
     fn codec() -> CreateCodec {
         CreateCodec {
-            name: identifier("event_codec"),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(identifier("event_wire")),
-            schema: identifier("event"),
+            name: named("event_codec"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named("event_wire"),
+            },
+            schema: named("event"),
             encoding_rules: Vec::new(),
         }
     }
@@ -2458,7 +2350,7 @@ mod catch_all_kind_tests {
         );
 
         let mut right = base.clone();
-        right.right = ProcessorInputs::single(identifier("other_right"));
+        right.right = ProcessorInputs::single(named("other_right"));
         assert_single_aspect(
             Model::Correlator(base),
             Model::Correlator(right),
@@ -2470,8 +2362,8 @@ mod catch_all_kind_tests {
     #[test]
     fn window_bound_changes_pause_only_the_entity() {
         let base = CreateWindowProcessor {
-            name: identifier("window"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("window"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
             width: WindowBound {
@@ -2502,16 +2394,16 @@ mod catch_all_kind_tests {
     #[test]
     fn wasm_binding_changes_pause_only_the_entity() {
         let base = CreateWasmProcessor {
-            name: identifier("guest"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("guest"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
-            resource: identifier("guest_bundle"),
+            resource: named("guest_bundle"),
             resource_version: Some(1),
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
-                max_fuel: 1_000_000,
-                max_memory_bytes: 64 * 1024 * 1024,
+                max_fuel: nonzero!(1_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
@@ -2531,16 +2423,16 @@ mod catch_all_kind_tests {
     #[test]
     fn wasm_limit_changes_pause_only_the_entity_without_purging_guest_state() {
         let base = CreateWasmProcessor {
-            name: identifier("guest"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("guest"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
-            resource: identifier("guest_bundle"),
+            resource: named("guest_bundle"),
             resource_version: Some(1),
             file: "processors/guest.wasm".to_string(),
             limits: WasmProcessorLimits {
-                max_fuel: 1_000_000,
-                max_memory_bytes: 64 * 1024 * 1024,
+                max_fuel: nonzero!(1_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
@@ -2548,7 +2440,7 @@ mod catch_all_kind_tests {
             materialized_state: Vec::new(),
         };
         let mut tightened = base.clone();
-        tightened.limits.max_fuel = 500_000;
+        tightened.limits.max_fuel = nonzero!(500_000u64);
         assert_single_aspect(
             Model::WasmProcessor(base),
             Model::WasmProcessor(tightened),
@@ -2561,11 +2453,11 @@ mod catch_all_kind_tests {
     #[test]
     fn inferencer_binding_changes_pause_only_the_entity() {
         let base = CreateInferencer {
-            name: identifier("score"),
-            from: ProcessorInputs::single(identifier("input")),
+            name: named("score"),
+            from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
             branched_by: BranchSelection::unbranched(),
-            resource: identifier("model_bundle"),
+            resource: named("model_bundle"),
             resource_version: Some(1),
             file: "models/score.onnx".to_string(),
             inputs: Vec::new(),
@@ -2588,7 +2480,7 @@ mod catch_all_kind_tests {
     fn config_entity_definitions_pause_the_domain() {
         let base_codec = codec();
         let mut recoded = base_codec.clone();
-        recoded.schema = identifier("event_v2");
+        recoded.schema = named("event_v2");
         assert_single_aspect(
             Model::Codec(base_codec),
             Model::Codec(recoded),
@@ -2597,7 +2489,7 @@ mod catch_all_kind_tests {
         );
 
         let base_vhost = CreateVhost {
-            name: identifier("edge"),
+            name: named("edge"),
             hostnames: vec!["edge.example.com".to_string()],
             tls: None,
         };
@@ -2612,7 +2504,7 @@ mod catch_all_kind_tests {
 
         let mut secured = base_vhost.clone();
         secured.tls = Some(VhostTlsResource {
-            resource: identifier("edge_tls"),
+            resource: named("edge_tls"),
             version: Some(1),
         });
         assert_single_aspect(
@@ -2623,8 +2515,8 @@ mod catch_all_kind_tests {
         );
 
         let base_branch = CreateBranch {
-            name: identifier("by_tenant"),
-            schema: identifier("tenant_branch"),
+            name: named("by_tenant"),
+            schema: named("tenant_branch"),
             ttl: "5m".to_string(),
             eviction: None,
         };
@@ -2638,7 +2530,7 @@ mod catch_all_kind_tests {
         );
 
         let mut reschemad = base_branch.clone();
-        reschemad.schema = identifier("tenant_branch_v2");
+        reschemad.schema = named("tenant_branch_v2");
         assert_single_aspect(
             Model::Branch(base_branch),
             Model::Branch(reschemad),
@@ -2664,7 +2556,7 @@ mod catch_all_kind_tests {
 
         let unchanged = codec();
         let mut recoded = unchanged.clone();
-        recoded.schema = identifier("event_v2");
+        recoded.schema = named("event_v2");
         assert!(
             Model::Codec(unchanged)
                 .change_aspects_against(&Model::Codec(recoded))
@@ -2678,7 +2570,7 @@ mod catch_all_kind_tests {
     fn a_renamed_entity_of_any_kind_is_a_replacement() {
         let base = codec();
         let mut renamed = base.clone();
-        renamed.name = identifier("other_codec");
+        renamed.name = named("other_codec");
         assert_single_aspect(
             Model::Codec(base),
             Model::Codec(renamed),

@@ -23,8 +23,8 @@ Install:
 
 ## Start The Server
 
-The server crate and executable are both named `nervix-server`. The `just server` recipe runs that
-dedicated server binary.
+The server crate and executable are both named `nervix-server`. The `just server` recipe creates a
+development CA and a `default`/`node-1` identity, then runs that dedicated server binary.
 
 ```bash
 NERVIX_INIT_DEFAULT_USER_PASSWORD='nervix' just server
@@ -48,15 +48,14 @@ just server -- \
   --http-listen-addr 0.0.0.0:8080 \
   --https-listen-addr 0.0.0.0:8443 \
   --grpc-advertise-addr 10.0.0.10:47391 \
-  --cluster-listen-addr 0.0.0.0:47392 \
-  --cluster-advertise-addr 10.0.0.10:47392 \
-  --cluster-api-mode http \
-  --cluster-api-listen-addr 0.0.0.0:47393 \
-  --cluster-api-advertise-addr 10.0.0.10:47393 \
-  --interconnect-mode http \
-  --interconnect-listen-addr 0.0.0.0:47394 \
-  --interconnect-advertise-addr 10.0.0.10:47394 \
-  --cluster-bootstrap-host 10.0.0.11:47392
+  --cluster-id production \
+  --node-id node-1 \
+  --interconnect-listen-addr 0.0.0.0:47395 \
+  --interconnect-advertise-addr node-1.internal.example:47395 \
+  --interconnect-tls-ca /etc/nervix/interconnect/ca.pem \
+  --interconnect-tls-cert /etc/nervix/interconnect/node-1.pem \
+  --interconnect-tls-key /etc/nervix/interconnect/node-1-key.pem \
+  --cluster-bootstrap-host node-2.internal.example:47395
 ```
 
 Nervix uses separate listener addresses for plain and TLS server-side traffic:
@@ -64,19 +63,16 @@ Nervix uses separate listener addresses for plain and TLS server-side traffic:
 - `--http-listen-addr` for HTTP and WS
 - `--https-listen-addr` for HTTPS and WSS
 
-Internal node-to-node traffic is configured separately:
-
-- `--cluster-api-mode http|https`
-- `--cluster-api-listen-addr` and `--cluster-api-advertise-addr` for plain HTTP cluster API
-- `--cluster-api-https-listen-addr` and `--cluster-api-https-advertise-addr` for HTTPS cluster API
-- `--interconnect-mode http|https`
-- `--interconnect-listen-addr` and `--interconnect-advertise-addr` for plain interconnect
-- `--interconnect-https-listen-addr` and `--interconnect-https-advertise-addr` for TLS interconnect
-
-Mode selection uses:
-
-- `http` for plain, unencrypted transport
-- `https` for TLS transport
+All internal node-to-node traffic uses one authenticated HTTP/2 listener. The CA, certificate, and
+private-key options are mandatory. Each node certificate must support both TLS server and client
+authentication, contain the advertised DNS name or IP address, and contain exactly one identity URI
+of the form `nervix://cluster/<cluster-id>/node/<node-id>`. Peers with a different cluster identity
+or a certificate identity that disagrees with their protocol identity are rejected. Gossip, Raft,
+resource transfer, and relay traffic use independent connection pools on this listener; bounded
+rkyv is the internal control encoding, while relay batches remain Arrow IPC.
+The server monitors all three interconnect PEM files. It reloads a changed bundle only after two
+consecutive reads agree and the complete replacement passes certificate, identity, and lifetime
+validation; an incomplete or invalid update leaves the active bundle in service and is retried.
 
 OpenTelemetry trace export is optional and uses the existing `tracing` instrumentation:
 

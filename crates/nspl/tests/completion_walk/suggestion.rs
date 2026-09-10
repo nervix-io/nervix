@@ -28,7 +28,13 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("byte_size_literal", "1MiB"),
     ("instance_count", "2"),
     ("integer_literal", "1"),
+    ("max_fuel", "1000000"),
     ("max_in_flight", "10"),
+    ("max_instances", "16"),
+    // Drawn so the pair is orderable: a walk that wrote a minimum above the maximum would report
+    // the ordering check rather than the branch it set out to reach.
+    ("max_pool_size", "8"),
+    ("min_pool_size", "1"),
     ("mqtt_qos", "1"),
     ("resource_version", "1"),
     // Deliberately constant: a conflict target has to name a column the VALUES record already
@@ -39,6 +45,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("duration_literal", "100ms"),
     ("endpoint_path", "'/nx/path'"),
     ("hostname", "nx-host"),
+    ("hostname_label", "nx"),
     ("iceberg_location", "'s3://nx/table'"),
     ("jaq_capture", "'{captured: .}'"),
     ("jaq_matcher", "'. == null'"),
@@ -53,6 +60,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("otel_metric_unit", "'1'"),
     ("otel_scope_name", "'nx/scope'"),
     ("otel_scope_version", "'1.0'"),
+    ("placement_rank", "1"),
     ("relay_capacity", "1024"),
     ("string", "'nx_value'"),
     ("string_literal", "'nx_value'"),
@@ -62,7 +70,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
 ];
 
 /// Placeholders that stand for a free-form expression region: the enclosing parser swallows tokens
-/// up to a boundary and re-parses them through the separate `vm_program` grammar, so completion
+/// up to a boundary and re-parses them through the semantic expression grammar, so completion
 /// inside them is not grammar-derived and the walker has to supply a body itself.
 const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("correlate_expression", "left.nx_field = right.nx_field"),

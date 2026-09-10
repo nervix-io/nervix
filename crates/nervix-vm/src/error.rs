@@ -1,10 +1,11 @@
 use arrow_schema::DataType;
-use nervix_nspl::vm_program::Span;
+use strum::IntoStaticStr;
 use thiserror::Error;
 
-use crate::ir::RegisterRef;
+use crate::{ir::RegisterRef, program::Span};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ErrorCode {
     DivisionByZero,
     Overflow,
@@ -14,12 +15,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::DivisionByZero => "division_by_zero",
-            Self::Overflow => "overflow",
-            Self::CastFailed => "cast_failed",
-            Self::InvalidArgument => "invalid_argument",
-        }
+        self.into()
     }
 }
 
@@ -81,7 +77,10 @@ impl RowErrors {
     }
 
     pub fn row(&self, row: usize) -> &[SideError] {
-        self.rows.get(row).map_or(&[], Vec::as_slice)
+        match self.rows.get(row) {
+            Some(errors) => errors.as_slice(),
+            None => &[],
+        }
     }
 
     pub fn get(&self, row: usize) -> Option<&[SideError]> {

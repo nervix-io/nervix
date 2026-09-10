@@ -1,4 +1,5 @@
 [package]
+description = "Raft replication of Nervix control-plane state: log store, state machine, snapshots and the peer network"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-consensus"
@@ -7,17 +8,28 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+testing = []
+
 [dependencies]
+arch-into = { workspace = true }
 ciborium = { workspace = true }
+error-stack = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }
+imbl = { workspace = true }
+meticulous = { workspace = true }
+nervix-execution = { workspace = true }
+nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
 openraft = { workspace = true }
 parking_lot = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+rkyv = { workspace = true }
 serde = { workspace = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

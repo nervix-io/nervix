@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nervix_models::Timestamp;
-use nervix_nspl::window_processor::aggregate::WindowAggregateProgram;
+use nervix_vm::window::WindowAggregateProgram;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
-    WindowProcessorState,
+    WindowProcessorState, lsm_sequence::LsmSequence,
 };
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -73,7 +73,7 @@ pub(super) struct WindowProcessorStateSnapshot {
 pub(super) struct ReplicatedWindowProcessorState {
     pub(super) placement: RuntimeStatePlacement,
     pub(super) snapshot: parking_lot::Mutex<Option<WindowProcessorStateSnapshot>>,
-    pub(super) current_lsm: AtomicU64,
+    pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) live_dirty: AtomicBool,
     pub(super) dirty: AtomicBool,
@@ -110,7 +110,7 @@ impl ReplicatedWindowProcessorState {
         Ok(Self {
             placement,
             snapshot: parking_lot::Mutex::new(snapshot),
-            current_lsm: AtomicU64::new(current_lsm),
+            current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             live_dirty: AtomicBool::new(false),
             dirty: AtomicBool::new(false),
@@ -136,10 +136,7 @@ impl ReplicatedWindowProcessorState {
             .to_snapshot()
             .map_err(RuntimePersistenceError::EncodeState)?;
         *self.snapshot.lock() = Some(snapshot);
-        let lsm = self
-            .current_lsm
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
+        let lsm = self.current_lsm.advance();
         self.live_dirty.store(false, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
         Ok(lsm)
@@ -162,7 +159,7 @@ impl ReplicatedWindowProcessorState {
                     accumulators: Vec::new(),
                 });
         Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.load(Ordering::SeqCst),
+            lsm: self.current_lsm.current(),
             schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_window_processor_snapshot(&snapshot)?,
         })

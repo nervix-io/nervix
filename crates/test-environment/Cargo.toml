@@ -1,4 +1,5 @@
 [package]
+description = "The external services the Nervix test and benchmark suites run against"
 edition.workspace = true
 name = "nervix-test-environment"
 publish = false
@@ -8,8 +9,11 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+arch-into = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+meticulous = { workspace = true }
+nervix-recovery = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

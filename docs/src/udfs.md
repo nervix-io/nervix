@@ -18,7 +18,7 @@ so native UDF work does not occupy an asynchronous runtime worker.
 
 The Roto language itself — syntax, types, functions, and `test` blocks — is covered by the
 generated [Roto Language Reference](roto-language-reference.md), downloaded from upstream at the
-exact Roto release Nervix embeds for `ROTO_0_11`; the language is developed at
+exact Roto release Nervix embeds for `ROTO_0_13`; the language is developed at
 [NLnetLabs/roto](https://github.com/NLnetLabs/roto).
 The column types and operations available inside a UDF body are the Nervix-provided catalog
 described on this page, not part of the Roto standard library.
@@ -27,7 +27,7 @@ described on this page, not part of the Roto standard library.
 
 ```nspl,ignore
 CREATE [IF NOT EXISTS] UDF <name>
-  WITH ROTO_0_11
+  WITH ROTO_0_13
   ARGS (<argument> <type> [OPTIONAL], ...)
   RETURNS <type> [OPTIONAL]
   [VOLATILE]
@@ -50,7 +50,7 @@ For example:
 
 ```nspl
 CREATE UDF risk_band
-  WITH ROTO_0_11
+  WITH ROTO_0_13
   ARGS (score F64)
   RETURNS STRING
   CODE $roto$
@@ -126,7 +126,7 @@ User code is never executed by constant folding.
 Column methods operate elementwise and preserve the input row count. A base method takes another
 column of the identical type; an `_s` method broadcasts a Roto scalar.
 
-The `ROTO_0_11` catalog currently includes:
+The `ROTO_0_13` catalog currently includes:
 
 - integer and floating columns: `add`, `sub`, `mul`, `div`, their `_s` forms, `eq`, `lt`, `gt`,
   their `_s` forms, and batch `min`/`max`;

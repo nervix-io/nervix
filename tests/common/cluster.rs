@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use arch_into::ArchInto as _;
 use async_nats::Client as NatsClient;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
@@ -21,17 +22,26 @@ use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
+use meticulous::ResultExt as _;
+use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
+use nervix_execution::Executor;
+use nervix_interconnect::{
+    ControlEnvelope, Envelope, PeerTarget, RuntimeErrorEvent, TlsConfigBundle, Transport,
+    TransportOptions,
+};
+use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
-#[cfg(feature = "testing")]
-use nervix_server::SchedulerMode;
+
+/// Cucumber node ids are fixed strings from the feature files, so they always parse.
+pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
+    ClusterNodeName::parse(raw).expect("cucumber node ids are valid cluster node names")
+}
 use nervix_server::{
+    FaultInjection, SchedulerMode,
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::{
-        DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks,
-        SchedulePublicationFaultInjector,
-    },
+    runtime::DEFAULT_TEMP_DIR,
 };
 use parking_lot::Mutex;
 use proto::{
@@ -41,6 +51,10 @@ use proto::{
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
     consumer::InitialPosition as PulsarInitialPosition,
+};
+use rcgen::{
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    SanType, date_time_ymd,
 };
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
@@ -108,6 +122,17 @@ const TEST_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TEST_AUTH_USERNAME: &str = "default";
 pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
+/// Every port any scenario in this process has claimed. Scenarios run concurrently in one test
+/// binary, and `next_ports` drops its probe listener as soon as it has read the port number, so the
+/// operating system does not stop a second scenario from binding the same port. This set is the
+/// only thing that does. Startup still retries on a fresh allocation, because the pool is shared
+/// with sibling worktrees running the same suite, and their binds are invisible here.
+///
+/// A port leaves the set only once nothing can still dial it. Returning one while a peer holds it
+/// in gossip lets an unrelated scenario's node answer that peer, and because every scenario names
+/// its nodes `node-1`, `node-2` and `node-3`, the certificate identity alone cannot distinguish
+/// those separate test clusters. Never releasing is not the alternative: seven ports per
+/// node across the suite exceeds the ephemeral range, so teardown has to give them back.
 static RESERVED_TEST_PORTS: LazyLock<Mutex<BTreeSet<u16>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
@@ -320,7 +345,7 @@ fn observability_metric_has_value(
         }
         matching_lines.push(line.to_string());
         if let Some(value) = parse_prometheus_sample_value(line)
-            && (value - expected_value as f64).abs() < f64::EPSILON
+            && (value - expected_value.approx_into::<f64>()).abs() < f64::EPSILON
         {
             return true;
         }
@@ -419,11 +444,110 @@ pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions>
     }
 }
 
+struct InterconnectTestCa {
+    certificate: rcgen::Certificate,
+    key: KeyPair,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestCertificateValidity {
+    Current,
+    Expired,
+}
+
+impl std::fmt::Debug for InterconnectTestCa {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InterconnectTestCa")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InterconnectTestCa {
+    fn new(root: &TempDir) -> io::Result<Self> {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let key = KeyPair::generate().map_err(io::Error::other)?;
+        let certificate = params.self_signed(&key).map_err(io::Error::other)?;
+        let path = root.path().join("interconnect-ca.pem");
+        std::fs::write(&path, certificate.pem())?;
+        Ok(Self {
+            certificate,
+            key,
+            path,
+        })
+    }
+
+    fn issue_node(
+        &self,
+        node_id: &str,
+        directory: &std::path::Path,
+    ) -> io::Result<(PathBuf, PathBuf)> {
+        self.issue_node_with_identity(
+            "cucumber",
+            node_id,
+            TestCertificateValidity::Current,
+            directory,
+        )
+    }
+
+    fn issue_node_with_identity(
+        &self,
+        cluster_id: &str,
+        node_id: &str,
+        validity: TestCertificateValidity,
+        directory: &std::path::Path,
+    ) -> io::Result<(PathBuf, PathBuf)> {
+        let mut params = CertificateParams::new(vec!["localhost".to_string(), HOST.to_string()])
+            .map_err(io::Error::other)?;
+        params.subject_alt_names.push(SanType::URI(
+            format!("nervix://cluster/{cluster_id}/node/{node_id}")
+                .try_into()
+                .map_err(io::Error::other)?,
+        ));
+        if validity == TestCertificateValidity::Expired {
+            params.not_before = date_time_ymd(2000, 1, 1);
+            params.not_after = date_time_ymd(2001, 1, 1);
+        }
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let key = KeyPair::generate().map_err(io::Error::other)?;
+        let certificate = params
+            .signed_by(&key, &self.certificate, &self.key)
+            .map_err(io::Error::other)?;
+        let certificate_path = directory.join("interconnect.pem");
+        let key_path = directory.join("interconnect-key.pem");
+        std::fs::write(&certificate_path, certificate.pem())?;
+        std::fs::write(&key_path, key.serialize_pem())?;
+        Ok((certificate_path, key_path))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InterconnectCredentialFault {
+    UntrustedClient,
+    WrongClusterIdentity,
+    WrongNodeIdentity,
+    MismatchedEndpoint,
+    ExpiredCertificate,
+}
+
 #[derive(Debug)]
 pub(crate) struct Cluster {
     _root_dir: TempDir,
+    interconnect_ca: InterconnectTestCa,
     nodes: BTreeMap<String, NodeHandle>,
-    runtime_test_hooks: RuntimeTestHooks,
+    fault_injection: FaultInjection,
     dependencies: DependencyEndpoints,
 }
 
@@ -439,8 +563,6 @@ pub(crate) struct TestClusterConfig {
     pub transaction_max_source_bytes: u64,
     pub transaction_max_open: usize,
     pub grpc_mode: InternalTransportMode,
-    pub cluster_api_mode: InternalTransportMode,
-    pub interconnect_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
     pub drain_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
@@ -461,8 +583,6 @@ impl Default for TestClusterConfig {
             transaction_max_source_bytes: 1024 * 1024,
             transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
-            cluster_api_mode: InternalTransportMode::Http,
-            interconnect_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
             drain_timeout: Duration::from_secs(30),
             memory_pressure: None,
@@ -475,39 +595,42 @@ impl Default for TestClusterConfig {
 impl Cluster {
     pub(crate) async fn start_with_config(
         node_count: usize,
-        runtime_test_hooks: RuntimeTestHooks,
+        fault_injection: FaultInjection,
         config: TestClusterConfig,
     ) -> io::Result<Self> {
         assert!(node_count >= 1, "cluster must contain at least one node");
         #[cfg(feature = "testing")]
         let config = {
             let mut config = config;
-            config.scheduler_mode.get_or_insert(if node_count == 3 {
+            let scheduler_mode = *config.scheduler_mode.get_or_insert(if node_count == 3 {
                 SchedulerMode::Random
             } else {
                 SchedulerMode::Sticky
             });
+            fault_injection.set_scheduler_mode(scheduler_mode);
             config
         };
         truncate_test_log_once()?;
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
         let root_dir = tempdir()?;
+        let interconnect_ca = InterconnectTestCa::new(&root_dir)?;
         let mut nodes = BTreeMap::new();
 
         for index in 1..=node_count {
             let node_id = format!("node-{index}");
-            let spec = NodeSpec::new(&root_dir, &node_id, index == 1)?;
-            runtime_test_hooks
-                .set_syslog_ingestor_bind_ip(node_id.clone(), spec.syslog_ingestor_host);
+            let spec = NodeSpec::new(&root_dir, &interconnect_ca, &node_id, index == 1)?;
+            fault_injection
+                .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
-                NodeHandle::new(spec, runtime_test_hooks.clone(), config.clone()),
+                NodeHandle::new(spec, fault_injection.clone(), config.clone()),
             );
         }
 
         let mut cluster = Self {
             _root_dir: root_dir,
-            runtime_test_hooks,
+            interconnect_ca,
+            fault_injection,
             nodes,
             dependencies: config.dependencies,
         };
@@ -531,7 +654,7 @@ impl Cluster {
             .get("node-1")
             .expect("bootstrap node exists")
             .spec
-            .cluster_addr();
+            .interconnect_addr();
         for (node_id, node) in &mut self.nodes {
             if node_id != "node-1" {
                 node.spec.bootstrap_host = Some(bootstrap_cluster_addr.clone());
@@ -643,7 +766,7 @@ impl Cluster {
             .nodes
             .values()
             .find(|node| node.task.is_some())
-            .map(|node| node.spec.cluster_addr())
+            .map(|node| node.spec.interconnect_addr())
             .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
         let config = self
             .nodes
@@ -652,13 +775,13 @@ impl Cluster {
             .expect("an existing cluster has at least one node")
             .config
             .clone();
-        let mut spec = NodeSpec::new(&self._root_dir, node_id, false)?;
+        let mut spec = NodeSpec::new(&self._root_dir, &self.interconnect_ca, node_id, false)?;
         spec.bootstrap_host = Some(bootstrap_host);
-        self.runtime_test_hooks
-            .set_syslog_ingestor_bind_ip(node_id.to_string(), spec.syslog_ingestor_host);
+        self.fault_injection
+            .set_syslog_ingestor_bind_ip(node_name(node_id), spec.syslog_ingestor_host);
         self.nodes.insert(
             node_id.to_string(),
-            NodeHandle::new(spec, self.runtime_test_hooks.clone(), config),
+            NodeHandle::new(spec, self.fault_injection.clone(), config),
         );
         self.start_node(node_id).await?;
 
@@ -696,6 +819,166 @@ impl Cluster {
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         handle.stop().await
+    }
+
+    pub(crate) async fn restart_node_with_new_interconnect_address(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        self.stop_node(node_id).await?;
+        let bootstrap_host = self
+            .nodes
+            .iter()
+            .find(|(candidate_id, candidate)| {
+                candidate_id.as_str() != node_id && candidate.task.is_some()
+            })
+            .map(|(_, candidate)| candidate.spec.interconnect_addr());
+        let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        handle.spec.reallocate_interconnect_ports()?;
+        if let Some(bootstrap_host) = bootstrap_host {
+            handle.spec.bootstrap_host = Some(bootstrap_host);
+        }
+        self.start_node(node_id).await?;
+
+        let node_ids = self.node_ids();
+        self.wait_for_consistent_leader_on_all_nodes().await?;
+        self.wait_for_full_interconnect(&node_ids).await
+    }
+
+    pub(crate) async fn rotate_interconnect_certificates(&mut self) -> io::Result<()> {
+        let interconnect_ca = InterconnectTestCa::new(&self._root_dir)?;
+        for (node_id, node) in &mut self.nodes {
+            tokio::task::consume_budget().await;
+            let (certificate, key) = interconnect_ca.issue_node(node_id, &node.spec.base_dir)?;
+            node.spec.interconnect_tls_ca = interconnect_ca.path.clone();
+            node.spec.interconnect_tls_cert = certificate;
+            node.spec.interconnect_tls_key = key;
+        }
+        self.interconnect_ca = interconnect_ca;
+        sleep(Duration::from_secs(3)).await;
+        Ok(())
+    }
+
+    pub(crate) async fn open_silent_interconnect_handshake(
+        &self,
+        node_id: &str,
+    ) -> io::Result<TcpStream> {
+        let handle = self.nodes.get(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        TcpStream::connect(parse_addr(&handle.spec.interconnect_addr())?).await
+    }
+
+    pub(crate) async fn attempt_interconnect_with_invalid_credentials(
+        &self,
+        target_node_id: &str,
+        fault: InterconnectCredentialFault,
+    ) -> io::Result<()> {
+        let target = self.nodes.get(target_node_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("unknown node '{target_node_id}'"),
+            )
+        })?;
+        let target_addr = parse_addr(&target.spec.interconnect_addr())?;
+        let probe_directory = tempfile::tempdir_in(self._root_dir.path())?;
+        let untrusted_authority = if let InterconnectCredentialFault::UntrustedClient = fault {
+            Some(InterconnectTestCa::new(&probe_directory)?)
+        } else {
+            None
+        };
+        let certificate_authority = untrusted_authority
+            .as_ref()
+            .unwrap_or(&self.interconnect_ca);
+        let certificate_cluster_id =
+            if let InterconnectCredentialFault::WrongClusterIdentity = fault {
+                "another-cluster"
+            } else {
+                "cucumber"
+            };
+        let validity = if let InterconnectCredentialFault::ExpiredCertificate = fault {
+            TestCertificateValidity::Expired
+        } else {
+            TestCertificateValidity::Current
+        };
+        let probe_node_id = ClusterNodeName::parse("probe-node").map_err(io::Error::other)?;
+        let (certificate_path, key_path) = certificate_authority.issue_node_with_identity(
+            certificate_cluster_id,
+            probe_node_id.as_ref(),
+            validity,
+            probe_directory.path(),
+        )?;
+        let tls =
+            TlsConfigBundle::from_pem_files(&self.interconnect_ca.path, certificate_path, key_path)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        let options = TransportOptions {
+            connection_setup_timeout: Duration::from_millis(750),
+            request_timeout: Duration::from_millis(750),
+            reconnect_backoff: Duration::from_millis(25),
+            max_reconnect_backoff: Duration::from_millis(50),
+            shutdown_drain_timeout: Duration::from_millis(250),
+            ..TransportOptions::default()
+        };
+        let (transport, _incoming) = Transport::bind(
+            "127.0.0.1:0".parse().expect("probe address is valid"),
+            "localhost",
+            certificate_cluster_id,
+            probe_node_id,
+            tls,
+            options,
+            Executor::default(),
+        )
+        .await
+        .map_err(io::Error::other)?;
+        let server_name = if let InterconnectCredentialFault::MismatchedEndpoint = fault {
+            "mismatched.invalid"
+        } else {
+            "localhost"
+        };
+        let peer_target = PeerTarget::new(target_addr, server_name);
+        let attempt = if let InterconnectCredentialFault::WrongNodeIdentity = fault {
+            let addressed_node = ClusterNodeName::parse("node-254").map_err(io::Error::other)?;
+            transport
+                .register_outbound_target(addressed_node.clone(), peer_target)
+                .map_err(io::Error::other)?;
+            transport
+                .send(
+                    &addressed_node,
+                    Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
+                        message: "interconnect identity probe".to_string(),
+                    })),
+                )
+                .await
+                .map_err(io::Error::other)
+        } else {
+            match transport.bootstrap_target(peer_target).await {
+                Ok(peer_node_id) => transport
+                    .send(
+                        &peer_node_id,
+                        Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
+                            message: "interconnect credential probe".to_string(),
+                        })),
+                    )
+                    .await
+                    .map_err(io::Error::other),
+                Err(error) => Err(io::Error::other(error)),
+            }
+        };
+        transport.shutdown().await;
+        attempt
+    }
+
+    /// Signals a node to exit without waiting for the process. Scenarios that observe a
+    /// transient reaction to owner loss must start observing while the node is still on its way
+    /// down, because the leader reacts as soon as it sees the node go.
+    pub(crate) fn begin_stopping_node(&mut self, node_id: &str) {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.request_stop();
     }
 
     pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
@@ -994,6 +1277,14 @@ impl Cluster {
         Ok(handle.spec.web_console_url())
     }
 
+    pub(crate) fn http_uri(&self, node_id: &str, path: &str) -> io::Result<String> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        Ok(handle.spec.http_uri(path))
+    }
+
     pub(crate) fn web_console_url_with_password(
         &self,
         node_id: &str,
@@ -1099,13 +1390,22 @@ impl Cluster {
         publish_kafka_with_headers(&self.dependencies, topic, payload, headers).await
     }
 
-    pub(crate) async fn publish_kafka_burst(
+    pub(crate) async fn publish_kafka_partition_with_headers(
         &self,
         topic: &str,
+        partition: i32,
         payload: &str,
-        count: usize,
+        headers: &[(&str, &str)],
     ) -> io::Result<()> {
-        publish_kafka_burst(&self.dependencies, topic, payload, count).await
+        publish_kafka_record(&self.dependencies, topic, Some(partition), payload, headers).await
+    }
+
+    pub(crate) async fn publish_kafka_payloads(
+        &self,
+        topic: &str,
+        payloads: &[String],
+    ) -> io::Result<()> {
+        publish_kafka_payloads(&self.dependencies, topic, payloads).await
     }
 
     pub(crate) async fn publish_kafka_partition(
@@ -1252,6 +1552,24 @@ impl Cluster {
         publish_http(&handle.spec, host, path, payload).await
     }
 
+    pub(crate) fn spawn_http_publish(
+        &self,
+        node_id: &str,
+        host: String,
+        path: String,
+        payload: String,
+    ) -> tokio::task::JoinHandle<io::Result<()>> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let uri = handle.spec.http_uri(&path);
+        tokio::spawn(async move {
+            publish_http_uri_with_headers(uri, &host, payload.as_bytes(), "application/json", &[])
+                .await
+        })
+    }
+
     pub(crate) async fn publish_http_with_headers(
         &self,
         node_id: &str,
@@ -1334,51 +1652,35 @@ impl Cluster {
     }
 
     pub(crate) fn fail_emitter_on_all_nodes(&self, emitter: &str) {
-        for handle in self.nodes.values() {
-            handle.fail_emitter(emitter);
-        }
+        self.fault_injection.fail_emitter(emitter);
     }
 
     pub(crate) fn stall_emitter_on_all_nodes(&self, emitter: &str) {
-        for handle in self.nodes.values() {
-            handle.stall_emitter(emitter);
-        }
+        self.fault_injection.stall_emitter(emitter);
     }
 
     pub(crate) fn clear_emitter_fault_on_all_nodes(&self, emitter: &str) {
-        for handle in self.nodes.values() {
-            handle.clear_emitter_fault(emitter);
-        }
+        self.fault_injection.clear_emitter_fault(emitter);
     }
 
     pub(crate) fn fail_otel_client_unavailable_on_all_nodes(&self, emitter: &str) {
-        self.runtime_test_hooks
-            .otel_client_faults
-            .fail_unavailable(emitter);
+        self.fault_injection.fail_otel_client_unavailable(emitter);
     }
 
     pub(crate) fn clear_otel_client_fault_on_all_nodes(&self, emitter: &str) {
-        self.runtime_test_hooks
-            .otel_client_faults
-            .clear_emitter(emitter);
+        self.fault_injection.clear_otel_client_fault(emitter);
     }
 
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
-        for handle in self.nodes.values() {
-            handle.fail_next_schedule_publication(domain);
-        }
+        self.fault_injection.fail_next_schedule_publication(domain);
     }
 
     pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str) {
-        for handle in self.nodes.values() {
-            handle.fail_ingestor(ingestor);
-        }
+        self.fault_injection.fail_ingestor(ingestor);
     }
 
     pub(crate) fn clear_ingestor_fault_on_all_nodes(&self, ingestor: &str) {
-        for handle in self.nodes.values() {
-            handle.clear_ingestor_fault(ingestor);
-        }
+        self.fault_injection.clear_ingestor_fault(ingestor);
     }
 
     pub(crate) async fn wait_for_interconnect_status(
@@ -1644,7 +1946,9 @@ impl Cluster {
                 && leader_status.raft_state.as_deref() == Some("Leader")
             {
                 if stable_leader.as_deref() == Some(leader_id.as_str()) {
-                    stable_count = stable_count.saturating_add(1);
+                    stable_count = stable_count
+                        .checked_add(1)
+                        .expect("a leader is polled a bounded number of times");
                 } else {
                     stable_leader = Some(leader_id.clone());
                     stable_count = 1;
@@ -1723,8 +2027,8 @@ impl Cluster {
     }
 
     pub(crate) fn transfer_leadership(&self, from_node_id: &str, to_node_id: &str) {
-        self.runtime_test_hooks
-            .request_leadership_transfer(from_node_id.to_string(), to_node_id.to_string());
+        self.fault_injection
+            .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
     }
     async fn wait_until<F>(&self, node_id: &str, predicate: F) -> io::Result<()>
     where
@@ -1770,35 +2074,24 @@ impl Drop for Cluster {
     }
 }
 
+/// One node in a test cluster. Every fault is reached through the shared injection handle, so
+/// arming a fault and the node that observes it can never drift apart.
 #[derive(Debug)]
 struct NodeHandle {
     spec: NodeSpec,
-    runtime_test_hooks: RuntimeTestHooks,
+    fault_injection: FaultInjection,
     config: TestClusterConfig,
-    emitter_faults: Arc<EmitterFaultInjector>,
-    ingestor_faults: Arc<IngestorFaultInjector>,
-    schedule_publication_faults: Arc<SchedulePublicationFaultInjector>,
     failure: Arc<Mutex<Option<String>>>,
     task: Option<JoinHandle<()>>,
     shutdown: Option<CancellationToken>,
 }
 
 impl NodeHandle {
-    fn new(
-        spec: NodeSpec,
-        runtime_test_hooks: RuntimeTestHooks,
-        config: TestClusterConfig,
-    ) -> Self {
-        let emitter_faults = runtime_test_hooks.emitter_faults.clone();
-        let ingestor_faults = runtime_test_hooks.ingestor_faults.clone();
-        let schedule_publication_faults = runtime_test_hooks.schedule_publication_faults.clone();
+    fn new(spec: NodeSpec, fault_injection: FaultInjection, config: TestClusterConfig) -> Self {
         Self {
             spec,
-            runtime_test_hooks,
+            fault_injection,
             config,
-            emitter_faults,
-            ingestor_faults,
-            schedule_publication_faults,
             failure: Arc::new(Mutex::new(None)),
             task: None,
             shutdown: None,
@@ -1809,10 +2102,7 @@ impl NodeHandle {
         if self.task.is_some() {
             return Ok(());
         }
-        if self.config.grpc_mode == InternalTransportMode::Https
-            || self.config.cluster_api_mode == InternalTransportMode::Https
-            || self.config.interconnect_mode == InternalTransportMode::Https
-        {
+        if self.config.grpc_mode == InternalTransportMode::Https {
             ensure_dev_tls_assets()?;
         }
 
@@ -1829,25 +2119,14 @@ impl NodeHandle {
             .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
             .cluster_id("cucumber".to_string())
-            .node_id(self.spec.node_id.clone())
+            .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
-            .cluster_listen_addr(parse_addr(&self.spec.cluster_addr())?)
-            .cluster_advertise_addr(parse_addr(&self.spec.cluster_addr())?.into())
-            .cluster_api_mode(self.config.cluster_api_mode)
-            .cluster_api_listen_addr(parse_addr(&self.spec.cluster_api_addr())?)
-            .cluster_api_advertise_addr(parse_addr(&self.spec.cluster_api_addr())?.into())
-            .cluster_api_https_listen_addr(Some(parse_addr(&self.spec.cluster_api_https_addr())?))
-            .cluster_api_https_advertise_addr(Some(
-                parse_addr(&self.spec.cluster_api_https_addr())?.into(),
-            ))
-            .interconnect_mode(self.config.interconnect_mode)
             .interconnect_listen_addr(parse_addr(&self.spec.interconnect_addr())?)
             .interconnect_advertise_addr(parse_addr(&self.spec.interconnect_addr())?.into())
-            .interconnect_https_listen_addr(Some(parse_addr(&self.spec.interconnect_https_addr())?))
-            .interconnect_https_advertise_addr(Some(
-                parse_addr(&self.spec.interconnect_https_addr())?.into(),
-            ))
+            .interconnect_tls_ca(self.spec.interconnect_tls_ca.clone())
+            .interconnect_tls_cert(self.spec.interconnect_tls_cert.clone())
+            .interconnect_tls_key(self.spec.interconnect_tls_key.clone())
             .allow_bootstrap(self.spec.allow_bootstrap)
             .default_user(TEST_AUTH_USERNAME.to_string())
             .init_default_user_password(Some(TEST_AUTH_PASSWORD.to_string()))
@@ -1856,12 +2135,6 @@ impl NodeHandle {
             .raft_election_timeout_min(TEST_RAFT_ELECTION_TIMEOUT_MIN)
             .raft_election_timeout_max(TEST_RAFT_ELECTION_TIMEOUT_MAX)
             .replica_count(self.config.replica_count);
-        #[cfg(feature = "testing")]
-        let application_builder = application_builder.scheduler_mode(
-            self.config
-                .scheduler_mode
-                .expect("test scheduler mode must be resolved before node startup"),
-        );
         let application = application_builder
             .state_snapshot_interval(self.config.state_snapshot_interval)
             .transaction_idle_timeout(self.config.transaction_idle_timeout)
@@ -1878,7 +2151,7 @@ impl NodeHandle {
                     .clone()
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_TEMP_DIR)),
             )
-            .runtime_test_hooks(self.runtime_test_hooks.clone())
+            .fault_injection(self.fault_injection.clone())
             .shutdown(shutdown.clone())
             .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
             .drain_timeout(self.config.drain_timeout)
@@ -1918,6 +2191,8 @@ impl NodeHandle {
                 Err(io::Error::other("timed out waiting for node shutdown"))
             }
         };
+        self.fault_injection
+            .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
             self.ensure_database_unlocked().await?;
         }
@@ -1990,37 +2265,15 @@ impl NodeHandle {
             task.abort();
         }
     }
-
-    fn fail_emitter(&self, emitter: &str) {
-        self.emitter_faults.fail_emitter(emitter);
-    }
-
-    fn stall_emitter(&self, emitter: &str) {
-        self.emitter_faults.stall_emitter(emitter);
-    }
-
-    fn clear_emitter_fault(&self, emitter: &str) {
-        self.emitter_faults.clear_emitter(emitter);
-    }
-
-    fn fail_ingestor(&self, ingestor: &str) {
-        self.ingestor_faults.fail_ingestor(ingestor);
-    }
-
-    fn clear_ingestor_fault(&self, ingestor: &str) {
-        self.ingestor_faults.clear_ingestor(ingestor);
-    }
-
-    fn fail_next_schedule_publication(&self, domain: &str) {
-        self.schedule_publication_faults
-            .fail_next_publication(domain);
-    }
 }
 
 #[derive(Debug)]
 struct NodeSpec {
     node_id: String,
     base_dir: PathBuf,
+    interconnect_tls_ca: PathBuf,
+    interconnect_tls_cert: PathBuf,
+    interconnect_tls_key: PathBuf,
     syslog_ingestor_host: IpAddr,
     allow_bootstrap: bool,
     bootstrap_host: Option<String>,
@@ -2030,11 +2283,7 @@ struct NodeSpec {
     https_port: u16,
     observability_port: u16,
     web_console_port: u16,
-    cluster_port: u16,
-    cluster_api_port: u16,
-    cluster_api_https_port: u16,
     interconnect_port: u16,
-    interconnect_https_port: u16,
 }
 
 struct NodePorts {
@@ -2044,16 +2293,12 @@ struct NodePorts {
     https: u16,
     observability: u16,
     web_console: u16,
-    cluster: u16,
-    cluster_api: u16,
-    cluster_api_https: u16,
     interconnect: u16,
-    interconnect_https: u16,
 }
 
 impl NodePorts {
     fn allocate() -> io::Result<Self> {
-        let mut ports = next_ports(11)?.into_iter();
+        let mut ports = next_ports(7)?.into_iter();
         Ok(Self {
             grpc: ports.next().expect("allocated gRPC port"),
             grpc_https: ports.next().expect("allocated gRPC HTTPS port"),
@@ -2061,25 +2306,31 @@ impl NodePorts {
             https: ports.next().expect("allocated HTTPS port"),
             observability: ports.next().expect("allocated observability port"),
             web_console: ports.next().expect("allocated web console port"),
-            cluster: ports.next().expect("allocated cluster port"),
-            cluster_api: ports.next().expect("allocated cluster API port"),
-            cluster_api_https: ports.next().expect("allocated cluster API HTTPS port"),
             interconnect: ports.next().expect("allocated interconnect port"),
-            interconnect_https: ports.next().expect("allocated interconnect HTTPS port"),
         })
     }
 }
 
 impl NodeSpec {
-    fn new(root: &TempDir, node_id: &str, allow_bootstrap: bool) -> io::Result<Self> {
+    fn new(
+        root: &TempDir,
+        interconnect_ca: &InterconnectTestCa,
+        node_id: &str,
+        allow_bootstrap: bool,
+    ) -> io::Result<Self> {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
+        let (interconnect_tls_cert, interconnect_tls_key) =
+            interconnect_ca.issue_node(node_id, &base_dir)?;
         let ports = NodePorts::allocate()?;
         let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
         Ok(Self {
             node_id: node_id.to_string(),
             base_dir,
+            interconnect_tls_ca: interconnect_ca.path.clone(),
+            interconnect_tls_cert,
+            interconnect_tls_key,
             syslog_ingestor_host,
             allow_bootstrap,
             bootstrap_host: None,
@@ -2089,11 +2340,7 @@ impl NodeSpec {
             https_port: ports.https,
             observability_port: ports.observability,
             web_console_port: ports.web_console,
-            cluster_port: ports.cluster,
-            cluster_api_port: ports.cluster_api,
-            cluster_api_https_port: ports.cluster_api_https,
             interconnect_port: ports.interconnect,
-            interconnect_https_port: ports.interconnect_https,
         })
     }
 
@@ -2120,14 +2367,35 @@ impl NodeSpec {
         self.https_port = ports.https;
         self.observability_port = ports.observability;
         self.web_console_port = ports.web_console;
-        self.cluster_port = ports.cluster;
-        self.cluster_api_port = ports.cluster_api;
-        self.cluster_api_https_port = ports.cluster_api_https;
         self.interconnect_port = ports.interconnect;
-        self.interconnect_https_port = ports.interconnect_https;
         Ok(())
     }
 
+    /// Move this node to a fresh interconnect address, leaving the address it is giving up
+    /// reserved for the rest of the run.
+    ///
+    /// The reservation set is shared by every scenario running concurrently, and `next_ports`
+    /// releases its probe listener as soon as it has read the port number, so the set is the only
+    /// thing stopping two scenarios from landing on the same port. Returning this node's old port
+    /// to it lets another scenario bind the address a peer is still dialling: every scenario names
+    /// its nodes `node-1`, `node-2`, `node-3`, so the impostor passes the peer-identity check and
+    /// is only caught when its introduction fails to verify against the expected key. The dialling
+    /// node then reports its peer unavailable until gossip carries the new address, which is long
+    /// enough to fail the scenario. Only this call site retires ports, and only a few times per
+    /// run, so keeping them costs a handful of entries.
+    fn reallocate_interconnect_ports(&mut self) -> io::Result<()> {
+        let mut ports = next_ports(1)?.into_iter();
+        let interconnect_port = ports
+            .next()
+            .ok_or_else(|| io::Error::other("interconnect port allocation returned no port"))?;
+        self.interconnect_port = interconnect_port;
+        Ok(())
+    }
+
+    /// Return this node's ports to the pool. Every caller reaches here with the node down: two
+    /// teardown paths, and the startup retry for a node that never bound them. That is what makes
+    /// the release safe, not the stop itself, so a caller that releases while a peer may still dial
+    /// the address belongs elsewhere.
     fn release_ports(&mut self) {
         let mut reserved = RESERVED_TEST_PORTS.lock();
         for port in [
@@ -2137,11 +2405,7 @@ impl NodeSpec {
             self.https_port,
             self.observability_port,
             self.web_console_port,
-            self.cluster_port,
-            self.cluster_api_port,
-            self.cluster_api_https_port,
             self.interconnect_port,
-            self.interconnect_https_port,
         ] {
             reserved.remove(&port);
         }
@@ -2212,24 +2476,8 @@ impl NodeSpec {
         format!("{HOST}:{}", self.web_console_port)
     }
 
-    fn cluster_addr(&self) -> String {
-        format!("{HOST}:{}", self.cluster_port)
-    }
-
-    fn cluster_api_addr(&self) -> String {
-        format!("{HOST}:{}", self.cluster_api_port)
-    }
-
-    fn cluster_api_https_addr(&self) -> String {
-        format!("{HOST}:{}", self.cluster_api_https_port)
-    }
-
     fn interconnect_addr(&self) -> String {
         format!("{HOST}:{}", self.interconnect_port)
-    }
-
-    fn interconnect_https_addr(&self) -> String {
-        format!("{HOST}:{}", self.interconnect_https_port)
     }
 
     fn db_path(&self) -> io::Result<PathBuf> {
@@ -2425,9 +2673,19 @@ async fn publish_http_bytes_with_headers(
     content_type: &str,
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
+    publish_http_uri_with_headers(spec.http_uri(path), host, payload, content_type, headers).await
+}
+
+async fn publish_http_uri_with_headers(
+    uri: String,
+    host: &str,
+    payload: &[u8],
+    content_type: &str,
+    headers: &[(&str, &str)],
+) -> io::Result<()> {
     let client = reqwest::Client::new();
     let mut request = client
-        .post(spec.http_uri(path))
+        .post(uri)
         .header("Host", host)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .body(payload.to_vec());
@@ -2638,6 +2896,15 @@ impl TestSession {
         }
     }
 
+    pub(crate) async fn run_command_result(
+        &mut self,
+        query: &str,
+    ) -> io::Result<proto::CommandResult> {
+        match self {
+            Self::Raw(session) => session.run_command_result(query).await,
+        }
+    }
+
     pub(crate) async fn try_next_subscription(
         &mut self,
         timeout_duration: Duration,
@@ -2659,6 +2926,17 @@ impl TestSession {
 
 impl RawTestSession {
     async fn run_command(&mut self, query: &str) -> io::Result<String> {
+        let result = self.run_command_result(query).await?;
+        if result.success {
+            return Ok(flatten_command_messages(&result));
+        }
+        Err(io::Error::other(format!(
+            "command failed: {}\ndiagnostics: {:?}",
+            result.message, result.diagnostics
+        )))
+    }
+
+    async fn run_command_result(&mut self, query: &str) -> io::Result<proto::CommandResult> {
         self.request_tx
             .send(SessionRequest {
                 request: Some(proto::session_request::Request::Command(CommandRequest {
@@ -2675,13 +2953,7 @@ impl RawTestSession {
                 Some(proto::SessionResponse {
                     event: Some(Event::Result(result)),
                 }) => {
-                    if result.success {
-                        return Ok(flatten_command_messages(&result));
-                    }
-                    return Err(io::Error::other(format!(
-                        "command failed: {}\ndiagnostics: {:?}",
-                        result.message, result.diagnostics
-                    )));
+                    return Ok(result);
                 }
                 Some(proto::SessionResponse {
                     event: Some(Event::Subscription(event)),
@@ -2783,7 +3055,7 @@ impl RawTestSession {
                         Some(proto::SessionResponse {
                             event: Some(Event::Server(event)),
                         }) => {
-                            if event.level == ServerEventLevel::Error as i32 {
+                            if event.level == i32::from(ServerEventLevel::Error) {
                                 return Ok(Some(TestServerEvent {
                                     level: event.level,
                                     message: event.message,
@@ -3199,7 +3471,7 @@ async fn rabbitmq_queue_consumer_count(
         )
         .await
         .map_err(io::Error::other)?;
-    Ok(declared.consumer_count() as usize)
+    Ok(declared.consumer_count().arch_into())
 }
 
 async fn publish_redis(
@@ -3411,11 +3683,11 @@ async fn publish_kafka_with_headers(
     publish_kafka_record(dependencies, topic, None, payload, headers).await
 }
 
-async fn publish_kafka_burst(
+/// Publishes every payload through one producer, so the ingestor polls them as one group.
+async fn publish_kafka_payloads(
     dependencies: &DependencyEndpoints,
     topic: &str,
-    payload: &str,
-    count: usize,
+    payloads: &[String],
 ) -> io::Result<()> {
     let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
@@ -3424,11 +3696,11 @@ async fn publish_kafka_burst(
         .set("request.timeout.ms", "5000")
         .create()
         .map_err(io::Error::other)?;
-    let mut deliveries = Vec::with_capacity(count);
-    for _ in 0..count {
+    let mut deliveries = Vec::with_capacity(payloads.len());
+    for payload in payloads {
         tokio::task::consume_budget().await;
         deliveries.push(producer.send(
-            FutureRecord::<(), str>::to(topic).payload(payload),
+            FutureRecord::<(), str>::to(topic).payload(payload.as_str()),
             Duration::from_secs(5),
         ));
     }
@@ -3546,18 +3818,15 @@ fn kafka_topic_partition_count(
     let metadata = consumer
         .fetch_metadata(Some(topic), Duration::from_secs(5))
         .map_err(io::Error::other)?;
-    Ok(metadata
-        .topics()
-        .iter()
-        .find(|entry| entry.name() == topic)
-        .and_then(|entry| {
-            let partitions = entry.partitions().len();
-            if partitions == 0 {
-                None
-            } else {
-                Some(partitions)
-            }
-        }))
+    let Some(entry) = metadata.topics().iter().find(|entry| entry.name() == topic) else {
+        return Ok(None);
+    };
+    let partitions = entry.partitions().len();
+    if partitions == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(partitions))
+    }
 }
 
 async fn wait_for_kafka_topic_partitions(
@@ -3618,9 +3887,10 @@ async fn ensure_kafka_topic_partitions(
         )
         .await
         .map_err(io::Error::other)?;
+    let mut created_new = false;
     for result in created {
         match result {
-            Ok(_) => {}
+            Ok(_) => created_new = true,
             Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
             Err((topic_name, code)) => {
                 return Err(io::Error::other(format!(
@@ -3630,8 +3900,12 @@ async fn ensure_kafka_topic_partitions(
         }
     }
 
+    let expected = usize::try_from(partitions)
+        .verified("the partition count was checked to be positive above");
+    if created_new {
+        return wait_for_kafka_topic_partitions(dependencies, topic, expected).await;
+    }
     let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
-    let expected = usize::try_from(partitions).expect("partition count must fit usize");
     if current > expected {
         return Err(io::Error::other(format!(
             "kafka topic '{topic}' already has {current} partitions, cannot shrink to {expected}"
@@ -3729,18 +4003,17 @@ fn kafka_consumer_group_next_offset(
     let committed = consumer
         .committed_offsets(partitions, Duration::from_secs(1))
         .map_err(io::Error::other)?;
-    let offset = committed
-        .find_partition(topic, partition)
-        .map(|element| element.offset())
-        .and_then(|offset| match offset {
-            Offset::Offset(offset) => Some(offset),
-            Offset::Beginning
-            | Offset::End
-            | Offset::Stored
-            | Offset::Invalid
-            | Offset::OffsetTail(_) => None,
-        });
-    Ok(offset)
+    let Some(element) = committed.find_partition(topic, partition) else {
+        return Ok(None);
+    };
+    match element.offset() {
+        Offset::Offset(offset) => Ok(Some(offset)),
+        Offset::Beginning
+        | Offset::End
+        | Offset::Stored
+        | Offset::Invalid
+        | Offset::OffsetTail(_) => Ok(None),
+    }
 }
 
 async fn ensure_sqs_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
@@ -4062,18 +4335,20 @@ async fn observe_kafka(
                     let headers = message
                         .headers()
                         .map(|headers| {
-                            (0..headers.count())
-                                .filter_map(|index| {
-                                    let header = headers.try_get(index)?;
-                                    Some((
-                                        header.key.to_string(),
-                                        header
-                                            .value
-                                            .map(|value| String::from_utf8_lossy(value).to_string())
-                                            .unwrap_or_default(),
-                                    ))
-                                })
-                                .collect::<Vec<_>>()
+                            let mut values = Vec::new();
+                            for index in 0..headers.count() {
+                                let Some(header) = headers.try_get(index) else {
+                                    continue;
+                                };
+                                values.push((
+                                    header.key.to_string(),
+                                    header
+                                        .value
+                                        .map(|value| String::from_utf8_lossy(value).to_string())
+                                        .unwrap_or_default(),
+                                ));
+                            }
+                            values
                         })
                         .unwrap_or_default();
                     let _ = payload_tx.send(BrokerMessage { payload, headers }).await;

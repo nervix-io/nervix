@@ -18,15 +18,33 @@ domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is reject
 
 Paced domains maintain a domain clock.
 
+`PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
+fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
+is stored.
+
 While the domain is running:
 
 - Nervix produces domain ticks
-- paced ingestors only admit records whose effective timestamp falls inside the tick window
-- `SKEW` defines the allowed admission window around each tick
+- paced ingestors admit records whose effective timestamp falls within `SKEW` of an eligible
+  logical tick center
+
+Centers are `origin + n × PERIOD`, where `origin` is the committed logical start and `n` is
+nonnegative. The current domain mapping determines the reached frontier. Only the newest 256
+positions through that frontier are eligible; position zero is eligible immediately on start.
+`SKEW` is an inclusive logical-time distance: an event exactly at either edge is accepted.
+Overlapping windows admit their union, while gaps between windows reject events.
+
+Admission reconstructs these positions from the installed mapping. Delayed, missing, or coalesced
+tick notifications do not change eligibility. A hypothetical future center is never eligible:
+an event can extend past the last reached center only by its declared `SKEW`. An event before
+the origin can be admitted within the origin's tolerance while that position remains eligible.
+`TIME RATE` changes when the frontier advances in real time; it does not scale source timestamps,
+`PERIOD`, or `SKEW`.
 
 Paced time is also important for expiration:
 
-- branch TTL uses domain logical time in paced domains
+- branch TTL uses domain logical time in paced domains, including the relay owner's cluster-wide
+  branch-presence decision
 - materialized-state cleanup follows the same logical-time rule
 
 Deterministic Roto UDFs preserve reproducibility when paced input is replayed at an accelerated
@@ -42,8 +60,10 @@ Ingestors in an unpaced domain admit records as they arrive, and branch TTL uses
 ## Placement Default
 
 Every domain has a fallback placement policy. It applies to directly connected runtime-node pairs
-that no named placement rule claims. The clause is optional on every domain-creation form, and
-omission means `NEUTRAL` so ordinary scheduler heuristics remain active:
+that no named placement rule claims. Because relays are scheduled runtime nodes, a
+producer-to-relay edge and a relay-to-consumer edge each receive the default independently. The
+clause is optional on every domain-creation form, and omission means `NEUTRAL` so ordinary
+scheduler heuristics remain active:
 
 ```nspl
 CREATE PACED DOMAIN production
@@ -81,9 +101,52 @@ Important runtime consequences:
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
 
-The lifecycle state and active paced-clock anchor are replicated with the domain. After leader
-failover, reconciliation reconstructs the running clock from that state; a completed transactional
-`START` therefore remains effective without re-executing its commit step.
+The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
+authority identifies a concrete incarnation of a named cluster node and carries a revision that
+advances whenever ownership changes or is revoked. After leader failover, reconciliation uses that
+committed state; a completed transactional `START` therefore remains effective without
+re-executing its commit step, and leadership transfer alone does not establish a new anchor or
+authority.
+
+Every live node installs that committed mapping before it builds executable work for the domain.
+The installed capability is bound to the domain name and `START` generation. A joining node uses
+the existing logical origin, physical UTC anchor, and rate; it does not establish a new anchor from
+its join time. An unpaced domain receives actual UTC through the same domain-bound capability. A
+missing domain, stopped clock, uninstalled paced mapping, or task bound to an earlier generation is
+a lifecycle error and never selects wall time as a paced fallback. Reads on one node do not move
+backward within a generation.
+
+The authority begins producing only after every live node reports that it installed the consensus
+runtime revision containing the mapping and fence. Join, restart, owner loss, and membership change
+can select a new authority without changing the clock mapping. A progress report is accepted only
+when its `START` generation, authority revision, node incarnation, and authenticated peer match the
+committed authority. Duplicate, delayed, reordered, or superseded progress is ignored and cannot
+create a domain. `STOP` revokes the authority in the same replicated lifecycle transition; a later
+`START` commits a new generation and mapping. Automatic ALTER quiescing keeps the authority and
+clock running.
+
+An explicit `START AT` timestamp must fit exactly in signed Unix nanoseconds. The inclusive range
+is `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`; valid RFC 3339 values
+immediately outside those endpoints are rejected by the command. Nervix converts accepted text to
+a timestamp at the language boundary and carries that timestamp through persistence and runtime
+state without reparsing it.
+
+`TIME RATE` accepts every positive finite `f64`, including scientific notation such as `5e-324`
+and `1.7976931348623157e308`. Zero, negative values, infinities, and NaN are rejected. The committed
+start mapping remains the sole clock anchor for that run. Tick delivery records progress but never
+re-anchors logical time, so a delayed tick cannot move time backwards.
+
+Clock projection rounds fractional logical nanoseconds down. Converting a logical target to a
+physical wait rounds fractional physical nanoseconds up, which prevents a deadline from firing
+early. Timestamp, duration, boundary, and tick-id overflow are errors. If tick production wakes
+after several periods have passed, it emits one tick at the latest due logical boundary and next
+targets the first future boundary.
+
+Domain cadence and data-lifecycle policy create logical deadlines from a bound domain clock.
+Connection, retry, cancellation, drain, and other operational policy create physical deadlines on
+the process monotonic clock. The two deadline kinds cannot be interchanged. A logical wait
+revalidates its domain and generation after every wake and returns both the logical instant that
+became due and a fresh execution-time snapshot. Cancellation is a separate typed outcome.
 
 ## Automatic Model-Alteration Quiescing
 
@@ -117,9 +180,18 @@ Every ingested record receives internal ingestion metadata, including mandatory 
 
 Timestamp sources:
 
-- `TIMESTAMP NOW`
-- `TIMESTAMP AT <field>`
+- `TIMESTAMP NOW` selects the installed domain's logical time when the ingest group is delivered.
+  Buffered intake released after automatic quiescing receives that delivery time. In an unpaced
+  domain, the same clock capability supplies actual UTC.
+- `TIMESTAMP AT <field>` preserves the decoded `DATETIME` field as the event time. Connector
+  timestamps selected when this clause is omitted in an unpaced domain, and broker metadata,
+  retain their external values. None of these values is multiplied by `TIME RATE`.
 
 In paced domains, ingestors must declare a timestamp source explicitly. In unpaced domains, timestamp metadata is still recorded, but it is not used to gate admission.
+
+Both ingestion watermarks initially equal the selected event time and travel with the record
+through relays and across nodes. Timestamp selection and admission share one delivery snapshot.
+An unknown, stopped, or uninstalled domain clock produces a lifecycle error; a paused domain
+withholds delivery until its ingestion path resumes.
 
 Window processors also use this metadata. Duration windows evaluate input event time from the record low watermark. Emitted aggregate records receive a low watermark equal to the minimum input low watermark in the emitted window and a high watermark equal to the current domain time at emission.

@@ -21,6 +21,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
+| Administrative durability, storage errors, and recovery of uncertain commits | `Control Plane` → `Durability and recovery` |
 | Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
 | Expressions, casts, and built-in functions | `Filter-Map Functions` |
 | Trusted Roto user-defined expression functions | `User-Defined Functions` |
@@ -82,7 +83,14 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
    maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, read-only statements,
    subscriptions, uploads, and node administration remain outside the transaction.
-5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
+5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
+   paced `START` establishes one replicated clock generation that joining nodes install before
+   execution. One committed authority revision identifies the producing node incarnation; owner
+   changes preserve the mapping, `STOP` revokes the authority, and automatic ALTER quiescing keeps
+   the generation and authority running.
+   Explicit start timestamps must fit the inclusive signed Unix-nanosecond range from
+   `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, and `TIME RATE` must
+   be positive and finite.
 
 Within the graph transaction, declare dependencies before consumers:
 
@@ -94,7 +102,7 @@ Within the graph transaction, declare dependencies before consumers:
 6. ingestors;
 7. branch-preserving processors, generators, and reingestors;
 8. emitters;
-9. placement rules, after every runtime-node or materialized-relay member they reference.
+9. placement rules, after every runtime-node member they reference, including relays.
 
 Resource upload paths, credentials, broker addresses, and external object names are deployment
 inputs. Keep placeholders obvious and list provisioning that must happen outside Nervix.
@@ -124,8 +132,12 @@ relay. Do not use them to scan across branches.
 
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
-  schedulable runtime nodes or materialized relays. Treat coverage as path-gated, allow a valid
+  schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
+  whether or not it has materialized state. Treat coverage as path-gated, allow a valid
   zero-effect rule, use lower `RANK` numbers for stronger claims, and never invent hard separation.
+- Endpoint and Syslog ingestors follow live cluster membership because their listeners execute on
+  every cluster node. Every client-source ingestor, including an outbound WebSocket client, keeps
+  its existing live primary and replicas through ordinary schedule recomputation.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
@@ -138,7 +150,9 @@ relay. Do not use them to scan across branches.
   documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
   use only `NO_ACK` source/sink modes, and configure TLS identity and framing for the client
   direction that consumes it.
-- Every relay declares a schema and explicit branch selection.
+- Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
+  owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
+  nodes each have one additional fixed dispatch slot.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different
   branch names, but each source retains its own branch through collection and external publish;
@@ -186,12 +200,21 @@ relay. Do not use them to scan across branches.
 - Transactions queue only the bound domain's replicated configuration statements. Commit progress
   survives leader failover, while only consecutive model-mutation runs receive atomic
   candidate-graph validation and persistence; `CREATE DOMAIN`, `CREATE USER`, read-only, and
-  session/client-local commands remain outside.
+  session/client-local commands remain outside. Placement changes that move running owners use an
+  effective `ENTITY_PAUSE`, and `COMMIT` also reports the total planned relocations.
 - Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
   all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
-- Entity holds, domain pauses, and memory-pressure quiescing automatically consult the ingestor's
-  mode. Stop, drop, drain/cordon relocation, failover, and shutdown terminate the source session.
-  Do not emit `PAUSE` or `RESUME` syntax.
+- Model-alteration entity holds, domain pauses, and memory-pressure quiescing consult the
+  ingestor's mode. Planned drain, graceful-shutdown drain, placement relocation, and explicit
+  `RELOCATE` ignore that mode: they stop new intake only for moved ingestors, drain already
+  admitted ACK work, then switch ownership. Stop and drop terminate the source session; unexpected
+  owner loss uses immediate failover. Do not emit `PAUSE` or `RESUME` syntax.
+- `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES [FOR <kind>
+  <name> ...];` moves a selected subgraph onto a named cluster node as one atomic gated handoff.
+  The selection is a kind-qualified list or a `FROM ... TO ...` corridor, `REQUIRE COLOCATION`
+  groups always move whole, and the statement is immediate, non-transaction content that is
+  mutually exclusive with model changes and `DRAIN NODE` in the same domain. It is a one-time move,
+  not a pin.
 - External entities and resource contents are provisioned before the graph is started.
 
 ## Verification and troubleshooting
@@ -199,8 +222,8 @@ relay. Do not use them to scan across branches.
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
-- `DESCRIBE RELAY <relay>;` and `DESCRIBE RELAY <relay> WHERE (...);` inspect logical and concrete
-  branch state.
+- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
+  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics.
@@ -215,6 +238,9 @@ Choose checks relevant to the configured graph:
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
   `DESCRIBE DOMAIN` inspect placement coverage, precedence, effective colocation groups, hosts, and
   the domain default.
+- `DESCRIBE RELOCATION ...;` shows the unit, quiesce level, gated relays, corridor coverage, and
+  unsatisfied preferences a `RELOCATE` with the same clauses would execute, without moving
+  anything.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.

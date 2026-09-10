@@ -10,6 +10,7 @@ use async_broadcast::{
     InactiveReceiver, Receiver as AsyncBroadcastReceiver, RecvError, SendError, Sender,
     TryRecvError,
 };
+use meticulous::OptionExt as _;
 use parking_lot::Mutex;
 use tokio::{
     sync::Notify,
@@ -77,7 +78,10 @@ impl RelayDispatchGate {
     pub(super) fn engage(&self, deadline: Instant, reason: impl Into<String>) -> u64 {
         let mut state = self.state.lock();
         loop {
-            state.generation = state.generation.wrapping_add(1);
+            state.generation = state
+                .generation
+                .checked_add(1)
+                .assured("a relay gate cannot be engaged 2^64 times on one node");
             if !state.engagements.contains_key(&state.generation) {
                 break;
             }
@@ -115,7 +119,10 @@ impl RelayDispatchGate {
             let deadline = {
                 let mut state = self.state.lock();
                 if state.engagements.is_empty() {
-                    state.in_flight_dispatches = state.in_flight_dispatches.saturating_add(1);
+                    state.in_flight_dispatches = state
+                        .in_flight_dispatches
+                        .checked_add(1)
+                        .assured("a permit is held per in-flight dispatch this node holds");
                     return RelayDispatchPermit { gate: self };
                 }
                 state
@@ -246,16 +253,15 @@ impl RelayDispatchGate {
         }
         let now = Instant::now();
         let mut state = self.state.lock();
-        let expired = state
-            .engagements
-            .iter()
-            .filter_map(|(generation, engagement)| {
-                engagement
-                    .fence_deadline()
-                    .is_some_and(|deadline| now >= deadline)
-                    .then_some((*generation, engagement.reason.clone()))
-            })
-            .collect::<Vec<_>>();
+        let mut expired = Vec::new();
+        for (generation, engagement) in &state.engagements {
+            let Some(deadline) = engagement.fence_deadline() else {
+                continue;
+            };
+            if now >= deadline {
+                expired.push((*generation, engagement.reason.clone()));
+            }
+        }
         if expired.is_empty() {
             return;
         }
@@ -311,11 +317,10 @@ impl Default for RelayDispatchGate {
 impl Drop for RelayDispatchPermit<'_> {
     fn drop(&mut self) {
         let mut state = self.gate.state.lock();
-        debug_assert!(
-            state.in_flight_dispatches > 0,
-            "relay dispatch permit count underflow"
-        );
-        state.in_flight_dispatches = state.in_flight_dispatches.saturating_sub(1);
+        state.in_flight_dispatches = state
+            .in_flight_dispatches
+            .checked_sub(1)
+            .verified("this permit raised the count when the gate admitted it");
         let quiescent = state.in_flight_dispatches == 0;
         drop(state);
         if quiescent {
@@ -707,7 +712,10 @@ impl<T> Drop for RelayPublishPermit<T> {
     fn drop(&mut self) {
         let was_dirty = self.inner.dirty.load(Ordering::Relaxed);
         let mut control = self.inner.control.lock();
-        control.active_publishers = control.active_publishers.saturating_sub(1);
+        control.active_publishers = control
+            .active_publishers
+            .checked_sub(1)
+            .verified("this permit raised the count when the publisher acquired it");
         let is_dirty = control.apply_pending_capacity();
         drop(control);
         self.inner.dirty.store(is_dirty, Ordering::Relaxed);
@@ -721,7 +729,10 @@ impl<T> Drop for RelayPublishWaiter<T> {
     fn drop(&mut self) {
         let was_dirty = self.inner.dirty.load(Ordering::Relaxed);
         let mut control = self.inner.control.lock();
-        control.waiting_publishers = control.waiting_publishers.saturating_sub(1);
+        control.waiting_publishers = control
+            .waiting_publishers
+            .checked_sub(1)
+            .verified("this waiter raised the count when the publisher started waiting");
         let is_dirty = control.apply_pending_capacity();
         drop(control);
         self.inner.dirty.store(is_dirty, Ordering::Relaxed);

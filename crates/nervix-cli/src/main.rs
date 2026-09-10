@@ -1,3 +1,14 @@
+//! The interactive terminal client for Nervix.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** The REPL: key bindings, the completion menu, rendered diagnostics, output formatting
+//!   and the shell-facing command surface.
+//! - **Depends on.** `nervix-client-core`, the language layer for completion and local statement
+//!   parsing, and the vocabulary.
+//! - **Must not know.** The server. It speaks the session API through the client core and nothing
+//!   else.
+
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -7,6 +18,7 @@ use std::{
     },
 };
 
+use arch_into::ArchInto as _;
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use byte_unit::{Byte, UnitType};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -17,9 +29,11 @@ use nervix_client_core::{
     ConnectOptions, Diagnostic, SubscriptionDeliveryBehavior, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionState,
 };
+use nervix_models::ClusterNodeName;
 use nervix_nspl::client_statement::{
     parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
 };
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use reedline::{
     Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
     KeyCode, KeyModifiers, ListMenu, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -89,22 +103,22 @@ enum Command {
     /// Remove a node from the cluster membership
     RemoveNode {
         /// Node id to remove
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Prevent the scheduler from placing new tasks on a node
     CordonNode {
         /// Node id to cordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Allow the scheduler to place new tasks on a node
     UncordonNode {
         /// Node id to uncordon
-        node_id: String,
+        node_id: ClusterNodeName,
     },
     /// Move scheduled graph nodes away from a node and keep it cordoned
     DrainNode {
         /// Node id to drain
-        node_id: String,
+        node_id: ClusterNodeName,
     },
 }
 
@@ -138,11 +152,10 @@ enum ClientError {
 
 impl Completer for GrpcCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let prefix = self
-            .buffer_prefix
-            .lock()
-            .map(|value| value.clone())
-            .unwrap_or_default();
+        let prefix = match self.buffer_prefix.lock() {
+            Ok(prefix) => prefix.clone(),
+            Err(_) => String::new(),
+        };
         let combined = format!("{}{}", prefix, &line[..pos.min(line.len())]);
         let cursor = u32::try_from(combined.len()).unwrap_or(u32::MAX);
         let client = self.client.clone();
@@ -183,12 +196,14 @@ impl Completer for GrpcCompleter {
 
 fn word_start(line: &str, pos: usize) -> usize {
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    line[..pos.min(line.len())]
+    let boundary = line[..pos.min(line.len())]
         .char_indices()
         .rev()
-        .find(|(_, c)| !is_word(*c))
-        .map(|(idx, c)| idx + c.len_utf8())
-        .unwrap_or(0)
+        .find(|(_, c)| !is_word(*c));
+    match boundary {
+        Some((index, character)) => index + character.len_utf8(),
+        None => 0,
+    }
 }
 
 #[tokio::main]
@@ -380,10 +395,20 @@ fn complete_local_upload_paths(
     pos: usize,
     lookup_hint: Option<&AutocompleteSuggestion>,
 ) -> Option<Vec<Suggestion>> {
-    let path_fragment = lookup_hint
-        .map(|hint| hint.value.as_str())
-        .filter(|hint| !hint.is_empty() || line[..pos.min(line.len())].contains(" VERSION '"))
-        .or_else(|| upload_resource_path_fragment(line, pos))?;
+    let hinted = match lookup_hint {
+        Some(hint)
+            if !hint.value.is_empty() || line[..pos.min(line.len())].contains(" VERSION '") =>
+        {
+            Some(hint.value.as_str())
+        }
+        _ => None,
+    };
+    let path_fragment = match hinted {
+        Some(path_fragment) => path_fragment,
+        None => upload_resource_path_fragment(line, pos)?,
+    };
+    // The suggested fragment may be longer than the text typed so far, in which case the
+    // replacement span starts at the beginning of the line.
     let span_start = pos.saturating_sub(path_fragment.len());
     let path = Path::new(path_fragment);
     let (base_dir, partial_name) = if path_fragment.is_empty() {
@@ -391,48 +416,58 @@ fn complete_local_upload_paths(
     } else if path_fragment.ends_with(std::path::MAIN_SEPARATOR) || path_fragment.ends_with('/') {
         (expand_user_path(path), String::new())
     } else {
-        (
-            expand_user_path(
-                path.parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from(".")),
-            ),
-            path.file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default(),
-        )
+        let parent = match path.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => PathBuf::from("."),
+        };
+        let file_name = match path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => String::new(),
+        };
+        (expand_user_path(parent), file_name)
     };
-    let mut suggestions = std::fs::read_dir(&base_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !partial_name.is_empty() && !name.starts_with(&partial_name) {
-                return None;
-            }
-            let value = if uses_home_prefix(path_fragment) {
-                let relative_base = strip_home_prefix(&base_dir)?;
-                if relative_base.as_os_str().is_empty() {
-                    format!("~/{name}")
-                } else {
-                    format!("~/{}/{}", relative_base.display(), name)
-                }
-            } else if base_dir == Path::new(".") {
-                name.clone()
-            } else {
-                base_dir.join(&name).display().to_string()
+    let Ok(entries) = std::fs::read_dir(&base_dir) else {
+        return None;
+    };
+    let mut suggestions = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !partial_name.is_empty() && !name.starts_with(&partial_name) {
+            continue;
+        }
+        let value = if uses_home_prefix(path_fragment) {
+            let Some(relative_base) = strip_home_prefix(&base_dir) else {
+                continue;
             };
-            let is_dir = entry.file_type().ok()?.is_dir();
-            Some(Suggestion {
-                value: if is_dir { format!("{value}/") } else { value },
-                description: None,
-                style: None,
-                extra: None,
-                span: reedline::Span::new(span_start, pos),
-                append_whitespace: false,
-            })
-        })
-        .collect::<Vec<_>>();
+            if relative_base.as_os_str().is_empty() {
+                format!("~/{name}")
+            } else {
+                format!("~/{}/{}", relative_base.display(), name)
+            }
+        } else if base_dir == Path::new(".") {
+            name.clone()
+        } else {
+            base_dir.join(&name).display().to_string()
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        suggestions.push(Suggestion {
+            value: if file_type.is_dir() {
+                format!("{value}/")
+            } else {
+                value
+            },
+            description: None,
+            style: None,
+            extra: None,
+            span: reedline::Span::new(span_start, pos),
+            append_whitespace: false,
+        });
+    }
     suggestions.sort_by(|left, right| left.value.cmp(&right.value));
     Some(suggestions)
 }
@@ -443,9 +478,10 @@ fn expand_user_path(path: impl AsRef<Path>) -> PathBuf {
         return path.to_path_buf();
     };
     if raw == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
+        return match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home),
+            None => path.to_path_buf(),
+        };
     }
     if let Some(stripped) = raw.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
@@ -664,7 +700,11 @@ async fn execute_upload_and_print(
 
     waiting_for_replication.store(true, Ordering::Relaxed);
     finished.store(true, Ordering::Relaxed);
-    let _ = progress_task.await;
+    // The task only renders the progress line, and `finished` has already told it to stop. Losing
+    // its join tells the operator nothing the upload outcome below does not already say.
+    progress_task
+        .await
+        .reported("rendering the upload progress line");
     let total_uploaded = uploaded.load(Ordering::Relaxed);
     clear_progress_line();
     let result = outcome.map_err(|err| StackReport::new(ClientError::from(err)))?;
@@ -703,12 +743,16 @@ fn emit_terminal_line(line: impl Into<String>) {
 
 fn render_progress_line(line: impl AsRef<str>) {
     print!("\r\x1b[2K{}", line.as_ref());
-    let _ = io::stdout().flush();
+    io::stdout()
+        .flush()
+        .discarded("the next update redraws the progress line a failed flush left behind");
 }
 
 fn clear_progress_line() {
     print!("\r\x1b[2K");
-    let _ = io::stdout().flush();
+    io::stdout()
+        .flush()
+        .discarded("the next update redraws the progress line a failed flush left behind");
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -722,17 +766,21 @@ fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSe
     tokio::spawn(async move {
         while let Ok(event) = subscription_client.next_subscription().await {
             tokio::task::consume_budget().await;
-            let _ = subscription_sender.send(format!(
-                "[events] subscription [{}] from [{}]: {}",
-                event.subscription, event.relay, event.payload
-            ));
+            subscription_sender
+                .send(format!(
+                    "[events] subscription [{}] from [{}]: {}",
+                    event.subscription, event.relay, event.payload
+                ))
+                .means_shutdown("terminal event printer");
         }
     });
 
     tokio::spawn(async move {
         while let Ok(event) = client.next_server_event().await {
             tokio::task::consume_budget().await;
-            let _ = sender.send(format_server_event(&event));
+            sender
+                .send(format_server_event(&event))
+                .means_shutdown("terminal event printer");
         }
     });
 }
@@ -799,8 +847,8 @@ fn subscribe_request(
 
 fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) {
     for diagnostic in diagnostics {
-        let start = usize::try_from(diagnostic.span_start).unwrap_or(0);
-        let mut end = usize::try_from(diagnostic.span_end).unwrap_or(start);
+        let start = diagnostic.span_start.arch_into();
+        let mut end = diagnostic.span_end.arch_into();
         if end < start {
             end = start;
         }
@@ -897,7 +945,10 @@ mod tests {
     fn remove_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "remove-node", "node-2"]);
         match args.subcommand {
-            Some(Command::RemoveNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::RemoveNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -906,7 +957,10 @@ mod tests {
     fn cordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "cordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::CordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::CordonNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -915,7 +969,10 @@ mod tests {
     fn uncordon_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "uncordon-node", "node-2"]);
         match args.subcommand {
-            Some(Command::UncordonNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::UncordonNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -924,7 +981,10 @@ mod tests {
     fn drain_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "drain-node", "node-2"]);
         match args.subcommand {
-            Some(Command::DrainNode { node_id }) => assert_eq!(node_id, "node-2"),
+            Some(Command::DrainNode { node_id }) => assert_eq!(
+                node_id,
+                ClusterNodeName::parse("node-2").expect("valid name")
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }

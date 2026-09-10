@@ -18,12 +18,15 @@ permissions:
   issues: write
 
 env:
-  KACHE_VERSION: "0.15.1"
+  KACHE_VERSION: "0.19.0"
 
 jobs:
   meta:
     name: metadata
-    if: github.event.action != 'labeled' || github.event.label.name == 'benchmark'
+    if: >-
+      (github.event_name != 'pull_request' ||
+        !contains(github.event.pull_request.labels.*.name, 'no-docker')) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'benchmark')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 40
     outputs:
@@ -40,7 +43,7 @@ jobs:
   build-arch:
     name: build-${{ matrix.image }}-${{ matrix.arch }}
     needs: meta
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 80
     strategy:
       fail-fast: false
@@ -51,11 +54,13 @@ jobs:
             platform: linux/amd64
             arch: amd64
             llvm: "23"
+            runner: blacksmith-4vcpu-ubuntu-2404
           - image: debian
             version: trixie
             platform: linux/arm64
             arch: arm64
             llvm: "23"
+            runner: blacksmith-4vcpu-ubuntu-2404
           # - image: alpine
           #   version: "3.23"
           #   platform: linux/amd64
@@ -259,6 +264,7 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'no-docker') &&
       contains(github.event.pull_request.labels.*.name, 'benchmark') &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: blacksmith-2vcpu-ubuntu-2404

@@ -1,8 +1,21 @@
-mod stored;
+//! The decisions a cluster makes about Models, before anything runs.
+//!
+//! Layer: decisions.
+//!
+//! - **Owns.** The durable model store, validation of domains, references, schemas, branches,
+//!   capabilities and execution contracts, transaction mutation planning, placement and relocation,
+//!   the active execution graph, and the assignment of nodes to cluster members.
+//! - **Depends on.** The vocabulary, the dataflow-graph description, the VM and the UDF host to
+//!   type-check what it validates, and `fjall` for storage.
+//! - **Must not know.** How a validated node runs. No Tokio task, no Arrow batch, no connector and
+//!   no branch-local state belongs here, and a decision must be computable without a cluster.
+//!
+mod relocation;
 
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeSet, VecDeque},
+    num::NonZeroU64,
     path::Path,
     str::FromStr,
     sync::Arc as StdArc,
@@ -16,6 +29,7 @@ use arrow_schema::{
 };
 use error_stack::{Report, ResultExt};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdge, DataflowEdgeKind, DataflowGraph, DataflowInputSide,
     DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind, DataflowSchemaField,
@@ -23,56 +37,62 @@ use nervix_dataflow_graph::{
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
     AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
-    AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchSelection, CborType,
-    ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction,
-    CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
-    CreatePlacement, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
-    CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
-    Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind,
-    MqttIngestMode, OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping,
-    OutputBranch, ParseAsType, PlacementGroupSchedule, PlacementPolicy, PlacementRuntimeNode,
-    ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
-    SignalingWireFormat, SqsFifoGroup, WireSchemaDefinition,
+    AlterWireSchema, Assignment, AssignmentTarget, AvroType, BranchName, BranchSelection, CborType,
+    ClusterNodeName, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat,
+    CorrelationTimeoutAction, CreateAvroWireSchema, CreateBranch, CreateCborWireSchema,
+    CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup,
+    CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchema, DomainName, DomainSchedule,
+    DropModel, EmitSink, EndpointName, EndpointType, Expression, FieldName, FlushPolicy,
+    IngestSource, IngestTimestampSource, IngestorName, JsonType, LookupName,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+    ModelChangeAspect, ModelIndex, ModelKind, ModelName, NodeRef, OtelAggregationTemporality,
+    OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType,
+    PlacementGroupSchedule, PlacementName, PlacementPolicy, ProcessorOutput, ProcessorOutputs,
+    QuiesceLevel, RelayName, ResolvedCodecWireFormat, RouteConstruction, ScheduledNode,
+    ScheduledNodes, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup,
+    UniquelyKindedModel, VhostName, WireSchemaLookup, WireSchemaName,
 };
-use nervix_nspl::{
-    vm_program::{
-        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
-        SemanticNamespaces, SpannedExpr, lower_branch_construction, lower_finalized_output_filter,
-        lower_generated_route, lower_route_construction, lower_set_only_route,
-        lower_transforming_route,
-    },
-    window_processor::aggregate::{lower_window_assignments, referenced_field_refs},
-};
+use nervix_recovery::Discarded as _;
 use nervix_roto::signatures_for as udf_signatures_for;
 use nervix_vm::{
-    CompileBinding, CompileOptions, OutputMode, SchemaSensitivity,
+    CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticNamespaces,
     compile_program_with_options_for_bindings_with_sensitivity,
-    infer_set_expr_types_for_bindings_with_udfs,
+    infer_set_expr_types_for_bindings_with_udfs, lower_branch_construction,
+    lower_finalized_output_filter, lower_generated_route, lower_route_construction,
+    lower_set_only_route, lower_transforming_route,
+    program::{
+        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
+        SpannedExpr,
+    },
+    window::{lower_window_assignments, referenced_field_refs},
 };
 use parking_lot::{Mutex, RwLock};
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
 };
+pub use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
-pub use stored::StoredModelVersioned;
 use thiserror::Error;
 use tracing::{info, warn};
 use triomphe::Arc;
 
 use crate::jaq_program::StatefulJaqProgram;
 
+/// Why applying one alteration of a batch discards its outcome.
+/// See [`RegistryMutation::apply_alteration`].
+const ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS: &str =
+    "an alteration the batch later repairs is applied against the final models, where a rejection \
+     can name the statement that caused it";
+
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
 const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
 
-fn udf_compile_options(
-    models: &HashMap<RegistryKey, Model>,
-    mut options: CompileOptions,
-) -> CompileOptions {
-    options.udf_signatures = udf_signatures_for(models.values().filter_map(|model| match model {
+fn udf_compile_options(models: &ModelIndex, mut options: CompileOptions) -> CompileOptions {
+    options.udf_signatures = udf_signatures_for(models.models().filter_map(|model| match model {
         Model::Udf(udf) => Some(udf),
         _ => None,
     }));
@@ -100,13 +120,6 @@ pub enum RegistryError {
     ReadValue,
     #[error("failed to deserialize model")]
     DeserializeValue,
-    #[error(
-        "stored emitter definition has no publishing MODE; recreate the emitter with an explicit \
-         MODE"
-    )]
-    EmitterPublishingModeMissing,
-    #[error("failed to convert stored model")]
-    ModelConversion,
     #[error("failed to decode key")]
     DecodeKey,
     #[error("failed to persist model batch")]
@@ -117,15 +130,20 @@ pub enum RegistryError {
     ConcurrentMutation { domain: String },
     #[error("model '{identifier}' does not exist in domain '{domain}'")]
     NotFound { domain: String, identifier: String },
+    /// Stored bytes that decode to a model of a kind other than the one their key names.
+    ///
+    /// The registry writes every model under the key the model itself reports, so this is corrupt
+    /// storage rather than configuration a domain can hold. It is reported instead of read so the
+    /// stored shape is recreated rather than reinterpreted.
     #[error(
-        "model '{identifier}' in domain '{domain}' expected kind {expected_kind}, found \
-         {actual_kind}"
+        "model '{identifier}' in domain '{domain}' is stored under kind {expected_kind} but \
+         decodes as {stored_kind}"
     )]
-    InvalidModelKind {
+    StoredModelKindMismatch {
         domain: String,
         identifier: String,
         expected_kind: &'static str,
-        actual_kind: &'static str,
+        stored_kind: &'static str,
     },
     #[error(
         "model '{identifier}' in domain '{domain}' requires missing {expected_kind} '{reference}'"
@@ -135,17 +153,6 @@ pub enum RegistryError {
         identifier: String,
         expected_kind: &'static str,
         reference: String,
-    },
-    #[error(
-        "model '{identifier}' in domain '{domain}' expected {expected_kind} '{reference}', found \
-         {actual_kind}"
-    )]
-    InvalidReferenceKind {
-        domain: String,
-        identifier: String,
-        expected_kind: &'static str,
-        reference: String,
-        actual_kind: &'static str,
     },
     #[error("active configuration graph for domain '{domain}' contains a cycle")]
     ConfigurationCycle { domain: String },
@@ -197,25 +204,18 @@ pub enum RegistryError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One model as storage holds it, with the domain that owns it.
+///
+/// The node the model configures is read from the model rather than carried beside it, because the
+/// key it is stored under is decoded from the model's own kind and name when the record is read.
 struct StoredModelRecord {
-    domain: Domain,
-    key: RegistryKey,
+    domain: DomainName,
     model: Model,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RegistryKey {
-    kind: ModelKind,
-    identifier: Identifier,
-}
-
-impl RegistryKey {
-    fn new(kind: ModelKind, identifier: Identifier) -> Self {
-        Self { kind, identifier }
-    }
-
-    fn from_model(model: &Model) -> Self {
-        Self::new(model.kind(), model.identifier().clone())
+impl StoredModelRecord {
+    fn node(&self) -> NodeRef {
+        self.model.node_ref()
     }
 }
 
@@ -227,15 +227,9 @@ pub struct Registry {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeChanges {
-    pub domain: Domain,
+    pub domain: DomainName,
     pub graph: Option<ActiveGraph>,
     pub changes: Vec<RuntimeChange>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RegistryEntity {
-    pub kind: ModelKind,
-    pub identifier: Identifier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,14 +239,14 @@ pub enum RuntimeChange {
         ingestor: Box<CreateIngestor>,
     },
     StopIngestor {
-        ingestor: Identifier,
+        ingestor: IngestorName,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuiescePlan {
     level: QuiesceLevel,
-    affected_entities: Vec<RegistryEntity>,
+    affected_entities: Vec<NodeRef>,
 }
 
 impl QuiescePlan {
@@ -260,7 +254,7 @@ impl QuiescePlan {
         self.level
     }
 
-    pub fn affected_entities(&self) -> &[RegistryEntity] {
+    pub fn affected_entities(&self) -> &[NodeRef] {
         &self.affected_entities
     }
 }
@@ -295,10 +289,11 @@ impl Registry {
         }
 
         for record in &stored {
+            let node = record.node();
             info!(
                 domain = record.domain.as_str(),
-                model = record.key.identifier.as_str(),
-                kind = record.key.kind.as_str(),
+                model = node.identifier.as_str(),
+                kind = node.kind.as_str(),
                 "loaded persisted model"
             );
         }
@@ -346,7 +341,7 @@ impl Registry {
     #[cfg(test)]
     pub fn apply_batch(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         models: Vec<Model>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutation_batch(
@@ -361,7 +356,7 @@ impl Registry {
     #[cfg(test)]
     pub fn drop_batch(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         drops: Vec<DropModel>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(
@@ -374,7 +369,7 @@ impl Registry {
     #[cfg(test)]
     pub fn alter_relay(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         alter: AlterRelay,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(
@@ -387,7 +382,7 @@ impl Registry {
     #[cfg(test)]
     pub fn apply_mutation_batch(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: Vec<RegistryMutation>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(domain, mutations, "mixed mutation batch")
@@ -396,45 +391,33 @@ impl Registry {
     pub fn startup_runtime_changes(&self) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
         let state = self.state.read();
         let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
-
-        Ok(domains
-            .into_iter()
-            .filter_map(|domain| {
-                let domain_state = state.domains.get(&domain)?;
-                let changes = runtime_changes_for_domain(
-                    &domain,
-                    Some(domain_state.graph.clone()),
-                    &HashMap::new(),
-                    &domain_state.models,
-                );
-                (changes.graph.is_some() || !changes.changes.is_empty()).then_some(changes)
-            })
-            .collect())
+        let mut startup_changes = Vec::new();
+        for domain in domains {
+            let domain_state = &state.domains[&domain];
+            let changes = runtime_changes_for_domain(
+                &domain,
+                Some(domain_state.graph.clone()),
+                &ModelIndex::new(),
+                &domain_state.models,
+            );
+            if changes.graph.is_some() || !changes.changes.is_empty() {
+                startup_changes.push(changes);
+            }
+        }
+        Ok(startup_changes)
     }
 
     pub fn synchronize_cluster_schedule(
         &self,
         schedule: &ClusterSchedule,
     ) -> Result<(), Report<RegistryError>> {
-        let desired_domains = schedule
-            .domains
-            .iter()
-            .map(|domain| domain.domain.clone())
-            .collect::<HashSet<_>>();
-        for domain_schedule in &schedule.domains {
+        let desired_domains = schedule.domains.keys().cloned().collect::<HashSet<_>>();
+        for domain_schedule in schedule.domains.values() {
             let models = domain_schedule
                 .nodes
-                .iter()
-                .filter_map(|node| {
-                    if let Model::Materializer(_) = node.config.as_ref() {
-                        return None;
-                    }
-                    Some((
-                        RegistryKey::new(node.kind, node.identifier.clone()),
-                        node.config.as_ref().clone(),
-                    ))
-                })
-                .collect::<HashMap<_, _>>();
+                .values()
+                .map(|node| node.config.as_ref().clone())
+                .collect::<ModelIndex>();
             self.synchronize_domain_models(&domain_schedule.domain, models)?;
         }
         let stale_domains = self
@@ -446,15 +429,15 @@ impl Registry {
             .cloned()
             .collect::<Vec<_>>();
         for domain in stale_domains {
-            self.synchronize_domain_models(&domain, HashMap::new())?;
+            self.synchronize_domain_models(&domain, ModelIndex::new())?;
         }
         Ok(())
     }
 
     fn synchronize_domain_models(
         &self,
-        domain: &Domain,
-        models: HashMap<RegistryKey, Model>,
+        domain: &DomainName,
+        models: ModelIndex,
     ) -> Result<(), Report<RegistryError>> {
         let _commit_guard = self.commit_lock.lock();
         let current_models = self
@@ -462,8 +445,8 @@ impl Registry {
             .list_models(domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         if current_models == models {
             return Ok(());
         }
@@ -480,8 +463,8 @@ impl Registry {
             })
             .collect::<HashMap<_, _>>();
         let drops = current_models
-            .keys()
-            .filter(|key| !models.contains_key(*key))
+            .nodes()
+            .filter(|key| !models.contains(key))
             .cloned()
             .collect::<HashSet<_>>();
         self.storage
@@ -509,7 +492,7 @@ impl Registry {
     #[cfg(test)]
     fn apply_mutations(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: Vec<RegistryMutation>,
         operation_name: &str,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
@@ -519,7 +502,7 @@ impl Registry {
 
     pub fn plan_mutations(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
     ) -> Result<PlannedMutations, Report<RegistryError>> {
         self.plan_mutations_named(domain, mutations, "mixed mutation batch")
@@ -532,7 +515,7 @@ impl Registry {
     /// may repair them.
     pub fn preflight_transaction_mutations(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
         self.plan_mutations_named_with_incomplete_candidate(
@@ -545,7 +528,7 @@ impl Registry {
 
     fn plan_mutations_named(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
         operation_name: &str,
     ) -> Result<PlannedMutations, Report<RegistryError>> {
@@ -557,12 +540,14 @@ impl Registry {
                 false,
             )?
             .planned
-            .expect("complete mutation planning must return a plan"))
+            .verified(
+                "this call disallows an incomplete candidate, and only that path returns no plan",
+            ))
     }
 
     fn plan_mutations_named_with_incomplete_candidate(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         mutations: &[RegistryMutation],
         operation_name: &str,
         allow_incomplete_candidate: bool,
@@ -582,8 +567,8 @@ impl Registry {
 
         let current_models = existing
             .iter()
-            .map(|record| (record.key.clone(), record.model.clone()))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model.clone())
+            .collect::<ModelIndex>();
         let current_state = self.build_domain_state(domain, &current_models)?;
         let mut candidate = current_models.clone();
         let mut mutation_quiesce_levels = Vec::with_capacity(mutations.len());
@@ -592,8 +577,8 @@ impl Registry {
             let mutation_base = candidate.get(&mutation.target_key()).cloned();
             match mutation {
                 RegistryMutation::Create(model) => {
-                    let identifier = model.identifier().clone();
-                    let key = RegistryKey::from_model(model);
+                    let identifier = model.name();
+                    let key = model.node_ref();
 
                     info!(
                         domain = domain.as_str(),
@@ -602,7 +587,7 @@ impl Registry {
                         "staging model create from batch"
                     );
 
-                    if candidate.contains_key(&key) {
+                    if candidate.contains(&key) {
                         warn!(
                             domain = domain.as_str(),
                             model = identifier.as_str(),
@@ -615,10 +600,9 @@ impl Registry {
                         }));
                     }
 
-                    candidate.insert(key, model.as_ref().clone());
+                    candidate.insert(model.as_ref().clone());
                 }
                 RegistryMutation::AlterSchema(alter) => {
-                    let key = RegistryKey::new(ModelKind::Schema, alter.schema.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.schema.as_str(),
@@ -626,18 +610,12 @@ impl Registry {
                         "staging schema alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) =
+                        candidate.configured_mut::<CreateSchema>(alter.schema.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Schema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::Schema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -649,7 +627,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterWireJsonSchema(alter) => {
-                    let key = RegistryKey::new(ModelKind::WireJsonSchema, alter.schema.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.schema.as_str(),
@@ -657,18 +634,20 @@ impl Registry {
                         "staging JSON wire schema alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) = candidate.narrowed_mut(
+                        ModelKind::WireJsonSchema,
+                        alter.schema.clone(),
+                        |model| {
+                            if let Model::WireJsonSchema(schema) = model {
+                                Some(schema)
+                            } else {
+                                None
+                            }
+                        },
+                    ) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::WireJsonSchema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::WireJsonSchema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -680,19 +659,20 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterWireCborSchema(alter) => {
-                    let key = RegistryKey::new(ModelKind::WireCborSchema, alter.schema.clone());
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) = candidate.narrowed_mut(
+                        ModelKind::WireCborSchema,
+                        alter.schema.clone(),
+                        |model| {
+                            if let Model::WireCborSchema(schema) = model {
+                                Some(schema)
+                            } else {
+                                None
+                            }
+                        },
+                    ) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::WireCborSchema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::WireCborSchema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -704,19 +684,12 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterWireAvroSchema(alter) => {
-                    let key = RegistryKey::new(ModelKind::WireAvroSchema, alter.schema.clone());
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(schema) =
+                        candidate.configured_mut::<CreateAvroWireSchema>(alter.schema.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.schema.as_str().to_string(),
-                        }));
-                    };
-                    let Model::WireAvroSchema(schema) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            expected_kind: ModelKind::WireAvroSchema.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
@@ -728,7 +701,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterRelay(alter) => {
-                    let key = RegistryKey::new(ModelKind::Relay, alter.relay.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.relay.as_str(),
@@ -736,22 +708,14 @@ impl Registry {
                         "staging relay alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(relay) = candidate.configured_mut::<CreateRelay>(alter.relay.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.relay.as_str().to_string(),
                         }));
                     };
-                    let before = model.clone();
-
-                    let Model::Relay(relay) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.relay.as_str().to_string(),
-                            expected_kind: ModelKind::Relay.as_str(),
-                            actual_kind: model.kind().as_str(),
-                        }));
-                    };
+                    let before = Model::Relay(relay.clone());
                     relay.apply_alter(alter).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
@@ -759,13 +723,12 @@ impl Registry {
                             reason: error.to_string(),
                         })
                     })?;
-                    let after = model.clone();
+                    let after = Model::Relay(relay.clone());
                     ensure_placement_member_shape_change_allowed(
                         domain, &before, &after, &candidate,
                     )?;
                 }
                 RegistryMutation::AlterJunction(alter) => {
-                    let key = RegistryKey::new(ModelKind::Junction, alter.junction.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.junction.as_str(),
@@ -773,18 +736,12 @@ impl Registry {
                         "staging junction alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(junction) =
+                        candidate.configured_mut::<CreateJunction>(alter.junction.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.junction.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Junction(junction) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.junction.as_str().to_string(),
-                            expected_kind: ModelKind::Junction.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     junction.apply_alter(alter).map_err(|error| {
@@ -796,7 +753,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterDeduplicator(alter) => {
-                    let key = RegistryKey::new(ModelKind::Deduplicator, alter.deduplicator.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.deduplicator.as_str(),
@@ -804,18 +760,12 @@ impl Registry {
                         "staging deduplicator alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(deduplicator) =
+                        candidate.configured_mut::<CreateDeduplicator>(alter.deduplicator.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.deduplicator.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Deduplicator(deduplicator) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.deduplicator.as_str().to_string(),
-                            expected_kind: ModelKind::Deduplicator.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     deduplicator.apply_alter(alter).map_err(|error| {
@@ -827,7 +777,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterReorderer(alter) => {
-                    let key = RegistryKey::new(ModelKind::Reorderer, alter.reorderer.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.reorderer.as_str(),
@@ -835,18 +784,12 @@ impl Registry {
                         "staging reorderer alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(reorderer) =
+                        candidate.configured_mut::<CreateReorderer>(alter.reorderer.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.reorderer.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Reorderer(reorderer) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.reorderer.as_str().to_string(),
-                            expected_kind: ModelKind::Reorderer.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     reorderer.apply_alter(alter).map_err(|error| {
@@ -858,7 +801,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterEmitter(alter) => {
-                    let key = RegistryKey::new(ModelKind::Emitter, alter.emitter.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.emitter.as_str(),
@@ -866,18 +808,12 @@ impl Registry {
                         "staging emitter alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(emitter) =
+                        candidate.configured_mut::<CreateEmitter>(alter.emitter.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.emitter.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Emitter(emitter) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.emitter.as_str().to_string(),
-                            expected_kind: ModelKind::Emitter.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     emitter.apply_alter(alter).map_err(|error| {
@@ -889,7 +825,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterIngestor(alter) => {
-                    let key = RegistryKey::new(ModelKind::Ingestor, alter.ingestor.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.ingestor.as_str(),
@@ -897,21 +832,15 @@ impl Registry {
                         "staging ingestor alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(ingestor) =
+                        candidate.configured_mut::<CreateIngestor>(alter.ingestor.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.ingestor.as_str().to_string(),
                         }));
                     };
-                    let before = model.clone();
-                    let Model::Ingestor(ingestor) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.ingestor.as_str().to_string(),
-                            expected_kind: ModelKind::Ingestor.as_str(),
-                            actual_kind: model.kind().as_str(),
-                        }));
-                    };
+                    let before = Model::Ingestor(ingestor.clone());
                     ingestor.apply_alter(alter).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
@@ -919,13 +848,12 @@ impl Registry {
                             reason: error.to_string(),
                         })
                     })?;
-                    let after = model.clone();
+                    let after = Model::Ingestor(ingestor.clone());
                     ensure_placement_member_shape_change_allowed(
                         domain, &before, &after, &candidate,
                     )?;
                 }
                 RegistryMutation::AlterReingestor(alter) => {
-                    let key = RegistryKey::new(ModelKind::Reingestor, alter.reingestor.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.reingestor.as_str(),
@@ -933,18 +861,12 @@ impl Registry {
                         "staging reingestor alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(reingestor) =
+                        candidate.configured_mut::<CreateReingestor>(alter.reingestor.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.reingestor.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Reingestor(reingestor) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.reingestor.as_str().to_string(),
-                            expected_kind: ModelKind::Reingestor.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     reingestor.apply_alter(alter).map_err(|error| {
@@ -956,7 +878,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterGenerator(alter) => {
-                    let key = RegistryKey::new(ModelKind::Generator, alter.generator.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.generator.as_str(),
@@ -964,18 +885,12 @@ impl Registry {
                         "staging generator alter from batch"
                     );
 
-                    let Some(model) = candidate.get_mut(&key) else {
+                    let Some(generator) =
+                        candidate.configured_mut::<CreateGenerator>(alter.generator.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.generator.as_str().to_string(),
-                        }));
-                    };
-                    let Model::Generator(generator) = model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.generator.as_str().to_string(),
-                            expected_kind: ModelKind::Generator.as_str(),
-                            actual_kind: model.kind().as_str(),
                         }));
                     };
                     generator.apply_alter(alter).map_err(|error| {
@@ -987,45 +902,47 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterPlacement(alter) => {
-                    let key = RegistryKey::new(ModelKind::Placement, alter.placement.clone());
+                    let key = NodeRef::new(ModelKind::Placement, alter.placement.clone());
                     info!(
                         domain = domain.as_str(),
                         model = alter.placement.as_str(),
                         kind = ModelKind::Placement.as_str(),
                         "staging placement alter from batch"
                     );
-                    let Some(mut model) = candidate.remove(&key) else {
+                    // A placement alteration may rename it, and the index keys a model by its own
+                    // name, so the entry leaves the index and re-enters under the resulting name.
+                    let Some(placement) =
+                        candidate.configured_mut::<CreatePlacement>(key.identifier.clone())
+                    else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: alter.placement.as_str().to_string(),
                         }));
                     };
-                    let Model::Placement(placement) = &mut model else {
-                        return Err(Report::new(RegistryError::InvalidModelKind {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.placement.as_str().to_string(),
-                            expected_kind: ModelKind::Placement.as_str(),
-                            actual_kind: model.kind().as_str(),
-                        }));
-                    };
-                    placement.apply_alter(alter).map_err(|error| {
+                    let mut altered = placement.clone();
+                    altered.apply_alter(alter).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: alter.placement.as_str().to_string(),
                             reason: error.to_string(),
                         })
                     })?;
-                    let next_key = RegistryKey::from_model(&model);
-                    if next_key != key && candidate.contains_key(&next_key) {
+                    let model = Model::Placement(altered);
+                    let next_key = model.node_ref();
+                    if next_key != key && candidate.contains(&next_key) {
                         return Err(Report::new(RegistryError::AlreadyExists {
                             domain: domain.as_str().to_string(),
-                            identifier: model.identifier().as_str().to_string(),
+                            identifier: model.name().as_str().to_string(),
                         }));
                     }
-                    candidate.insert(next_key, model);
+                    candidate.remove(&key).verified(
+                        "the placement being altered was resolved from this same index by this \
+                         key above",
+                    );
+                    candidate.insert(model);
                 }
                 RegistryMutation::Drop(drop) => {
-                    let key = RegistryKey::new(drop.kind, drop.name.clone());
+                    let key = NodeRef::new(drop.kind, drop.name.clone());
                     info!(
                         domain = domain.as_str(),
                         model = drop.name.as_str(),
@@ -1033,7 +950,7 @@ impl Registry {
                         "staging model drop from batch"
                     );
 
-                    if !candidate.contains_key(&key) {
+                    if !candidate.contains(&key) {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: drop.name.as_str().to_string(),
@@ -1043,7 +960,7 @@ impl Registry {
                         let RegistryMutation::Create(model) = mutation else {
                             return false;
                         };
-                        RegistryKey::from_model(model) == key
+                        model.node_ref() == key
                     });
                     if !allow_incomplete_candidate && !recreated_later {
                         let candidate_state = self.build_domain_state(domain, &candidate)?;
@@ -1053,7 +970,10 @@ impl Registry {
                             &HashSet::from_iter([key.clone()]),
                         )?;
                     }
-                    let _ = candidate.remove(&key);
+                    candidate.remove(&key).discarded(
+                        "a candidate that never held the dropped entity is already in the state \
+                         this removal wants",
+                    );
                 }
             }
             let mutation_candidate = mutation
@@ -1067,13 +987,17 @@ impl Registry {
         }
 
         let drops_in_batch = current_models
-            .keys()
-            .filter(|key| !candidate.contains_key(*key))
+            .nodes()
+            .filter(|key| !candidate.contains(key))
             .cloned()
             .collect::<HashSet<_>>();
 
         let domain_state = match self.build_domain_state(domain, &candidate) {
             Ok(state) => state,
+            // A caller that allows an incomplete candidate is queuing a step of a transaction that
+            // later steps complete, so a candidate that does not yet build has no plan to offer
+            // and no failure to report. The batch is validated once, on its final models, where a
+            // rejection can name the statement that caused it.
             Err(_) if allow_incomplete_candidate => {
                 return Ok(TransactionMutationPreflight {
                     planned: None,
@@ -1147,8 +1071,8 @@ impl Registry {
             .list_models(&planned.domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         if current_models != planned.base_models {
             return Err(Report::new(RegistryError::ConcurrentMutation {
                 domain: planned.domain.as_str().to_string(),
@@ -1175,27 +1099,26 @@ impl Registry {
         let mut writer = self.state.write();
         *writer = Arc::new(RegistryState { domains });
 
-        let graph_snapshot = writer
-            .domains
-            .get(&planned.domain)
-            .map(|state| state.graph.describe())
-            .unwrap_or_default();
+        let graph_snapshot = match writer.domains.get(&planned.domain) {
+            Some(state) => state.graph.describe(),
+            None => String::new(),
+        };
+        let node_count = match writer.domains.get(&planned.domain) {
+            Some(state) => state.graph.node_count(),
+            None => 0,
+        };
+        let edge_count = match writer.domains.get(&planned.domain) {
+            Some(state) => state.graph.edge_count(),
+            None => 0,
+        };
 
         info!(
             domain = planned.domain.as_str(),
             batch_size = planned.batch_size,
             operation = planned.operation_name,
             result = "ok",
-            node_count = writer
-                .domains
-                .get(&planned.domain)
-                .map(|state| state.graph.node_count())
-                .unwrap_or(0),
-            edge_count = writer
-                .domains
-                .get(&planned.domain)
-                .map(|state| state.graph.edge_count())
-                .unwrap_or(0),
+            node_count,
+            edge_count,
             "applied mutation batch\n{}",
             graph_snapshot
         );
@@ -1213,8 +1136,8 @@ impl Registry {
             .list_models(&planned.domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         if current_models != planned.domain_state.models {
             return Err(Report::new(RegistryError::ConcurrentMutation {
                 domain: planned.domain.as_str().to_string(),
@@ -1233,8 +1156,8 @@ impl Registry {
             })
             .collect::<HashMap<_, _>>();
         let drops = current_models
-            .keys()
-            .filter(|key| !planned.base_models.contains_key(*key))
+            .nodes()
+            .filter(|key| !planned.base_models.contains(key))
             .cloned()
             .collect::<HashSet<_>>();
         self.storage
@@ -1261,23 +1184,71 @@ impl Registry {
         Ok(runtime_changes)
     }
 
-    pub fn get(
+    /// The `M` named `identifier` in `domain`, when the domain configures one.
+    ///
+    /// `M` names the kind the read is keyed by, so a hit is an `M` and the caller has no second
+    /// outcome to answer for. Stored bytes that decode to another kind are corrupt storage rather
+    /// than configuration a domain can hold, and they surface here once as
+    /// [`RegistryError::StoredModelKindMismatch`].
+    pub fn get<M: UniquelyKindedModel>(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
+        identifier: impl Into<ModelName>,
+    ) -> Result<Option<M>, Report<RegistryError>> {
+        let identifier = identifier.into();
+        let Some(model) = self.get_of_kind(domain, M::KIND, identifier.clone())? else {
+            return Ok(None);
+        };
+        let stored_kind = model.kind();
+        let Some(model) = M::from_model(model) else {
+            return Err(Report::new(RegistryError::StoredModelKindMismatch {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                expected_kind: M::KIND.as_str(),
+                stored_kind: stored_kind.as_str(),
+            }));
+        };
+        Ok(Some(model))
+    }
+
+    /// The model named `identifier` in `domain` under a kind the caller learns at runtime.
+    ///
+    /// `SHOW CREATE` takes the kind from the statement it is rendering, so it reads the union and
+    /// renders whatever the domain stores. Every read that names its kind in its own source uses
+    /// [`Self::get`] instead.
+    pub fn get_of_kind(
+        &self,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<Option<Model>, Report<RegistryError>> {
+        let identifier = identifier.into();
         self.storage
             .get(domain, kind, identifier)
             .change_context(RegistryError::LoadStoredModels)
     }
 
+    /// Whether `domain` already configures a model of `kind` named `identifier`.
+    ///
+    /// `CREATE ... IF NOT EXISTS` only asks whether the name is taken, so it never decodes the
+    /// stored model to find out.
+    pub fn contains(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        identifier: impl Into<ModelName>,
+    ) -> Result<bool, Report<RegistryError>> {
+        self.storage
+            .contains(domain, kind, identifier)
+            .change_context(RegistryError::LoadStoredModels)
+    }
+
     pub fn list_identifiers(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
         prefix: &str,
-    ) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
         self.storage
             .list_identifiers(domain, kind, prefix)
             .change_context(RegistryError::LoadStoredModels)
@@ -1288,11 +1259,11 @@ impl Registry {
     /// configuration that does not yet resolve still reports the names it defines.
     pub fn resulting_identifiers(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
         prefix: &str,
         queued: &[RegistryMutation],
-    ) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
         let committed = self.list_identifiers(domain, kind, prefix)?;
         if queued.is_empty() {
             return Ok(committed);
@@ -1320,7 +1291,7 @@ impl Registry {
     /// configuration a client is still writing rather than a plan that will be persisted.
     pub fn resulting_models(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         queued: &[RegistryMutation],
     ) -> Result<Vec<Model>, Report<RegistryError>> {
         let mut models = self
@@ -1328,22 +1299,22 @@ impl Registry {
             .list_models(domain)
             .change_context(RegistryError::LoadStoredModels)?
             .into_iter()
-            .map(|record| (record.key, record.model))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.model)
+            .collect::<ModelIndex>();
         for mutation in queued {
             mutation.fold_into_models(&mut models);
         }
-        Ok(models.into_values().collect())
+        Ok(models.into_iter().map(|(_, model)| model).collect())
     }
 
-    pub fn active_graph(&self, domain: &Domain) -> Option<ActiveGraph> {
+    pub fn active_graph(&self, domain: &DomainName) -> Option<ActiveGraph> {
         let state = self.state.read();
         state.domains.get(domain).map(|ns| ns.graph.clone())
     }
 
     pub fn placement_plan(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         default_policy: PlacementPolicy,
     ) -> Option<PlacementPlan> {
         let state = self.state.read();
@@ -1353,7 +1324,7 @@ impl Registry {
             .map(|domain_state| domain_state.graph.placement_plan(default_policy))
     }
 
-    pub fn active_graphs(&self) -> Vec<(Domain, ActiveGraph)> {
+    pub fn active_graphs(&self) -> Vec<(DomainName, ActiveGraph)> {
         let state = self.state.read();
         let mut graphs = state
             .domains
@@ -1364,7 +1335,7 @@ impl Registry {
         graphs
     }
 
-    pub fn active_domain_entities(&self, domain: &Domain) -> Vec<RegistryEntity> {
+    pub fn active_domain_entities(&self, domain: &DomainName) -> Vec<NodeRef> {
         let state = self.state.read();
         let Some(domain_state) = state.domains.get(domain) else {
             return Vec::new();
@@ -1374,43 +1345,36 @@ impl Registry {
             .nodes()
             .into_iter()
             .filter(|node| !node.is_dataflow_node())
-            .map(|node| RegistryEntity {
-                kind: node.kind,
-                identifier: node.identifier,
-            })
+            .map(|node| node.node_ref())
             .collect::<Vec<_>>();
-        entities.sort_by(|left, right| {
-            left.kind
-                .as_str()
-                .cmp(right.kind.as_str())
-                .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
-        });
+        entities.sort();
         entities
     }
 
     fn build_domain_state(
         &self,
-        domain: &Domain,
-        models: &HashMap<RegistryKey, Model>,
+        domain: &DomainName,
+        models: &ModelIndex,
     ) -> Result<DomainState, Report<RegistryError>> {
         DomainState::build(domain, models)
     }
 
-    fn active_graph_snapshot(&self, domain: &Domain) -> String {
-        self.active_graph(domain)
-            .map(|graph| graph.describe())
-            .unwrap_or_default()
+    fn active_graph_snapshot(&self, domain: &DomainName) -> String {
+        match self.active_graph(domain) {
+            Some(graph) => graph.describe(),
+            None => String::new(),
+        }
     }
 }
 
 fn classify_quiesce(
-    base: &HashMap<RegistryKey, Model>,
-    candidate: &HashMap<RegistryKey, Model>,
+    base: &ModelIndex,
+    candidate: &ModelIndex,
     candidate_graph: &ActiveGraph,
 ) -> QuiescePlan {
     let mut level = QuiesceLevel::Dynamic;
     let mut affected_entities = Vec::new();
-    let mut gated_seeds = HashSet::<RegistryKey>::default();
+    let mut gated_seeds = HashSet::<NodeRef>::default();
 
     for (key, base_model) in base {
         let change_level = match candidate.get(key) {
@@ -1427,15 +1391,15 @@ fn classify_quiesce(
         if change_level.requires_entity_pause() {
             gated_seeds.insert(key.clone());
         }
-        affected_entities.push(RegistryEntity {
+        affected_entities.push(NodeRef {
             kind: key.kind,
             identifier: key.identifier.clone(),
         });
     }
 
-    for key in candidate.keys().filter(|key| !base.contains_key(*key)) {
+    for key in candidate.nodes().filter(|key| !base.contains(key)) {
         level = level.max(ModelChangeAspect::EntityCreated.quiesce_level());
-        affected_entities.push(RegistryEntity {
+        affected_entities.push(NodeRef {
             kind: key.kind,
             identifier: key.identifier.clone(),
         });
@@ -1487,49 +1451,43 @@ pub enum RegistryMutation {
 }
 
 impl RegistryMutation {
-    fn target_key(&self) -> RegistryKey {
+    fn target_key(&self) -> NodeRef {
         match self {
-            Self::Create(model) => RegistryKey::from_model(model),
-            Self::AlterSchema(alter) => RegistryKey::new(ModelKind::Schema, alter.schema.clone()),
+            Self::Create(model) => model.node_ref(),
+            Self::AlterSchema(alter) => NodeRef::new(ModelKind::Schema, alter.schema.clone()),
             Self::AlterWireJsonSchema(alter) => {
-                RegistryKey::new(ModelKind::WireJsonSchema, alter.schema.clone())
+                NodeRef::new(ModelKind::WireJsonSchema, alter.schema.clone())
             }
             Self::AlterWireCborSchema(alter) => {
-                RegistryKey::new(ModelKind::WireCborSchema, alter.schema.clone())
+                NodeRef::new(ModelKind::WireCborSchema, alter.schema.clone())
             }
             Self::AlterWireAvroSchema(alter) => {
-                RegistryKey::new(ModelKind::WireAvroSchema, alter.schema.clone())
+                NodeRef::new(ModelKind::WireAvroSchema, alter.schema.clone())
             }
-            Self::AlterRelay(alter) => RegistryKey::new(ModelKind::Relay, alter.relay.clone()),
-            Self::AlterJunction(alter) => {
-                RegistryKey::new(ModelKind::Junction, alter.junction.clone())
-            }
+            Self::AlterRelay(alter) => NodeRef::new(ModelKind::Relay, alter.relay.clone()),
+            Self::AlterJunction(alter) => NodeRef::new(ModelKind::Junction, alter.junction.clone()),
             Self::AlterDeduplicator(alter) => {
-                RegistryKey::new(ModelKind::Deduplicator, alter.deduplicator.clone())
+                NodeRef::new(ModelKind::Deduplicator, alter.deduplicator.clone())
             }
             Self::AlterReorderer(alter) => {
-                RegistryKey::new(ModelKind::Reorderer, alter.reorderer.clone())
+                NodeRef::new(ModelKind::Reorderer, alter.reorderer.clone())
             }
-            Self::AlterEmitter(alter) => {
-                RegistryKey::new(ModelKind::Emitter, alter.emitter.clone())
-            }
-            Self::AlterIngestor(alter) => {
-                RegistryKey::new(ModelKind::Ingestor, alter.ingestor.clone())
-            }
+            Self::AlterEmitter(alter) => NodeRef::new(ModelKind::Emitter, alter.emitter.clone()),
+            Self::AlterIngestor(alter) => NodeRef::new(ModelKind::Ingestor, alter.ingestor.clone()),
             Self::AlterReingestor(alter) => {
-                RegistryKey::new(ModelKind::Reingestor, alter.reingestor.clone())
+                NodeRef::new(ModelKind::Reingestor, alter.reingestor.clone())
             }
             Self::AlterGenerator(alter) => {
-                RegistryKey::new(ModelKind::Generator, alter.generator.clone())
+                NodeRef::new(ModelKind::Generator, alter.generator.clone())
             }
             Self::AlterPlacement(alter) => {
-                RegistryKey::new(ModelKind::Placement, alter.placement.clone())
+                NodeRef::new(ModelKind::Placement, alter.placement.clone())
             }
-            Self::Drop(drop) => RegistryKey::new(drop.kind, drop.name.clone()),
+            Self::Drop(drop) => NodeRef::new(drop.kind, drop.name.clone()),
         }
     }
 
-    fn resulting_key(&self) -> Option<RegistryKey> {
+    fn resulting_key(&self) -> Option<NodeRef> {
         match self {
             Self::Drop(_) => None,
             Self::AlterPlacement(alter) => {
@@ -1545,7 +1503,7 @@ impl RegistryMutation {
                     })
                     .next_back()
                     .unwrap_or(&alter.placement);
-                Some(RegistryKey::new(ModelKind::Placement, identifier.clone()))
+                Some(NodeRef::new(ModelKind::Placement, identifier.clone()))
             }
             _ => Some(self.target_key()),
         }
@@ -1554,10 +1512,10 @@ impl RegistryMutation {
     /// Fold this mutation into `models` without validating the outcome. An alteration that no
     /// longer applies leaves the stored model as it was, so a description of queued configuration
     /// never fails on an intermediate state its later statements repair.
-    fn fold_into_models(&self, models: &mut HashMap<RegistryKey, Model>) {
+    fn fold_into_models(&self, models: &mut ModelIndex) {
         match self {
             Self::Create(model) => {
-                models.insert(RegistryKey::from_model(model), model.as_ref().clone());
+                models.insert(model.as_ref().clone());
             }
             Self::Drop(_) => {
                 models.remove(&self.target_key());
@@ -1567,52 +1525,85 @@ impl RegistryMutation {
                     return;
                 };
                 self.apply_alteration(&mut model);
-                let resulting = self.resulting_key().unwrap_or_else(|| self.target_key());
-                models.insert(resulting, model);
+                models.insert(model);
             }
         }
     }
 
+    /// Fold one alteration into the model it targets, keeping the model as it was when the
+    /// alteration no longer applies.
+    ///
+    /// Every arm below discards its outcome for the reason [`Self::fold_into_models`] gives: this
+    /// walk describes queued configuration rather than committing it, and a statement that reads
+    /// as invalid against an intermediate state is routinely repaired by a later statement in the
+    /// same batch. Validation happens once, on the batch's final models, where a rejection can
+    /// name the statement that caused it.
     fn apply_alteration(&self, model: &mut Model) {
         match (self, model) {
             (Self::AlterSchema(alter), Model::Schema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterWireJsonSchema(alter), Model::WireJsonSchema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterWireCborSchema(alter), Model::WireCborSchema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterWireAvroSchema(alter), Model::WireAvroSchema(schema)) => {
-                let _ = schema.apply_alter(alter);
+                schema
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterRelay(alter), Model::Relay(relay)) => {
-                let _ = relay.apply_alter(alter);
+                relay
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterJunction(alter), Model::Junction(junction)) => {
-                let _ = junction.apply_alter(alter);
+                junction
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterDeduplicator(alter), Model::Deduplicator(deduplicator)) => {
-                let _ = deduplicator.apply_alter(alter);
+                deduplicator
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterReorderer(alter), Model::Reorderer(reorderer)) => {
-                let _ = reorderer.apply_alter(alter);
+                reorderer
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterEmitter(alter), Model::Emitter(emitter)) => {
-                let _ = emitter.apply_alter(alter);
+                emitter
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterIngestor(alter), Model::Ingestor(ingestor)) => {
-                let _ = ingestor.apply_alter(alter);
+                ingestor
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterReingestor(alter), Model::Reingestor(reingestor)) => {
-                let _ = reingestor.apply_alter(alter);
+                reingestor
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterGenerator(alter), Model::Generator(generator)) => {
-                let _ = generator.apply_alter(alter);
+                generator
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             (Self::AlterPlacement(alter), Model::Placement(placement)) => {
-                let _ = placement.apply_alter(alter);
+                placement
+                    .apply_alter(alter)
+                    .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
             _ => {}
         }
@@ -1627,13 +1618,13 @@ enum RegistryPersistMutation {
 
 #[derive(Debug, Clone)]
 pub struct PlannedMutations {
-    domain: Domain,
+    domain: DomainName,
     batch_size: usize,
     operation_name: String,
-    base_models: HashMap<RegistryKey, Model>,
+    base_models: ModelIndex,
     domain_state: DomainState,
-    models_to_persist: HashMap<RegistryKey, RegistryPersistMutation>,
-    drops_in_batch: HashSet<RegistryKey>,
+    models_to_persist: HashMap<NodeRef, RegistryPersistMutation>,
+    drops_in_batch: HashSet<NodeRef>,
     runtime_changes: RuntimeChanges,
     quiesce: QuiescePlan,
 }
@@ -1705,18 +1696,18 @@ impl PlannedMutations {
 
 #[derive(Debug, Clone)]
 struct RegistryState {
-    domains: HashMap<Domain, DomainState>,
+    domains: HashMap<DomainName, DomainState>,
 }
 
 impl RegistryState {
     fn from_records(records: Vec<StoredModelRecord>) -> Result<Self, Report<RegistryError>> {
-        let mut grouped = HashMap::<Domain, HashMap<RegistryKey, Model>>::new();
+        let mut grouped = HashMap::<DomainName, ModelIndex>::new();
 
         for record in records {
             grouped
                 .entry(record.domain)
                 .or_default()
-                .insert(record.key, record.model);
+                .insert(record.model);
         }
 
         let mut domains = HashMap::new();
@@ -1731,15 +1722,12 @@ impl RegistryState {
 
 #[derive(Debug, Clone)]
 struct DomainState {
-    models: HashMap<RegistryKey, Model>,
+    models: ModelIndex,
     graph: ActiveGraph,
 }
 
 impl DomainState {
-    fn build(
-        domain: &Domain,
-        models: &HashMap<RegistryKey, Model>,
-    ) -> Result<Self, Report<RegistryError>> {
+    fn build(domain: &DomainName, models: &ModelIndex) -> Result<Self, Report<RegistryError>> {
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let mut indices = HashMap::new();
 
@@ -1795,7 +1783,7 @@ impl DomainState {
             };
             let source = *indices
                 .get(key)
-                .expect("graph node must exist for every model");
+                .verified("the pass above added a graph node for every model in this map");
 
             if let Some(branched_by) = model_branch_selection(model)
                 && let Some(branch_ref) = branched_by.branch_ref()
@@ -1930,7 +1918,7 @@ impl DomainState {
                         graph.add_edge(signaling_protocol, source, EdgeKind::RequiredBy);
                     }
                 }
-                Model::Materializer(_) | Model::Placement(_) => {}
+                Model::Placement(_) => {}
                 Model::SignalingProtocol(protocol) => {
                     ensure_signaling_protocol_is_valid(domain, identifier, protocol)?;
                 }
@@ -2068,25 +2056,6 @@ impl DomainState {
                     )?;
                 }
                 Model::WasmProcessor(processor) => {
-                    if processor.limits.max_fuel == 0 {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: "WASM processor MAX FUEL must be greater than zero".to_string(),
-                        }));
-                    }
-                    if processor.limits.max_memory_bytes == 0
-                        || usize::try_from(processor.limits.max_memory_bytes).is_err()
-                    {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: format!(
-                                "WASM processor MAX MEMORY {} bytes is not supported on this node",
-                                processor.limits.max_memory_bytes
-                            ),
-                        }));
-                    }
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -2152,22 +2121,9 @@ impl DomainState {
                     )?;
                 }
                 Model::Codec(codec) => {
-                    if let Some(wire_schema_identifier) = codec.wire_schema.as_ref() {
-                        let wire_schema = expect_kind(
-                            domain,
-                            identifier,
-                            models,
-                            &indices,
-                            wire_schema_identifier,
-                            codec.wire_format.wire_schema_kind().ok_or_else(|| {
-                                Report::new(RegistryError::InvalidModel {
-                                    domain: domain.as_str().to_string(),
-                                    identifier: identifier.as_str().to_string(),
-                                    reason: "codec wire format cannot reference a wire schema"
-                                        .to_string(),
-                                })
-                            })?,
-                        )?;
+                    if let Some(reference) = codec.wire_format.wire_schema_reference() {
+                        let wire_schema =
+                            expect_node(domain, identifier, models, &indices, &reference)?;
                         graph.add_edge(wire_schema, source, EdgeKind::RequiredBy);
                     }
                     let schema = expect_kind(
@@ -2182,24 +2138,16 @@ impl DomainState {
 
                     let schema_model =
                         expect_schema_model(domain, identifier, models, &codec.schema)?;
-                    let wire_schema_model = codec
-                        .wire_schema
-                        .as_ref()
-                        .map(|wire_schema| {
-                            expect_wire_schema_model(
-                                domain,
-                                identifier,
-                                models,
-                                &codec.wire_format,
-                                wire_schema,
-                            )
-                        })
-                        .transpose()?;
+                    let wire_schemas = DomainModelWireSchemas {
+                        domain,
+                        identifier,
+                        models,
+                    };
+                    let wire_format = codec.wire_format.resolve(&wire_schemas)?;
                     ensure_codec_schema_compatibility(
                         domain,
                         identifier,
-                        &codec.wire_format,
-                        wire_schema_model.as_ref(),
+                        wire_format,
                         schema_model,
                         &codec.encoding_rules,
                     )?;
@@ -2271,8 +2219,11 @@ impl DomainState {
                                 ModelKind::Client,
                             )?;
                             let client_model = models
-                                .get(&RegistryKey::new(ModelKind::Client, client.clone()))
-                                .expect("validated syslog client must exist");
+                                .get(&NodeRef::new(ModelKind::Client, client.clone()))
+                                .verified(
+                                    "expect_kind above resolved this client reference against the \
+                                     same model set",
+                                );
                             if let Model::ClientSyslog(_) = client_model {
                             } else {
                                 return Err(Report::new(RegistryError::InvalidModel {
@@ -2281,8 +2232,9 @@ impl DomainState {
                                     reason: format!(
                                         "SYSLOG ingestor requires a SYSLOG client, found {} \
                                          client '{}'",
-                                        client_model.client_type_label().expect(
-                                            "validated client model must have a client type"
+                                        client_model.client_type_label().verified(
+                                            "this model was resolved as a client above, and every \
+                                             client model carries a type label"
                                         ),
                                         client.as_str(),
                                     ),
@@ -2309,8 +2261,9 @@ impl DomainState {
                         models,
                         &ingestor.decode_using_codec,
                     )?;
-                    let message_namespace = Identifier::parse(INGEST_MESSAGE_NAMESPACE)
-                        .expect("static namespace must be a valid identifier");
+                    let message_namespace = RelayName::parse(INGEST_MESSAGE_NAMESPACE).assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    );
                     validate_ingestor_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -3001,7 +2954,7 @@ impl DomainState {
                     let producer_schema = input_schemas
                         .first()
                         .map(|(_relay, schema)| *schema)
-                        .expect("validated emitter inputs must not be empty");
+                        .verified("the emitter inputs were validated as non-empty above");
                     for (relay, schema) in &input_schemas {
                         if schema.name != producer_schema.name {
                             return Err(Report::new(RegistryError::InvalidModel {
@@ -3065,8 +3018,11 @@ impl DomainState {
                         ModelKind::Client,
                     )?;
                     let client_model = models
-                        .get(&RegistryKey::new(ModelKind::Client, client_name.clone()))
-                        .expect("validated emitter client must exist");
+                        .get(&NodeRef::new(ModelKind::Client, client_name.clone()))
+                        .verified(
+                            "expect_kind above resolved this client reference against the same \
+                             model set",
+                        );
                     if !emitter.sink.accepts_client(client_model) {
                         return Err(Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
@@ -3075,9 +3031,10 @@ impl DomainState {
                                 "{} emitter requires a {} client, found {} client '{}'",
                                 emitter.sink.transport_label(),
                                 emitter.sink.expected_client_type(),
-                                client_model
-                                    .client_type_label()
-                                    .expect("validated client model must have a client type"),
+                                client_model.client_type_label().verified(
+                                    "this model was resolved as a client above, and every client \
+                                     model carries a type label"
+                                ),
                                 client_name.as_str(),
                             ),
                         }));
@@ -3094,11 +3051,14 @@ impl DomainState {
                             ModelKind::Client,
                         )?;
                         let catalog_client_model = models
-                            .get(&RegistryKey::new(
+                            .get(&NodeRef::new(
                                 ModelKind::Client,
                                 catalog_client_name.clone(),
                             ))
-                            .expect("validated Iceberg catalog client must exist");
+                            .verified(
+                                "expect_kind above resolved this client reference against the \
+                                 same model set",
+                            );
                         if let Model::ClientIcebergRest(_) = catalog_client_model {
                         } else {
                             return Err(Report::new(RegistryError::InvalidModel {
@@ -3107,8 +3067,9 @@ impl DomainState {
                                 reason: format!(
                                     "ICEBERG emitter requires an ICEBERG_REST catalog client, \
                                      found {} client '{}'",
-                                    catalog_client_model.client_type_label().expect(
-                                        "validated catalog client model must have a client type"
+                                    catalog_client_model.client_type_label().verified(
+                                        "this model was resolved as a client above, and every \
+                                         client model carries a type label"
                                     ),
                                     catalog_client_name.as_str(),
                                 ),
@@ -3166,7 +3127,6 @@ impl DomainState {
         validate_endpoint_paths(domain, models)?;
         infer_stream_branchings(domain, models, &indices, &mut graph)?;
         validate_processing_branch_selections(domain, models, &indices, &graph)?;
-        attach_materializer_nodes(models, &mut indices, &mut graph);
         let placement = PlacementAnalysis::build(domain, models, &indices, &mut graph)?;
 
         Ok(Self {
@@ -3189,66 +3149,66 @@ pub struct PlacementPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementRulePlan {
-    pub name: Identifier,
-    pub from: Vec<Identifier>,
-    pub to: Vec<Identifier>,
+    pub name: ModelName,
+    pub from: Vec<ModelName>,
+    pub to: Vec<ModelName>,
     pub policy: PlacementPolicy,
-    pub rank: Option<u64>,
+    pub rank: Option<NonZeroU64>,
     pub endpoint_pairs: Vec<PlacementEndpointPairPlan>,
     pub claims: Vec<PlacementRuleClaimPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementEndpointPairPlan {
-    pub source: PlacementRuntimeNode,
-    pub destination: PlacementRuntimeNode,
+    pub source: NodeRef,
+    pub destination: NodeRef,
     pub connected: bool,
-    pub corridor: Vec<PlacementRuntimeNode>,
+    pub corridor: Vec<NodeRef>,
     pub witnesses: Vec<PlacementCorridorWitness>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementCorridorWitness {
-    pub captured: PlacementRuntimeNode,
-    pub path: Vec<PlacementRuntimeNode>,
+    pub captured: NodeRef,
+    pub path: Vec<NodeRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementRuleClaimPlan {
-    pub left: PlacementRuntimeNode,
-    pub right: PlacementRuntimeNode,
+    pub left: NodeRef,
+    pub right: NodeRef,
     pub effective: bool,
     pub effective_policy: PlacementPolicy,
-    pub winning_rules: Vec<Identifier>,
+    pub winning_rules: Vec<PlacementName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementEffectivePair {
-    pub left: PlacementRuntimeNode,
-    pub right: PlacementRuntimeNode,
+    pub left: NodeRef,
+    pub right: NodeRef,
     pub policy: PlacementPolicy,
-    pub winning_rules: Vec<Identifier>,
+    pub winning_rules: Vec<PlacementName>,
     pub from_domain_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementRequireGroupPlan {
-    pub members: Vec<PlacementRuntimeNode>,
+    pub members: Vec<NodeRef>,
     pub bonds: Vec<PlacementEffectivePair>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PlacementPair {
-    left: RegistryKey,
-    right: RegistryKey,
+    left: NodeRef,
+    right: NodeRef,
 }
 
 impl PlacementPair {
-    fn new(left: RegistryKey, right: RegistryKey) -> Option<Self> {
+    fn new(left: NodeRef, right: NodeRef) -> Option<Self> {
         if left == right {
             return None;
         }
-        if registry_key_cmp(&left, &right).is_le() {
+        if left <= right {
             Some(Self { left, right })
         } else {
             Some(Self {
@@ -3258,11 +3218,8 @@ impl PlacementPair {
         }
     }
 
-    fn runtime_nodes(&self) -> (PlacementRuntimeNode, PlacementRuntimeNode) {
-        (
-            placement_runtime_node(&self.left),
-            placement_runtime_node(&self.right),
-        )
+    fn runtime_nodes(&self) -> (NodeRef, NodeRef) {
+        (self.left.clone(), self.right.clone())
     }
 }
 
@@ -3275,23 +3232,23 @@ struct PlacementRuleAnalysis {
 
 #[derive(Debug, Clone)]
 struct PlacementEndpointAnalysis {
-    source: RegistryKey,
-    destination: RegistryKey,
-    corridor: Vec<RegistryKey>,
-    witnesses: Vec<(RegistryKey, Vec<RegistryKey>)>,
+    source: NodeRef,
+    destination: NodeRef,
+    corridor: Vec<NodeRef>,
+    witnesses: Vec<(NodeRef, Vec<NodeRef>)>,
 }
 
 #[derive(Debug, Clone)]
 struct PlacementClaim {
-    rule: Identifier,
+    rule: PlacementName,
     policy: PlacementPolicy,
-    rank: Option<u64>,
+    rank: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedPlacementPair {
     policy: PlacementPolicy,
-    winning_rules: Vec<Identifier>,
+    winning_rules: Vec<PlacementName>,
     from_domain_default: bool,
 }
 
@@ -3300,25 +3257,28 @@ struct PlacementAnalysis {
     rules: Vec<PlacementRuleAnalysis>,
     explicit_pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
     direct_pairs: HashSet<PlacementPair>,
+    /// Retained so a relocation corridor can be covered between endpoints no placement rule
+    /// names, using the same path-gated coverage the rules use.
+    topology: PlacementTopology,
 }
 
 #[derive(Debug, Clone)]
 struct EffectivePlacementPlan {
     pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
-    require_groups: Vec<Vec<RegistryKey>>,
-    group_by_member: HashMap<RegistryKey, usize>,
+    require_groups: Vec<Vec<NodeRef>>,
+    group_by_member: HashMap<NodeRef, usize>,
 }
 
 impl PlacementAnalysis {
     fn build(
-        domain: &Domain,
-        models: &HashMap<RegistryKey, Model>,
-        indices: &HashMap<RegistryKey, NodeIndex>,
+        domain: &DomainName,
+        models: &ModelIndex,
+        indices: &HashMap<NodeRef, NodeIndex>,
         graph: &mut DiGraph<ActiveNode, EdgeKind>,
     ) -> Result<Self, Report<RegistryError>> {
         let topology = PlacementTopology::build(models, indices, graph);
         let mut placement_models = models
-            .values()
+            .models()
             .filter_map(|model| match model {
                 Model::Placement(placement) => Some(placement.clone()),
                 _ => None,
@@ -3337,22 +3297,18 @@ impl PlacementAnalysis {
                 })
             })?;
             let placement_index = indices
-                .get(&RegistryKey::new(
-                    ModelKind::Placement,
-                    placement.name.clone(),
-                ))
+                .get(&NodeRef::new(ModelKind::Placement, placement.name.clone()))
                 .copied()
-                .expect("placement graph node must exist");
+                .verified("the pass above added a graph node for every placement");
             let from = resolve_placement_members(domain, &placement, &placement.from, models)?;
             let to = resolve_placement_members(domain, &placement, &placement.to, models)?;
 
             let mut pinned = HashSet::default();
             for member in from.iter().chain(&to) {
                 if pinned.insert(member.pin.clone()) {
-                    let pin_index = indices
-                        .get(&member.pin)
-                        .copied()
-                        .expect("resolved placement member pin must exist");
+                    let pin_index = indices.get(&member.pin).copied().verified(
+                        "resolve_placement_members resolved every pin against this same index map",
+                    );
                     graph.add_edge(pin_index, placement_index, EdgeKind::RequiredBy);
                 }
             }
@@ -3369,7 +3325,10 @@ impl PlacementAnalysis {
                                 endpoint.corridor[left_index].clone(),
                                 endpoint.corridor[right_index].clone(),
                             )
-                            .expect("different corridor positions must form a pair");
+                            .verified(
+                                "the two indices address different corridor positions, so the \
+                                 members differ",
+                            );
                             if claimed_pairs.insert(pair.clone()) {
                                 claims_by_pair
                                     .entry(pair)
@@ -3398,7 +3357,7 @@ impl PlacementAnalysis {
                 .iter()
                 .map(|claim| placement_rank_key(claim.rank))
                 .min()
-                .expect("a claimed pair must have at least one claim");
+                .verified("a pair enters claims_by_pair only together with its first claim");
             let mut winners = claims
                 .iter()
                 .filter(|claim| placement_rank_key(claim.rank) == strongest)
@@ -3409,7 +3368,7 @@ impl PlacementAnalysis {
                 let first = winners
                     .iter()
                     .find(|claim| claim.policy == policy)
-                    .expect("first winning policy must have an owner");
+                    .verified("policy was read from winners[0], so at least that claim carries it");
                 return Err(Report::new(RegistryError::PlacementConflict {
                     domain: domain.as_str().to_string(),
                     left_rule: first.rule.as_str().to_string(),
@@ -3439,6 +3398,7 @@ impl PlacementAnalysis {
             rules,
             explicit_pairs,
             direct_pairs: topology.direct_pairs(),
+            topology,
         })
     }
 
@@ -3487,26 +3447,27 @@ impl PlacementAnalysis {
             .rules
             .iter()
             .map(|rule| {
-                let mut claims =
-                    rule.claimed_pairs
-                        .iter()
-                        .map(|pair| {
-                            let resolved = effective.pairs.get(pair).expect(
-                                "an explicit rule claim must remain effective or overridden",
-                            );
-                            let (left, right) = pair.runtime_nodes();
-                            PlacementRuleClaimPlan {
-                                left,
-                                right,
-                                effective: resolved.winning_rules.contains(&rule.model.name),
-                                effective_policy: resolved.policy,
-                                winning_rules: resolved.winning_rules.clone(),
-                            }
-                        })
-                        .collect::<Vec<_>>();
+                let mut claims = rule
+                    .claimed_pairs
+                    .iter()
+                    .map(|pair| {
+                        let resolved = effective.pairs.get(pair).verified(
+                            "every claimed pair of this rule was inserted into the effective map \
+                             above",
+                        );
+                        let (left, right) = pair.runtime_nodes();
+                        PlacementRuleClaimPlan {
+                            left,
+                            right,
+                            effective: resolved.winning_rules.contains(&rule.model.name),
+                            effective_policy: resolved.policy,
+                            winning_rules: resolved.winning_rules.clone(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 claims.sort_by(placement_rule_claim_cmp);
                 PlacementRulePlan {
-                    name: rule.model.name.clone(),
+                    name: ModelName::from(&rule.model.name),
                     from: rule.model.from.clone(),
                     to: rule.model.to.clone(),
                     policy: rule.model.policy,
@@ -3539,7 +3500,7 @@ impl PlacementAnalysis {
                     .collect::<Vec<_>>();
                 bonds.sort_by(placement_effective_pair_cmp);
                 PlacementRequireGroupPlan {
-                    members: members.iter().map(placement_runtime_node).collect(),
+                    members: members.to_vec(),
                     bonds,
                 }
             })
@@ -3555,20 +3516,20 @@ impl PlacementAnalysis {
 
 #[derive(Debug, Clone)]
 struct ResolvedPlacementMember {
-    runtime: RegistryKey,
-    pin: RegistryKey,
+    runtime: NodeRef,
+    pin: NodeRef,
 }
 
 #[derive(Debug, Clone, Default)]
 struct PlacementTopology {
-    adjacency: HashMap<RegistryKey, Vec<RegistryKey>>,
-    reverse: HashMap<RegistryKey, Vec<RegistryKey>>,
+    adjacency: HashMap<NodeRef, Vec<NodeRef>>,
+    reverse: HashMap<NodeRef, Vec<NodeRef>>,
 }
 
 impl PlacementTopology {
     fn build(
-        models: &HashMap<RegistryKey, Model>,
-        indices: &HashMap<RegistryKey, NodeIndex>,
+        models: &ModelIndex,
+        indices: &HashMap<NodeRef, NodeIndex>,
         graph: &DiGraph<ActiveNode, EdgeKind>,
     ) -> Self {
         let placement_indices = graph
@@ -3579,13 +3540,13 @@ impl PlacementTopology {
                     .is_some_and(|node| is_placement_runtime_model(node.config.as_ref()))
             })
             .collect::<HashSet<_>>();
-        let mut adjacency_sets = HashMap::<RegistryKey, HashSet<RegistryKey>>::new();
+        let mut adjacency_sets = HashMap::<NodeRef, HashSet<NodeRef>>::new();
 
         for source in &placement_indices {
             let source_node = graph
                 .node_weight(*source)
-                .expect("placement source node must exist");
-            let source_key = source_node.key();
+                .verified("this endpoint comes from an edge of the same graph");
+            let source_key = source_node.node_ref();
             adjacency_sets.entry(source_key.clone()).or_default();
             let mut pending = graph
                 .edges_directed(*source, Direction::Outgoing)
@@ -3600,8 +3561,8 @@ impl PlacementTopology {
                 if placement_indices.contains(&index) {
                     let target = graph
                         .node_weight(index)
-                        .expect("placement target node must exist")
-                        .key();
+                        .verified("this endpoint comes from an edge of the same graph")
+                        .node_ref();
                     adjacency_sets
                         .entry(source_key.clone())
                         .or_default()
@@ -3622,12 +3583,9 @@ impl PlacementTopology {
                 continue;
             }
             for relay in placement_materialized_relays(model) {
-                let materializer = RegistryKey::new(ModelKind::Materializer, relay.clone());
-                if indices.contains_key(&materializer) {
-                    adjacency_sets
-                        .entry(materializer)
-                        .or_default()
-                        .insert(key.clone());
+                let relay = NodeRef::new(ModelKind::Relay, relay.clone());
+                if indices.contains_key(&relay) {
+                    adjacency_sets.entry(relay).or_default().insert(key.clone());
                 }
             }
         }
@@ -3635,10 +3593,10 @@ impl PlacementTopology {
         let mut adjacency = HashMap::default();
         for (source, targets) in adjacency_sets {
             let mut targets = targets.into_iter().collect::<Vec<_>>();
-            targets.sort_by(registry_key_cmp);
+            targets.sort();
             adjacency.insert(source, targets);
         }
-        let mut reverse_sets = HashMap::<RegistryKey, HashSet<RegistryKey>>::new();
+        let mut reverse_sets = HashMap::<NodeRef, HashSet<NodeRef>>::new();
         for (source, targets) in &adjacency {
             reverse_sets.entry(source.clone()).or_default();
             for target in targets {
@@ -3651,7 +3609,7 @@ impl PlacementTopology {
         let mut reverse = HashMap::default();
         for (target, sources) in reverse_sets {
             let mut sources = sources.into_iter().collect::<Vec<_>>();
-            sources.sort_by(registry_key_cmp);
+            sources.sort();
             reverse.insert(target, sources);
         }
         Self { adjacency, reverse }
@@ -3670,8 +3628,8 @@ impl PlacementTopology {
 
     fn endpoint_analysis(
         &self,
-        source: RegistryKey,
-        destination: RegistryKey,
+        source: NodeRef,
+        destination: NodeRef,
     ) -> PlacementEndpointAnalysis {
         let connecting_path = if source == destination {
             self.cycle_path(&source)
@@ -3690,7 +3648,7 @@ impl PlacementTopology {
         let forward = self.reachable(&source, &self.adjacency);
         let backward = self.reachable(&destination, &self.reverse);
         let mut corridor = forward.intersection(&backward).cloned().collect::<Vec<_>>();
-        corridor.sort_by(registry_key_cmp);
+        corridor.sort();
         let mut witnesses = Vec::new();
         for captured in corridor
             .iter()
@@ -3715,9 +3673,9 @@ impl PlacementTopology {
 
     fn reachable(
         &self,
-        start: &RegistryKey,
-        edges: &HashMap<RegistryKey, Vec<RegistryKey>>,
-    ) -> HashSet<RegistryKey> {
+        start: &NodeRef,
+        edges: &HashMap<NodeRef, Vec<NodeRef>>,
+    ) -> HashSet<NodeRef> {
         let mut visited = HashSet::default();
         let mut pending = vec![start.clone()];
         while let Some(node) = pending.pop() {
@@ -3731,12 +3689,12 @@ impl PlacementTopology {
         visited
     }
 
-    fn path(&self, start: &RegistryKey, end: &RegistryKey) -> Option<Vec<RegistryKey>> {
+    fn path(&self, start: &NodeRef, end: &NodeRef) -> Option<Vec<NodeRef>> {
         if start == end {
             return Some(vec![start.clone()]);
         }
         let mut pending = VecDeque::from([start.clone()]);
-        let mut previous = HashMap::<RegistryKey, RegistryKey>::new();
+        let mut previous = HashMap::<NodeRef, NodeRef>::new();
         let mut visited = HashSet::from_iter([start.clone()]);
         while let Some(node) = pending.pop_front() {
             for target in self.adjacency.get(&node).into_iter().flatten() {
@@ -3748,9 +3706,9 @@ impl PlacementTopology {
                     let mut path = vec![end.clone()];
                     let mut cursor = end;
                     while cursor != start {
-                        cursor = previous
-                            .get(cursor)
-                            .expect("visited path node must have a predecessor");
+                        cursor = previous.get(cursor).verified(
+                            "the search records a predecessor for a node before it can be reached",
+                        );
                         path.push(cursor.clone());
                     }
                     path.reverse();
@@ -3762,7 +3720,7 @@ impl PlacementTopology {
         None
     }
 
-    fn cycle_path(&self, start: &RegistryKey) -> Option<Vec<RegistryKey>> {
+    fn cycle_path(&self, start: &NodeRef) -> Option<Vec<NodeRef>> {
         for target in self.adjacency.get(start).into_iter().flatten() {
             if target == start {
                 return Some(vec![start.clone(), start.clone()]);
@@ -3778,10 +3736,10 @@ impl PlacementTopology {
 }
 
 fn resolve_placement_members(
-    domain: &Domain,
+    domain: &DomainName,
     placement: &CreatePlacement,
-    members: &[Identifier],
-    models: &HashMap<RegistryKey, Model>,
+    members: &[ModelName],
+    models: &ModelIndex,
 ) -> Result<Vec<ResolvedPlacementMember>, Report<RegistryError>> {
     let mut resolved = Vec::new();
     let mut seen = HashSet::default();
@@ -3795,24 +3753,16 @@ fn resolve_placement_members(
 }
 
 fn resolve_placement_member(
-    domain: &Domain,
+    domain: &DomainName,
     placement: &CreatePlacement,
-    member: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    member: &ModelName,
+    models: &ModelIndex,
 ) -> Result<ResolvedPlacementMember, Report<RegistryError>> {
     let mut eligible = Vec::new();
     let mut cluster_wide_ingestor = false;
-    let mut relay_without_state = false;
     let mut ineligible_kinds = Vec::new();
     for (key, model) in models.iter().filter(|(key, _)| key.identifier == *member) {
         match model {
-            Model::Relay(relay) if relay.materialized_state.is_some() => {
-                eligible.push(ResolvedPlacementMember {
-                    runtime: RegistryKey::new(ModelKind::Materializer, member.clone()),
-                    pin: key.clone(),
-                });
-            }
-            Model::Relay(_) => relay_without_state = true,
             Model::Ingestor(_) if model.executes_on_every_cluster_node() => {
                 cluster_wide_ingestor = true;
             }
@@ -3822,11 +3772,10 @@ fn resolve_placement_member(
                     pin: key.clone(),
                 });
             }
-            Model::Materializer(_) => {}
             _ => ineligible_kinds.push(key.kind),
         }
     }
-    eligible.sort_by(|left, right| registry_key_cmp(&left.runtime, &right.runtime));
+    eligible.sort_by(|left, right| left.runtime.cmp(&right.runtime));
     eligible.dedup_by(|left, right| left.runtime == right.runtime);
     if eligible.len() == 1 {
         return Ok(eligible.remove(0));
@@ -3845,12 +3794,6 @@ fn resolve_placement_member(
         format!(
             "placement member '{}' is not placement-eligible: server-listener ingestors execute \
              on every cluster node",
-            member
-        )
-    } else if relay_without_state {
-        format!(
-            "placement member '{}' is a relay that is not materialized and is not \
-             placement-eligible",
             member
         )
     } else if !ineligible_kinds.is_empty() {
@@ -3882,6 +3825,7 @@ fn is_user_placement_member_model(model: &Model) -> bool {
             | Model::Inferencer(_)
             | Model::Ingestor(_)
             | Model::Reingestor(_)
+            | Model::Relay(_)
             | Model::Lookup(_)
             | Model::Junction(_)
             | Model::Deduplicator(_)
@@ -3895,37 +3839,36 @@ fn is_user_placement_member_model(model: &Model) -> bool {
 
 fn is_placement_eligible_member_model(model: &Model) -> bool {
     match model {
-        Model::Relay(relay) => relay.materialized_state.is_some(),
         Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
         _ => is_user_placement_member_model(model),
     }
 }
 
 fn ensure_placement_member_shape_change_allowed(
-    domain: &Domain,
+    domain: &DomainName,
     before: &Model,
     after: &Model,
-    candidate_models: &HashMap<RegistryKey, Model>,
+    candidate_models: &ModelIndex,
 ) -> Result<(), Report<RegistryError>> {
     if !is_placement_eligible_member_model(before) || is_placement_eligible_member_model(after) {
         return Ok(());
     }
 
-    let member = after.identifier();
-    let mut placements = candidate_models
-        .values()
-        .filter_map(|model| {
-            let Model::Placement(placement) = model else {
-                return None;
-            };
-            placement
-                .from
-                .iter()
-                .chain(&placement.to)
-                .any(|candidate| candidate == member)
-                .then_some(placement.name.clone())
-        })
-        .collect::<Vec<_>>();
+    let member = after.name();
+    let mut placements = Vec::new();
+    for model in candidate_models.models() {
+        let Model::Placement(placement) = model else {
+            continue;
+        };
+        if placement
+            .from
+            .iter()
+            .chain(&placement.to)
+            .any(|candidate| *candidate == member)
+        {
+            placements.push(placement.name.clone());
+        }
+    }
     placements.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     placements.dedup();
     if placements.is_empty() {
@@ -3937,7 +3880,7 @@ fn ensure_placement_member_shape_change_allowed(
         identifier: member.as_str().to_string(),
         placements: placements
             .iter()
-            .map(Identifier::as_str)
+            .map(|name| name.as_str())
             .collect::<Vec<_>>()
             .join(", "),
     }))
@@ -3946,12 +3889,11 @@ fn ensure_placement_member_shape_change_allowed(
 fn is_placement_runtime_model(model: &Model) -> bool {
     match model {
         Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
-        Model::Materializer(_) => true,
         _ => is_user_placement_member_model(model),
     }
 }
 
-fn placement_materialized_relays(model: &Model) -> Vec<&Identifier> {
+fn placement_materialized_relays(model: &Model) -> Vec<&RelayName> {
     let mut relays = model_materialized_state_dependencies(model)
         .iter()
         .map(|dependency| &dependency.relay)
@@ -3962,37 +3904,25 @@ fn placement_materialized_relays(model: &Model) -> Vec<&Identifier> {
     relays
 }
 
-fn placement_rank_key(rank: Option<u64>) -> (u8, u64) {
-    rank.map_or((1, 0), |rank| (0, rank))
-}
-
-fn registry_key_cmp(left: &RegistryKey, right: &RegistryKey) -> Ordering {
-    left.kind
-        .as_str()
-        .cmp(right.kind.as_str())
-        .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
-}
-
-fn placement_runtime_node(key: &RegistryKey) -> PlacementRuntimeNode {
-    PlacementRuntimeNode::new(key.kind, key.identifier.clone())
+fn placement_rank_key(rank: Option<NonZeroU64>) -> (u8, u64) {
+    match rank {
+        Some(rank) => (0, rank.get()),
+        None => (1, 0),
+    }
 }
 
 fn placement_endpoint_pair_plan(endpoint: &PlacementEndpointAnalysis) -> PlacementEndpointPairPlan {
     PlacementEndpointPairPlan {
-        source: placement_runtime_node(&endpoint.source),
-        destination: placement_runtime_node(&endpoint.destination),
+        source: endpoint.source.clone(),
+        destination: endpoint.destination.clone(),
         connected: !endpoint.corridor.is_empty(),
-        corridor: endpoint
-            .corridor
-            .iter()
-            .map(placement_runtime_node)
-            .collect(),
+        corridor: endpoint.corridor.to_vec(),
         witnesses: endpoint
             .witnesses
             .iter()
             .map(|(captured, path)| PlacementCorridorWitness {
-                captured: placement_runtime_node(captured),
-                path: path.iter().map(placement_runtime_node).collect(),
+                captured: captured.clone(),
+                path: path.to_vec(),
             })
             .collect(),
     }
@@ -4012,34 +3942,26 @@ fn placement_effective_pair(
     }
 }
 
-fn placement_runtime_node_cmp(
-    left: &PlacementRuntimeNode,
-    right: &PlacementRuntimeNode,
-) -> Ordering {
-    left.kind
-        .as_str()
-        .cmp(right.kind.as_str())
-        .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
-}
-
 fn placement_effective_pair_cmp(
     left: &PlacementEffectivePair,
     right: &PlacementEffectivePair,
 ) -> Ordering {
-    placement_runtime_node_cmp(&left.left, &right.left)
-        .then_with(|| placement_runtime_node_cmp(&left.right, &right.right))
+    left.left
+        .cmp(&right.left)
+        .then_with(|| left.right.cmp(&right.right))
 }
 
 fn placement_rule_claim_cmp(
     left: &PlacementRuleClaimPlan,
     right: &PlacementRuleClaimPlan,
 ) -> Ordering {
-    placement_runtime_node_cmp(&left.left, &right.left)
-        .then_with(|| placement_runtime_node_cmp(&left.right, &right.right))
+    left.left
+        .cmp(&right.left)
+        .then_with(|| left.right.cmp(&right.right))
 }
 
-fn placement_require_groups(require_pairs: &[PlacementPair]) -> Vec<Vec<RegistryKey>> {
-    let mut parent = HashMap::<RegistryKey, RegistryKey>::new();
+fn placement_require_groups(require_pairs: &[PlacementPair]) -> Vec<Vec<NodeRef>> {
+    let mut parent = HashMap::<NodeRef, NodeRef>::new();
     for pair in require_pairs {
         parent
             .entry(pair.left.clone())
@@ -4050,27 +3972,24 @@ fn placement_require_groups(require_pairs: &[PlacementPair]) -> Vec<Vec<Registry
         placement_union(&mut parent, &pair.left, &pair.right);
     }
     let members = parent.keys().cloned().collect::<Vec<_>>();
-    let mut groups = HashMap::<RegistryKey, Vec<RegistryKey>>::new();
+    let mut groups = HashMap::<NodeRef, Vec<NodeRef>>::new();
     for member in members {
         let root = placement_find(&mut parent, &member);
         groups.entry(root).or_default().push(member);
     }
     let mut groups = groups.into_values().collect::<Vec<_>>();
     for group in &mut groups {
-        group.sort_by(registry_key_cmp);
+        group.sort();
     }
-    groups.sort_by(|left, right| registry_key_cmp(&left[0], &right[0]));
+    groups.sort_by(|left, right| left[0].cmp(&right[0]));
     groups
 }
 
-fn placement_find(
-    parent: &mut HashMap<RegistryKey, RegistryKey>,
-    member: &RegistryKey,
-) -> RegistryKey {
+fn placement_find(parent: &mut HashMap<NodeRef, NodeRef>, member: &NodeRef) -> NodeRef {
     let direct = parent
         .get(member)
         .cloned()
-        .expect("placement disjoint-set member must exist");
+        .verified("every member is inserted into the parent map before find runs over it");
     if direct == *member {
         return direct;
     }
@@ -4079,17 +3998,13 @@ fn placement_find(
     root
 }
 
-fn placement_union(
-    parent: &mut HashMap<RegistryKey, RegistryKey>,
-    left: &RegistryKey,
-    right: &RegistryKey,
-) {
+fn placement_union(parent: &mut HashMap<NodeRef, NodeRef>, left: &NodeRef, right: &NodeRef) {
     let left_root = placement_find(parent, left);
     let right_root = placement_find(parent, right);
     if left_root == right_root {
         return;
     }
-    if registry_key_cmp(&left_root, &right_root).is_le() {
+    if left_root <= right_root {
         parent.insert(right_root, left_root);
     } else {
         parent.insert(left_root, right_root);
@@ -4099,7 +4014,7 @@ fn placement_union(
 #[derive(Debug, Clone)]
 pub struct ActiveGraph {
     graph: DiGraph<ActiveNode, EdgeKind>,
-    indices: HashMap<RegistryKey, NodeIndex>,
+    indices: HashMap<NodeRef, NodeIndex>,
     placement: PlacementAnalysis,
 }
 
@@ -4121,14 +4036,9 @@ impl ActiveGraph {
     pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
         let models = schedule
             .nodes
-            .iter()
-            .map(|node| {
-                (
-                    RegistryKey::new(node.kind, node.identifier.clone()),
-                    node.config.as_ref().clone(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+            .values()
+            .map(|node| node.config.as_ref().clone())
+            .collect::<ModelIndex>();
         DomainState::build(&schedule.domain, &models).map(|state| state.graph)
     }
 
@@ -4136,9 +4046,9 @@ impl ActiveGraph {
         self.placement.plan(default_policy)
     }
 
-    pub fn node(&self, kind: ModelKind, identifier: &Identifier) -> Option<&ActiveNode> {
+    pub fn node(&self, kind: ModelKind, identifier: &ModelName) -> Option<&ActiveNode> {
         self.indices
-            .get(&RegistryKey::new(kind, identifier.clone()))
+            .get(&NodeRef::new(kind, identifier.clone()))
             .and_then(|index| self.graph.node_weight(*index))
     }
 
@@ -4176,23 +4086,27 @@ impl ActiveGraph {
         }
     }
 
-    pub fn edges(&self) -> Vec<(Identifier, Identifier, EdgeKind)> {
+    pub fn edges(&self) -> Vec<ActiveEdge> {
         self.graph
             .edge_references()
             .map(|edge| {
                 let from = self
                     .graph
                     .node_weight(edge.source())
-                    .expect("source node must exist")
+                    .verified("this endpoint comes from an edge of the same graph")
                     .identifier
                     .clone();
                 let to = self
                     .graph
                     .node_weight(edge.target())
-                    .expect("target node must exist")
+                    .verified("this endpoint comes from an edge of the same graph")
                     .identifier
                     .clone();
-                (from, to, *edge.weight())
+                ActiveEdge {
+                    from,
+                    to,
+                    kind: *edge.weight(),
+                }
             })
             .collect()
     }
@@ -4201,7 +4115,7 @@ impl ActiveGraph {
         self.graph.node_weights().cloned().collect()
     }
 
-    fn dependent_dataflow_entities(&self, seeds: &HashSet<RegistryKey>) -> HashSet<RegistryEntity> {
+    fn dependent_dataflow_entities(&self, seeds: &HashSet<NodeRef>) -> HashSet<NodeRef> {
         let mut pending = seeds
             .iter()
             .filter_map(|key| self.indices.get(key).copied())
@@ -4216,9 +4130,9 @@ impl ActiveGraph {
             let node = self
                 .graph
                 .node_weight(index)
-                .expect("visited graph node must exist");
+                .verified("this index came from the same graph, which is not modified here");
             if node.is_dataflow_node() {
-                affected.insert(RegistryEntity {
+                affected.insert(NodeRef {
                     kind: node.kind,
                     identifier: node.identifier.clone(),
                 });
@@ -4236,9 +4150,17 @@ impl ActiveGraph {
     }
 
     fn schema_fingerprint_for_index(&self, index: NodeIndex) -> [u8; 32] {
+        /// One schema model that a node's fingerprint covers, encoded so the hash reflects the
+        /// exact stored shape rather than the order the graph walk reached it in.
+        struct FingerprintedSchema {
+            kind: ModelKind,
+            identifier: ModelName,
+            encoded: Vec<u8>,
+        }
+
         let mut pending = vec![index];
         let mut visited = HashSet::default();
-        let mut schemas = Vec::new();
+        let mut schemas = Vec::<FingerprintedSchema>::new();
 
         while let Some(index) = pending.pop() {
             if !visited.insert(index) {
@@ -4247,18 +4169,20 @@ impl ActiveGraph {
             let node = self
                 .graph
                 .node_weight(index)
-                .expect("visited graph node must exist");
+                .verified("this index came from the same graph, which is not modified here");
             if let Model::Schema(_)
             | Model::WireJsonSchema(_)
             | Model::WireCborSchema(_)
             | Model::WireAvroSchema(_) = node.config.as_ref()
             {
-                schemas.push((
-                    node.kind,
-                    node.identifier.clone(),
-                    serde_json::to_vec(node.config.as_ref())
-                        .expect("validated schema models must serialize"),
-                ));
+                schemas.push(FingerprintedSchema {
+                    kind: node.kind,
+                    identifier: node.identifier.clone(),
+                    encoded: serde_json::to_vec(node.config.as_ref()).assured(
+                        "registry models are plain serde structures with string keys, which \
+                         serde_json always encodes",
+                    ),
+                });
             }
             pending.extend(
                 self.graph
@@ -4269,34 +4193,34 @@ impl ActiveGraph {
             );
         }
         schemas.sort_by(|left, right| {
-            left.0
+            left.kind
                 .as_str()
-                .cmp(right.0.as_str())
-                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+                .cmp(right.kind.as_str())
+                .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
         });
 
         let mut hasher = blake3::Hasher::new();
-        for (kind, identifier, encoded) in schemas {
-            hasher.update(kind.as_str().as_bytes());
+        for schema in schemas {
+            hasher.update(schema.kind.as_str().as_bytes());
             hasher.update(&[0]);
-            hasher.update(identifier.as_str().as_bytes());
+            hasher.update(schema.identifier.as_str().as_bytes());
             hasher.update(&[0]);
-            hasher.update(&encoded);
+            hasher.update(&schema.encoded);
             hasher.update(&[0]);
         }
         *hasher.finalize().as_bytes()
     }
 
-    pub fn schema_fingerprint(&self, kind: ModelKind, identifier: &Identifier) -> Option<[u8; 32]> {
+    pub fn schema_fingerprint(&self, kind: ModelKind, identifier: &ModelName) -> Option<[u8; 32]> {
         self.indices
-            .get(&RegistryKey::new(kind, identifier.clone()))
+            .get(&NodeRef::new(kind, identifier.clone()))
             .map(|index| self.schema_fingerprint_for_index(*index))
     }
 
     pub fn schedule_for_domain(
         &self,
-        domain: &Domain,
-        cluster_nodes: &[String],
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         default_policy: PlacementPolicy,
     ) -> DomainSchedule {
@@ -4319,8 +4243,8 @@ impl ActiveGraph {
     #[cfg(feature = "testing")]
     pub(crate) fn schedule_for_domain_with_mode(
         &self,
-        domain: &Domain,
-        cluster_nodes: &[String],
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         default_policy: PlacementPolicy,
         scheduler_mode: SchedulerMode,
@@ -4336,26 +4260,32 @@ impl ActiveGraph {
 
     fn schedule_for_domain_inner(
         &self,
-        domain: &Domain,
-        cluster_nodes: &[String],
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         default_policy: PlacementPolicy,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
     ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
         let placement = self.placement.effective(default_policy);
+        let assignment_slots = replica_count
+            .min(cluster_nodes.len())
+            .checked_add(1)
+            .assured("a replica count clamped to the cluster leaves room for the primary slot");
         #[cfg(feature = "testing")]
-        let random_schedule_seed = {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"nervix/test-random-scheduler/domain");
-            hasher.update(&[0]);
-            hasher.update(domain.as_str().as_bytes());
-            *hasher.finalize().as_bytes()
+        let random_assignment_planner = if let SchedulerMode::Random = scheduler_mode {
+            Some(RandomAssignmentPlanner::new(
+                domain,
+                &cluster_nodes,
+                assignment_slots,
+            ))
+        } else {
+            None
         };
         let mut next_assignment = 0usize;
-        let mut node_load = HashMap::<String, usize>::new();
-        let mut assigned_by_key = HashMap::<RegistryKey, Vec<String>>::new();
-        let mut group_assignments = HashMap::<usize, Vec<String>>::new();
+        let mut node_load = HashMap::<ClusterNodeName, usize>::new();
+        let mut assigned_by_key = HashMap::<NodeRef, Vec<ClusterNodeName>>::new();
+        let mut group_assignments = HashMap::<usize, Vec<ClusterNodeName>>::new();
         let mut depth_cache = HashMap::<NodeIndex, usize>::new();
         let mut nodes = self
             .graph
@@ -4364,36 +4294,34 @@ impl ActiveGraph {
                 let node = self
                     .graph
                     .node_weight(index)
-                    .expect("graph node must exist for every index")
+                    .verified("this index came from the same graph, which is not modified here")
                     .clone();
                 let depth = schedulable_depth(&self.graph, index, &mut depth_cache);
-                (index, node, depth)
+                PlacementCandidate { index, node, depth }
             })
             .collect::<Vec<_>>();
-        nodes.sort_by(
-            |(left_index, left_node, left_depth), (right_index, right_node, right_depth)| {
-                left_depth
-                    .cmp(right_depth)
-                    .then_with(|| left_node.kind.as_str().cmp(right_node.kind.as_str()))
-                    .then_with(|| {
-                        left_node
-                            .identifier
-                            .as_str()
-                            .cmp(right_node.identifier.as_str())
-                    })
-                    .then_with(|| left_index.index().cmp(&right_index.index()))
-            },
-        );
+        nodes.sort_by(|left, right| {
+            left.depth
+                .cmp(&right.depth)
+                .then_with(|| left.node.kind.as_str().cmp(right.node.kind.as_str()))
+                .then_with(|| {
+                    left.node
+                        .identifier
+                        .as_str()
+                        .cmp(right.node.identifier.as_str())
+                })
+                .then_with(|| left.index.index().cmp(&right.index.index()))
+        });
         let index_by_key = nodes
             .iter()
-            .map(|(index, node, _)| (node.key(), *index))
+            .map(|candidate| (candidate.node.node_ref(), candidate.index))
             .collect::<HashMap<_, _>>();
 
-        let mut scheduled_nodes = Vec::with_capacity(nodes.len());
-        for (index, node, _) in nodes {
-            let key = node.key();
+        let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
+        for PlacementCandidate { index, node, .. } in nodes {
+            let key = node.node_ref();
             let group_index = placement.group_by_member.get(&key).copied();
-            let assigned_nodes = if let Some(existing) =
+            let mut assigned_nodes = if let Some(existing) =
                 group_index.and_then(|group_index| group_assignments.get(&group_index))
             {
                 existing.clone()
@@ -4405,11 +4333,7 @@ impl ActiveGraph {
                     placement_pairs: &placement.pairs,
                     node_load: &node_load,
                     next_assignment: &mut next_assignment,
-                    replica_count,
-                    #[cfg(feature = "testing")]
-                    scheduler_mode,
-                    #[cfg(feature = "testing")]
-                    random_schedule_seed,
+                    assignment_slots,
                 };
                 let assignment = if let Some(group_index) = group_index {
                     let members = &placement.require_groups[group_index];
@@ -4419,11 +4343,30 @@ impl ActiveGraph {
                             index_by_key
                                 .get(member)
                                 .copied()
-                                .expect("placement group member must have a graph index")
+                                .verified("index_by_key was built from every node of this graph")
                         })
                         .collect::<Vec<_>>();
+                    #[cfg(feature = "testing")]
+                    if let Some(random_assignment_planner) = &random_assignment_planner {
+                        random_assignment_planner.assignment(members)
+                    } else {
+                        assignment_planner.for_group(members, &member_indices)
+                    }
+                    #[cfg(not(feature = "testing"))]
                     assignment_planner.for_group(members, &member_indices)
                 } else {
+                    #[cfg(feature = "testing")]
+                    if let Some(random_assignment_planner) = &random_assignment_planner {
+                        random_assignment_planner.for_model(&key, node.config.as_ref())
+                    } else {
+                        assignment_for_model(
+                            &mut assignment_planner,
+                            index,
+                            &key,
+                            node.config.as_ref(),
+                        )
+                    }
+                    #[cfg(not(feature = "testing"))]
                     assignment_for_model(&mut assignment_planner, index, &key, node.config.as_ref())
                 };
                 if let Some(group_index) = group_index {
@@ -4431,6 +4374,11 @@ impl ActiveGraph {
                 }
                 assignment
             };
+            if let Model::Relay(relay) = node.config.as_ref()
+                && relay.materialized_state.is_none()
+            {
+                assigned_nodes.truncate(1);
+            }
             let primary_node = assigned_nodes.first().cloned();
             if !assigned_nodes.is_empty() {
                 assigned_by_key.insert(key, assigned_nodes.clone());
@@ -4438,32 +4386,24 @@ impl ActiveGraph {
                     *node_load.entry(assigned_node.clone()).or_insert(0) += 1;
                 }
             }
-            scheduled_nodes.push(ScheduledNode {
-                identifier: node.identifier,
-                kind: node.kind,
-                config: Box::new((*node.config).clone()),
-                effective_branching: node.effective_branching,
-                effective_branching_schema: node.effective_branching_schema,
-                schema_fingerprint: self.schema_fingerprint_for_index(index),
-                kafka_partition_schedule: None,
-                primary_node,
-                assigned_nodes,
-            });
+            let scheduled_node = ScheduledNode::new((*node.config).clone())
+                .with_effective_branching(node.effective_branching, node.effective_branching_schema)
+                .with_schema_fingerprint(self.schema_fingerprint_for_index(index))
+                .placed_on(primary_node, assigned_nodes);
+            scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
         let placement_groups = placement
             .require_groups
             .iter()
             .map(|members| {
-                let runtime_members = members
-                    .iter()
-                    .map(placement_runtime_node)
-                    .collect::<Vec<_>>();
-                let primary_node = members.first().and_then(|first| {
-                    scheduled_nodes
-                        .iter()
-                        .find(|node| node.kind == first.kind && node.identifier == first.identifier)
-                        .and_then(|node| node.primary_node.clone())
-                });
+                let runtime_members = members.to_vec();
+                let primary_node = if let Some(first) = members.first()
+                    && let Some(node) = scheduled_nodes.get(first)
+                {
+                    node.primary_node.clone()
+                } else {
+                    None
+                };
                 PlacementGroupSchedule {
                     members: runtime_members,
                     primary_node,
@@ -4489,14 +4429,14 @@ impl ActiveGraph {
             .filter(|index| {
                 self.graph
                     .node_weight(*index)
-                    .expect("dataflow graph node must exist")
+                    .verified("this index came from the same graph, which is not modified here")
                     .is_dataflow_node()
             })
             .flat_map(|source_index| {
                 let source = self
                     .graph
                     .node_weight(source_index)
-                    .expect("dataflow source node must exist");
+                    .verified("this endpoint comes from an edge of the same graph");
                 included_nodes.insert(source_index);
                 visible_dataflow_targets(&self.graph, source_index)
                     .into_iter()
@@ -4504,7 +4444,7 @@ impl ActiveGraph {
                         let target = self
                             .graph
                             .node_weight(target_index)
-                            .expect("dataflow target node must exist");
+                            .verified("this endpoint comes from an edge of the same graph");
                         included_nodes.insert(target_index);
                         source.dataflow_edge_to(target, dataflow_edge_kind(edge_kind))
                     })
@@ -4512,27 +4452,24 @@ impl ActiveGraph {
             })
             .collect::<Vec<_>>();
 
-        let schemas = self
-            .graph
-            .node_indices()
-            .filter_map(|index| {
-                let node = self
-                    .graph
-                    .node_weight(index)
-                    .expect("dataflow graph node must exist");
-                let Model::Schema(schema) = node.config.as_ref() else {
-                    return None;
-                };
-                Some((node.identifier.clone(), schema.clone()))
-            })
-            .collect::<HashMap<_, _>>();
+        let mut schemas = HashMap::default();
+        for index in self.graph.node_indices() {
+            let node = self
+                .graph
+                .node_weight(index)
+                .verified("this index came from the same graph, which is not modified here");
+            let Model::Schema(schema) = node.config.as_ref() else {
+                continue;
+            };
+            schemas.insert(node.identifier.clone(), schema.clone());
+        }
 
         let mut nodes = included_nodes
             .iter()
             .map(|index| {
                 self.graph
                     .node_weight(*index)
-                    .expect("dataflow graph node must exist")
+                    .verified("this index came from the same graph, which is not modified here")
                     .to_dataflow_node(&schemas)
             })
             .collect::<Vec<_>>();
@@ -4540,7 +4477,7 @@ impl ActiveGraph {
             let node = self
                 .graph
                 .node_weight(*index)
-                .expect("dataflow graph node must exist");
+                .verified("this index came from the same graph, which is not modified here");
             if let Some(client_node) = node.dataflow_source_client_node() {
                 edges.push(
                     DataflowEdge::data(
@@ -4607,7 +4544,7 @@ fn visible_dataflow_targets(
         }
         let node = graph
             .node_weight(index)
-            .expect("dataflow traversal node must exist");
+            .verified("this index came from the same graph, which is not modified here");
         if node.is_dataflow_node() {
             targets.push((index, edge_kind));
             continue;
@@ -4632,18 +4569,47 @@ const fn dataflow_edge_kind(kind: EdgeKind) -> DataflowEdgeKind {
     }
 }
 
+/// How well one cluster node suits the entity being placed. The field order is the order the
+/// candidates are ranked in: placement policy first, then operator preference, then the lightest
+/// load, then how far the node sits from the round-robin cursor, with the node name breaking ties.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct AssignmentCandidate {
+    placement_order: isize,
+    preferred_order: usize,
+    load: Reverse<usize>,
+    round_robin_distance: Reverse<usize>,
+    node_id: ClusterNodeName,
+}
+
+/// One graph node awaiting placement, ordered by how deep in the dataflow it sits so upstream
+/// nodes are assigned before the nodes that read from them.
+struct PlacementCandidate {
+    index: NodeIndex,
+    node: ActiveNode,
+    depth: usize,
+}
+
+/// One edge of an active graph, named by the models it joins and what the dependency means.
+#[derive(Debug, Clone)]
+pub struct ActiveEdge {
+    pub from: ModelName,
+    pub to: ModelName,
+    pub kind: EdgeKind,
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveNode {
-    pub identifier: Identifier,
+    pub identifier: ModelName,
     pub kind: ModelKind,
     pub config: Arc<Model>,
-    pub effective_branching: Option<Vec<Identifier>>,
-    pub effective_branching_schema: Option<Identifier>,
+    pub effective_branching: Option<Vec<FieldName>>,
+    pub effective_branching_schema: Option<SchemaName>,
 }
 
 impl ActiveNode {
-    fn key(&self) -> RegistryKey {
-        RegistryKey::new(self.kind, self.identifier.clone())
+    /// How this node is addressed: the kind it is and the name it carries, together.
+    pub fn node_ref(&self) -> NodeRef {
+        NodeRef::new(self.kind, self.identifier.clone())
     }
 
     fn dataflow_id(&self) -> String {
@@ -4685,7 +4651,7 @@ impl ActiveNode {
     fn dataflow_edge_to(&self, target: &Self, kind: DataflowEdgeKind) -> DataflowEdge {
         if kind == DataflowEdgeKind::Data
             && target.kind == ModelKind::Generator
-            && target.reads_materialized_state_from(&self.identifier)
+            && target.reads_materialized_state_from(&RelayName::from(&self.identifier))
         {
             return DataflowEdge::data(
                 self.dataflow_id(),
@@ -4695,7 +4661,7 @@ impl ActiveNode {
         }
         DataflowEdge::data(self.dataflow_id(), target.dataflow_id(), kind)
             .with_metric(self.dataflow_metric_for_target(target))
-            .with_input_side(target.correlator_input_side(&self.identifier))
+            .with_input_side(target.correlator_input_side(&RelayName::from(&self.identifier)))
             .with_routes(self.dataflow_routes_to(target, kind))
     }
 
@@ -4716,7 +4682,7 @@ impl ActiveNode {
             .collect()
     }
 
-    fn reads_materialized_state_from(&self, relay: &Identifier) -> bool {
+    fn reads_materialized_state_from(&self, relay: &RelayName) -> bool {
         self.config
             .materialized_state_relays()
             .into_iter()
@@ -4725,7 +4691,7 @@ impl ActiveNode {
 
     /// Which side of a correlator an input relay enters. Correlators are the only nodes whose
     /// inputs are distinguishable, and the console labels the two sides.
-    fn correlator_input_side(&self, source: &Identifier) -> Option<DataflowInputSide> {
+    fn correlator_input_side(&self, source: &RelayName) -> Option<DataflowInputSide> {
         let Model::Correlator(correlator) = self.config.as_ref() else {
             return None;
         };
@@ -4752,7 +4718,7 @@ impl ActiveNode {
         let routes = outputs
             .routes
             .iter()
-            .filter(|route| route.relay == target.identifier)
+            .filter(|route| route.relay == RelayName::from(&target.identifier))
             .count();
         u32::try_from(routes).unwrap_or(u32::MAX).max(1)
     }
@@ -4799,7 +4765,7 @@ impl ActiveNode {
         )
     }
 
-    fn to_dataflow_node(&self, schemas: &HashMap<Identifier, CreateSchema>) -> DataflowNode {
+    fn to_dataflow_node(&self, schemas: &HashMap<ModelName, CreateSchema>) -> DataflowNode {
         let node = DataflowNode::new(
             self.dataflow_id(),
             self.identifier.as_str(),
@@ -4808,7 +4774,7 @@ impl ActiveNode {
         .with_branch(self.dataflow_branch());
         match self.config.as_ref() {
             Model::Relay(relay) => {
-                let Some(schema) = schemas.get(&relay.schema) else {
+                let Some(schema) = schemas.get(&ModelName::from(&relay.schema)) else {
                     return node;
                 };
                 node.with_schema(
@@ -4834,8 +4800,10 @@ impl ActiveNode {
             },
             ModelKind::Relay => DataflowNodeRole::Relay,
             kind => DataflowNodeRole::Processor {
-                processor: dataflow_processor_kind(kind)
-                    .expect("every dataflow processor kind must map to a drawn processor"),
+                processor: dataflow_processor_kind(kind).verified(
+                    "only nodes accepted by is_dataflow_node reach here, and the kinds left after \
+                     ingestor, emitter and relay all map to a processor",
+                ),
             },
         }
     }
@@ -4914,8 +4882,8 @@ fn parse_as_to_dataflow_label(ty: &ParseAsType) -> String {
 }
 
 fn validate_ingestor_source(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     ingestor: &CreateIngestor,
 ) -> Result<(), Report<RegistryError>> {
     let invalid = |reason: String| {
@@ -4956,44 +4924,22 @@ fn validate_ingestor_source(
         }
         nervix_models::IngestQuiesceMode::Suspend | nervix_models::IngestQuiesceMode::Drop => {}
     }
-    if let IngestSource::Mqtt {
-        topic,
-        instances,
-        mode,
-        ..
-    } = &ingestor.source
+    if let IngestSource::Mqtt { topic, .. } = &ingestor.source
+        && topic.is_empty()
     {
-        if topic.is_empty() {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "MQTT topic filter must not be empty".to_string(),
-            }));
-        }
-        if *instances == 0 {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "MQTT instances must be greater than 0".to_string(),
-            }));
-        }
-        if let MqttIngestMode::AckParallel { max, .. } = mode
-            && *max == 0
-        {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "MQTT mode MAX must be greater than 0".to_string(),
-            }));
-        }
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "MQTT topic filter must not be empty".to_string(),
+        }));
     }
     Ok(())
 }
 
 fn validate_emitter_publishing_contract(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     emitter: &CreateEmitter,
 ) -> Result<(), Report<RegistryError>> {
     let invalid = |reason: String| {
@@ -5054,23 +5000,9 @@ fn validate_emitter_publishing_contract(
         )));
     }
 
-    if let Some(window) = emitter.publishing_mode.ack_window()
-        && window.max_in_flight() == 0
-    {
-        return Err(invalid(
-            "MODE ACK PARALLEL MAX must be greater than zero".to_string(),
-        ));
-    }
     if let Some(timeout) = emitter.publishing_mode.ack_timeout() {
-        let timeout = humantime::parse_duration(timeout).map_err(|error| {
-            invalid(format!(
-                "invalid MODE ACK TIMEOUT '{}': {error}",
-                emitter
-                    .publishing_mode
-                    .ack_timeout()
-                    .expect("confirmation mode must retain its timeout")
-            ))
-        })?;
+        let timeout = humantime::parse_duration(timeout)
+            .map_err(|error| invalid(format!("invalid MODE ACK TIMEOUT '{timeout}': {error}")))?;
         if timeout.is_zero() {
             return Err(invalid(
                 "MODE ACK TIMEOUT must be greater than zero".to_string(),
@@ -5079,17 +5011,6 @@ fn validate_emitter_publishing_contract(
     }
 
     match emitter.sink.as_ref() {
-        EmitSink::ClickHouse { max_batch, .. }
-        | EmitSink::Postgres { max_batch, .. }
-        | EmitSink::MySql { max_batch, .. }
-        | EmitSink::MongoDb { max_batch, .. }
-            if *max_batch == 0 =>
-        {
-            return Err(invalid(format!(
-                "{} WITH MAX BATCH must be greater than zero",
-                emitter.sink.transport_label()
-            )));
-        }
         EmitSink::Sqs {
             queue, fifo_group, ..
         } => {
@@ -5156,23 +5077,37 @@ fn validate_otel_mapping_contract(
     attributes: &[OtelValueMapping],
     resource: &[OtelValueMapping],
 ) -> Result<(), String> {
-    let (signal_label, allowed, required, delta) = match signal {
-        OtelSignal::Logs => (
-            "LOGS",
-            &[
+    /// The `VALUES` contract one OTEL signal imposes: what it may name, what it must name, and
+    /// whether delta temporality adds `start_time` to the required keys.
+    struct SignalContract {
+        label: &'static str,
+        allowed: &'static [&'static str],
+        required: &'static [&'static str],
+        delta: bool,
+    }
+
+    let SignalContract {
+        label: signal_label,
+        allowed,
+        required,
+        delta,
+    } = match signal {
+        OtelSignal::Logs => SignalContract {
+            label: "LOGS",
+            allowed: &[
                 "time",
                 "severity_text",
                 "severity_number",
                 "body",
                 "trace_id",
                 "span_id",
-            ][..],
-            &["time", "body"][..],
-            false,
-        ),
-        OtelSignal::Traces => (
-            "TRACES",
-            &[
+            ],
+            required: &["time", "body"],
+            delta: false,
+        },
+        OtelSignal::Traces => SignalContract {
+            label: "TRACES",
+            allowed: &[
                 "trace_id",
                 "span_id",
                 "parent_span_id",
@@ -5182,26 +5117,26 @@ fn validate_otel_mapping_contract(
                 "end_time",
                 "status_code",
                 "status_message",
-            ][..],
-            &["trace_id", "span_id", "name", "start_time", "end_time"][..],
-            false,
-        ),
+            ],
+            required: &["trace_id", "span_id", "name", "start_time", "end_time"],
+            delta: false,
+        },
         OtelSignal::Metric(metric) => match metric.kind {
-            OtelMetricKind::Gauge => (
-                "METRIC GAUGE",
-                &["time", "start_time", "value"][..],
-                &["time", "value"][..],
-                false,
-            ),
-            OtelMetricKind::Sum { temporality, .. } => (
-                "METRIC SUM",
-                &["time", "start_time", "value"][..],
-                &["time", "value"][..],
-                temporality == OtelAggregationTemporality::Delta,
-            ),
-            OtelMetricKind::Histogram { temporality } => (
-                "METRIC HISTOGRAM",
-                &[
+            OtelMetricKind::Gauge => SignalContract {
+                label: "METRIC GAUGE",
+                allowed: &["time", "start_time", "value"],
+                required: &["time", "value"],
+                delta: false,
+            },
+            OtelMetricKind::Sum { temporality, .. } => SignalContract {
+                label: "METRIC SUM",
+                allowed: &["time", "start_time", "value"],
+                required: &["time", "value"],
+                delta: temporality == OtelAggregationTemporality::Delta,
+            },
+            OtelMetricKind::Histogram { temporality } => SignalContract {
+                label: "METRIC HISTOGRAM",
+                allowed: &[
                     "time",
                     "start_time",
                     "count",
@@ -5210,10 +5145,10 @@ fn validate_otel_mapping_contract(
                     "explicit_bounds",
                     "min",
                     "max",
-                ][..],
-                &["time", "count", "bucket_counts", "explicit_bounds"][..],
-                temporality == OtelAggregationTemporality::Delta,
-            ),
+                ],
+                required: &["time", "count", "bucket_counts", "explicit_bounds"],
+                delta: temporality == OtelAggregationTemporality::Delta,
+            },
         },
     };
 
@@ -5259,9 +5194,9 @@ fn validate_otel_mapping_contract(
 }
 
 fn validate_sqs_fifo_group_expression(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -5273,7 +5208,7 @@ fn validate_sqs_fifo_group_expression(
         return Ok(());
     };
 
-    let target = Identifier::parse("fifo_group").map_err(|error| {
+    let target = FieldName::parse("fifo_group").map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -5281,7 +5216,13 @@ fn validate_sqs_fifo_group_expression(
         })
     })?;
     let output_schema = CreateSchema {
-        name: target.clone(),
+        name: SchemaName::parse("fifo_group").map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("invalid internal SQS FIFO group schema: {error}"),
+            })
+        })?,
         fields: vec![SchemaField {
             name: target.clone(),
             ty: ParseAsType::String,
@@ -5294,7 +5235,7 @@ fn validate_sqs_fifo_group_expression(
     let parsed = lower_transforming_route(
         &RouteConstruction {
             assignments: vec![Assignment {
-                target: AssignmentTarget::bare(target),
+                target: AssignmentTarget::bare(target.clone()),
                 value: expression.clone(),
             }],
             ..RouteConstruction::default()
@@ -5310,8 +5251,10 @@ fn validate_sqs_fifo_group_expression(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", input_schema),
         writable_binding_for_internal_schema("output", &output_schema),
@@ -5436,7 +5379,7 @@ fn schedulable_depth_inner(
         let source = edge.source();
         let source_node = graph
             .node_weight(source)
-            .expect("incoming source node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         let candidate_depth = if is_schedulable_model(source_node.config.as_ref()) {
             schedulable_depth_inner(graph, source, cache, visiting) + 1
         } else {
@@ -5457,7 +5400,7 @@ fn is_schedulable_model(model: &Model) -> bool {
             | Model::Inferencer(_)
             | Model::Ingestor(_)
             | Model::Reingestor(_)
-            | Model::Materializer(_)
+            | Model::Relay(_)
             | Model::Lookup(_)
             | Model::Deduplicator(_)
             | Model::Correlator(_)
@@ -5469,79 +5412,19 @@ fn is_schedulable_model(model: &Model) -> bool {
     )
 }
 
-fn attach_materializer_nodes(
-    models: &HashMap<RegistryKey, Model>,
-    indices: &mut HashMap<RegistryKey, NodeIndex>,
-    graph: &mut DiGraph<ActiveNode, EdgeKind>,
-) {
-    let materialized_streams = models
-        .iter()
-        .filter_map(|(key, model)| {
-            let Model::Relay(relay) = model else {
-                return None;
-            };
-            relay
-                .materialized_state
-                .clone()
-                .map(|state| (key.identifier.clone(), relay.clone(), state))
-        })
-        .collect::<Vec<_>>();
-
-    for (identifier, relay, state) in materialized_streams {
-        let Some(stream_index) = indices
-            .get(&RegistryKey::new(ModelKind::Relay, identifier.clone()))
-            .copied()
-        else {
-            continue;
-        };
-        let effective_branching = graph
-            .node_weight(stream_index)
-            .and_then(|node| node.effective_branching.clone());
-        let effective_branching_schema = graph
-            .node_weight(stream_index)
-            .and_then(|node| node.effective_branching_schema.clone());
-        let materializer = CreateMaterializer {
-            relay: relay.name,
-            state,
-        };
-        let materializer_index = graph.add_node(ActiveNode {
-            identifier: identifier.clone(),
-            kind: ModelKind::Materializer,
-            config: Arc::new(Model::Materializer(materializer)),
-            effective_branching,
-            effective_branching_schema,
-        });
-        indices.insert(
-            RegistryKey::new(ModelKind::Materializer, identifier),
-            materializer_index,
-        );
-        graph.add_edge(stream_index, materializer_index, EdgeKind::RequiredBy);
-        graph.add_edge(stream_index, materializer_index, EdgeKind::SendsTo);
-    }
-}
-
 fn validate_branch_model(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
     parse_branch_ttl(domain, identifier, &branch.ttl)?;
-    if let Some(eviction) = &branch.eviction
-        && eviction.max_instances() == 0
-    {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "branch MAX INSTANCES must be greater than zero".to_string(),
-        }));
-    }
     ensure_branch_schema_exists(domain, identifier, models, branch)
 }
 
 fn parse_branch_ttl(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     ttl: &str,
 ) -> Result<Duration, Report<RegistryError>> {
     humantime::parse_duration(ttl).map_err(|error| {
@@ -5554,13 +5437,13 @@ fn parse_branch_ttl(
 }
 
 fn ensure_branch_schema_exists(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
     let Some(Model::Schema(_)) =
-        models.get(&RegistryKey::new(ModelKind::Schema, branch.schema.clone()))
+        models.get(&NodeRef::new(ModelKind::Schema, branch.schema.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
@@ -5574,8 +5457,8 @@ fn ensure_branch_schema_exists(
 }
 
 fn ensure_schema_has_fields<T>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     fields: &[T],
     schema_kind: &str,
 ) -> Result<(), Report<RegistryError>> {
@@ -5590,16 +5473,16 @@ fn ensure_schema_has_fields<T>(
 }
 
 fn ensure_wire_schema_has_fields<T>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     schema: &CreateWireSchema<T>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
 }
 
 fn ensure_signaling_protocol_is_valid(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     protocol: &CreateSignalingProtocol,
 ) -> Result<(), Report<RegistryError>> {
     let invalid = |reason: String| {
@@ -5692,8 +5575,8 @@ fn ensure_signaling_protocol_is_valid(
 }
 
 fn parse_window_bound_duration(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     bound_name: &str,
     duration: Option<&str>,
 ) -> Result<(), Report<RegistryError>> {
@@ -5713,19 +5596,19 @@ fn parse_window_bound_duration(
 
 #[derive(Clone, Copy)]
 struct ModelValidationContext<'location, 'models> {
-    domain: &'location Domain,
-    identifier: &'location Identifier,
-    models: &'models HashMap<RegistryKey, Model>,
+    domain: &'location DomainName,
+    identifier: &'location ModelName,
+    models: &'models ModelIndex,
 }
 
 fn processor_input_schemas<'inputs, 'models>(
     context: ModelValidationContext<'_, 'models>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     inputs: &'inputs nervix_models::ProcessorInputs,
     relation: &str,
-) -> Result<Vec<(&'inputs Identifier, &'models CreateSchema)>, Report<RegistryError>> {
+) -> Result<Vec<(&'inputs RelayName, &'models CreateSchema)>, Report<RegistryError>> {
     let ModelValidationContext {
         domain,
         identifier,
@@ -5783,8 +5666,8 @@ fn processor_input_schemas<'inputs, 'models>(
 }
 
 fn ensure_input_collect_policy(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     policy: Option<&nervix_models::InputCollectPolicy>,
     relation: &str,
 ) -> Result<(), Report<RegistryError>> {
@@ -5830,8 +5713,8 @@ fn ensure_input_collect_policy(
 }
 
 fn validate_correlator_input_sides_do_not_overlap(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     correlator: &CreateCorrelator,
 ) -> Result<(), Report<RegistryError>> {
     let mut left = HashSet::new();
@@ -5854,11 +5737,11 @@ fn validate_correlator_input_sides_do_not_overlap(
 }
 
 fn processor_first_input_relay<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     inputs: &'a nervix_models::ProcessorInputs,
     relation: &str,
-) -> Result<&'a Identifier, Report<RegistryError>> {
+) -> Result<&'a RelayName, Report<RegistryError>> {
     inputs.from.first().ok_or_else(|| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5869,11 +5752,11 @@ fn processor_first_input_relay<'a>(
 }
 
 fn ensure_window_processor_output_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     window_processor: &CreateWindowProcessor,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &window_processor.output_routes)?;
@@ -5893,11 +5776,11 @@ fn ensure_window_processor_output_schemas(
 }
 
 fn ensure_wasm_processor_output_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     processor: &nervix_models::CreateWasmProcessor,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &processor.output_routes)?;
@@ -5936,10 +5819,10 @@ fn ensure_wasm_processor_output_schemas(
 }
 
 fn effective_wasm_output_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    input_schemas: &[(&RelayName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -5966,8 +5849,10 @@ fn effective_wasm_output_filter_map_schema(
     }
 
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let Some((_first_input_relay, _first_input_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -6024,12 +5909,12 @@ fn effective_wasm_output_filter_map_schema(
 }
 
 fn validate_window_processor_output(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     let aggregate = lower_window_assignments(&output.construction).map_err(|reason| {
@@ -6123,9 +6008,9 @@ fn validate_window_processor_output(
 }
 
 fn validate_window_route_where(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -6146,8 +6031,10 @@ fn validate_window_route_where(
             })
         })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![writable_binding_for_internal_schema(
         "output",
         output_schema,
@@ -6191,9 +6078,9 @@ fn validate_window_route_where(
 fn locality_affinity_scores(
     graph: &DiGraph<ActiveNode, EdgeKind>,
     index: NodeIndex,
-    assigned_by_key: &HashMap<RegistryKey, Vec<String>>,
-) -> HashMap<String, usize> {
-    let mut scores = HashMap::<String, usize>::new();
+    assigned_by_key: &HashMap<NodeRef, Vec<ClusterNodeName>>,
+) -> HashMap<ClusterNodeName, usize> {
+    let mut scores = HashMap::<ClusterNodeName, usize>::new();
     collect_locality_affinity(
         graph,
         index,
@@ -6207,9 +6094,9 @@ fn locality_affinity_scores(
 fn collect_locality_affinity(
     graph: &DiGraph<ActiveNode, EdgeKind>,
     index: NodeIndex,
-    assigned_by_key: &HashMap<RegistryKey, Vec<String>>,
+    assigned_by_key: &HashMap<NodeRef, Vec<ClusterNodeName>>,
     visited: &mut HashSet<NodeIndex>,
-    scores: &mut HashMap<String, usize>,
+    scores: &mut HashMap<ClusterNodeName, usize>,
 ) {
     if !visited.insert(index) {
         return;
@@ -6222,9 +6109,9 @@ fn collect_locality_affinity(
         let source = edge.source();
         let source_node = graph
             .node_weight(source)
-            .expect("incoming source node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         if is_schedulable_model(source_node.config.as_ref()) {
-            if let Some(node_ids) = assigned_by_key.get(&source_node.key()) {
+            if let Some(node_ids) = assigned_by_key.get(&source_node.node_ref()) {
                 for node_id in node_ids {
                     *scores.entry(node_id.clone()).or_insert(0) += 1;
                 }
@@ -6237,35 +6124,54 @@ fn collect_locality_affinity(
 
 struct AssignmentPlanner<'a> {
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
-    cluster_nodes: &'a [String],
-    assigned_by_key: &'a HashMap<RegistryKey, Vec<String>>,
+    cluster_nodes: &'a [ClusterNodeName],
+    assigned_by_key: &'a HashMap<NodeRef, Vec<ClusterNodeName>>,
     placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
-    node_load: &'a HashMap<String, usize>,
+    node_load: &'a HashMap<ClusterNodeName, usize>,
     next_assignment: &'a mut usize,
-    replica_count: usize,
-    #[cfg(feature = "testing")]
-    scheduler_mode: SchedulerMode,
-    #[cfg(feature = "testing")]
-    random_schedule_seed: [u8; 32],
+    assignment_slots: usize,
 }
 
-impl AssignmentPlanner<'_> {
-    #[cfg(feature = "testing")]
-    fn random_schedule_seed_for(&self, members: &[RegistryKey]) -> u64 {
+#[cfg(feature = "testing")]
+struct RandomAssignmentPlanner<'a> {
+    cluster_nodes: &'a [ClusterNodeName],
+    assignment_slots: usize,
+    domain_seed: [u8; 32],
+}
+
+#[cfg(feature = "testing")]
+impl<'a> RandomAssignmentPlanner<'a> {
+    fn new(
+        domain: &DomainName,
+        cluster_nodes: &'a [ClusterNodeName],
+        assignment_slots: usize,
+    ) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nervix/test-random-scheduler/domain");
+        hasher.update(&[0]);
+        hasher.update(domain.as_str().as_bytes());
+        Self {
+            cluster_nodes,
+            assignment_slots,
+            domain_seed: *hasher.finalize().as_bytes(),
+        }
+    }
+
+    fn assignment_seed_for(&self, members: &[NodeRef]) -> u64 {
         let mut hasher = blake3::Hasher::new();
         if let [member] = members {
             hasher.update(b"nervix/test-random-scheduler/model");
             hasher.update(&[0]);
-            hasher.update(&self.random_schedule_seed);
+            hasher.update(&self.domain_seed);
             hasher.update(member.kind.as_str().as_bytes());
             hasher.update(&[0]);
             hasher.update(member.identifier.as_str().as_bytes());
         } else {
             let mut members = members.to_vec();
-            members.sort_by(registry_key_cmp);
+            members.sort();
             hasher.update(b"nervix/test-random-scheduler/placement-unit");
             hasher.update(&[0]);
-            hasher.update(&self.random_schedule_seed);
+            hasher.update(&self.domain_seed);
             for member in members {
                 hasher.update(member.kind.as_str().as_bytes());
                 hasher.update(&[0]);
@@ -6278,35 +6184,47 @@ impl AssignmentPlanner<'_> {
         u64::from_le_bytes(seed)
     }
 
-    #[cfg(feature = "testing")]
-    fn random_assignment(&self, members: &[RegistryKey]) -> Vec<String> {
+    fn assignment(&self, members: &[NodeRef]) -> Vec<ClusterNodeName> {
         let mut nodes = self.cluster_nodes.to_vec();
-        fastrand::Rng::with_seed(self.random_schedule_seed_for(members)).shuffle(&mut nodes);
-        nodes.truncate(self.replica_count.saturating_add(1));
+        fastrand::Rng::with_seed(self.assignment_seed_for(members)).shuffle(&mut nodes);
+        nodes.truncate(self.assignment_slots);
         nodes
     }
 
+    fn for_model(&self, key: &NodeRef, model: &Model) -> Vec<ClusterNodeName> {
+        if let Model::Ingestor(_) = model
+            && model.executes_on_every_cluster_node()
+        {
+            return self.cluster_nodes.to_vec();
+        }
+        if is_schedulable_model(model) {
+            self.assignment(std::slice::from_ref(key))
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl AssignmentPlanner<'_> {
     fn ranked_assignment(
         &mut self,
-        preferred_order: &HashMap<String, usize>,
-        placement_order: &HashMap<String, isize>,
-    ) -> Vec<String> {
+        preferred_order: &HashMap<ClusterNodeName, usize>,
+        placement_order: &HashMap<ClusterNodeName, isize>,
+    ) -> Vec<ClusterNodeName> {
         let mut ordered_nodes = self
             .cluster_nodes
             .iter()
             .enumerate()
-            .map(|(position, node_id)| {
-                (
-                    placement_order.get(node_id).copied().unwrap_or(0),
-                    preferred_order.get(node_id).copied().unwrap_or(0),
-                    Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
-                    Reverse(
-                        (position + self.cluster_nodes.len()
-                            - (*self.next_assignment % self.cluster_nodes.len()))
-                            % self.cluster_nodes.len(),
-                    ),
-                    node_id.clone(),
-                )
+            .map(|(position, node_id)| AssignmentCandidate {
+                placement_order: placement_order.get(node_id).copied().unwrap_or(0),
+                preferred_order: preferred_order.get(node_id).copied().unwrap_or(0),
+                load: Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
+                round_robin_distance: Reverse(
+                    (position + self.cluster_nodes.len()
+                        - (*self.next_assignment % self.cluster_nodes.len()))
+                        % self.cluster_nodes.len(),
+                ),
+                node_id: node_id.clone(),
             })
             .collect::<Vec<_>>();
         ordered_nodes.sort_unstable();
@@ -6314,22 +6232,17 @@ impl AssignmentPlanner<'_> {
         *self.next_assignment += 1;
         ordered_nodes
             .into_iter()
-            .take(self.replica_count.saturating_add(1))
-            .map(|(_, _, _, _, node_id)| node_id)
+            .take(self.assignment_slots)
+            .map(|candidate| candidate.node_id)
             .collect()
     }
 
-    fn for_group(&mut self, members: &[RegistryKey], indices: &[NodeIndex]) -> Vec<String> {
+    fn for_group(&mut self, members: &[NodeRef], indices: &[NodeIndex]) -> Vec<ClusterNodeName> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
         }
 
-        #[cfg(feature = "testing")]
-        if let SchedulerMode::Random = self.scheduler_mode {
-            return self.random_assignment(members);
-        }
-
-        let mut preferred_order = HashMap::<String, usize>::new();
+        let mut preferred_order = HashMap::<ClusterNodeName, usize>::new();
         for index in indices {
             for (node_id, score) in
                 locality_affinity_scores(self.graph, *index, self.assigned_by_key)
@@ -6337,7 +6250,7 @@ impl AssignmentPlanner<'_> {
                 *preferred_order.entry(node_id).or_insert(0) += score;
             }
         }
-        let mut placement_order = HashMap::<String, isize>::new();
+        let mut placement_order = HashMap::<ClusterNodeName, isize>::new();
         for member in members {
             for (node_id, score) in
                 placement_affinity_scores(member, self.placement_pairs, self.assigned_by_key)
@@ -6348,7 +6261,12 @@ impl AssignmentPlanner<'_> {
         self.ranked_assignment(&preferred_order, &placement_order)
     }
 
-    fn for_model(&mut self, index: NodeIndex, key: &RegistryKey, model: &Model) -> Vec<String> {
+    fn for_model(
+        &mut self,
+        index: NodeIndex,
+        key: &NodeRef,
+        model: &Model,
+    ) -> Vec<ClusterNodeName> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
         }
@@ -6361,7 +6279,7 @@ impl AssignmentPlanner<'_> {
             | Model::Inferencer(_)
             | Model::Ingestor(_)
             | Model::Reingestor(_)
-            | Model::Materializer(_)
+            | Model::Relay(_)
             | Model::Lookup(_)
             | Model::Deduplicator(_)
             | Model::Correlator(_)
@@ -6370,11 +6288,6 @@ impl AssignmentPlanner<'_> {
             | Model::WindowProcessor(_)
             | Model::WasmProcessor(_)
             | Model::Emitter(_) => {
-                #[cfg(feature = "testing")]
-                if let SchedulerMode::Random = self.scheduler_mode {
-                    return self.random_assignment(std::slice::from_ref(key));
-                }
-
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
                 let placement_order =
@@ -6389,9 +6302,9 @@ impl AssignmentPlanner<'_> {
 fn assignment_for_model(
     planner: &mut AssignmentPlanner<'_>,
     index: NodeIndex,
-    key: &RegistryKey,
+    key: &NodeRef,
     model: &Model,
-) -> Vec<String> {
+) -> Vec<ClusterNodeName> {
     if planner.cluster_nodes.is_empty() {
         return Vec::new();
     }
@@ -6399,11 +6312,11 @@ fn assignment_for_model(
 }
 
 fn placement_affinity_scores(
-    subject: &RegistryKey,
+    subject: &NodeRef,
     pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
-    assigned_by_key: &HashMap<RegistryKey, Vec<String>>,
-) -> HashMap<String, isize> {
-    let mut scores = HashMap::<String, isize>::new();
+    assigned_by_key: &HashMap<NodeRef, Vec<ClusterNodeName>>,
+) -> HashMap<ClusterNodeName, isize> {
+    let mut scores = HashMap::<ClusterNodeName, isize>::new();
     for (pair, resolved) in pairs {
         let other = if pair.left == *subject {
             &pair.right
@@ -6417,7 +6330,10 @@ fn placement_affinity_scores(
             PlacementPolicy::SuggestSeparation => -1,
             PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => continue,
         };
-        let Some(primary) = assigned_by_key.get(other).and_then(|nodes| nodes.first()) else {
+        let Some(nodes) = assigned_by_key.get(other) else {
+            continue;
+        };
+        let Some(primary) = nodes.first() else {
             continue;
         };
         *scores.entry(primary.clone()).or_insert(0) += adjustment;
@@ -6461,9 +6377,9 @@ impl ModelStorage {
     #[cfg(test)]
     fn put(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: &ModelName,
         model: &Model,
     ) -> Result<(), Report<RegistryError>> {
         let key = encode_key(domain, kind, identifier)?;
@@ -6489,9 +6405,9 @@ impl ModelStorage {
 
     fn commit_batch(
         &self,
-        domain: &Domain,
-        models_to_persist: &HashMap<RegistryKey, RegistryPersistMutation>,
-        drops_in_batch: &HashSet<RegistryKey>,
+        domain: &DomainName,
+        models_to_persist: &HashMap<NodeRef, RegistryPersistMutation>,
+        drops_in_batch: &HashSet<NodeRef>,
     ) -> Result<(), Report<RegistryError>> {
         let encoded_models = models_to_persist
             .iter()
@@ -6523,10 +6439,11 @@ impl ModelStorage {
 
     fn get(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
-        identifier: &Identifier,
+        identifier: impl Into<ModelName>,
     ) -> Result<Option<Model>, Report<RegistryError>> {
+        let identifier = identifier.into();
         let key = encode_key(domain, kind, identifier)?;
         let Some(raw) = self
             .index
@@ -6536,18 +6453,27 @@ impl ModelStorage {
             return Ok(None);
         };
 
-        let envelope = deserialize_value(raw.as_ref())?;
+        deserialize_value(raw.as_ref()).map(Some)
+    }
 
-        let model = Model::try_from(envelope).change_context(RegistryError::ModelConversion)?;
-        Ok(Some(model))
+    fn contains(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        identifier: impl Into<ModelName>,
+    ) -> Result<bool, Report<RegistryError>> {
+        let key = encode_key(domain, kind, identifier.into())?;
+        self.index
+            .contains_key(key)
+            .change_context(RegistryError::ReadValue)
     }
 
     fn list_identifiers(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
         kind: ModelKind,
         prefix: &str,
-    ) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
         let mut out = Vec::new();
         let prefix = prefix.to_ascii_lowercase();
 
@@ -6560,11 +6486,12 @@ impl ModelStorage {
                 continue;
             }
 
-            if !record.key.identifier.as_str().starts_with(&prefix) {
+            let identifier = record.model.name();
+            if !identifier.as_str().starts_with(&prefix) {
                 continue;
             }
 
-            out.push(record.key.identifier);
+            out.push(identifier);
         }
 
         out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -6574,7 +6501,7 @@ impl ModelStorage {
 
     fn list_models(
         &self,
-        domain: &Domain,
+        domain: &DomainName,
     ) -> Result<Vec<StoredModelRecord>, Report<RegistryError>> {
         self.list_records().map(|records| {
             records
@@ -6599,21 +6526,28 @@ impl ModelStorage {
             let key: ModelKeyOwned =
                 storekey::deserialize(&raw_key).change_context(RegistryError::DecodeKey)?;
 
-            let envelope = deserialize_value(raw_value.as_ref())?;
-            let model = Model::try_from(envelope).change_context(RegistryError::ModelConversion)?;
+            let model = deserialize_value(raw_value.as_ref())?;
 
-            let domain =
-                Domain::parse(&key.domain).change_context(RegistryError::ModelConversion)?;
+            let domain = DomainName::parse(&key.domain).change_context(RegistryError::DecodeKey)?;
             let kind = ModelKind::from_str(&key.kind)
-                .map_err(|_| Report::new(RegistryError::ModelConversion))?;
-            let identifier = Identifier::parse(&key.identifier)
-                .change_context(RegistryError::ModelConversion)?;
+                .map_err(|_| Report::new(RegistryError::DecodeKey))?;
+            let identifier =
+                ModelName::parse(&key.identifier).change_context(RegistryError::DecodeKey)?;
 
-            records.push(StoredModelRecord {
-                domain,
-                key: RegistryKey::new(kind, identifier),
-                model,
-            });
+            // Every model is written under the key it reports, so a stored pair that disagrees is
+            // corrupt storage. Checking it once here is what lets every reader below take the node
+            // from the model and never reconcile the two again.
+            let stored = NodeRef::new(kind, identifier);
+            if stored != model.node_ref() {
+                return Err(Report::new(RegistryError::StoredModelKindMismatch {
+                    domain: domain.as_str().to_string(),
+                    identifier: stored.identifier.as_str().to_string(),
+                    expected_kind: stored.kind.as_str(),
+                    stored_kind: model.kind().as_str(),
+                }));
+            }
+
+            records.push(StoredModelRecord { domain, model });
         }
 
         Ok(records)
@@ -6635,10 +6569,11 @@ struct ModelKeyOwned {
 }
 
 fn encode_key(
-    domain: &Domain,
+    domain: &DomainName,
     kind: ModelKind,
-    identifier: &Identifier,
+    identifier: impl Into<ModelName>,
 ) -> Result<Vec<u8>, Report<RegistryError>> {
+    let identifier = identifier.into();
     storekey::serialize(&ModelKey {
         domain: domain.as_str(),
         kind: kind.as_str(),
@@ -6648,53 +6583,59 @@ fn encode_key(
 }
 
 fn serialize_value(model: &Model) -> Result<Vec<u8>, Report<RegistryError>> {
-    let stored = StoredModelVersioned::from(model.clone());
-    rkyv::to_bytes::<rkyv::rancor::Error>(&stored)
+    rkyv::to_bytes::<rkyv::rancor::Error>(model)
         .map(|bytes| bytes.to_vec())
         .change_context(RegistryError::SerializeValue)
 }
 
-fn deserialize_value(bytes: &[u8]) -> Result<StoredModelVersioned, Report<RegistryError>> {
-    match rkyv::from_bytes::<StoredModelVersioned, rkyv::rancor::Error>(bytes) {
-        Ok(stored) => Ok(stored),
-        Err(current_error) => match stored::decode_pre_publishing_mode_model(bytes) {
-            Some(stored::PrePublishingModeStoredDecode::Model(stored)) => Ok(*stored),
-            Some(stored::PrePublishingModeStoredDecode::EmitterWithoutMode) => {
-                Err(Report::new(RegistryError::EmitterPublishingModeMissing))
-            }
-            None => Err(current_error).change_context(RegistryError::DeserializeValue),
-        },
-    }
+fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
+    rkyv::from_bytes::<Model, rkyv::rancor::Error>(bytes)
+        .change_context(RegistryError::DeserializeValue)
 }
 
 fn expect_kind(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
-    referenced: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
+    referenced: impl Into<ModelName>,
     expected_kind: ModelKind,
 ) -> Result<NodeIndex, Report<RegistryError>> {
-    let referenced_key = RegistryKey::new(expected_kind, referenced.clone());
-    models.get(&referenced_key).ok_or_else(|| {
+    expect_node(
+        domain,
+        identifier,
+        models,
+        indices,
+        &NodeRef::new(expected_kind, referenced),
+    )
+}
+
+fn expect_node(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
+    referenced: &NodeRef,
+) -> Result<NodeIndex, Report<RegistryError>> {
+    models.get(referenced).ok_or_else(|| {
         Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            expected_kind: expected_kind.as_str(),
-            reference: referenced.as_str().to_string(),
+            expected_kind: referenced.kind.as_str(),
+            reference: referenced.identifier.as_str().to_string(),
         })
     })?;
 
     Ok(*indices
-        .get(&referenced_key)
-        .expect("referenced model must have a graph node"))
+        .get(referenced)
+        .verified("the reference was resolved above, and every resolved model has an index"))
 }
 
 fn add_message_error_policy_edges(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     policy: &MessageErrorPolicy,
@@ -6718,14 +6659,14 @@ struct MessageErrorSchemas<'a> {
 }
 
 fn validate_model_message_error_policies(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     model: &Model,
 ) -> Result<(), Report<RegistryError>> {
     let validate_outputs = |outputs: &ProcessorOutputs,
                             schemas: MessageErrorSchemas<'_>,
-                            expected_branch: Option<&Identifier>| {
+                            expected_branch: Option<&BranchName>| {
         for output in outputs.outputs() {
             let partial_output = schema_for_ack_model(domain, identifier, models, &output.relay)?;
             validate_message_error_policy(
@@ -6905,9 +6846,9 @@ fn validate_model_message_error_policies(
 }
 
 fn validate_transforming_processor_message_errors(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     inputs: &nervix_models::ProcessorInputs,
     outputs: &ProcessorOutputs,
     branch: &BranchSelection,
@@ -6938,12 +6879,12 @@ fn validate_transforming_processor_message_errors(
 }
 
 fn validate_message_error_policy(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     policy: &MessageErrorPolicy,
     schemas: MessageErrorSchemas<'_>,
-    expected_branch: Option<&Identifier>,
+    expected_branch: Option<&BranchName>,
 ) -> Result<(), Report<RegistryError>> {
     let MessageErrorPolicy::Dlq { relay, assignments } = policy else {
         return Ok(());
@@ -6956,8 +6897,8 @@ fn validate_message_error_policy(
             reason: format!(
                 "message-error relay '{}' uses branch {}, expected {}",
                 relay,
-                actual_branch.map_or("UNBRANCHED", Identifier::as_str),
-                expected_branch.map_or("UNBRANCHED", Identifier::as_str),
+                format_branch_name(actual_branch),
+                format_branch_name(expected_branch),
             ),
         }));
     }
@@ -7106,10 +7047,10 @@ fn model_materialized_state_dependencies(model: &Model) -> &[MaterializedStateDe
 }
 
 fn add_materialized_state_dependency_edges(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     dependencies: &[MaterializedStateDependency],
@@ -7142,9 +7083,9 @@ fn add_materialized_state_dependency_edges(
 }
 
 fn validate_materialized_state_default(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     dependency: &MaterializedStateDependency,
 ) -> Result<(), Report<RegistryError>> {
     let MaterializedStatePolicy::Default(assignments) = &dependency.policy else {
@@ -7234,7 +7175,7 @@ fn validate_materialized_state_default(
 
 fn expression_contains_nondeterministic_or_side_effect_call(
     expression: &Expression,
-    models: &HashMap<RegistryKey, Model>,
+    models: &ModelIndex,
 ) -> bool {
     match expression {
         Expression::Literal(_) | Expression::Field(_) => false,
@@ -7261,7 +7202,7 @@ fn expression_contains_nondeterministic_or_side_effect_call(
             arguments,
         } => {
             models
-                .get(&RegistryKey::new(ModelKind::Udf, function.clone()))
+                .get(&NodeRef::new(ModelKind::Udf, function.clone()))
                 .is_none_or(|model| !matches!(model, Model::Udf(udf) if !udf.volatile))
                 || arguments.iter().any(|argument| {
                     expression_contains_nondeterministic_or_side_effect_call(argument, models)
@@ -7300,8 +7241,8 @@ fn expression_contains_nondeterministic_or_side_effect_call(
 }
 
 fn validate_declared_materialized_state_references(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     model: &Model,
     dependencies: &[MaterializedStateDependency],
 ) -> Result<(), Report<RegistryError>> {
@@ -7486,10 +7427,10 @@ fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression))
 }
 
 fn add_udf_dependency_edges(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     model: &Model,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     consumer: NodeIndex,
 ) -> Result<(), Report<RegistryError>> {
@@ -7500,7 +7441,7 @@ fn add_udf_dependency_edges(
         });
     });
     for function in dependencies {
-        let key = RegistryKey::new(ModelKind::Udf, function.clone());
+        let key = NodeRef::new(ModelKind::Udf, function.clone());
         let udf = indices.get(&key).copied().ok_or_else(|| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
@@ -7514,10 +7455,10 @@ fn add_udf_dependency_edges(
 }
 
 fn add_output_message_error_policy_edges(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     outputs: &ProcessorOutputs,
@@ -7537,10 +7478,10 @@ fn add_output_message_error_policy_edges(
 }
 
 fn add_correlation_timeout_action_edges(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     action: &CorrelationTimeoutAction,
@@ -7555,99 +7496,110 @@ fn add_correlation_timeout_action_edges(
 }
 
 fn expect_schema_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    referenced: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    referenced: &SchemaName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
-    match models.get(&RegistryKey::new(ModelKind::Schema, referenced.clone())) {
-        Some(Model::Schema(schema)) => Ok(schema),
-        Some(model) => Err(Report::new(RegistryError::InvalidReferenceKind {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Schema.as_str(),
-            reference: referenced.as_str().to_string(),
-            actual_kind: model.kind().as_str(),
-        })),
-        None => Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Schema.as_str(),
-            reference: referenced.as_str().to_string(),
-        })),
+    models
+        .configured::<CreateSchema>(referenced.clone())
+        .ok_or_else(|| {
+            Report::new(RegistryError::MissingReference {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                expected_kind: ModelKind::Schema.as_str(),
+                reference: referenced.as_str().to_string(),
+            })
+        })
+}
+
+/// The wire schemas of a domain's proposed configuration, as a codec's format looks them up.
+///
+/// The reference the format names is resolved against the store the whole configuration is
+/// validated from, and the format decides which kind is read, so a codec never sees a wire schema
+/// of another kind.
+struct DomainModelWireSchemas<'a> {
+    domain: &'a DomainName,
+    identifier: &'a ModelName,
+    models: &'a ModelIndex,
+}
+
+impl<'a> DomainModelWireSchemas<'a> {
+    fn require<T>(
+        &self,
+        kind: ModelKind,
+        referenced: &WireSchemaName,
+        extract: impl Fn(&'a Model) -> Option<&'a CreateWireSchema<T>>,
+    ) -> Result<&'a CreateWireSchema<T>, Report<RegistryError>> {
+        self.models
+            .narrowed(kind, referenced.clone(), extract)
+            .ok_or_else(|| {
+                Report::new(RegistryError::MissingReference {
+                    domain: self.domain.as_str().to_string(),
+                    identifier: self.identifier.as_str().to_string(),
+                    expected_kind: kind.as_str(),
+                    reference: referenced.as_str().to_string(),
+                })
+            })
     }
 }
 
-fn expect_wire_schema_model(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    wire_format: &CodecWireFormat,
-    referenced: &Identifier,
-) -> Result<WireSchemaDefinition, Report<RegistryError>> {
-    let Some(kind) = wire_format.wire_schema_kind() else {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec wire format cannot reference a wire schema".to_string(),
-        }));
-    };
-    match (
-        kind,
-        models.get(&RegistryKey::new(kind, referenced.clone())),
-    ) {
-        (ModelKind::WireJsonSchema, Some(Model::WireJsonSchema(schema))) => {
-            Ok(WireSchemaDefinition::Json(schema.clone()))
-        }
-        (ModelKind::WireCborSchema, Some(Model::WireCborSchema(schema))) => {
-            Ok(WireSchemaDefinition::Cbor(schema.clone()))
-        }
-        (ModelKind::WireAvroSchema, Some(Model::WireAvroSchema(schema))) => {
-            Ok(WireSchemaDefinition::Avro(schema.clone()))
-        }
-        (_, Some(model)) => Err(Report::new(RegistryError::InvalidReferenceKind {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: kind.as_str(),
-            reference: referenced.as_str().to_string(),
-            actual_kind: model.kind().as_str(),
-        })),
-        (_, None) => Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: kind.as_str(),
-            reference: referenced.as_str().to_string(),
-        })),
+impl WireSchemaLookup for DomainModelWireSchemas<'_> {
+    type Error = Report<RegistryError>;
+
+    fn json_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<&CreateJsonWireSchema, Self::Error> {
+        self.require(ModelKind::WireJsonSchema, name, |model| match model {
+            Model::WireJsonSchema(schema) => Some(schema),
+            _ => None,
+        })
+    }
+
+    fn cbor_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<&CreateCborWireSchema, Self::Error> {
+        self.require(ModelKind::WireCborSchema, name, |model| match model {
+            Model::WireCborSchema(schema) => Some(schema),
+            _ => None,
+        })
+    }
+
+    fn avro_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<&CreateAvroWireSchema, Self::Error> {
+        self.require(ModelKind::WireAvroSchema, name, |model| match model {
+            Model::WireAvroSchema(schema) => Some(schema),
+            _ => None,
+        })
     }
 }
 
 fn expect_codec_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    referenced: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    referenced: impl Into<ModelName>,
 ) -> Result<&'a CreateCodec, Report<RegistryError>> {
-    match models.get(&RegistryKey::new(ModelKind::Codec, referenced.clone())) {
-        Some(Model::Codec(codec)) => Ok(codec),
-        Some(model) => Err(Report::new(RegistryError::InvalidReferenceKind {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Codec.as_str(),
-            reference: referenced.as_str().to_string(),
-            actual_kind: model.kind().as_str(),
-        })),
-        None => Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Codec.as_str(),
-            reference: referenced.as_str().to_string(),
-        })),
-    }
+    let referenced = referenced.into();
+    models
+        .configured::<CreateCodec>(referenced.clone())
+        .ok_or_else(|| {
+            Report::new(RegistryError::MissingReference {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                expected_kind: ModelKind::Codec.as_str(),
+                reference: referenced.as_str().to_string(),
+            })
+        })
 }
 
 fn ensure_codec_supports_decoding(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     codec: &CreateCodec,
 ) -> Result<(), Report<RegistryError>> {
     if codec.wire_format.supports_decoding() {
@@ -7666,8 +7618,8 @@ fn ensure_codec_supports_decoding(
 }
 
 fn ensure_codec_supports_encoding(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     codec: &CreateCodec,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -7713,70 +7665,46 @@ fn ensure_codec_supports_encoding(
 }
 
 fn schema_for_codec_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    codec_id: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    codec_id: &CodecName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let codec = expect_codec_model(domain, identifier, models, codec_id)?;
     expect_schema_model(domain, identifier, models, &codec.schema)
 }
 
 fn schema_for_ack_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    relay_id: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    relay_id: &RelayName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
-    let relay = match models.get(&RegistryKey::new(ModelKind::Relay, relay_id.clone())) {
-        Some(Model::Relay(relay)) => relay,
-        Some(model) => {
-            return Err(Report::new(RegistryError::InvalidReferenceKind {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Relay.as_str(),
-                reference: relay_id.as_str().to_string(),
-                actual_kind: model.kind().as_str(),
-            }));
-        }
-        None => {
-            return Err(Report::new(RegistryError::MissingReference {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Relay.as_str(),
-                reference: relay_id.as_str().to_string(),
-            }));
-        }
+    let Some(relay) = models.configured::<CreateRelay>(relay_id.clone()) else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Relay.as_str(),
+            reference: relay_id.as_str().to_string(),
+        }));
     };
 
     expect_schema_model(domain, identifier, models, &relay.schema)
 }
 
 fn schema_for_lookup_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    lookup_id: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    lookup_id: &LookupName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
-    let lookup = match models.get(&RegistryKey::new(ModelKind::Lookup, lookup_id.clone())) {
-        Some(Model::Lookup(lookup)) => lookup,
-        Some(model) => {
-            return Err(Report::new(RegistryError::InvalidReferenceKind {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Lookup.as_str(),
-                reference: lookup_id.as_str().to_string(),
-                actual_kind: model.kind().as_str(),
-            }));
-        }
-        None => {
-            return Err(Report::new(RegistryError::MissingReference {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                expected_kind: ModelKind::Lookup.as_str(),
-                reference: lookup_id.as_str().to_string(),
-            }));
-        }
+    let Some(lookup) = models.configured::<CreateLookup>(lookup_id.clone()) else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Lookup.as_str(),
+            reference: lookup_id.as_str().to_string(),
+        }));
     };
 
     schema_for_codec_model(domain, identifier, models, &lookup.decode_using_codec)
@@ -7791,8 +7719,8 @@ enum ProcessorOutputSchemaCompatibility {
 impl ProcessorOutputSchemaCompatibility {
     fn ensure(
         self,
-        domain: &Domain,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ModelName,
         effective_schema: &CreateSchema,
         output_schema: &CreateSchema,
         relation: &str,
@@ -7817,8 +7745,8 @@ impl ProcessorOutputSchemaCompatibility {
 }
 
 fn ensure_processor_outputs_declared(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     outputs: &ProcessorOutputs,
 ) -> Result<(), Report<RegistryError>> {
     if outputs.is_empty() {
@@ -7833,8 +7761,8 @@ fn ensure_processor_outputs_declared(
 }
 
 fn ensure_processor_output_flush_policies(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     outputs: &ProcessorOutputs,
 ) -> Result<(), Report<RegistryError>> {
     for output in outputs.outputs() {
@@ -7848,48 +7776,30 @@ fn ensure_processor_output_flush_policies(
                 ),
             }));
         };
-        if policy.flush_each.eq_ignore_ascii_case("IMMEDIATE") {
-            if policy.max_batch_size.is_some() {
-                return Err(Report::new(RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!(
-                        "TO output '{}' FLUSH IMMEDIATE cannot declare MAX BATCH SIZE",
-                        output.relay.as_str()
-                    ),
-                }));
-            }
+        let FlushPolicy::Each {
+            interval,
+            max_batch_size,
+        } = policy
+        else {
             continue;
-        }
-        humantime::parse_duration(&policy.flush_each).map_err(|error| {
+        };
+        humantime::parse_duration(interval).map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "invalid TO output '{}' FLUSH EACH duration '{}': {error}",
-                    output.relay.as_str(),
-                    policy.flush_each
+                    "invalid TO output '{}' FLUSH EACH duration '{interval}': {error}",
+                    output.relay.as_str()
                 ),
             })
         })?;
-        let Some(max_batch_size) = policy.max_batch_size.as_deref() else {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "TO output '{}' FLUSH EACH requires MAX BATCH SIZE",
-                    output.relay.as_str()
-                ),
-            }));
-        };
         max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "invalid TO output '{}' MAX BATCH SIZE '{}': {error}",
-                    output.relay.as_str(),
-                    max_batch_size
+                    "invalid TO output '{}' MAX BATCH SIZE '{max_batch_size}': {error}",
+                    output.relay.as_str()
                 ),
             })
         })?;
@@ -7898,10 +7808,10 @@ fn ensure_processor_output_flush_policies(
 }
 
 fn add_processor_output_edges(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     outputs: &ProcessorOutputs,
@@ -7923,10 +7833,10 @@ fn add_processor_output_edges(
 }
 
 fn add_output_branch_dependency_edges(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     outputs: &ProcessorOutputs,
@@ -7949,10 +7859,10 @@ fn add_output_branch_dependency_edges(
 }
 
 fn validate_filter_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     filter_where: Option<&Expression>,
 ) -> Result<(), Report<RegistryError>> {
@@ -7974,10 +7884,10 @@ fn validate_filter_where_for_internal_schemas(
 }
 
 fn validate_ingestor_filter_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     filter_where: Option<&Expression>,
     source: &IngestSource,
@@ -8027,10 +7937,10 @@ fn validate_ingestor_filter_where_for_internal_schemas(
 }
 
 fn validate_from_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     from_where: &[nervix_models::ProcessorInputWhere],
 ) -> Result<(), Report<RegistryError>> {
@@ -8046,10 +7956,10 @@ fn validate_from_where_for_internal_schemas(
 }
 
 fn validate_scoped_from_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     from_where: &[nervix_models::ProcessorInputWhere],
     input_namespace: &'static str,
@@ -8099,7 +8009,7 @@ fn validate_scoped_from_where_for_internal_schemas(
 
 fn validate_where_program_for_internal_schemas(
     context: ModelValidationContext<'_, '_>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     where_program: &Expression,
     clause_name: &str,
@@ -8118,7 +8028,7 @@ fn validate_where_program_for_internal_schemas(
 
 fn validate_where_program_for_scoped_internal_schemas(
     context: ModelValidationContext<'_, '_>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     where_program: &Expression,
     clause_name: &str,
@@ -8146,8 +8056,10 @@ fn validate_where_program_for_scoped_internal_schemas(
     })?;
 
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let Some((_first_relay, first_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -8202,10 +8114,10 @@ fn validate_where_program_for_scoped_internal_schemas(
 }
 
 fn effective_processor_output_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    input_schemas: &[(&RelayName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -8232,8 +8144,10 @@ fn effective_processor_output_filter_map_schema(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
 
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", first_schema),
@@ -8287,7 +8201,7 @@ fn effective_processor_output_filter_map_schema(
 fn ensure_processor_output_schemas(
     context: ModelValidationContext<'_, '_>,
     outputs: &ProcessorOutputs,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     relation: &str,
     compatibility: ProcessorOutputSchemaCompatibility,
@@ -8321,9 +8235,9 @@ fn ensure_processor_output_schemas(
 }
 
 fn effective_emitter_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     emitter: &nervix_models::CreateEmitter,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
@@ -8381,8 +8295,10 @@ fn effective_emitter_filter_map_schema(
     }
 
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut body_bindings = if codec_route {
         vec![
             readonly_binding_for_internal_schema("input", input_schema),
@@ -8471,19 +8387,31 @@ fn lookup_hash_map_bindings(mut fields: Vec<(String, ArrowDataType)>) -> Vec<Com
     )]
 }
 
-type LookupHashMapRewriteResult = (
-    nervix_nspl::vm_program::SpannedNode<Program>,
-    Vec<(String, ArrowDataType)>,
-);
+/// A rewritten program together with the internal fields its `LOOKUP_HASH_MAP` calls now read
+/// from, which the compiler binds as an extra input namespace.
+struct LookupHashMapRewriteResult {
+    program: nervix_vm::program::SpannedNode<Program>,
+    fields: Vec<(String, ArrowDataType)>,
+}
+
+/// One `LOOKUP_HASH_MAP` call lifted out of a program: which hash map and field it reads, the key
+/// expression it looks up, and the internal field the rewritten program reads the result from.
+struct LookupHashMapCallSite {
+    lookup: LookupName,
+    lookup_field: FieldName,
+    key: Expr,
+    generated_field: String,
+    data_type: ArrowDataType,
+}
 
 fn rewrite_lookup_hash_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    parsed: &nervix_nspl::vm_program::SpannedNode<Program>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    parsed: &nervix_vm::program::SpannedNode<Program>,
 ) -> Result<LookupHashMapRewriteResult, Report<RegistryError>> {
     let mut next_field = 0usize;
-    let mut calls = Vec::<(Identifier, String, Expr, String, ArrowDataType)>::new();
+    let mut calls = Vec::<LookupHashMapCallSite>::new();
     let mut rewrite = |expr: &SpannedExpr| {
         rewrite_lookup_hash_map_expr(
             domain,
@@ -8494,7 +8422,7 @@ fn rewrite_lookup_hash_map_program(
             &mut next_field,
         )
     };
-    let program = nervix_nspl::vm_program::SpannedNode {
+    let program = nervix_vm::program::SpannedNode {
         inner: Program {
             filter: parsed.inner.filter.as_ref().map(&mut rewrite).transpose()?,
             set: parsed
@@ -8508,8 +8436,8 @@ fn rewrite_lookup_hash_map_program(
                 .invoke
                 .iter()
                 .map(|invocation| {
-                    Ok(nervix_nspl::vm_program::SpannedNode {
-                        inner: nervix_nspl::vm_program::Invocation {
+                    Ok(nervix_vm::program::SpannedNode {
+                        inner: nervix_vm::program::Invocation {
                             function: invocation.inner.function.clone(),
                             args: invocation
                                 .inner
@@ -8527,17 +8455,17 @@ fn rewrite_lookup_hash_map_program(
     };
     let fields = calls
         .into_iter()
-        .map(|(_, _, _, generated_field, data_type)| (generated_field, data_type))
+        .map(|call| (call.generated_field, call.data_type))
         .collect();
-    Ok((program, fields))
+    Ok(LookupHashMapRewriteResult { program, fields })
 }
 
 fn rewrite_lookup_hash_map_expr(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     expr: &SpannedExpr,
-    calls: &mut Vec<(Identifier, String, Expr, String, ArrowDataType)>,
+    calls: &mut Vec<LookupHashMapCallSite>,
     next_field: &mut usize,
 ) -> Result<SpannedExpr, Report<RegistryError>> {
     let inner = match &expr.inner {
@@ -8585,7 +8513,7 @@ fn rewrite_lookup_hash_map_expr(
                         reason,
                     })
                 })?;
-                let lookup = Identifier::parse(lookup_name).map_err(|error| {
+                let lookup = LookupName::parse(lookup_name).map_err(|error| {
                     Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
                         identifier: identifier.as_str().to_string(),
@@ -8594,20 +8522,25 @@ fn rewrite_lookup_hash_map_expr(
                         ),
                     })
                 })?;
-                let lookup_field = lookup_hash_map_literal_arg(args, 2)
-                    .map_err(|reason| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason,
-                        })
-                    })?
-                    .to_string();
+                let raw_lookup_field = lookup_hash_map_literal_arg(args, 2).map_err(|reason| {
+                    Report::new(RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason,
+                    })
+                })?;
+                let lookup_field = FieldName::parse(raw_lookup_field).change_context(
+                    RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason: format!("LOOKUP_HASH_MAP field '{raw_lookup_field}' is invalid"),
+                    },
+                )?;
                 let lookup_schema = schema_for_lookup_model(domain, identifier, models, &lookup)?;
                 let Some(schema_field) = lookup_schema
                     .fields
                     .iter()
-                    .find(|field| field.name.as_str() == lookup_field)
+                    .find(|field| field.name == lookup_field)
                 else {
                     return Err(Report::new(RegistryError::IncompatibleSchema {
                         domain: domain.as_str().to_string(),
@@ -8623,23 +8556,21 @@ fn rewrite_lookup_hash_map_expr(
                 // compared without its source spans.
                 let key = args[1].inner.clone();
                 let data_type = arrow_data_type_for_parse_as(&schema_field.ty);
-                let existing = calls
-                    .iter()
-                    .find(|(call_lookup, call_field, call_key, _, _)| {
-                        call_lookup == &lookup && call_field == &lookup_field && call_key == &key
-                    });
-                let generated_field = if let Some((_, _, _, generated_field, _)) = existing {
-                    generated_field.clone()
+                let existing = calls.iter().find(|call| {
+                    call.lookup == lookup && call.lookup_field == lookup_field && call.key == key
+                });
+                let generated_field = if let Some(existing) = existing {
+                    existing.generated_field.clone()
                 } else {
                     let generated_field = format!("value_{}", *next_field);
                     *next_field += 1;
-                    calls.push((
-                        lookup,
+                    calls.push(LookupHashMapCallSite {
+                        lookup: lookup.clone(),
                         lookup_field,
                         key,
-                        generated_field.clone(),
+                        generated_field: generated_field.clone(),
                         data_type,
-                    ));
+                    });
                     generated_field
                 };
                 Expr::InternalFieldRef(InternalFieldRef {
@@ -8708,7 +8639,7 @@ fn rewrite_lookup_hash_map_expr(
                 .transpose()?,
         },
     };
-    Ok(nervix_nspl::vm_program::SpannedNode {
+    Ok(nervix_vm::program::SpannedNode {
         inner,
         span: expr.span,
     })
@@ -8796,7 +8727,7 @@ fn program_uses_header_reads(program: &Program) -> bool {
             .any(expr_uses_header_read)
 }
 
-fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec<(String, String)> {
+fn collect_program_field_refs(program: &nervix_vm::program::Program) -> Vec<(String, String)> {
     let mut refs = Vec::new();
     if let Some(filter) = &program.filter {
         collect_expr_field_refs(filter, &mut refs);
@@ -8813,14 +8744,14 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
 }
 
 fn referenced_materialized_stream_bindings(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     excluded_namespaces: &HashSet<String>,
     program_label: &str,
 ) -> Result<Vec<CompileBinding>, Report<RegistryError>> {
-    let mut fields_by_stream = HashMap::<Identifier, HashSet<String>>::default();
+    let mut fields_by_stream = HashMap::<RelayName, HashSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
         if excluded_namespaces.contains(&relay) || relay == "metadata" || relay == BRANCH_NAMESPACE
         {
@@ -8829,7 +8760,7 @@ fn referenced_materialized_stream_bindings(
         let Some(relay_name) = relay.strip_prefix("relay_state.") else {
             continue;
         };
-        let relay = Identifier::parse(relay_name).map_err(|error| {
+        let relay = RelayName::parse(relay_name).map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8837,7 +8768,7 @@ fn referenced_materialized_stream_bindings(
             })
         })?;
         let Some(Model::Relay(ack_model)) =
-            models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
+            models.get(&NodeRef::new(ModelKind::Relay, relay.clone()))
         else {
             return Err(Report::new(RegistryError::MissingReference {
                 domain: domain.as_str().to_string(),
@@ -8900,13 +8831,12 @@ fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
 }
 
 fn ensure_stream_is_materialized(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    relay: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    relay: &RelayName,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(Model::Relay(ack_model)) =
-        models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
+    let Some(Model::Relay(ack_model)) = models.get(&NodeRef::new(ModelKind::Relay, relay.clone()))
     else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -8928,9 +8858,9 @@ fn ensure_stream_is_materialized(
 }
 
 fn validate_generator_output(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     generator: &CreateGenerator,
     output: &ProcessorOutput,
 ) -> Result<(), Report<RegistryError>> {
@@ -9001,9 +8931,9 @@ fn validate_generator_output(
 }
 
 fn effective_ingestor_output_filter_map_schema(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     ingestor: &CreateIngestor,
     input_schema: &CreateSchema,
     output: &ProcessorOutput,
@@ -9035,8 +8965,10 @@ fn effective_ingestor_output_filter_map_schema(
         }));
     }
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
 
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", input_schema),
@@ -9104,22 +9036,29 @@ fn ingest_source_supports_headers(source: &IngestSource) -> bool {
 fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSchema> {
     match source {
         IngestSource::Kafka { .. } => Some(CreateSchema {
-            name: Identifier::parse("ingestor_metadata").expect("valid metadata schema name"),
+            name: SchemaName::parse("ingestor_metadata")
+                .assured("this is a constant literal that satisfies the identifier grammar"),
             fields: vec![
                 SchemaField {
-                    name: Identifier::parse("topic").expect("valid metadata field"),
+                    name: FieldName::parse("topic").assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    ),
                     ty: ParseAsType::String,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("partition").expect("valid metadata field"),
+                    name: FieldName::parse("partition").assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    ),
                     ty: ParseAsType::I32,
                     optional: true,
                     sensitive: false,
                 },
                 SchemaField {
-                    name: Identifier::parse("offset").expect("valid metadata field"),
+                    name: FieldName::parse("offset").assured(
+                        "this is a constant literal that satisfies the identifier grammar",
+                    ),
                     ty: ParseAsType::I64,
                     optional: true,
                     sensitive: false,
@@ -9127,9 +9066,11 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
             ],
         }),
         IngestSource::Syslog { .. } => Some(CreateSchema {
-            name: Identifier::parse("ingestor_metadata").expect("valid metadata schema name"),
+            name: SchemaName::parse("ingestor_metadata")
+                .assured("this is a constant literal that satisfies the identifier grammar"),
             fields: vec![SchemaField {
-                name: Identifier::parse("peer_addr").expect("valid metadata field"),
+                name: FieldName::parse("peer_addr")
+                    .assured("this is a constant literal that satisfies the identifier grammar"),
                 ty: ParseAsType::String,
                 optional: true,
                 sensitive: false,
@@ -9217,7 +9158,10 @@ fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
                 arrow_data_type_for_parse_as(element),
                 false,
             )),
-            i32::try_from(*len).expect("array length must fit Arrow fixed-size list"),
+            i32::try_from(len.get()).verified(
+                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
+                 list",
+            ),
         ),
         ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
             "item",
@@ -9228,8 +9172,8 @@ fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
 }
 
 fn ensure_internal_schema_compatibility(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     producer: &CreateSchema,
     consumer: &CreateSchema,
     relation: &str,
@@ -9251,8 +9195,8 @@ enum SensitivityCompatibility {
 }
 
 fn ensure_internal_schema_compatibility_with_policy(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     producer: &CreateSchema,
     consumer: &CreateSchema,
     relation: &str,
@@ -9339,8 +9283,8 @@ fn ensure_internal_schema_compatibility_with_policy(
 }
 
 fn ensure_equal_internal_schema(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     left: &CreateSchema,
     right: &CreateSchema,
     relation: &str,
@@ -9361,11 +9305,11 @@ fn ensure_equal_internal_schema(
 }
 
 fn ensure_deduplicator_key_compiles(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     deduplicator: &CreateDeduplicator,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     let Some((_primary_relay, primary_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -9388,7 +9332,7 @@ fn ensure_deduplicator_key_compiles(
         .map(|(index, expression)| {
             Ok(Assignment {
                 target: AssignmentTarget::bare(
-                    Identifier::parse(&format!("deduplicate_key_{index}")).map_err(|error| {
+                    FieldName::parse(&format!("deduplicate_key_{index}")).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),
@@ -9441,12 +9385,12 @@ fn ensure_deduplicator_key_compiles(
 }
 
 fn validate_correlator(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     correlator: &CreateCorrelator,
-    left_schemas: &[(&Identifier, &CreateSchema)],
-    right_schemas: &[(&Identifier, &CreateSchema)],
+    left_schemas: &[(&RelayName, &CreateSchema)],
+    right_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     humantime::parse_duration(&correlator.max_time).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -9502,12 +9446,12 @@ fn validate_correlator(
 }
 
 fn validate_correlate_where_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     correlator: &CreateCorrelator,
-    left_schemas: &[(&Identifier, &CreateSchema)],
-    right_schemas: &[(&Identifier, &CreateSchema)],
+    left_schemas: &[(&RelayName, &CreateSchema)],
+    right_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     let parsed = lower_route_construction(
         &RouteConstruction {
@@ -9565,8 +9509,8 @@ fn validate_correlate_where_for_internal_schemas(
 
 fn validate_correlator_output(
     context: ModelValidationContext<'_, '_>,
-    left_schemas: &[(&Identifier, &CreateSchema)],
-    right_schemas: &[(&Identifier, &CreateSchema)],
+    left_schemas: &[(&RelayName, &CreateSchema)],
+    right_schemas: &[(&RelayName, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -9735,9 +9679,9 @@ fn validate_correlator_output(
 }
 
 fn validate_correlator_timeout_action(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     input_schema: &CreateSchema,
     action: &CorrelationTimeoutAction,
     relation: &str,
@@ -9750,11 +9694,11 @@ fn validate_correlator_timeout_action(
 }
 
 fn ensure_inferencer_input_mappings(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     processor: &CreateInferencer,
-    input_schemas: &[(&Identifier, &CreateSchema)],
+    input_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     let Some((_relay, input_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -9764,7 +9708,7 @@ fn ensure_inferencer_input_mappings(
         }));
     };
     for mapping in &processor.inputs {
-        let target = Identifier::parse("mapped_tensor").map_err(|error| {
+        let target = FieldName::parse("mapped_tensor").map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -9774,7 +9718,7 @@ fn ensure_inferencer_input_mappings(
         let parsed = lower_route_construction(
             &RouteConstruction {
                 assignments: vec![Assignment {
-                    target: AssignmentTarget::bare(target),
+                    target: AssignmentTarget::bare(target.clone()),
                     value: mapping.expression.clone(),
                 }],
                 ..RouteConstruction::default()
@@ -9803,7 +9747,7 @@ fn ensure_inferencer_input_mappings(
                 ),
             })
         })?;
-        let Some((_field, actual_type, actual_nullable)) = inferred.first() else {
+        let Some(inferred) = inferred.first() else {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -9811,7 +9755,7 @@ fn ensure_inferencer_input_mappings(
             }));
         };
         let expected_type = arrow_data_type_for_parse_as(&mapping.schema.message_type());
-        if actual_type != &expected_type || *actual_nullable {
+        if inferred.data_type != expected_type || inferred.nullable {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -9819,8 +9763,8 @@ fn ensure_inferencer_input_mappings(
                     "inference input '{}' requires {:?} non-null, found {:?}{}",
                     mapping.tensor,
                     expected_type,
-                    actual_type,
-                    if *actual_nullable {
+                    inferred.data_type,
+                    if inferred.nullable {
                         " nullable"
                     } else {
                         " non-null"
@@ -9834,9 +9778,9 @@ fn ensure_inferencer_input_mappings(
 }
 
 fn validate_inferencer_output_filter_map(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -9858,8 +9802,10 @@ fn validate_inferencer_output_filter_map(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
         readonly_binding_for_internal_schema("generated", &inner_output_schema),
         writable_binding_for_internal_schema("output", output_schema),
@@ -9911,22 +9857,22 @@ fn validate_inferencer_output_filter_map(
 trait InferencerRegistrySchema {
     fn inner_output_schema(
         &self,
-        domain: &Domain,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ModelName,
     ) -> Result<CreateSchema, Report<RegistryError>>;
 }
 
 impl InferencerRegistrySchema for CreateInferencer {
     fn inner_output_schema(
         &self,
-        domain: &Domain,
-        identifier: &Identifier,
+        domain: &DomainName,
+        identifier: &ModelName,
     ) -> Result<CreateSchema, Report<RegistryError>> {
         let fields = self
             .output_schema
             .iter()
             .map(|declaration| {
-                let name = Identifier::parse(&declaration.tensor).map_err(|error| {
+                let name = FieldName::parse(&declaration.tensor).map_err(|error| {
                     Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
                         identifier: identifier.as_str().to_string(),
@@ -9945,16 +9891,16 @@ impl InferencerRegistrySchema for CreateInferencer {
             })
             .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
         Ok(CreateSchema {
-            name: Identifier::parse(INNER_OUTPUT_NAMESPACE)
-                .expect("public inferencer namespace must be a valid identifier"),
+            name: SchemaName::parse(INNER_OUTPUT_NAMESPACE)
+                .assured("this is a constant literal that satisfies the identifier grammar"),
             fields,
         })
     }
 }
 
 fn ensure_lookup_key_field_exists(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     lookup: &CreateLookup,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -9978,8 +9924,8 @@ fn ensure_lookup_key_field_exists(
 }
 
 fn ensure_ingestor_timestamp_source(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     ingestor: &CreateIngestor,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -10020,13 +9966,13 @@ fn ensure_ingestor_timestamp_source(
 }
 
 fn relay_declared_branch<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    relay: &Identifier,
-) -> Result<Option<&'a Identifier>, Report<RegistryError>> {
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    relay: &RelayName,
+) -> Result<Option<&'a BranchName>, Report<RegistryError>> {
     let Some(Model::Relay(relay_model)) =
-        models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
+        models.get(&NodeRef::new(ModelKind::Relay, relay.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
@@ -10039,13 +9985,13 @@ fn relay_declared_branch<'a>(
 }
 
 fn relay_declared_branch_schema<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    relay: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    relay: &RelayName,
 ) -> Result<Option<&'a CreateSchema>, Report<RegistryError>> {
     let Some(Model::Relay(relay_model)) =
-        models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
+        models.get(&NodeRef::new(ModelKind::Relay, relay.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
@@ -10059,7 +10005,7 @@ fn relay_declared_branch_schema<'a>(
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
     let Some(Model::Schema(schema)) =
-        models.get(&RegistryKey::new(ModelKind::Schema, branch.schema.clone()))
+        models.get(&NodeRef::new(ModelKind::Schema, branch.schema.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
@@ -10072,13 +10018,13 @@ fn relay_declared_branch_schema<'a>(
 }
 
 fn ensure_output_branch(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     output: &ProcessorOutput,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-    incoming_branch: Option<&Identifier>,
+    incoming_branch: Option<&BranchName>,
 ) -> Result<(), Report<RegistryError>> {
     let target_branch = relay_declared_branch(domain, identifier, models, &output.relay)?;
     let Some(branch_action) = output.branch.as_ref() else {
@@ -10120,7 +10066,7 @@ fn ensure_output_branch(
             reason: format!(
                 "TO output '{}' must use its exact declared branch '{}'",
                 output.relay.as_str(),
-                target_branch.map_or("UNBRANCHED", Identifier::as_str)
+                format_branch_name(target_branch)
             ),
         }));
     }
@@ -10156,8 +10102,10 @@ fn ensure_output_branch(
         })
     })?;
     let original_parsed = parsed.clone();
-    let (parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", input_schema),
         readonly_binding_for_internal_schema("output", output_schema),
@@ -10203,10 +10151,10 @@ fn ensure_output_branch(
 }
 
 fn validate_vhost_hostnames(
-    domain: &Domain,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    models: &ModelIndex,
 ) -> Result<(), Report<RegistryError>> {
-    let mut owners = HashMap::<String, Identifier>::new();
+    let mut owners = HashMap::<String, VhostName>::new();
 
     for (key, model) in models {
         let Model::Vhost(vhost) = model else {
@@ -10225,7 +10173,7 @@ fn validate_vhost_hostnames(
                 }));
             }
 
-            if let Some(existing) = owners.insert(normalized, identifier.clone()) {
+            if let Some(existing) = owners.insert(normalized, VhostName::from(identifier)) {
                 return Err(Report::new(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
@@ -10242,10 +10190,10 @@ fn validate_vhost_hostnames(
 }
 
 fn validate_endpoint_paths(
-    domain: &Domain,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    models: &ModelIndex,
 ) -> Result<(), Report<RegistryError>> {
-    let mut routes = HashMap::<(Identifier, String), Identifier>::new();
+    let mut routes = HashMap::<(VhostName, String), EndpointName>::new();
 
     for (key, model) in models {
         let Model::Endpoint(endpoint) = model else {
@@ -10254,7 +10202,7 @@ fn validate_endpoint_paths(
         let identifier = &key.identifier;
 
         let key = (endpoint.on_vhost.clone(), endpoint.path.clone());
-        if let Some(existing) = routes.insert(key, identifier.clone()) {
+        if let Some(existing) = routes.insert(key, EndpointName::from(identifier)) {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -10272,9 +10220,9 @@ fn validate_endpoint_paths(
 }
 
 fn infer_stream_branchings(
-    domain: &Domain,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
     let producer_ids = SortedSet::from_unsorted(
@@ -10303,41 +10251,23 @@ fn infer_stream_branchings(
         changed = false;
 
         for producer_id in &producer_ids {
-            let Some(model) = models
-                .get(&RegistryKey::new(ModelKind::Generator, producer_id.clone()))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Inferencer,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::WasmProcessor,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| models.get(&RegistryKey::new(ModelKind::Ingestor, producer_id.clone())))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Reingestor,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::Deduplicator,
-                        producer_id.clone(),
-                    ))
-                })
-                .or_else(|| models.get(&RegistryKey::new(ModelKind::Junction, producer_id.clone())))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(
-                        ModelKind::WindowProcessor,
-                        producer_id.clone(),
-                    ))
-                })
-            else {
+            let mut model = None;
+            for kind in [
+                ModelKind::Generator,
+                ModelKind::Inferencer,
+                ModelKind::WasmProcessor,
+                ModelKind::Ingestor,
+                ModelKind::Reingestor,
+                ModelKind::Deduplicator,
+                ModelKind::Junction,
+                ModelKind::WindowProcessor,
+            ] {
+                if let Some(candidate) = models.get(&NodeRef::new(kind, producer_id.clone())) {
+                    model = Some(candidate);
+                    break;
+                }
+            }
+            let Some(model) = model else {
                 continue;
             };
 
@@ -10490,9 +10420,9 @@ fn infer_stream_branchings(
 }
 
 fn validate_processing_branch_selections(
-    domain: &Domain,
-    models: &HashMap<RegistryKey, Model>,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    domain: &DomainName,
+    models: &ModelIndex,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
     // Normal processors are branch-preserving: they must run under an explicit
@@ -10694,11 +10624,11 @@ fn validate_processing_branch_selections(
 }
 
 struct ProcessorBranchingCheck<'a> {
-    domain: &'a Domain,
-    identifier: &'a Identifier,
+    domain: &'a DomainName,
+    identifier: &'a ModelName,
     model_kind: &'a str,
-    models: &'a HashMap<RegistryKey, Model>,
-    indices: &'a HashMap<RegistryKey, NodeIndex>,
+    models: &'a ModelIndex,
+    indices: &'a HashMap<NodeRef, NodeIndex>,
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
 }
 
@@ -10717,7 +10647,7 @@ impl ProcessorBranchingCheck<'_> {
     fn matches_relay(
         &self,
         branched_by: &BranchSelection,
-        relay: &Identifier,
+        relay: &RelayName,
     ) -> Result<(), Report<RegistryError>> {
         let declared =
             resolved_branch_selection(self.domain, self.identifier, self.models, branched_by)?;
@@ -10789,14 +10719,14 @@ impl ProcessorBranchingCheck<'_> {
 }
 
 fn ensure_processing_source_branching(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     model_kind: &str,
-    relay: &Identifier,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    relay: &RelayName,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(index) = indices.get(&RegistryKey::new(ModelKind::Relay, relay.clone())) else {
+    let Some(index) = indices.get(&NodeRef::new(ModelKind::Relay, relay.clone())) else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -10829,12 +10759,12 @@ fn ensure_processing_source_branching(
 }
 
 fn ensure_relays_have_same_branch(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     context: &str,
-    left: &Identifier,
-    right: &Identifier,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    left: &RelayName,
+    right: &RelayName,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
     let left_branching = relay_branching(indices, graph, left);
@@ -10859,11 +10789,11 @@ fn ensure_relays_have_same_branch(
 }
 
 fn relay_branching(
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
-    relay: &Identifier,
+    relay: &RelayName,
 ) -> Option<ResolvedBranching> {
-    let index = indices.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))?;
+    let index = indices.get(&NodeRef::new(ModelKind::Relay, relay.clone()))?;
     let node = graph.node_weight(*index)?;
     let Model::Relay(relay) = node.config.as_ref() else {
         return None;
@@ -10877,9 +10807,9 @@ fn relay_branching(
 
 #[derive(Clone)]
 struct ResolvedBranching {
-    branch: Option<Identifier>,
-    schema: Option<Identifier>,
-    fields: Vec<Identifier>,
+    branch: Option<BranchName>,
+    schema: Option<SchemaName>,
+    fields: Vec<FieldName>,
 }
 
 impl ResolvedBranching {
@@ -10889,27 +10819,27 @@ impl ResolvedBranching {
 }
 
 trait BranchReference {
-    fn branch_ref(&self) -> Option<&Identifier>;
+    fn branch_ref(&self) -> Option<&BranchName>;
 }
 
 impl BranchReference for BranchSelection {
-    fn branch_ref(&self) -> Option<&Identifier> {
+    fn branch_ref(&self) -> Option<&BranchName> {
         self.branch()
     }
 }
 
 impl BranchReference for OutputBranch {
-    fn branch_ref(&self) -> Option<&Identifier> {
+    fn branch_ref(&self) -> Option<&BranchName> {
         self.branch()
     }
 }
 
 fn resolved_output_branches(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     outputs: &ProcessorOutputs,
-) -> Result<Vec<(Identifier, ResolvedBranching)>, Report<RegistryError>> {
+) -> Result<Vec<(RelayName, ResolvedBranching)>, Report<RegistryError>> {
     outputs
         .outputs()
         .map(|output| {
@@ -10932,9 +10862,9 @@ fn resolved_output_branches(
 }
 
 fn resolved_branch_selection(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
     branched_by: &dyn BranchReference,
 ) -> Result<ResolvedBranching, Report<RegistryError>> {
     let Some(branch_ref) = branched_by.branch_ref() else {
@@ -10953,13 +10883,13 @@ fn resolved_branch_selection(
 }
 
 fn branch_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    branch_ref: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    branch_ref: &BranchName,
 ) -> Result<&'a CreateBranch, Report<RegistryError>> {
     let Some(Model::Branch(branch)) =
-        models.get(&RegistryKey::new(ModelKind::Branch, branch_ref.clone()))
+        models.get(&NodeRef::new(ModelKind::Branch, branch_ref.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
@@ -10972,13 +10902,13 @@ fn branch_model<'a>(
 }
 
 fn schema_model<'a>(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &'a HashMap<RegistryKey, Model>,
-    schema_ref: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    schema_ref: &SchemaName,
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let Some(Model::Schema(schema)) =
-        models.get(&RegistryKey::new(ModelKind::Schema, schema_ref.clone()))
+        models.get(&NodeRef::new(ModelKind::Schema, schema_ref.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
@@ -11005,13 +10935,13 @@ fn model_branch_selection(model: &Model) -> Option<&dyn BranchReference> {
 }
 
 fn branching_schema_fields(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    branch_schema: &Identifier,
-) -> Result<Vec<Identifier>, Report<RegistryError>> {
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    branch_schema: &SchemaName,
+) -> Result<Vec<FieldName>, Report<RegistryError>> {
     let Some(Model::Schema(schema)) =
-        models.get(&RegistryKey::new(ModelKind::Schema, branch_schema.clone()))
+        models.get(&NodeRef::new(ModelKind::Schema, branch_schema.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
@@ -11028,19 +10958,21 @@ fn branching_schema_fields(
 }
 
 fn assign_stream_branching(
-    domain: &Domain,
-    producer: &Identifier,
-    relay: &Identifier,
+    domain: &DomainName,
+    producer: &ModelName,
+    relay: &RelayName,
     branching: ResolvedBranching,
-    indices: &HashMap<RegistryKey, NodeIndex>,
+    indices: &HashMap<NodeRef, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<bool, Report<RegistryError>> {
     let index = *indices
-        .get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
-        .expect("stream node must exist in graph");
-    let node = graph
-        .node_weight_mut(index)
-        .expect("stream node must exist in graph");
+        .get(&NodeRef::new(ModelKind::Relay, relay.clone()))
+        .verified(
+            "the relay reference was validated above, and every validated relay has a graph node",
+        );
+    let node = graph.node_weight_mut(index).verified(
+        "the relay reference was validated above, and every validated relay has a graph node",
+    );
 
     match &node.effective_branching {
         None => {
@@ -11087,31 +11019,33 @@ fn assign_stream_branching(
     }
 }
 
-fn format_branch_name(branch: Option<&Identifier>) -> &str {
-    branch.map(Identifier::as_str).unwrap_or("UNBRANCHED")
+fn format_branch_name(branch: Option<&BranchName>) -> &str {
+    match branch {
+        Some(name) => name.as_str(),
+        None => "UNBRANCHED",
+    }
 }
 
-fn format_branched_by(branched_by: &[Identifier]) -> String {
+fn format_branched_by(branched_by: &[FieldName]) -> String {
     if branched_by.is_empty() {
         "(none)".to_string()
     } else {
         branched_by
             .iter()
-            .map(Identifier::as_str)
+            .map(|name| name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     }
 }
 
 fn ensure_codec_schema_compatibility(
-    domain: &Domain,
-    identifier: &Identifier,
-    wire_format: &CodecWireFormat,
-    wire_schema: Option<&WireSchemaDefinition>,
+    domain: &DomainName,
+    identifier: &ModelName,
+    wire_format: ResolvedCodecWireFormat<'_>,
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
 ) -> Result<(), Report<RegistryError>> {
-    let rfc3339_fields = if let CodecWireFormat::Syslog = wire_format {
+    let rfc3339_fields = if let ResolvedCodecWireFormat::Syslog = wire_format {
         if !encoding_rules.is_empty() {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
@@ -11123,186 +11057,89 @@ fn ensure_codec_schema_compatibility(
     } else {
         ensure_supported_codec_encoding_rules(domain, identifier, schema, encoding_rules)?
     };
-    match (wire_format, wire_schema) {
-        (CodecWireFormat::Syslog, None) => ensure_syslog_field_contract(domain, identifier, schema),
-        (CodecWireFormat::Syslog, Some(_)) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "SYSLOG codec must not reference a wire schema".to_string(),
-        })),
-        (CodecWireFormat::Json, Some(WireSchemaDefinition::Json(json))) => {
-            ensure_wire_field_set_matches(
-                domain,
-                identifier,
-                &json
-                    .fields
-                    .iter()
-                    .map(|field| WireFieldCompatibility {
-                        name: field.name.as_str(),
-                        optional: field.optional,
-                        wire_type: field.ty.as_ref().to_string(),
-                        compatibility: WireTypeCompatibility::Json(field.ty),
-                    })
-                    .collect::<Vec<_>>(),
-                schema,
-                "json",
-                &rfc3339_fields,
-            )
-        }
-        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Cbor(cbor))) => {
-            ensure_wire_field_set_matches(
-                domain,
-                identifier,
-                &cbor
-                    .fields
-                    .iter()
-                    .map(|field| WireFieldCompatibility {
-                        name: field.name.as_str(),
-                        optional: field.optional,
-                        wire_type: field.ty.as_ref().to_string(),
-                        compatibility: WireTypeCompatibility::Json(field.ty),
-                    })
-                    .collect::<Vec<_>>(),
-                schema,
-                "cbor",
-                &rfc3339_fields,
-            )
-        }
-        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Avro(avro))) => {
-            ensure_wire_field_set_matches(
-                domain,
-                identifier,
-                &avro
-                    .fields
-                    .iter()
-                    .map(|field| WireFieldCompatibility {
-                        name: field.name.as_str(),
-                        optional: field.optional,
-                        wire_type: field.ty.as_ref().to_string(),
-                        compatibility: WireTypeCompatibility::Avro(field.ty),
-                    })
-                    .collect::<Vec<_>>(),
-                schema,
-                "avro",
-                &rfc3339_fields,
-            )
-        }
-        (
-            CodecWireFormat::JaqNative {
-                transformations, ..
-            },
-            None,
-        ) if transformations.has_any() => Ok(()),
-        (CodecWireFormat::Protobuf(config), None) if config.transformations.has_any() => Ok(()),
-        (
-            CodecWireFormat::JaqNative {
-                transformations, ..
-            },
-            None,
-        ) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: if transformations.has_any() {
-                "JAQ-native codec is invalid".to_string()
+    match wire_format {
+        ResolvedCodecWireFormat::Syslog => ensure_syslog_field_contract(domain, identifier, schema),
+        ResolvedCodecWireFormat::Json(json) => ensure_wire_field_set_matches(
+            domain,
+            identifier,
+            &json
+                .fields
+                .iter()
+                .map(|field| WireFieldCompatibility {
+                    name: field.name.as_str(),
+                    optional: field.optional,
+                    wire_type: field.ty.as_ref().to_string(),
+                    compatibility: WireTypeCompatibility::Json(field.ty),
+                })
+                .collect::<Vec<_>>(),
+            schema,
+            "json",
+            &rfc3339_fields,
+        ),
+        ResolvedCodecWireFormat::Cbor(cbor) => ensure_wire_field_set_matches(
+            domain,
+            identifier,
+            &cbor
+                .fields
+                .iter()
+                .map(|field| WireFieldCompatibility {
+                    name: field.name.as_str(),
+                    optional: field.optional,
+                    wire_type: field.ty.as_ref().to_string(),
+                    compatibility: WireTypeCompatibility::Json(field.ty),
+                })
+                .collect::<Vec<_>>(),
+            schema,
+            "cbor",
+            &rfc3339_fields,
+        ),
+        ResolvedCodecWireFormat::Avro(avro) => ensure_wire_field_set_matches(
+            domain,
+            identifier,
+            &avro
+                .fields
+                .iter()
+                .map(|field| WireFieldCompatibility {
+                    name: field.name.as_str(),
+                    optional: field.optional,
+                    wire_type: field.ty.as_ref().to_string(),
+                    compatibility: WireTypeCompatibility::Avro(field.ty),
+                })
+                .collect::<Vec<_>>(),
+            schema,
+            "avro",
+            &rfc3339_fields,
+        ),
+        ResolvedCodecWireFormat::JaqNative {
+            transformations, ..
+        } => {
+            if transformations.has_any() {
+                Ok(())
             } else {
-                "JAQ-native codec must declare a JAQ transformation".to_string()
-            },
-        })),
-        (CodecWireFormat::Json, Some(WireSchemaDefinition::Avro(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares JSON wire format but references an avro wire schema"
-                    .to_string(),
-            }))
+                Err(Report::new(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
+                }))
+            }
         }
-        (CodecWireFormat::Json, Some(WireSchemaDefinition::Cbor(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares JSON wire format but references a cbor wire schema"
-                    .to_string(),
-            }))
+        ResolvedCodecWireFormat::Protobuf(config) => {
+            if config.transformations.has_any() {
+                Ok(())
+            } else {
+                Err(Report::new(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: "protobuf codec must declare a JAQ transformation".to_string(),
+                }))
+            }
         }
-        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Json(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares CBOR wire format but references a json wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Avro(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares CBOR wire format but references an avro wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Json(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares AVRO wire format but references a json wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Cbor(_))) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "codec declares AVRO wire format but references a cbor wire schema"
-                    .to_string(),
-            }))
-        }
-        (CodecWireFormat::Json, None) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec declares JSON wire format but does not reference a json wire schema"
-                .to_string(),
-        })),
-        (CodecWireFormat::Cbor, None) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec declares CBOR wire format but does not reference a cbor wire schema"
-                .to_string(),
-        })),
-        (CodecWireFormat::Avro, None) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "codec declares AVRO wire format but does not reference an avro wire schema"
-                .to_string(),
-        })),
-        (CodecWireFormat::JaqNative { .. }, Some(_)) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "JAQ-native codec must not reference a wire schema".to_string(),
-            }))
-        }
-        (CodecWireFormat::Protobuf(config), None) => {
-            Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: if config.transformations.has_any() {
-                    "protobuf codec is invalid".to_string()
-                } else {
-                    "protobuf codec must declare a JAQ transformation".to_string()
-                },
-            }))
-        }
-        (CodecWireFormat::Protobuf(_), Some(_)) => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "protobuf codec must not reference a wire schema".to_string(),
-        })),
     }
 }
 
 fn ensure_syslog_field_contract(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
     for field in &schema.fields {
@@ -11344,11 +11181,11 @@ fn ensure_syslog_field_contract(
 }
 
 fn ensure_supported_codec_encoding_rules(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
-) -> Result<HashSet<Identifier>, Report<RegistryError>> {
+) -> Result<HashSet<FieldName>, Report<RegistryError>> {
     let mut rfc3339_fields = HashSet::new();
     for rule in encoding_rules {
         if rule.encoding != CodecEncoding::Rfc3339 {
@@ -11414,12 +11251,12 @@ enum WireTypeCompatibility {
 }
 
 fn ensure_wire_field_set_matches(
-    domain: &Domain,
-    identifier: &Identifier,
+    domain: &DomainName,
+    identifier: &ModelName,
     wire_fields: &[WireFieldCompatibility<'_>],
     schema: &CreateSchema,
     wire_kind: &str,
-    rfc3339_fields: &HashSet<Identifier>,
+    rfc3339_fields: &HashSet<FieldName>,
 ) -> Result<(), Report<RegistryError>> {
     for schema_field in &schema.fields {
         let Some(wire_field) = wire_fields
@@ -11568,10 +11405,10 @@ fn parse_as_is_integer(ty: &ParseAsType) -> bool {
 }
 
 fn runtime_changes_for_domain(
-    domain: &Domain,
+    domain: &DomainName,
     graph: Option<ActiveGraph>,
-    current_models: &HashMap<RegistryKey, Model>,
-    candidate_models: &HashMap<RegistryKey, Model>,
+    current_models: &ModelIndex,
+    candidate_models: &ModelIndex,
 ) -> RuntimeChanges {
     let current_ingestor_ids = SortedSet::from_unsorted(
         current_models
@@ -11596,31 +11433,17 @@ fn runtime_changes_for_domain(
 
     for ingestor in &current_ingestor_ids {
         changes.push(RuntimeChange::StopIngestor {
-            ingestor: ingestor.clone(),
+            ingestor: IngestorName::from(ingestor),
         });
     }
 
     for ingestor in &candidate_ingestor_ids {
         let Some(Model::Ingestor(ingestor_model)) =
-            candidate_models.get(&RegistryKey::new(ModelKind::Ingestor, ingestor.clone()))
+            candidate_models.get(&NodeRef::new(ModelKind::Ingestor, ingestor.clone()))
         else {
             continue;
         };
-        let source_ref = match &ingestor_model.source {
-            IngestSource::Http { client, .. } => client,
-            IngestSource::Kafka { client, .. } => client,
-            IngestSource::Pulsar { client, .. } => client,
-            IngestSource::Prometheus { client, .. } => client,
-            IngestSource::RabbitMq { client, .. } => client,
-            IngestSource::RedisPubSub { client, .. } => client,
-            IngestSource::Mqtt { client, .. } => client,
-            IngestSource::Nats { client, .. } => client,
-            IngestSource::ZeroMq { client, .. } => client,
-            IngestSource::Sqs { client, .. } => client,
-            IngestSource::Websockets { client, .. } => client,
-            IngestSource::Syslog { client, .. } => client,
-            IngestSource::Endpoint { endpoint, .. } => endpoint,
-        };
+        let source_ref = ingestor_model.source.source_ref();
         let source_kind = match &ingestor_model.source {
             IngestSource::Http { .. }
             | IngestSource::Kafka { .. }
@@ -11637,7 +11460,7 @@ fn runtime_changes_for_domain(
             IngestSource::Endpoint { .. } => ModelKind::Endpoint,
         };
         let Some(source_model) =
-            candidate_models.get(&RegistryKey::new(source_kind, source_ref.clone()))
+            candidate_models.get(&NodeRef::new(source_kind, source_ref.clone()))
         else {
             continue;
         };
@@ -11668,10 +11491,10 @@ fn has_required_by_cycle(graph: &DiGraph<ActiveNode, EdgeKind>) -> bool {
         }
         let source = *node_map
             .get(&edge.source())
-            .expect("required-by source node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         let target = *node_map
             .get(&edge.target())
-            .expect("required-by target node must exist");
+            .verified("this endpoint comes from an edge of the same graph");
         required_by_graph.add_edge(source, target, ());
     }
 
@@ -11679,30 +11502,29 @@ fn has_required_by_cycle(graph: &DiGraph<ActiveNode, EdgeKind>) -> bool {
 }
 
 fn ensure_drop_targets_are_not_in_use(
-    domain: &Domain,
+    domain: &DomainName,
     graph: &ActiveGraph,
-    drops_in_batch: &HashSet<RegistryKey>,
+    drops_in_batch: &HashSet<NodeRef>,
 ) -> Result<(), Report<RegistryError>> {
     for key in drops_in_batch {
         let Some(index) = graph.indices.get(key).copied() else {
             continue;
         };
 
-        let mut blockers = graph
-            .graph
-            .edges_directed(index, Direction::Outgoing)
-            .filter_map(|blocker_index| {
-                if *blocker_index.weight() != EdgeKind::RequiredBy {
-                    return None;
-                }
-                let blocker = graph
-                    .graph
-                    .node_weight(blocker_index.target())
-                    .expect("outgoing blocker node must exist")
-                    .clone();
-                (!drops_in_batch.contains(&blocker.key())).then_some(blocker.identifier)
-            })
-            .collect::<Vec<_>>();
+        let mut blockers = Vec::new();
+        for blocker_index in graph.graph.edges_directed(index, Direction::Outgoing) {
+            if *blocker_index.weight() != EdgeKind::RequiredBy {
+                continue;
+            }
+            let blocker = graph
+                .graph
+                .node_weight(blocker_index.target())
+                .verified("this endpoint comes from an edge of the same graph")
+                .clone();
+            if !drops_in_batch.contains(&blocker.node_ref()) {
+                blockers.push(blocker.identifier);
+            }
+        }
         blockers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         blockers.dedup_by(|a, b| a.as_str() == b.as_str());
 
@@ -11712,7 +11534,7 @@ fn ensure_drop_targets_are_not_in_use(
                 identifier: key.identifier.as_str().to_string(),
                 blockers: blockers
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(|name| name.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
             }));
@@ -11726,6 +11548,7 @@ fn ensure_drop_targets_are_not_in_use(
 mod tests {
     use std::{
         fs,
+        num::NonZeroU64,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -11737,33 +11560,38 @@ mod tests {
         AckMode, AlterEmitter, AlterEmitterOperation, AlterIngestor, AlterIngestorOperation,
         AlterJunction, AlterPlacement, AlterPlacementOperation, AlterProcessorOperation,
         AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-        AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope,
-        BranchSelection, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
-        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
-        CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
-        CreateClientHttp, CreateClientKafka, CreateClientSqs, CreateClientSyslog, CreateCodec,
-        CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor,
-        CreateJunction, CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
-        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, Domain, DomainSchedule,
-        DropModel, EmitSink, EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, Expression,
-        FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
-        IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
-        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
-        MqttSession, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelSignal,
-        OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
-        ScheduledNode, SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect,
-        SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, WindowBound,
-        WireSchemaField,
+        AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName,
+        BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule,
+        CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName,
+        CodecProtobufConfig, CodecWireFormat, ConsumerGroupName, CorrelationTimeoutAction,
+        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientHttp,
+        CreateClientKafka, CreateClientSqs, CreateClientSyslog, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
+        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
+        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DeduplicatorName, DomainName,
+        DomainSchedule, DropModel, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode,
+        EndpointName, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope,
+        FlushPolicy, GeneralErrorPolicy, IngestSource, IngestTimestampSource, IngestorName,
+        Inheritance, InputCollectPolicy, JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, MaterializedRelayState, MaterializedStateDependency,
+        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
+        MqttIngestMode, MqttQos, MqttSession, NodeRef, OtelAggregationTemporality, OtelMetric,
+        OtelMetricKind, OtelSignal, OtelValueMapping, OutputBranch, ParseAsType, PlacementPolicy,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, ReingestorName,
+        RelayBranching, RelayName, RetryPolicy, ScheduledNode, SchemaField, SchemaName,
+        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsFifoGroup, TopicName, VhostName, WindowBound, WindowProcessorName,
+        WireSchemaField, WireSchemaName,
     };
+    use nonzero_ext::nonzero;
+    use rstest::rstest;
 
     #[cfg(feature = "testing")]
     use super::SchedulerMode;
     use super::{
         CreateSignalingProtocol, DataflowGraphCounts, ModelStorage, PlacementTopology, Registry,
-        RegistryError, RegistryKey, RegistryMutation, Report, RuntimeChange, deserialize_value,
-        ensure_signaling_protocol_is_valid, validate_emitter_publishing_contract,
+        RegistryError, RegistryMutation, Report, RuntimeChange, ensure_signaling_protocol_is_valid,
+        validate_emitter_publishing_contract,
     };
 
     fn temp_db_path() -> PathBuf {
@@ -11776,7 +11604,7 @@ mod tests {
 
     fn sample_transport_model(name: &str) -> Model {
         Model::ClientKafka(CreateClientKafka {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: ClientName::parse(name).expect("valid identifier"),
             mount: None,
             config: vec![KafkaConfigEntry {
                 key: "bootstrap.servers".to_string(),
@@ -11785,12 +11613,16 @@ mod tests {
         })
     }
 
-    fn identifier(raw: &str) -> Identifier {
-        Identifier::parse(raw).expect("valid identifier")
+    fn named<N>(raw: &str) -> N
+    where
+        N: for<'a> TryFrom<&'a str>,
+        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+    {
+        N::try_from(raw).expect("valid name")
     }
 
-    fn branch_name_for_relay(relay: &str) -> Identifier {
-        identifier(&format!("by_{relay}"))
+    fn branch_name_for_relay(relay: &str) -> BranchName {
+        named(&format!("by_{relay}"))
     }
 
     fn branched_by(relay: &str, fields: &[&str]) -> OutputBranch {
@@ -11801,11 +11633,11 @@ mod tests {
                 .map(|field| Assignment {
                     target: AssignmentTarget {
                         scope: AssignmentTargetScope::Bare,
-                        field: identifier(field),
+                        field: named(field),
                     },
                     value: Expression::Field(FieldReference::scoped(
                         FieldScope::Message,
-                        identifier(field),
+                        named(field),
                     )),
                 })
                 .collect(),
@@ -11871,19 +11703,23 @@ mod tests {
 
     fn unbranched_transforming_outputs(relay: &str) -> ProcessorOutputs {
         with_output_branch(
-            with_inherit_all(ProcessorOutputs::single(identifier(relay)))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            with_inherit_all(ProcessorOutputs::single(named(relay))).with_flush_policy(
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
+            ),
             OutputBranch::Unbranched,
         )
     }
 
     fn branch_schema(name: &str, fields: &[&str]) -> Model {
         Model::Schema(CreateSchema {
-            name: identifier(name),
+            name: named(name),
             fields: fields
                 .iter()
                 .map(|field| SchemaField {
-                    name: identifier(field),
+                    name: named(field),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -11894,8 +11730,8 @@ mod tests {
 
     fn branch(name: &str, schema: &str) -> Model {
         Model::Branch(CreateBranch {
-            name: identifier(name),
-            schema: identifier(schema),
+            name: named(name),
+            schema: named(schema),
             ttl: "5m".to_string(),
             eviction: None,
         })
@@ -11904,7 +11740,7 @@ mod tests {
     fn branch_for_relay(relay: &str, schema: &str) -> Model {
         Model::Branch(CreateBranch {
             name: branch_name_for_relay(relay),
-            schema: identifier(schema),
+            schema: named(schema),
             ttl: "5m".to_string(),
             eviction: None,
         })
@@ -11912,11 +11748,11 @@ mod tests {
 
     fn branch_schema_with_types(name: &str, fields: &[(&str, ParseAsType)]) -> Model {
         Model::Schema(CreateSchema {
-            name: identifier(name),
+            name: named(name),
             fields: fields
                 .iter()
                 .map(|(field, ty)| SchemaField {
-                    name: identifier(field),
+                    name: named(field),
                     ty: ty.clone(),
                     optional: false,
                     sensitive: false,
@@ -11927,9 +11763,9 @@ mod tests {
 
     fn schema(name: &str) -> Model {
         Model::Schema(CreateSchema {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: SchemaName::parse(name).expect("valid identifier"),
             fields: vec![SchemaField {
-                name: Identifier::parse("value").expect("valid identifier"),
+                name: FieldName::parse("value").expect("valid identifier"),
                 ty: nervix_models::ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -11939,10 +11775,10 @@ mod tests {
 
     fn wire_schema(name: &str) -> Model {
         Model::WireJsonSchema(CreateWireSchema {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: WireSchemaName::parse(name).expect("valid identifier"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: Identifier::parse("value").expect("valid identifier"),
+                name: FieldName::parse("value").expect("valid identifier"),
                 ty: JsonType::String,
                 optional: false,
             }],
@@ -11951,10 +11787,10 @@ mod tests {
 
     fn json_wire_schema_with_type(name: &str, field_type: JsonType) -> Model {
         Model::WireJsonSchema(CreateWireSchema {
-            name: identifier(name),
+            name: named(name),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: identifier("value"),
+                name: named("value"),
                 ty: field_type,
                 optional: false,
             }],
@@ -11963,10 +11799,10 @@ mod tests {
 
     fn avro_wire_schema_with_type(name: &str, field_type: nervix_models::AvroType) -> Model {
         Model::WireAvroSchema(CreateWireSchema {
-            name: identifier(name),
+            name: named(name),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: identifier("value"),
+                name: named("value"),
                 ty: field_type,
                 optional: false,
             }],
@@ -11979,7 +11815,7 @@ mod tests {
 
     fn vhost(name: &str, hostnames: &[&str]) -> Model {
         Model::Vhost(CreateVhost {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: VhostName::parse(name).expect("valid identifier"),
             hostnames: hostnames
                 .iter()
                 .map(|hostname| (*hostname).to_string())
@@ -11995,8 +11831,8 @@ mod tests {
         endpoint_type: nervix_models::EndpointType,
     ) -> Model {
         Model::Endpoint(nervix_models::CreateEndpoint {
-            name: Identifier::parse(name).expect("valid identifier"),
-            on_vhost: Identifier::parse(vhost_name).expect("valid identifier"),
+            name: EndpointName::parse(name).expect("valid identifier"),
+            on_vhost: VhostName::parse(vhost_name).expect("valid identifier"),
             path: path.to_string(),
             endpoint_type,
             signaling_protocol: None,
@@ -12005,27 +11841,27 @@ mod tests {
 
     fn codec(name: &str, schema: &str) -> Model {
         Model::Codec(CreateCodec {
-            name: Identifier::parse(name).expect("valid identifier"),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(Identifier::parse("event_wire").expect("valid identifier")),
-            schema: Identifier::parse(schema).expect("valid identifier"),
+            name: CodecName::parse(name).expect("valid identifier"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: WireSchemaName::parse("event_wire").expect("valid identifier"),
+            },
+            schema: SchemaName::parse(schema).expect("valid identifier"),
             encoding_rules: Vec::new(),
         })
     }
 
     fn syslog_codec(name: &str, schema: &str) -> Model {
         Model::Codec(CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: CodecWireFormat::Syslog,
-            wire_schema: None,
-            schema: identifier(schema),
+            schema: named(schema),
             encoding_rules: Vec::new(),
         })
     }
 
     fn syslog_client(name: &str) -> Model {
         Model::ClientSyslog(CreateClientSyslog {
-            name: identifier(name),
+            name: named(name),
             mount: None,
             config: vec![ClientConfigEntry {
                 key: "protocol".to_string(),
@@ -12036,10 +11872,11 @@ mod tests {
 
     fn avro_codec(name: &str, wire_schema: &str, schema: &str) -> Model {
         Model::Codec(CreateCodec {
-            name: identifier(name),
-            wire_format: CodecWireFormat::Avro,
-            wire_schema: Some(identifier(wire_schema)),
-            schema: identifier(schema),
+            name: named(name),
+            wire_format: CodecWireFormat::Avro {
+                wire_schema: named(wire_schema),
+            },
+            schema: named(schema),
             encoding_rules: Vec::new(),
         })
     }
@@ -12051,7 +11888,7 @@ mod tests {
         on_emitting: Option<&str>,
     ) -> Model {
         Model::Codec(CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
                 transformations: CodecJaqTransformations {
@@ -12059,8 +11896,7 @@ mod tests {
                     on_emitting: on_emitting.map(str::to_string),
                 },
             },
-            wire_schema: None,
-            schema: identifier(schema),
+            schema: named(schema),
             encoding_rules: Vec::new(),
         })
     }
@@ -12072,9 +11908,9 @@ mod tests {
         on_emitting: Option<&str>,
     ) -> Model {
         Model::Codec(CreateCodec {
-            name: identifier(name),
+            name: named(name),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: Some(1),
                 config: vec![ClientConfigEntry {
                     key: "file".to_string(),
@@ -12086,14 +11922,9 @@ mod tests {
                     on_emitting: on_emitting.map(str::to_string),
                 },
             }),
-            wire_schema: None,
-            schema: identifier(schema),
+            schema: named(schema),
             encoding_rules: Vec::new(),
         })
-    }
-
-    fn rfc3339_json_codec(name: &str, wire_schema: &str, schema: &str) -> Model {
-        rfc3339_json_codec_for_field(name, wire_schema, schema, "value")
     }
 
     fn rfc3339_json_codec_for_field(
@@ -12103,15 +11934,82 @@ mod tests {
         field: &str,
     ) -> Model {
         Model::Codec(CreateCodec {
-            name: identifier(name),
-            wire_format: CodecWireFormat::Json,
-            wire_schema: Some(identifier(wire_schema)),
-            schema: identifier(schema),
+            name: named(name),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named(wire_schema),
+            },
+            schema: named(schema),
             encoding_rules: vec![CodecEncodingRule {
-                field: identifier(field),
+                field: named(field),
                 encoding: CodecEncoding::Rfc3339,
             }],
         })
+    }
+
+    #[derive(Debug)]
+    enum CodecTypeCase {
+        Json {
+            internal: ParseAsType,
+            wire: JsonType,
+            rfc3339_field: Option<&'static str>,
+        },
+        Avro {
+            internal: ParseAsType,
+            wire: nervix_models::AvroType,
+        },
+    }
+
+    impl CodecTypeCase {
+        fn models(self) -> Vec<Model> {
+            let internal = match &self {
+                Self::Json { internal, .. } | Self::Avro { internal, .. } => internal.clone(),
+            };
+            let schema = Model::Schema(CreateSchema {
+                name: named("event_schema"),
+                fields: vec![SchemaField {
+                    name: named("value"),
+                    ty: internal,
+                    optional: false,
+                    sensitive: false,
+                }],
+            });
+
+            match self {
+                Self::Json {
+                    wire,
+                    rfc3339_field,
+                    ..
+                } => {
+                    let codec = if let Some(field) = rfc3339_field {
+                        rfc3339_json_codec_for_field(
+                            "event_codec",
+                            "event_wire",
+                            "event_schema",
+                            field,
+                        )
+                    } else {
+                        codec("event_codec", "event_schema")
+                    };
+                    vec![
+                        schema,
+                        json_wire_schema_with_type("event_wire", wire),
+                        codec,
+                    ]
+                }
+                Self::Avro { wire, .. } => vec![
+                    schema,
+                    avro_wire_schema_with_type("event_wire", wire),
+                    avro_codec("event_codec", "event_wire", "event_schema"),
+                ],
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    enum CodecTypeExpectation {
+        Accepted,
+        IncompatibleSchema,
+        InvalidModel,
     }
 
     fn ingestor(name: &str, into: &str, codec: &str, client: &str) -> Model {
@@ -12142,21 +12040,25 @@ mod tests {
             branched_by(into, branch_fields)
         };
         Model::Ingestor(CreateIngestor {
-            name: identifier(name),
+            name: named(name),
             output_routes: with_output_branch(
-                with_inherit_all(ProcessorOutputs::single(identifier(into)))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                with_inherit_all(ProcessorOutputs::single(named(into))).with_flush_policy(
+                    FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    },
+                ),
                 branch,
             ),
-            decode_using_codec: identifier(codec),
+            decode_using_codec: named(codec),
             timestamp_source: None,
             source: IngestSource::Kafka {
-                client: Identifier::parse(client).expect("valid identifier"),
-                topic: Identifier::parse("notifications").expect("valid identifier"),
+                client: ClientName::parse(client).expect("valid identifier"),
+                topic: TopicName::parse("notifications").expect("valid identifier"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    Identifier::parse("cg").expect("valid identifier"),
+                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
                 ),
-                instances: 1,
+                instances: nonzero!(1u64),
                 mode: KafkaIngestMode::AckSequential {
                     timeout: "30s".to_string(),
                     retry_policy: nervix_models::RetryPolicy {
@@ -12174,9 +12076,9 @@ mod tests {
 
     fn relay(name: &str, schema: &str) -> Model {
         Model::Relay(CreateRelay {
-            name: Identifier::parse(name).expect("valid identifier"),
-            schema: Identifier::parse(schema).expect("valid identifier"),
-            buffer: 1,
+            name: RelayName::parse(name).expect("valid identifier"),
+            schema: SchemaName::parse(schema).expect("valid identifier"),
+            buffer: nonzero!(1usize),
             branching: RelayBranching::unbranched(),
             materialized_state: None,
         })
@@ -12186,7 +12088,7 @@ mod tests {
         let Model::Relay(mut relay) = relay(name, schema) else {
             unreachable!("relay helper must build a relay model")
         };
-        relay.branching = RelayBranching::branched_by(identifier(branch));
+        relay.branching = RelayBranching::branched_by(named(branch));
         Model::Relay(relay)
     }
 
@@ -12208,9 +12110,9 @@ mod tests {
 
     fn materialized_relay(name: &str, schema: &str) -> Model {
         Model::Relay(CreateRelay {
-            name: Identifier::parse(name).expect("valid identifier"),
-            schema: Identifier::parse(schema).expect("valid identifier"),
-            buffer: 1,
+            name: RelayName::parse(name).expect("valid identifier"),
+            schema: SchemaName::parse(schema).expect("valid identifier"),
+            buffer: nonzero!(1usize),
             branching: RelayBranching::branched_by(branch_name_for_relay(name)),
             materialized_state: Some(MaterializedRelayState::LastByTimestamp),
         })
@@ -12236,22 +12138,22 @@ mod tests {
 
     fn wasm_processor(name: &str, from_relay: &str, into_relay: &str) -> Model {
         Model::WasmProcessor(CreateWasmProcessor {
-            name: identifier(name),
-            from: ProcessorInputs::single(identifier(from_relay)),
+            name: named(name),
+            from: ProcessorInputs::single(named(from_relay)),
             output_routes: {
-                let mut outputs = ProcessorOutputs::single(identifier(into_relay));
+                let mut outputs = ProcessorOutputs::single(named(into_relay));
                 outputs.routes[0].construction =
                     nervix_nspl::parse_route_construction("SET value = value")
                         .expect("generated route construction must parse");
                 outputs
             },
             branched_by: BranchSelection::unbranched(),
-            resource: identifier("wasm_filter"),
+            resource: named("wasm_filter"),
             resource_version: Some(1),
             file: "processors/filter_even.wasm".to_string(),
             limits: nervix_models::WasmProcessorLimits {
-                max_fuel: 1_000_000_000,
-                max_memory_bytes: 64 * 1024 * 1024,
+                max_fuel: nonzero!(1_000_000_000u64),
+                max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
@@ -12266,15 +12168,18 @@ mod tests {
         right_relay: &str,
         into_relay: &str,
     ) -> Model {
-        let mut output_routes = (ProcessorOutputs::single(identifier(into_relay)))
-            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()));
+        let mut output_routes =
+            (ProcessorOutputs::single(named(into_relay))).with_flush_policy(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            });
         output_routes.routes[0].construction =
             nervix_nspl::parse_route_construction("SET value = left.value")
                 .expect("route construction must parse");
         Model::Correlator(CreateCorrelator {
-            name: identifier(name),
-            left: ProcessorInputs::single(identifier(left_relay)),
-            right: ProcessorInputs::single(identifier(right_relay)),
+            name: named(name),
+            left: ProcessorInputs::single(named(left_relay)),
+            right: ProcessorInputs::single(named(right_relay)),
             output_routes,
             branched_by: BranchSelection::unbranched(),
             correlate_where: nervix_nspl::parse_expression("left.value = right.value")
@@ -12298,12 +12203,12 @@ mod tests {
         construction: &str,
     ) -> Model {
         let mut output_routes =
-            ProcessorOutputs::single(Identifier::parse(into_relay).expect("valid identifier"));
+            ProcessorOutputs::single(RelayName::parse(into_relay).expect("valid identifier"));
         output_routes.routes[0].construction = nervix_nspl::parse_route_construction(construction)
             .expect("window route construction must parse");
         Model::WindowProcessor(CreateWindowProcessor {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
+            name: WindowProcessorName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
             output_routes,
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             width: WindowBound {
@@ -12322,18 +12227,21 @@ mod tests {
 
     fn junction(name: &str, from_relays: &[&str], into_relay: &str) -> Model {
         Model::Junction(CreateJunction {
-            name: Identifier::parse(name).expect("valid identifier"),
+            name: JunctionName::parse(name).expect("valid identifier"),
             from: ProcessorInputs::new(
                 from_relays
                     .iter()
-                    .map(|stream| Identifier::parse(stream).expect("valid identifier"))
+                    .map(|stream| RelayName::parse(stream).expect("valid identifier"))
                     .collect(),
                 Vec::new(),
             ),
             output_routes: with_inherit_all(ProcessorOutputs::single(
-                Identifier::parse(into_relay).expect("valid identifier"),
+                RelayName::parse(into_relay).expect("valid identifier"),
             ))
-            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            .with_flush_policy(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            }),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(
                 from_relays
                     .first()
@@ -12353,12 +12261,15 @@ mod tests {
         max_time: &str,
     ) -> Model {
         Model::Deduplicator(CreateDeduplicator {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
+            name: DeduplicatorName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
             output_routes: with_inherit_all(ProcessorOutputs::single(
-                Identifier::parse(into_relay).expect("valid identifier"),
+                RelayName::parse(into_relay).expect("valid identifier"),
             ))
-            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            .with_flush_policy(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            }),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             deduplicate_on: vec![
                 nervix_nspl::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
@@ -12378,13 +12289,16 @@ mod tests {
             branched_by(into_relay, params)
         };
         Model::Reingestor(CreateReingestor {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
+            name: ReingestorName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
             output_routes: with_output_branch(
                 with_inherit_all(ProcessorOutputs::single(
-                    Identifier::parse(into_relay).expect("valid identifier"),
+                    RelayName::parse(into_relay).expect("valid identifier"),
                 ))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                .with_flush_policy(FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                }),
                 branch,
             ),
             mode: AckMode::Attached,
@@ -12395,12 +12309,12 @@ mod tests {
 
     fn emitter(name: &str, from_relay: &str, codec: &str, client: &str) -> Model {
         Model::Emitter(CreateEmitter {
-            name: Identifier::parse(name).expect("valid identifier"),
-            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
-            encode_using_codec: Some(Identifier::parse(codec).expect("valid identifier")),
+            name: EmitterName::parse(name).expect("valid identifier"),
+            from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
+            encode_using_codec: Some(CodecName::parse(codec).expect("valid identifier")),
             sink: Box::new(EmitSink::Kafka {
-                client: Identifier::parse(client).expect("valid identifier"),
-                topic: Identifier::parse("topic").expect("valid topic identifier"),
+                client: ClientName::parse(client).expect("valid identifier"),
+                topic: TopicName::parse("topic").expect("valid topic identifier"),
             }),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -12408,8 +12322,10 @@ mod tests {
                     max_backoff: "30s".to_string(),
                 },
             },
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -12428,7 +12344,7 @@ mod tests {
         fail_matchers: &[&str],
     ) -> CreateSignalingProtocol {
         CreateSignalingProtocol {
-            name: identifier("handshake"),
+            name: named("handshake"),
             format,
             on_connect: SignalingProtocolOnConnect {
                 accept_data: false,
@@ -12447,8 +12363,8 @@ mod tests {
     fn validate_signaling_protocol(
         protocol: &CreateSignalingProtocol,
     ) -> Result<(), Report<RegistryError>> {
-        let domain = Domain::parse("default").expect("valid domain");
-        ensure_signaling_protocol_is_valid(&domain, &protocol.name, protocol)
+        let domain = DomainName::parse("default").expect("valid domain");
+        ensure_signaling_protocol_is_valid(&domain, &ModelName::from(&protocol.name), protocol)
     }
 
     #[test]
@@ -12463,7 +12379,7 @@ mod tests {
 
         validate_signaling_protocol(&signaling_protocol(
             SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: Some(1),
                 config: Vec::new(),
                 send_message: "nervix.test.Subscribe".to_string(),
@@ -12534,7 +12450,7 @@ mod tests {
     fn protobuf_signaling_protocols_require_both_message_types() {
         let error = validate_signaling_protocol(&signaling_protocol(
             SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                resource: identifier("proto_bundle"),
+                resource: named("proto_bundle"),
                 resource_version: None,
                 config: Vec::new(),
                 send_message: "nervix.test.Subscribe".to_string(),
@@ -12554,12 +12470,12 @@ mod tests {
 
     #[test]
     fn emitter_publishing_contract_rejects_model_level_bypasses() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        let models = HashMap::default();
+        let models = ModelIndex::new();
 
         emitter.publishing_mode = EmitterPublishingMode::NoAck {
             retry_policy: RetryPolicy {
@@ -12567,8 +12483,13 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("zero retry backoff must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("zero retry backoff must be rejected");
         assert!(format!("{error:#}").contains("BACKOFF must be greater than zero"));
 
         emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
@@ -12579,21 +12500,14 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("zero confirmation timeout must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("zero confirmation timeout must be rejected");
         assert!(format!("{error:#}").contains("ACK TIMEOUT must be greater than zero"));
-
-        emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
-            window: EmitterAckWindow::Parallel { max: 0 },
-            ack_timeout: "1s".to_string(),
-            retry_policy: RetryPolicy {
-                backoff: "10ms".to_string(),
-                max_backoff: "1s".to_string(),
-            },
-        };
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("zero confirmation windows must be rejected");
-        assert!(format!("{error:#}").contains("PARALLEL MAX must be greater than zero"));
 
         emitter.publishing_mode = EmitterPublishingMode::MqttQos0 {
             retry_policy: RetryPolicy {
@@ -12601,12 +12515,17 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("foreign publishing modes must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("foreign publishing modes must be rejected");
         assert!(format!("{error:#}").contains("KAFKA emitter does not support MODE QOS 0"));
 
         *emitter.sink = EmitSink::Sqs {
-            client: identifier("sqs_main"),
+            client: named("sqs_main"),
             queue: "events".to_string(),
             fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
                 nervix_models::Literal::String("group".to_string()),
@@ -12618,37 +12537,26 @@ mod tests {
                 max_backoff: "100ms".to_string(),
             },
         };
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("retry maxima below their initial backoff must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("retry maxima below their initial backoff must be rejected");
         assert!(format!("{error:#}").contains("must be at least BACKOFF"));
 
         if let EmitterPublishingMode::SqsSingle { retry_policy } = &mut emitter.publishing_mode {
             retry_policy.max_backoff = "1s".to_string();
         }
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("FIFO GROUP on a standard queue must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("FIFO GROUP on a standard queue must be rejected");
         assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
-
-        *emitter.sink = EmitSink::ClickHouse {
-            client: identifier("clickhouse_main"),
-            table: identifier("events"),
-            values: Vec::new(),
-            max_batch: 0,
-            flush_each: "IMMEDIATE".to_string(),
-        };
-        emitter.encode_using_codec = None;
-        emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-            retry_policy: RetryPolicy {
-                backoff: "10ms".to_string(),
-                max_backoff: "1s".to_string(),
-            },
-        };
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("zero database batch limits must be rejected");
-        assert!(
-            format!("{error:#}").contains("CLICKHOUSE WITH MAX BATCH must be greater than zero"),
-            "unexpected validation error: {error:#}"
-        );
     }
 
     fn otel_mapping(key: &str) -> OtelValueMapping {
@@ -12660,7 +12568,7 @@ mod tests {
 
     #[test]
     fn otel_mapping_contract_validates_signal_keys_before_runtime() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
@@ -12672,29 +12580,39 @@ mod tests {
                 max_backoff: "1s".to_string(),
             },
         };
-        let models = HashMap::default();
+        let models = ModelIndex::new();
 
         *emitter.sink = EmitSink::Otel {
-            client: identifier("otel_main"),
+            client: named("otel_main"),
             signal: OtelSignal::Logs,
             values: vec![otel_mapping("time"), otel_mapping("body")],
             attributes: Vec::new(),
             resource: Vec::new(),
             scope: None,
         };
-        validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect("complete OTEL LOGS mappings must be accepted");
+        validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect("complete OTEL LOGS mappings must be accepted");
 
         let EmitSink::Otel { values, .. } = emitter.sink.as_mut() else {
             unreachable!("test emitter must remain OTEL")
         };
         values.push(otel_mapping("body"));
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("duplicate OTEL VALUES keys must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("duplicate OTEL VALUES keys must be rejected");
         assert!(format!("{error:#}").contains("duplicate key 'body'"));
 
         *emitter.sink = EmitSink::Otel {
-            client: identifier("otel_main"),
+            client: named("otel_main"),
             signal: OtelSignal::Metric(OtelMetric {
                 name: "requests".to_string(),
                 unit: "1".to_string(),
@@ -12709,52 +12627,21 @@ mod tests {
             resource: Vec::new(),
             scope: None,
         };
-        let error = validate_emitter_publishing_contract(&domain, &emitter.name, &models, &emitter)
-            .expect_err("DELTA metric streams without start_time must be rejected");
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("DELTA metric streams without start_time must be rejected");
         assert!(format!("{error:#}").contains("DELTA VALUES requires key 'start_time'"));
-    }
-
-    #[test]
-    fn archived_pre_publishing_mode_emitter_requires_recreation() {
-        let fixture =
-            include_bytes!("../../tests/fixtures/registry/emitter-before-publishing-modes.rkyv");
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(fixture.len());
-        aligned.extend_from_slice(fixture);
-
-        let error = deserialize_value(&aligned)
-            .expect_err("an authentic archived emitter without MODE must not load");
-        assert_eq!(
-            error.current_context(),
-            &RegistryError::EmitterPublishingModeMissing
-        );
-        assert!(format!("{error:#}").contains("recreate the emitter with an explicit MODE"));
-    }
-
-    #[test]
-    fn archived_pre_publishing_mode_non_emitter_remains_readable() {
-        let fixture =
-            include_bytes!("../../tests/fixtures/registry/schema-before-publishing-modes.rkyv");
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(fixture.len());
-        aligned.extend_from_slice(fixture);
-
-        let stored = deserialize_value(&aligned)
-            .expect("an unchanged model from the prior outer archive must remain readable");
-        let model = Model::try_from(stored).expect("the archived schema must remain valid");
-        assert!(matches!(
-            model,
-            Model::Schema(CreateSchema { ref name, ref fields })
-                if name.as_str() == "events"
-                    && fields.len() == 1
-                    && fields[0].name.as_str() == "seq"
-                    && fields[0].ty == ParseAsType::I64
-        ));
     }
 
     #[test]
     fn sqs_fifo_group_is_validated_at_emitter_creation() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -12770,7 +12657,7 @@ mod tests {
                     branch("tenant_branch", "tenant_branch_schema"),
                     relay_branched_by("tenant_events", "event_schema", "tenant_branch"),
                     Model::ClientSqs(CreateClientSqs {
-                        name: identifier("sqs_main"),
+                        name: named("sqs_main"),
                         mount: None,
                         config: vec![ClientConfigEntry {
                             key: "region".to_string(),
@@ -12786,7 +12673,7 @@ mod tests {
             unreachable!("emitter helper must build an emitter model")
         };
         valid.sink = Box::new(EmitSink::Sqs {
-            client: identifier("sqs_main"),
+            client: named("sqs_main"),
             queue: "events.fifo".to_string(),
             fifo_group: Some(SqsFifoGroup::Expression(
                 nervix_nspl::parse_expression("input.value").expect("valid FIFO group expression"),
@@ -12803,7 +12690,7 @@ mod tests {
             .expect("non-sensitive STRING FIFO expressions should be accepted");
 
         let mut wrong_type = valid.clone();
-        wrong_type.name = identifier("wrong_fifo_type");
+        wrong_type.name = named("wrong_fifo_type");
         if let EmitSink::Sqs { fifo_group, .. } = wrong_type.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::Expression(Expression::Literal(
                 nervix_models::Literal::I64(42),
@@ -12815,8 +12702,8 @@ mod tests {
         assert!(format!("{error:#}").contains("requires an exact non-sensitive STRING value"));
 
         let mut branch_fifo = valid.clone();
-        branch_fifo.name = identifier("branch_fifo");
-        branch_fifo.from = ProcessorInputs::single(identifier("tenant_events"));
+        branch_fifo.name = named("branch_fifo");
+        branch_fifo.from = ProcessorInputs::single(named("tenant_events"));
         if let EmitSink::Sqs { fifo_group, .. } = branch_fifo.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::FromBranch);
         }
@@ -12825,8 +12712,8 @@ mod tests {
             .expect("FIFO GROUP FROM BRANCH should accept a wholly branched input set");
 
         let mut mixed_inputs = valid.clone();
-        mixed_inputs.name = identifier("mixed_fifo_inputs");
-        mixed_inputs.from.from = vec![identifier("tenant_events"), identifier("events")];
+        mixed_inputs.name = named("mixed_fifo_inputs");
+        mixed_inputs.from.from = vec![named("tenant_events"), named("events")];
         if let EmitSink::Sqs { fifo_group, .. } = mixed_inputs.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::FromBranch);
         }
@@ -12839,9 +12726,9 @@ mod tests {
             .apply_mutation_batch(
                 &domain,
                 vec![RegistryMutation::AlterEmitter(AlterEmitter {
-                    emitter: identifier("branch_fifo"),
+                    emitter: named("branch_fifo"),
                     operations: vec![AlterEmitterOperation::AddFrom {
-                        relay: identifier("events"),
+                        relay: named("events"),
                         where_clause: None,
                     }],
                 })],
@@ -12850,7 +12737,7 @@ mod tests {
         assert!(format!("{error:#}").contains("FROM BRANCH requires branched input"));
 
         let mut from_branch = valid;
-        from_branch.name = identifier("unbranched_fifo");
+        from_branch.name = named("unbranched_fifo");
         if let EmitSink::Sqs { fifo_group, .. } = from_branch.sink.as_mut() {
             *fifo_group = Some(SqsFifoGroup::FromBranch);
         }
@@ -12864,22 +12751,22 @@ mod tests {
 
     #[test]
     fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let schema = CreateSchema {
-            name: identifier("event_schema"),
+            name: named("event_schema"),
             fields: vec![SchemaField {
-                name: identifier("tenant"),
+                name: named("tenant"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
             }],
         };
         let mut emitter = CreateEmitter {
-            name: identifier("emit"),
-            from: ProcessorInputs::single(identifier("events")),
-            encode_using_codec: Some(identifier("events_codec")),
+            name: named("emit"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: Some(named("events_codec")),
             sink: Box::new(EmitSink::ZeroMq {
-                client: identifier("zeromq_main"),
+                client: named("zeromq_main"),
             }),
             publishing_mode: EmitterPublishingMode::NoAck {
                 retry_policy: RetryPolicy {
@@ -12887,8 +12774,10 @@ mod tests {
                     max_backoff: "30s".to_string(),
                 },
             },
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
+            flush_policy: FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
             construction: nervix_nspl::parse_route_construction(
@@ -12900,8 +12789,8 @@ mod tests {
 
         let error = super::effective_emitter_filter_map_schema(
             &domain,
-            &emitter.name,
-            &HashMap::default(),
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
             &emitter,
             &schema,
             &schema,
@@ -12910,12 +12799,12 @@ mod tests {
         assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
 
         *emitter.sink = EmitSink::Syslog {
-            client: identifier("syslog_main"),
+            client: named("syslog_main"),
         };
         let error = super::effective_emitter_filter_map_schema(
             &domain,
-            &emitter.name,
-            &HashMap::default(),
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
             &emitter,
             &schema,
             &schema,
@@ -12924,13 +12813,13 @@ mod tests {
         assert!(format!("{error:#}").contains("SYSLOG emitters do not support write_header"));
 
         *emitter.sink = EmitSink::Kafka {
-            client: identifier("kafka_main"),
-            topic: identifier("events_out"),
+            client: named("kafka_main"),
+            topic: named("events_out"),
         };
         super::effective_emitter_filter_map_schema(
             &domain,
-            &emitter.name,
-            &HashMap::default(),
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
             &emitter,
             &schema,
             &schema,
@@ -12943,10 +12832,10 @@ mod tests {
         kind: ModelKind,
         identifier: &str,
     ) -> &'a ScheduledNode {
+        let identity = NodeRef::new(kind, named::<ModelName>(identifier));
         schedule
             .nodes
-            .iter()
-            .find(|node| node.kind == kind && node.identifier.as_str() == identifier)
+            .get(&identity)
             .unwrap_or_else(|| panic!("missing scheduled node {kind:?}:{identifier}"))
     }
 
@@ -12978,13 +12867,13 @@ mod tests {
         from: &[&str],
         to: &[&str],
         policy: PlacementPolicy,
-        rank: Option<u64>,
+        rank: Option<NonZeroU64>,
     ) -> Model {
         Model::Placement(
             CreatePlacement::new(
-                identifier(name),
-                from.iter().map(|member| identifier(member)).collect(),
-                to.iter().map(|member| identifier(member)).collect(),
+                named(name),
+                from.iter().map(|member| named(member)).collect(),
+                to.iter().map(|member| named(member)).collect(),
                 policy,
                 rank,
             )
@@ -12992,10 +12881,10 @@ mod tests {
         )
     }
 
-    fn example_graph_models(name: &str, source: &str) -> (Domain, Vec<nervix_models::Model>) {
+    fn example_graph_models(name: &str, source: &str) -> (DomainName, Vec<nervix_models::Model>) {
         let statements = nervix_nspl::client_statement::parse_client_statement_sources(source)
             .unwrap_or_else(|error| panic!("{name} example should parse: {error:?}"));
-        let mut domain = Domain::parse("default").expect("valid domain");
+        let mut domain = DomainName::parse("default").expect("valid domain");
         let mut models = Vec::new();
 
         for parsed in statements {
@@ -13074,7 +12963,7 @@ mod tests {
     fn create_fails_when_model_already_exists() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
+        let ns = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&ns, vec![sample_transport_model("kafka_main")])
@@ -13095,7 +12984,7 @@ mod tests {
     fn create_allows_same_identifier_for_different_kinds() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
+        let ns = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -13106,20 +12995,19 @@ mod tests {
 
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &ns,
-                    ModelKind::Schema,
-                    &Identifier::parse("shared_name").expect("valid identifier"),
+                    ModelName::parse("shared_name").expect("valid model name"),
                 )
                 .expect("schema read should succeed")
                 .is_some()
         );
         assert!(
             registry
-                .get(
+                .get_of_kind(
                     &ns,
                     ModelKind::Client,
-                    &Identifier::parse("shared_name").expect("valid identifier"),
+                    ModelName::parse("shared_name").expect("valid model name"),
                 )
                 .expect("client read should succeed")
                 .is_some()
@@ -13135,28 +13023,28 @@ mod tests {
             .open()
             .expect("database should open");
         let storage = ModelStorage::from_database(db).expect("storage should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let schema = schema("event_schema");
         let wire_schema = wire_schema("event_wire");
         let relay = relay("raw_events", "event_schema");
         let model = ingestor("kafka_ingestor", "raw_events", "event_codec", "kafka_main");
 
         storage
-            .put(&domain, schema.kind(), schema.identifier(), &schema)
+            .put(&domain, schema.kind(), &schema.name(), &schema)
             .expect("write should succeed");
         storage
             .put(
                 &domain,
                 wire_schema.kind(),
-                wire_schema.identifier(),
+                &wire_schema.name(),
                 &wire_schema,
             )
             .expect("write should succeed");
         storage
-            .put(&domain, relay.kind(), relay.identifier(), &relay)
+            .put(&domain, relay.kind(), &relay.name(), &relay)
             .expect("write should succeed");
         storage
-            .put(&domain, model.kind(), model.identifier(), &model)
+            .put(&domain, model.kind(), &model.name(), &model)
             .expect("write should succeed");
         drop(storage);
 
@@ -13175,14 +13063,14 @@ mod tests {
     fn list_identifiers_filters_by_kind_and_prefix() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
+        let ns = DomainName::parse("default").expect("valid domain");
 
         registry
             .storage
             .put(
                 &ns,
                 ModelKind::Client,
-                &Identifier::parse("kafka_main").expect("valid identifier"),
+                &ModelName::from(&ClientName::parse("kafka_main").expect("valid client name")),
                 &sample_transport_model("kafka_main"),
             )
             .expect("write should succeed");
@@ -13193,7 +13081,7 @@ mod tests {
         assert_eq!(
             transports
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["kafka_main"]
         );
@@ -13205,16 +13093,16 @@ mod tests {
     fn get_roundtrip_returns_stored_model() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let ns = Domain::parse("default").expect("valid domain");
-        let id = Identifier::parse("kafka_main").expect("valid identifier");
+        let ns = DomainName::parse("default").expect("valid domain");
+        let id = ClientName::parse("kafka_main").expect("valid client name");
         let model = sample_transport_model("kafka_main");
 
         registry
             .storage
-            .put(&ns, ModelKind::Client, &id, &model)
+            .put(&ns, ModelKind::Client, &ModelName::from(&id), &model)
             .expect("create should succeed");
         let loaded = registry
-            .get(&ns, ModelKind::Client, &id)
+            .get_of_kind(&ns, ModelKind::Client, &id)
             .expect("read should succeed")
             .expect("model should exist");
 
@@ -13227,12 +13115,12 @@ mod tests {
     fn synchronized_domain_schedule_persists_models_for_restart() {
         let source_path = temp_db_path();
         let source = Registry::open(&source_path).expect("source registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let mut models = full_graph_batch();
         let Model::Relay(notifications) = models
             .iter_mut()
             .find(|model| {
-                model.kind() == ModelKind::Relay && model.identifier().as_str() == "notifications"
+                model.kind() == ModelKind::Relay && model.name().as_str() == "notifications"
             })
             .expect("notifications relay should exist")
         else {
@@ -13247,35 +13135,37 @@ mod tests {
             .expect("source graph should exist")
             .schedule_for_domain(
                 &domain,
-                &["node-1".to_string()],
+                &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
                 PlacementPolicy::Neutral,
             );
-        assert!(
-            schedule
-                .nodes
-                .iter()
-                .any(|node| node.kind == ModelKind::Materializer),
-            "fixture schedule must include its synthetic materializer"
+        let scheduled_relay = schedule
+            .nodes
+            .get(&NodeRef::new(
+                ModelKind::Relay,
+                named::<ModelName>("notifications"),
+            ))
+            .expect("fixture schedule must include its materialized relay");
+        assert_eq!(
+            scheduled_relay.assigned_nodes,
+            [named::<ClusterNodeName>("node-1")]
         );
 
         let replica_path = temp_db_path();
         {
             let replica = Registry::open(&replica_path).expect("replica registry should open");
             replica
-                .synchronize_cluster_schedule(&ClusterSchedule {
-                    domains: vec![schedule],
-                })
+                .synchronize_cluster_schedule(&ClusterSchedule::from_iter([schedule]))
                 .expect("schedule models should synchronize");
         }
 
         let reopened = Registry::open(&replica_path).expect("replica registry should reopen");
         assert_eq!(
             reopened
-                .get(&domain, ModelKind::Ingestor, &identifier("ing"))
+                .get::<CreateIngestor>(&domain, named::<ModelName>("ing"))
                 .expect("replica model read should succeed"),
             source
-                .get(&domain, ModelKind::Ingestor, &identifier("ing"))
+                .get::<CreateIngestor>(&domain, named::<ModelName>("ing"))
                 .expect("source model read should succeed")
         );
 
@@ -13287,7 +13177,7 @@ mod tests {
     fn apply_batch_accepts_partial_graphs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -13309,7 +13199,7 @@ mod tests {
     fn alter_relay_set_capacity_updates_stored_model_and_active_graph() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -13325,8 +13215,10 @@ mod tests {
             .alter_relay(
                 &domain,
                 AlterRelay {
-                    relay: identifier("notifications"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                    relay: named("notifications"),
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(5usize),
+                    }],
                 },
             )
             .expect("alter should succeed");
@@ -13336,25 +13228,22 @@ mod tests {
         );
         assert!(changes.graph.is_some());
 
-        let stored = registry
-            .get(&domain, ModelKind::Relay, &identifier("notifications"))
+        let stored_relay = registry
+            .get::<CreateRelay>(&domain, named::<ModelName>("notifications"))
             .expect("read should succeed")
             .expect("relay should exist");
-        let Model::Relay(stored_relay) = stored else {
-            panic!("stored model should be a relay");
-        };
-        assert_eq!(stored_relay.buffer, 5);
+        assert_eq!(stored_relay.buffer, nonzero!(5usize));
 
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
         let node = graph
-            .node(ModelKind::Relay, &identifier("notifications"))
+            .node(ModelKind::Relay, &named("notifications"))
             .expect("relay node should exist");
         let Model::Relay(graph_relay) = node.config.as_ref() else {
             panic!("graph node should contain relay config");
         };
-        assert_eq!(graph_relay.buffer, 5);
+        assert_eq!(graph_relay.buffer, nonzero!(5usize));
 
         let _ = fs::remove_dir_all(path);
     }
@@ -13363,7 +13252,7 @@ mod tests {
     fn mutation_plan_classifies_no_op_and_relay_capacity_from_the_model_diff() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13378,8 +13267,10 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterRelay(AlterRelay {
-                    relay: identifier("notifications"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 1 }],
+                    relay: named("notifications"),
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(1usize),
+                    }],
                 })],
             )
             .expect("no-op alter should plan");
@@ -13391,8 +13282,10 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterRelay(AlterRelay {
-                    relay: identifier("notifications"),
-                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                    relay: named("notifications"),
+                    operations: vec![AlterRelayOperation::SetCapacity {
+                        capacity: nonzero!(5usize),
+                    }],
                 })],
             )
             .expect("capacity alter should plan");
@@ -13400,9 +13293,9 @@ mod tests {
         assert_eq!(capacity.quiesce().level(), QuiesceLevel::Dynamic);
         assert_eq!(
             capacity.quiesce().affected_entities(),
-            &[super::RegistryEntity {
+            &[super::NodeRef {
                 kind: ModelKind::Relay,
-                identifier: identifier("notifications"),
+                identifier: named("notifications"),
             }]
         );
 
@@ -13413,7 +13306,7 @@ mod tests {
     fn transaction_preflight_classifies_each_mutation_against_its_prefix() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13429,10 +13322,10 @@ mod tests {
                 &domain,
                 &[
                     RegistryMutation::AlterSchema(AlterSchema {
-                        schema: identifier("event_schema"),
+                        schema: named("event_schema"),
                         operations: vec![AlterSchemaOperation::AddField {
                             field: SchemaField {
-                                name: identifier("note"),
+                                name: named("note"),
                                 ty: ParseAsType::String,
                                 optional: true,
                                 sensitive: false,
@@ -13440,8 +13333,10 @@ mod tests {
                         }],
                     }),
                     RegistryMutation::AlterRelay(AlterRelay {
-                        relay: identifier("notifications"),
-                        operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                        relay: named("notifications"),
+                        operations: vec![AlterRelayOperation::SetCapacity {
+                            capacity: nonzero!(5usize),
+                        }],
                     }),
                 ],
             )
@@ -13467,7 +13362,7 @@ mod tests {
     fn junction_alter_is_applied_before_diff_based_quiesce_classification() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13476,12 +13371,15 @@ mod tests {
                     relay("incoming", "event_schema"),
                     relay("outgoing", "event_schema"),
                     Model::Junction(CreateJunction {
-                        name: identifier("route_events"),
-                        from: ProcessorInputs::single(identifier("incoming")),
-                        output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                        name: named("route_events"),
+                        from: ProcessorInputs::single(named("incoming")),
+                        output_routes: with_inherit_all(ProcessorOutputs::single(named(
                             "outgoing",
                         )))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
                         branched_by: BranchSelection::unbranched(),
                         mode: AckMode::Attached,
                         filter_where: None,
@@ -13495,7 +13393,7 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterJunction(AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::SetFilterWhere {
                         where_clause: nervix_nspl::parse_expression("input.value != ''")
                             .expect("valid expression"),
@@ -13509,7 +13407,7 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterJunction(AlterJunction {
-                    junction: identifier("route_events"),
+                    junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::SetMode {
                         mode: AckMode::Detached,
                     }],
@@ -13525,7 +13423,7 @@ mod tests {
     fn emitter_alter_is_applied_before_diff_based_quiesce_classification() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13545,10 +13443,9 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetFlush {
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
+                        flush_policy: FlushPolicy::Immediate,
                     }],
                 })],
             )
@@ -13559,9 +13456,9 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
-                    emitter: identifier("event_sink"),
+                    emitter: named("event_sink"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetClient {
-                        client: identifier("sink_b"),
+                        client: named("sink_b"),
                     }],
                 })],
             )
@@ -13569,9 +13466,9 @@ mod tests {
         assert_eq!(entity_pause.quiesce().level(), QuiesceLevel::EntityPause);
         assert_eq!(
             entity_pause.quiesce().affected_entities(),
-            &[super::RegistryEntity {
+            &[super::NodeRef {
                 kind: ModelKind::Emitter,
-                identifier: identifier("event_sink"),
+                identifier: named("event_sink"),
             }]
         );
 
@@ -13582,7 +13479,7 @@ mod tests {
     fn relay_drop_create_same_key_is_classified_as_a_model_change() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -13600,7 +13497,7 @@ mod tests {
                 &[
                     RegistryMutation::Drop(DropModel {
                         kind: ModelKind::Relay,
-                        name: identifier("notifications"),
+                        name: named("notifications"),
                     }),
                     RegistryMutation::Create(Box::new(relay("notifications", "event_schema_v2"))),
                 ],
@@ -13610,9 +13507,9 @@ mod tests {
         assert_eq!(planned.quiesce().level(), QuiesceLevel::DomainPause);
         assert_eq!(
             planned.quiesce().affected_entities(),
-            &[super::RegistryEntity {
+            &[super::NodeRef {
                 kind: ModelKind::Relay,
-                identifier: identifier("notifications"),
+                identifier: named("notifications"),
             }]
         );
 
@@ -13623,13 +13520,13 @@ mod tests {
     fn referenced_codec_drop_create_same_key_is_classified_as_domain_pause() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(Model::WireJsonSchema(CreateWireSchema {
-            name: identifier("event_wire_v2"),
+            name: named("event_wire_v2"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
-                name: identifier("value"),
+                name: named("value"),
                 ty: JsonType::String,
                 optional: false,
             }],
@@ -13641,14 +13538,16 @@ mod tests {
         let Model::Codec(mut replacement) = codec("event_codec", "event_schema") else {
             unreachable!("codec helper must build a codec model");
         };
-        replacement.wire_schema = Some(identifier("event_wire_v2"));
+        replacement.wire_format = CodecWireFormat::Json {
+            wire_schema: named("event_wire_v2"),
+        };
         let planned = registry
             .plan_mutations(
                 &domain,
                 &[
                     RegistryMutation::Drop(DropModel {
                         kind: ModelKind::Codec,
-                        name: identifier("event_codec"),
+                        name: named("event_codec"),
                     }),
                     RegistryMutation::Create(Box::new(Model::Codec(replacement))),
                 ],
@@ -13658,9 +13557,9 @@ mod tests {
         assert_eq!(planned.quiesce().level(), QuiesceLevel::DomainPause);
         assert_eq!(
             planned.quiesce().affected_entities(),
-            &[super::RegistryEntity {
+            &[super::NodeRef {
                 kind: ModelKind::Codec,
-                identifier: identifier("event_codec"),
+                identifier: named("event_codec"),
             }]
         );
 
@@ -13671,13 +13570,15 @@ mod tests {
     fn alter_relay_rejects_missing_relay_without_persisting() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.alter_relay(
             &domain,
             AlterRelay {
-                relay: identifier("notifications"),
-                operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                relay: named("notifications"),
+                operations: vec![AlterRelayOperation::SetCapacity {
+                    capacity: nonzero!(5usize),
+                }],
             },
         );
         assert!(matches!(
@@ -13688,7 +13589,7 @@ mod tests {
         ));
         assert!(
             registry
-                .get(&domain, ModelKind::Relay, &identifier("notifications"))
+                .get::<CreateRelay>(&domain, named::<ModelName>("notifications"),)
                 .expect("read should succeed")
                 .is_none()
         );
@@ -13700,7 +13601,7 @@ mod tests {
     fn apply_batch_accepts_unbranched_ingestor_without_branch_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -13720,7 +13621,7 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
         let relay = graph
-            .node(ModelKind::Relay, &identifier("notifications"))
+            .node(ModelKind::Relay, &named("notifications"))
             .expect("relay should exist");
         assert_eq!(relay.effective_branching, Some(Vec::new()));
         assert_eq!(relay.effective_branching_schema, None);
@@ -14219,7 +14120,7 @@ mod tests {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain =
-            Domain::parse("unconditional_processor_output_route").expect("domain should parse");
+            DomainName::parse("unconditional_processor_output_route").expect("domain should parse");
 
         registry
             .apply_batch(
@@ -14229,12 +14130,12 @@ mod tests {
                     explicitly_unbranched_relay("raw_events", "event_schema"),
                     explicitly_unbranched_relay("projected_events", "event_schema"),
                     Model::Deduplicator(CreateDeduplicator {
-                        name: identifier("dedup_events"),
-                        from: ProcessorInputs::single(identifier("raw_events")),
-                        output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                        name: named("dedup_events"),
+                        from: ProcessorInputs::single(named("raw_events")),
+                        output_routes: with_inherit_all(ProcessorOutputs::single(named(
                             "projected_events",
                         )))
-                        .with_flush_policy("IMMEDIATE".to_string(), None),
+                        .with_flush_policy(FlushPolicy::Immediate),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![
                             nervix_nspl::parse_expression("input.value")
@@ -14274,12 +14175,12 @@ mod tests {
         for (index, (collect_policy, expected)) in cases.into_iter().enumerate() {
             let path = temp_db_path();
             let registry = Registry::open(&path).expect("registry should open");
-            let domain = Domain::parse(&format!("invalid_input_collection_{index}"))
+            let domain = DomainName::parse(&format!("invalid_input_collection_{index}"))
                 .expect("domain should parse");
-            let mut inputs = ProcessorInputs::single(identifier("raw_events"));
+            let mut inputs = ProcessorInputs::single(named("raw_events"));
             inputs.collect_policy = Some(collect_policy);
             let junction = Model::Junction(CreateJunction {
-                name: identifier("collect_events"),
+                name: named("collect_events"),
                 from: inputs,
                 output_routes: unbranched_transforming_outputs("collected_events"),
                 branched_by: BranchSelection::unbranched(),
@@ -14312,13 +14213,13 @@ mod tests {
     fn apply_batch_rejects_empty_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let schema_domain = Domain::parse("empty_schema").expect("valid domain");
-        let wire_schema_domain = Domain::parse("empty_wire_schema").expect("valid domain");
+        let schema_domain = DomainName::parse("empty_schema").expect("valid domain");
+        let wire_schema_domain = DomainName::parse("empty_wire_schema").expect("valid domain");
 
         let result = registry.apply_batch(
             &schema_domain,
             vec![Model::Schema(CreateSchema {
-                name: identifier("root_branch"),
+                name: named("root_branch"),
                 fields: Vec::new(),
             })],
         );
@@ -14332,7 +14233,7 @@ mod tests {
         let result = registry.apply_batch(
             &wire_schema_domain,
             vec![Model::WireJsonSchema(CreateWireSchema {
-                name: identifier("empty_wire"),
+                name: named("empty_wire"),
                 strictness: Default::default(),
                 fields: Vec::<WireSchemaField<JsonType>>::new(),
             })],
@@ -14351,14 +14252,14 @@ mod tests {
     fn placement_corridor_claims_every_runtime_pair_and_reports_witnesses() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_corridor").expect("valid domain");
+        let domain = DomainName::parse("placement_corridor").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "critical_path",
             &["ing"],
             &["emit"],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
 
         registry
@@ -14369,35 +14270,40 @@ mod tests {
             .expect("graph should be installed")
             .placement_plan(PlacementPolicy::Neutral);
         let rule = &plan.rules[0];
-        assert_eq!(rule.name, identifier("critical_path"));
+        assert_eq!(rule.name, named("critical_path"));
         assert_eq!(rule.endpoint_pairs.len(), 1);
         let endpoint = &rule.endpoint_pairs[0];
         assert!(endpoint.connected);
-        assert_eq!(endpoint.source.identifier, identifier("ing"));
-        assert_eq!(endpoint.destination.identifier, identifier("emit"));
+        assert_eq!(endpoint.source.identifier, named("ing"));
+        assert_eq!(endpoint.destination.identifier, named("emit"));
         let mut corridor = endpoint
             .corridor
             .iter()
             .map(|member| member.identifier.as_str())
             .collect::<Vec<_>>();
         corridor.sort_unstable();
-        assert_eq!(corridor, vec!["emit", "ing", "p99_proc"]);
-        assert_eq!(rule.claims.len(), 3, "a three-member corridor is a clique");
-        assert_eq!(endpoint.witnesses.len(), 1);
         assert_eq!(
-            endpoint.witnesses[0].captured.identifier,
-            identifier("p99_proc")
+            corridor,
+            vec!["emit", "ing", "notifications", "p99", "p99_proc"]
         );
-        assert_eq!(
-            endpoint.witnesses[0]
+        assert_eq!(rule.claims.len(), 10, "a five-member corridor is a clique");
+        assert_eq!(endpoint.witnesses.len(), 3);
+        let mut captured = endpoint
+            .witnesses
+            .iter()
+            .map(|witness| witness.captured.identifier.as_str())
+            .collect::<Vec<_>>();
+        captured.sort_unstable();
+        assert_eq!(captured, ["notifications", "p99", "p99_proc"]);
+        assert!(endpoint.witnesses.iter().all(|witness| {
+            witness
                 .path
                 .iter()
                 .map(|member| member.identifier.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ing", "p99_proc", "emit"]
-        );
+                .eq(["ing", "notifications", "p99_proc", "p99", "emit"])
+        }));
         assert_eq!(plan.require_groups.len(), 1);
-        assert_eq!(plan.require_groups[0].members.len(), 3);
+        assert_eq!(plan.require_groups[0].members.len(), 5);
 
         let _ = fs::remove_dir_all(path);
     }
@@ -14406,7 +14312,7 @@ mod tests {
     fn placement_disconnected_endpoint_pair_is_valid_with_empty_coverage() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_disconnected").expect("valid domain");
+        let domain = DomainName::parse("placement_disconnected").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             client_model("other_broker"),
@@ -14417,7 +14323,7 @@ mod tests {
                 &["emit"],
                 &["other_ing"],
                 PlacementPolicy::RequireColocation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
 
@@ -14441,7 +14347,7 @@ mod tests {
     fn placement_stronger_rank_overrides_weaker_policy_without_conflict() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_rank").expect("valid domain");
+        let domain = DomainName::parse("placement_rank").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             placement(
@@ -14449,14 +14355,14 @@ mod tests {
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::RequireColocation,
-                Some(2),
+                Some(nonzero!(2u64)),
             ),
             placement(
                 "strong_cut",
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::SuggestSeparation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
 
@@ -14479,14 +14385,14 @@ mod tests {
             })
             .expect("rule pair should be effective");
         assert_eq!(effective.policy, PlacementPolicy::SuggestSeparation);
-        assert_eq!(effective.winning_rules, vec![identifier("strong_cut")]);
+        assert_eq!(effective.winning_rules, vec![named("strong_cut")]);
         let weak = plan
             .rules
             .iter()
-            .find(|rule| rule.name == identifier("weak_glue"))
+            .find(|rule| rule.name == named("weak_glue"))
             .expect("weak rule should remain introspectable");
         assert!(!weak.claims[0].effective);
-        assert_eq!(weak.claims[0].winning_rules, vec![identifier("strong_cut")]);
+        assert_eq!(weak.claims[0].winning_rules, vec![named("strong_cut")]);
 
         let _ = fs::remove_dir_all(path);
     }
@@ -14495,7 +14401,7 @@ mod tests {
     fn placement_equal_rank_different_policies_are_an_activation_conflict() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_conflict").expect("valid domain");
+        let domain = DomainName::parse("placement_conflict").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             placement(
@@ -14503,14 +14409,14 @@ mod tests {
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::RequireColocation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
             placement(
                 "cut",
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::Neutral,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
 
@@ -14531,8 +14437,12 @@ mod tests {
         assert_eq!(error_domain, domain.as_str());
         assert_eq!([left_rule.as_str(), right_rule.as_str()], ["cut", "glue"]);
         let witness = [left_identifier.as_str(), right_identifier.as_str()];
-        assert!(witness.contains(&"ing"));
-        assert!(witness.contains(&"p99_proc"));
+        assert_ne!(witness[0], witness[1]);
+        assert!(
+            witness
+                .iter()
+                .all(|member| { ["ing", "notifications", "p99_proc"].contains(member) })
+        );
 
         let _ = fs::remove_dir_all(path);
     }
@@ -14541,7 +14451,7 @@ mod tests {
     fn placement_materialized_relay_member_uses_state_delivery_dependency() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_materialized_state").expect("valid domain");
+        let domain = DomainName::parse("placement_materialized_state").expect("valid domain");
         let mut models = full_graph_batch();
         let Model::Relay(mut profiles) =
             relay_branched_like("profiles", "event_schema", "notifications")
@@ -14553,9 +14463,7 @@ mod tests {
         let deduplicator = models
             .iter_mut()
             .find_map(|model| match model {
-                Model::Deduplicator(deduplicator)
-                    if deduplicator.name == identifier("p99_proc") =>
-                {
+                Model::Deduplicator(deduplicator) if deduplicator.name == named("p99_proc") => {
                     Some(deduplicator)
                 }
                 _ => None,
@@ -14564,7 +14472,7 @@ mod tests {
         deduplicator
             .materialized_state
             .push(MaterializedStateDependency {
-                relay: identifier("profiles"),
+                relay: named("profiles"),
                 policy: MaterializedStatePolicy::RequiredSkip,
             });
         models.push(placement(
@@ -14572,7 +14480,7 @@ mod tests {
             &["profiles"],
             &["p99_proc"],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
 
         registry
@@ -14584,9 +14492,9 @@ mod tests {
             .placement_plan(PlacementPolicy::Neutral);
         let endpoint = &plan.rules[0].endpoint_pairs[0];
         assert!(endpoint.connected);
-        assert_eq!(endpoint.source.kind, ModelKind::Materializer);
-        assert_eq!(endpoint.source.identifier, identifier("profiles"));
-        assert_eq!(endpoint.destination.identifier, identifier("p99_proc"));
+        assert_eq!(endpoint.source.kind, ModelKind::Relay);
+        assert_eq!(endpoint.source.identifier, named("profiles"));
+        assert_eq!(endpoint.destination.identifier, named("p99_proc"));
         assert_eq!(endpoint.corridor.len(), 2);
         assert_eq!(plan.require_groups[0].members.len(), 2);
 
@@ -14594,10 +14502,10 @@ mod tests {
     }
 
     #[test]
-    fn placement_rejects_nonmaterialized_relay_and_cluster_wide_ingestor_members() {
+    fn placement_accepts_relay_and_rejects_cluster_wide_ingestor_members() {
         let relay_path = temp_db_path();
         let relay_registry = Registry::open(&relay_path).expect("registry should open");
-        let relay_domain = Domain::parse("placement_plain_relay").expect("valid domain");
+        let relay_domain = DomainName::parse("placement_plain_relay").expect("valid domain");
         let mut relay_models = full_graph_batch();
         relay_models.push(placement(
             "plain_relay",
@@ -14606,27 +14514,32 @@ mod tests {
             PlacementPolicy::RequireColocation,
             None,
         ));
-        let relay_error = relay_registry
+        relay_registry
             .apply_batch(&relay_domain, relay_models)
-            .expect_err("a plain relay is not a placement member");
-        assert!(
-            format!("{relay_error:#}").contains("relay that is not materialized"),
-            "unexpected relay error: {relay_error:#}"
+            .expect("a relay is a placement member");
+        let relay_plan = relay_registry
+            .active_graph(&relay_domain)
+            .expect("relay graph should be installed")
+            .placement_plan(PlacementPolicy::Neutral);
+        assert_eq!(
+            relay_plan.rules[0].endpoint_pairs[0].source.kind,
+            ModelKind::Relay
         );
 
         let endpoint_path = temp_db_path();
         let endpoint_registry = Registry::open(&endpoint_path).expect("registry should open");
-        let endpoint_domain = Domain::parse("placement_endpoint_ingestor").expect("valid domain");
+        let endpoint_domain =
+            DomainName::parse("placement_endpoint_ingestor").expect("valid domain");
         let mut endpoint_models = full_graph_batch();
         let ingestor = endpoint_models
             .iter_mut()
             .find_map(|model| match model {
-                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                Model::Ingestor(ingestor) if ingestor.name == named("ing") => Some(ingestor),
                 _ => None,
             })
             .expect("full graph must contain ing");
         ingestor.source = IngestSource::Endpoint {
-            endpoint: identifier("ingest_http"),
+            endpoint: named("ingest_http"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
@@ -14659,17 +14572,17 @@ mod tests {
 
         let syslog_path = temp_db_path();
         let syslog_registry = Registry::open(&syslog_path).expect("registry should open");
-        let syslog_domain = Domain::parse("placement_syslog_ingestor").expect("valid domain");
+        let syslog_domain = DomainName::parse("placement_syslog_ingestor").expect("valid domain");
         let mut syslog_models = full_graph_batch();
         let ingestor = syslog_models
             .iter_mut()
             .find_map(|model| match model {
-                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                Model::Ingestor(ingestor) if ingestor.name == named("ing") => Some(ingestor),
                 _ => None,
             })
             .expect("full graph must contain ing");
         ingestor.source = IngestSource::Syslog {
-            client: identifier("syslog_listener"),
+            client: named("syslog_listener"),
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         };
         syslog_models.extend([
@@ -14700,7 +14613,7 @@ mod tests {
     fn placement_members_are_pinned_by_every_referencing_rule() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_pins").expect("valid domain");
+        let domain = DomainName::parse("placement_pins").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             placement(
@@ -14727,7 +14640,7 @@ mod tests {
                 &domain,
                 &[RegistryMutation::Drop(DropModel {
                     kind: ModelKind::Deduplicator,
-                    name: identifier("p99_proc"),
+                    name: named("p99_proc"),
                 })],
             )
             .expect_err("referenced placement member must be pinned");
@@ -14743,7 +14656,7 @@ mod tests {
     fn placement_alter_then_member_drop_uses_ordered_candidate_graph() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_ordered_drop").expect("valid domain");
+        let domain = DomainName::parse("placement_ordered_drop").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "pin_ing",
@@ -14757,15 +14670,15 @@ mod tests {
             .expect("placement should validate");
 
         let alter = RegistryMutation::AlterPlacement(AlterPlacement {
-            placement: identifier("pin_ing"),
+            placement: named("pin_ing"),
             operations: vec![AlterPlacementOperation::SetMembers {
-                from: vec![identifier("p99_proc")],
-                to: vec![identifier("emit")],
+                from: vec![named("p99_proc")],
+                to: vec![named("emit")],
             }],
         });
         let drop_member = RegistryMutation::Drop(DropModel {
             kind: ModelKind::Ingestor,
-            name: identifier("ing"),
+            name: named("ing"),
         });
         registry
             .plan_mutations(&domain, &[alter.clone(), drop_member.clone()])
@@ -14786,7 +14699,7 @@ mod tests {
     fn placement_non_placeable_alter_names_every_pinning_rule() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_pinned_alter").expect("valid domain");
+        let domain = DomainName::parse("placement_pinned_alter").expect("valid domain");
         let mut models = full_graph_batch();
         models.extend([
             vhost("public", &["events.example.com"]),
@@ -14808,7 +14721,7 @@ mod tests {
                 &["ing"],
                 &["p99_proc"],
                 PlacementPolicy::RequireColocation,
-                Some(1),
+                Some(nonzero!(1u64)),
             ),
         ]);
         registry
@@ -14819,10 +14732,10 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterIngestor(AlterIngestor {
-                    ingestor: identifier("ing"),
+                    ingestor: named("ing"),
                     operations: vec![AlterIngestorOperation::SetSource {
                         source: IngestSource::Endpoint {
-                            endpoint: identifier("ingest_http"),
+                            endpoint: named("ingest_http"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
                             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
@@ -14850,7 +14763,7 @@ mod tests {
     fn placement_default_require_forms_a_connected_component_from_per_hop_claims() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_default_require").expect("valid domain");
+        let domain = DomainName::parse("placement_default_require").expect("valid domain");
         registry
             .apply_batch(&domain, full_graph_batch())
             .expect("graph should validate");
@@ -14859,17 +14772,20 @@ mod tests {
             .expect("graph should be installed");
         let plan = graph.placement_plan(PlacementPolicy::RequireColocation);
 
-        assert_eq!(plan.effective_pairs.len(), 2, "the default is per-hop");
+        assert_eq!(plan.effective_pairs.len(), 4, "the default is per-hop");
         assert!(
             plan.effective_pairs
                 .iter()
                 .all(|pair| pair.from_domain_default)
         );
         assert_eq!(plan.require_groups.len(), 1);
-        assert_eq!(plan.require_groups[0].members.len(), 3);
+        assert_eq!(plan.require_groups[0].members.len(), 5);
         let schedule = graph.schedule_for_domain(
             &domain,
-            &["node-1".to_string(), "node-2".to_string()],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::RequireColocation,
         );
@@ -14878,6 +14794,14 @@ mod tests {
             .expect("ingestor should be assigned");
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Relay, "notifications").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Relay, "p99").assigned_single_node(),
             Some(owner)
         );
         assert_eq!(
@@ -14893,14 +14817,14 @@ mod tests {
     fn placement_require_binds_the_random_test_scheduler() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_random_require").expect("valid domain");
+        let domain = DomainName::parse("placement_random_require").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "critical_path",
             &["ing"],
             &["emit"],
             PlacementPolicy::RequireColocation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
         registry
             .apply_batch(&domain, models)
@@ -14911,9 +14835,9 @@ mod tests {
         let schedule = graph.schedule_for_domain_with_mode(
             &domain,
             &[
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
             PlacementPolicy::Neutral,
@@ -14931,10 +14855,18 @@ mod tests {
             scheduled_node(&schedule, ModelKind::Emitter, "emit").assigned_single_node(),
             Some(owner)
         );
-        assert_eq!(schedule.placement_groups.len(), 1);
-        assert_eq!(schedule.placement_groups[0].members.len(), 3);
         assert_eq!(
-            schedule.placement_groups[0].primary_node.as_deref(),
+            scheduled_node(&schedule, ModelKind::Relay, "notifications").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(
+            scheduled_node(&schedule, ModelKind::Relay, "p99").assigned_single_node(),
+            Some(owner)
+        );
+        assert_eq!(schedule.placement_groups.len(), 1);
+        assert_eq!(schedule.placement_groups[0].members.len(), 5);
+        assert_eq!(
+            schedule.placement_groups[0].primary_node.as_ref(),
             Some(owner)
         );
 
@@ -14945,14 +14877,14 @@ mod tests {
     fn placement_suggest_separation_outranks_upstream_locality() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_suggest").expect("valid domain");
+        let domain = DomainName::parse("placement_suggest").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(placement(
             "spread",
             &["ing"],
             &["p99_proc"],
             PlacementPolicy::SuggestSeparation,
-            Some(1),
+            Some(nonzero!(1u64)),
         ));
         registry
             .apply_batch(&domain, models)
@@ -14962,7 +14894,10 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &["node-1".to_string(), "node-2".to_string()],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
@@ -14979,7 +14914,7 @@ mod tests {
     fn placement_prefer_colocation_outranks_majority_upstream_locality() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("placement_prefer").expect("valid domain");
+        let domain = DomainName::parse("placement_prefer").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -14998,13 +14933,9 @@ mod tests {
                     ingestor("ing_b", "source_b", "event_codec", "broker_b"),
                     ingestor("ing_c", "source_c", "event_codec", "broker_c"),
                     Model::Junction(CreateJunction {
-                        name: identifier("join"),
+                        name: named("join"),
                         from: ProcessorInputs::new(
-                            vec![
-                                identifier("source_a"),
-                                identifier("source_b"),
-                                identifier("source_c"),
-                            ],
+                            vec![named("source_a"), named("source_b"), named("source_c")],
                             Vec::new(),
                         ),
                         output_routes: unbranched_transforming_outputs("joined"),
@@ -15018,7 +14949,7 @@ mod tests {
                         &["ing_b"],
                         &["join"],
                         PlacementPolicy::PreferColocation,
-                        Some(1),
+                        Some(nonzero!(1u64)),
                     ),
                 ],
             )
@@ -15028,26 +14959,29 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &["node-1".to_string(), "node-2".to_string()],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_single_node(),
-            Some("node-1")
+            Some(&named::<ClusterNodeName>("node-1"))
         );
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_b").assigned_single_node(),
-            Some("node-2")
+            Some(&named::<ClusterNodeName>("node-2"))
         );
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_c").assigned_single_node(),
-            Some("node-1")
+            Some(&named::<ClusterNodeName>("node-1"))
         );
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Junction, "join").assigned_single_node(),
-            Some("node-2"),
+            Some(&named::<ClusterNodeName>("node-2")),
             "explicit placement preference must beat two upstream-locality votes for node-1"
         );
 
@@ -15056,10 +14990,10 @@ mod tests {
 
     #[test]
     fn placement_cycle_corridor_captures_the_whole_cycle_with_member_witnesses() {
-        let cycle_a = RegistryKey::new(ModelKind::Reingestor, identifier("cycle_a"));
-        let cycle_b = RegistryKey::new(ModelKind::Reingestor, identifier("cycle_b"));
-        let cycle_c = RegistryKey::new(ModelKind::Reingestor, identifier("cycle_c"));
-        let tail = RegistryKey::new(ModelKind::Emitter, identifier("tail"));
+        let cycle_a = NodeRef::new(ModelKind::Reingestor, named::<ModelName>("cycle_a"));
+        let cycle_b = NodeRef::new(ModelKind::Reingestor, named::<ModelName>("cycle_b"));
+        let cycle_c = NodeRef::new(ModelKind::Reingestor, named::<ModelName>("cycle_c"));
+        let tail = NodeRef::new(ModelKind::Emitter, named::<ModelName>("tail"));
         let topology = PlacementTopology {
             adjacency: HashMap::from_iter([
                 (cycle_a.clone(), vec![cycle_b.clone(), tail]),
@@ -15090,7 +15024,7 @@ mod tests {
             path.first() == path.last()
                 && path
                     .first()
-                    .is_some_and(|member| member.identifier == identifier("cycle_a"))
+                    .is_some_and(|member| member.identifier == named("cycle_a"))
         }));
     }
 
@@ -15098,7 +15032,7 @@ mod tests {
     fn schedule_spreads_independent_ingestors_before_locality_applies() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15122,18 +15056,21 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &["node-1".to_string(), "node-2".to_string()],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_nodes,
-            vec!["node-1".to_string()]
+            vec![named::<ClusterNodeName>("node-1")]
         );
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_b").assigned_nodes,
-            vec!["node-2".to_string()]
+            vec![named::<ClusterNodeName>("node-2")]
         );
 
         let _ = fs::remove_dir_all(path);
@@ -15143,7 +15080,7 @@ mod tests {
     fn schedule_prefers_upstream_locality_for_dedicated_chain() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -15155,9 +15092,9 @@ mod tests {
         let schedule = graph.schedule_for_domain(
             &domain,
             &[
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
             PlacementPolicy::Neutral,
@@ -15165,15 +15102,15 @@ mod tests {
 
         let ingestor_node = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()
-            .map(str::to_string)
+            .cloned()
             .clone();
         let processor_node = scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc")
             .assigned_single_node()
-            .map(str::to_string)
+            .cloned()
             .clone();
         let emitter_node = scheduled_node(&schedule, ModelKind::Emitter, "emit")
             .assigned_single_node()
-            .map(str::to_string)
+            .cloned()
             .clone();
 
         assert_eq!(processor_node, ingestor_node);
@@ -15185,49 +15122,34 @@ mod tests {
     #[cfg(feature = "testing")]
     #[test]
     fn random_test_scheduler_preserves_singleton_seed_and_assignment() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let mut domain_hasher = blake3::Hasher::new();
         domain_hasher.update(b"nervix/test-random-scheduler/domain");
         domain_hasher.update(&[0]);
         domain_hasher.update(domain.as_str().as_bytes());
         let domain_seed = *domain_hasher.finalize().as_bytes();
-        let member = RegistryKey::new(ModelKind::Ingestor, identifier("ing"));
+        let member = NodeRef::new(ModelKind::Ingestor, named::<ModelName>("ing"));
 
-        let mut legacy_hasher = blake3::Hasher::new();
-        legacy_hasher.update(b"nervix/test-random-scheduler/model");
-        legacy_hasher.update(&[0]);
-        legacy_hasher.update(&domain_seed);
-        legacy_hasher.update(member.kind.as_str().as_bytes());
-        legacy_hasher.update(&[0]);
-        legacy_hasher.update(member.identifier.as_str().as_bytes());
+        let mut expected_hasher = blake3::Hasher::new();
+        expected_hasher.update(b"nervix/test-random-scheduler/model");
+        expected_hasher.update(&[0]);
+        expected_hasher.update(&domain_seed);
+        expected_hasher.update(member.kind.as_str().as_bytes());
+        expected_hasher.update(&[0]);
+        expected_hasher.update(member.identifier.as_str().as_bytes());
         let mut expected_seed = [0; 8];
-        expected_seed.copy_from_slice(&legacy_hasher.finalize().as_bytes()[..8]);
+        expected_seed.copy_from_slice(&expected_hasher.finalize().as_bytes()[..8]);
         let expected_seed = u64::from_le_bytes(expected_seed);
 
-        let graph = petgraph::graph::DiGraph::new();
         let cluster_nodes = [
-            "node-1".to_string(),
-            "node-2".to_string(),
-            "node-3".to_string(),
+            named::<ClusterNodeName>("node-1"),
+            named::<ClusterNodeName>("node-2"),
+            named::<ClusterNodeName>("node-3"),
         ];
-        let assigned_by_key = HashMap::default();
-        let placement_pairs = HashMap::default();
-        let node_load = HashMap::default();
-        let mut next_assignment = 0;
-        let planner = super::AssignmentPlanner {
-            graph: &graph,
-            cluster_nodes: &cluster_nodes,
-            assigned_by_key: &assigned_by_key,
-            placement_pairs: &placement_pairs,
-            node_load: &node_load,
-            next_assignment: &mut next_assignment,
-            replica_count: 0,
-            scheduler_mode: SchedulerMode::Random,
-            random_schedule_seed: domain_seed,
-        };
+        let planner = super::RandomAssignmentPlanner::new(&domain, &cluster_nodes, 1);
 
         assert_eq!(
-            planner.random_schedule_seed_for(std::slice::from_ref(&member)),
+            planner.assignment_seed_for(std::slice::from_ref(&member)),
             expected_seed,
             "a singleton must retain the pre-placement random-scheduler seed"
         );
@@ -15235,7 +15157,7 @@ mod tests {
         fastrand::Rng::with_seed(expected_seed).shuffle(&mut expected_assignment);
         expected_assignment.truncate(1);
         assert_eq!(
-            planner.random_assignment(std::slice::from_ref(&member)),
+            planner.assignment(std::slice::from_ref(&member)),
             expected_assignment,
             "a singleton must retain the pre-placement randomized assignment"
         );
@@ -15246,7 +15168,7 @@ mod tests {
     fn random_test_schedule_is_stable_for_unchanged_inputs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -15256,9 +15178,9 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
         let cluster_nodes = [
-            "node-1".to_string(),
-            "node-2".to_string(),
-            "node-3".to_string(),
+            named::<ClusterNodeName>("node-1"),
+            named::<ClusterNodeName>("node-2"),
+            named::<ClusterNodeName>("node-3"),
         ];
         let expected = graph.schedule_for_domain_with_mode(
             &domain,
@@ -15288,17 +15210,17 @@ mod tests {
     fn syslog_server_ingestor_is_assigned_to_every_cluster_node() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("syslog_cluster_wide").expect("valid domain");
+        let domain = DomainName::parse("syslog_cluster_wide").expect("valid domain");
         let mut models = full_graph_batch();
         let ingestor = models
             .iter_mut()
             .find_map(|model| match model {
-                Model::Ingestor(ingestor) if ingestor.name == identifier("ing") => Some(ingestor),
+                Model::Ingestor(ingestor) if ingestor.name == named("ing") => Some(ingestor),
                 _ => None,
             })
             .expect("full graph must contain ing");
         ingestor.source = IngestSource::Syslog {
-            client: identifier("syslog_listener"),
+            client: named("syslog_listener"),
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         };
         models.push(syslog_client("syslog_listener"));
@@ -15310,9 +15232,9 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
         let cluster_nodes = [
-            "node-1".to_string(),
-            "node-2".to_string(),
-            "node-3".to_string(),
+            named::<ClusterNodeName>("node-1"),
+            named::<ClusterNodeName>("node-2"),
+            named::<ClusterNodeName>("node-3"),
         ];
         let schedule =
             graph.schedule_for_domain(&domain, &cluster_nodes, 0, PlacementPolicy::Neutral);
@@ -15329,7 +15251,7 @@ mod tests {
     fn random_test_schedule_ignores_upstream_locality_across_domains() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -15339,13 +15261,13 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
         let cluster_nodes = [
-            "node-1".to_string(),
-            "node-2".to_string(),
-            "node-3".to_string(),
+            named::<ClusterNodeName>("node-1"),
+            named::<ClusterNodeName>("node-2"),
+            named::<ClusterNodeName>("node-3"),
         ];
         let observed_cross_node_path = (0..32).any(|suffix| {
             let scheduled_domain =
-                Domain::parse(&format!("test_{suffix}")).expect("valid test domain");
+                DomainName::parse(&format!("test_{suffix}")).expect("valid test domain");
             let schedule = graph.schedule_for_domain_with_mode(
                 &scheduled_domain,
                 &cluster_nodes,
@@ -15374,7 +15296,7 @@ mod tests {
     fn schedule_prefers_majority_upstream_locality_for_shared_downstream() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15418,27 +15340,30 @@ mod tests {
             .expect("graph should be installed");
         let schedule = graph.schedule_for_domain(
             &domain,
-            &["node-1".to_string(), "node-2".to_string()],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_nodes,
-            vec!["node-1".to_string()]
+            vec![named::<ClusterNodeName>("node-1")]
         );
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_b").assigned_nodes,
-            vec!["node-2".to_string()]
+            vec![named::<ClusterNodeName>("node-2")]
         );
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_c").assigned_nodes,
-            vec!["node-1".to_string()]
+            vec![named::<ClusterNodeName>("node-1")]
         );
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Emitter, "emit_shared").assigned_nodes,
-            vec!["node-1".to_string()]
+            vec![named::<ClusterNodeName>("node-1")]
         );
 
         let _ = fs::remove_dir_all(path);
@@ -15448,7 +15373,7 @@ mod tests {
     fn schedule_places_server_side_ingestors_on_all_live_nodes() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15466,13 +15391,13 @@ mod tests {
                     ),
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
-                        name: Identifier::parse("http_ing").expect("valid identifier"),
+                        name: IngestorName::parse("http_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
-                        decode_using_codec: Identifier::parse("event_codec")
+                        decode_using_codec: CodecName::parse("event_codec")
                             .expect("valid identifier"),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
-                            endpoint: Identifier::parse("ingest_http").expect("valid identifier"),
+                            endpoint: EndpointName::parse("ingest_http").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
                             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
@@ -15492,9 +15417,9 @@ mod tests {
         let schedule = graph.schedule_for_domain(
             &domain,
             &[
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
             PlacementPolicy::Neutral,
@@ -15503,9 +15428,9 @@ mod tests {
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "http_ing").assigned_nodes,
             vec![
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string()
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+                named::<ClusterNodeName>("node-3")
             ]
         );
 
@@ -15516,7 +15441,7 @@ mod tests {
     fn mqtt_instances_greater_than_one_are_valid() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
@@ -15527,14 +15452,14 @@ mod tests {
                 client_model("mqtt_main"),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("mqtt_ing").expect("valid identifier"),
+                    name: IngestorName::parse("mqtt_ing").expect("valid identifier"),
                     output_routes: unbranched_transforming_outputs("notifications"),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Mqtt {
-                        client: Identifier::parse("mqtt_main").expect("valid identifier"),
+                        client: ClientName::parse("mqtt_main").expect("valid identifier"),
                         topic: "notifications".to_string(),
-                        instances: 2,
+                        instances: nonzero!(2u64),
                         mode: MqttIngestMode::NoAckSequential {
                             session: MqttSession::Clean,
                             qos: MqttQos::AtMostOnce,
@@ -15556,22 +15481,22 @@ mod tests {
     fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
             vec![
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: SchemaName::parse("event_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: FieldName::parse("value").expect("valid identifier"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
                         },
                         SchemaField {
-                            name: Identifier::parse("occurred_at").expect("valid identifier"),
+                            name: FieldName::parse("occurred_at").expect("valid identifier"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
@@ -15579,16 +15504,16 @@ mod tests {
                     ],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
-                    name: Identifier::parse("event_wire").expect("valid identifier"),
+                    name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
                         WireSchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: FieldName::parse("value").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: false,
                         },
                         WireSchemaField {
-                            name: Identifier::parse("occurred_at").expect("valid identifier"),
+                            name: FieldName::parse("occurred_at").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: false,
                         },
@@ -15598,19 +15523,19 @@ mod tests {
                 client_model("broker"),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("ing").expect("valid identifier"),
+                    name: IngestorName::parse("ing").expect("valid identifier"),
                     output_routes: unbranched_transforming_outputs("notifications"),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: Some(IngestTimestampSource::At(
-                        Identifier::parse("occurred_at").expect("valid identifier"),
+                        FieldName::parse("occurred_at").expect("valid field name"),
                     )),
                     source: IngestSource::Kafka {
-                        client: Identifier::parse("broker").expect("valid identifier"),
-                        topic: Identifier::parse("notifications").expect("valid identifier"),
+                        client: ClientName::parse("broker").expect("valid identifier"),
+                        topic: TopicName::parse("notifications").expect("valid identifier"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
-                            Identifier::parse("cg").expect("valid identifier"),
+                            ConsumerGroupName::parse("cg").expect("valid consumer group"),
                         ),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAckParallel,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -15634,29 +15559,29 @@ mod tests {
     fn ingestor_route_validation_accepts_explicit_projection() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("raw").expect("valid identifier"),
+                                name: FieldName::parse("raw").expect("valid identifier"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -15664,16 +15589,16 @@ mod tests {
                         ],
                     }),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("transformed_schema").expect("valid identifier"),
+                        name: SchemaName::parse("transformed_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("total").expect("valid identifier"),
+                                name: FieldName::parse("total").expect("valid identifier"),
                                 ty: ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
@@ -15681,21 +15606,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("raw").expect("valid identifier"),
+                                name: FieldName::parse("raw").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -15707,9 +15632,9 @@ mod tests {
                     branch_schema("tenant_branch", &["tenant"]),
                     branch_for_relay("notifications", "tenant_branch"),
                     Model::Ingestor(CreateIngestor {
-                        name: Identifier::parse("ing").expect("valid identifier"),
+                        name: IngestorName::parse("ing").expect("valid identifier"),
                         output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                            relay: Identifier::parse("notifications").expect("valid identifier"),
+                            relay: RelayName::parse("notifications").expect("valid identifier"),
                             construction: nervix_nspl::parse_route_construction(
                                 "SET total = input.value, tenant = input.tenant",
                             )
@@ -15718,17 +15643,20 @@ mod tests {
                             message_error_policy: MessageErrorPolicy::Log,
                             branch: Some(branched_by("notifications", &["tenant"])),
                         }]))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                        decode_using_codec: Identifier::parse("event_codec")
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        }),
+                        decode_using_codec: CodecName::parse("event_codec")
                             .expect("valid identifier"),
                         timestamp_source: None,
                         source: IngestSource::Kafka {
-                            client: Identifier::parse("broker").expect("valid identifier"),
-                            topic: Identifier::parse("notifications").expect("valid identifier"),
+                            client: ClientName::parse("broker").expect("valid identifier"),
+                            topic: TopicName::parse("notifications").expect("valid identifier"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                Identifier::parse("cg").expect("valid identifier"),
+                                ConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
-                            instances: 1,
+                            instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAckParallel,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         },
@@ -15746,34 +15674,34 @@ mod tests {
     fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
             vec![
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: SchemaName::parse("event_schema").expect("valid identifier"),
                     fields: vec![SchemaField {
-                        name: Identifier::parse("value").expect("valid identifier"),
+                        name: FieldName::parse("value").expect("valid identifier"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
                     }],
                 }),
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("transformed_schema").expect("valid identifier"),
+                    name: SchemaName::parse("transformed_schema").expect("valid identifier"),
                     fields: vec![SchemaField {
-                        name: Identifier::parse("total").expect("valid identifier"),
+                        name: FieldName::parse("total").expect("valid identifier"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
                     }],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
-                    name: Identifier::parse("event_wire").expect("valid identifier"),
+                    name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![WireSchemaField {
-                        name: Identifier::parse("value").expect("valid identifier"),
+                        name: FieldName::parse("value").expect("valid identifier"),
                         ty: JsonType::Integer,
                         optional: false,
                     }],
@@ -15782,9 +15710,9 @@ mod tests {
                 client_model("broker"),
                 relay("notifications", "transformed_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("ing").expect("valid identifier"),
+                    name: IngestorName::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                        relay: Identifier::parse("notifications").expect("valid identifier"),
+                        relay: RelayName::parse("notifications").expect("valid identifier"),
                         construction: nervix_nspl::parse_route_construction(
                             "SET total = input.missing + 1",
                         )
@@ -15793,16 +15721,19 @@ mod tests {
                         message_error_policy: MessageErrorPolicy::Log,
                         branch: Some(OutputBranch::Unbranched),
                     }]))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    }),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
-                        client: Identifier::parse("broker").expect("valid identifier"),
-                        topic: Identifier::parse("notifications").expect("valid identifier"),
+                        client: ClientName::parse("broker").expect("valid identifier"),
+                        topic: TopicName::parse("notifications").expect("valid identifier"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
-                            Identifier::parse("cg").expect("valid identifier"),
+                            ConsumerGroupName::parse("cg").expect("valid consumer group"),
                         ),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAckParallel,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -15826,22 +15757,22 @@ mod tests {
     fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let result = registry.apply_batch(
             &domain,
             vec![
                 Model::Schema(CreateSchema {
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: SchemaName::parse("event_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: FieldName::parse("value").expect("valid identifier"),
                             ty: ParseAsType::I64,
                             optional: false,
                             sensitive: false,
                         },
                         SchemaField {
-                            name: Identifier::parse("tenant").expect("valid identifier"),
+                            name: FieldName::parse("tenant").expect("valid identifier"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
@@ -15849,16 +15780,16 @@ mod tests {
                     ],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
-                    name: Identifier::parse("event_wire").expect("valid identifier"),
+                    name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
                         WireSchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: FieldName::parse("value").expect("valid identifier"),
                             ty: JsonType::Integer,
                             optional: false,
                         },
                         WireSchemaField {
-                            name: Identifier::parse("tenant").expect("valid identifier"),
+                            name: FieldName::parse("tenant").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: false,
                         },
@@ -15868,9 +15799,9 @@ mod tests {
                 client_model("broker"),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
-                    name: Identifier::parse("ing").expect("valid identifier"),
+                    name: IngestorName::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
-                        relay: Identifier::parse("notifications").expect("valid identifier"),
+                        relay: RelayName::parse("notifications").expect("valid identifier"),
                         construction: nervix_nspl::parse_route_construction(
                             "INHERIT ALL EXCEPT value",
                         )
@@ -15879,16 +15810,19 @@ mod tests {
                         message_error_policy: MessageErrorPolicy::Log,
                         branch: Some(OutputBranch::Unbranched),
                     }]))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "100ms".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    }),
+                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
-                        client: Identifier::parse("broker").expect("valid identifier"),
-                        topic: Identifier::parse("notifications").expect("valid identifier"),
+                        client: ClientName::parse("broker").expect("valid identifier"),
+                        topic: TopicName::parse("notifications").expect("valid identifier"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(
-                            Identifier::parse("cg").expect("valid identifier"),
+                            ConsumerGroupName::parse("cg").expect("valid consumer group"),
                         ),
-                        instances: 1,
+                        instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAckParallel,
                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                     },
@@ -15912,7 +15846,7 @@ mod tests {
     fn schedule_removes_server_side_ingestor_placements_for_missing_nodes() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -15930,13 +15864,13 @@ mod tests {
                     ),
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
-                        name: Identifier::parse("ws_ing").expect("valid identifier"),
+                        name: IngestorName::parse("ws_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
-                        decode_using_codec: Identifier::parse("event_codec")
+                        decode_using_codec: CodecName::parse("event_codec")
                             .expect("valid identifier"),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
-                            endpoint: Identifier::parse("ingest_ws").expect("valid identifier"),
+                            endpoint: EndpointName::parse("ingest_ws").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
                             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
@@ -15956,16 +15890,19 @@ mod tests {
         let initial_schedule = graph.schedule_for_domain(
             &domain,
             &[
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string(),
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
             PlacementPolicy::Neutral,
         );
         let reduced_schedule = graph.schedule_for_domain(
             &domain,
-            &["node-1".to_string(), "node-3".to_string()],
+            &[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ],
             0,
             PlacementPolicy::Neutral,
         );
@@ -15973,14 +15910,17 @@ mod tests {
         assert_eq!(
             scheduled_node(&initial_schedule, ModelKind::Ingestor, "ws_ing").assigned_nodes,
             vec![
-                "node-1".to_string(),
-                "node-2".to_string(),
-                "node-3".to_string()
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-2"),
+                named::<ClusterNodeName>("node-3")
             ]
         );
         assert_eq!(
             scheduled_node(&reduced_schedule, ModelKind::Ingestor, "ws_ing").assigned_nodes,
-            vec!["node-1".to_string(), "node-3".to_string()]
+            vec![
+                named::<ClusterNodeName>("node-1"),
+                named::<ClusterNodeName>("node-3")
+            ]
         );
 
         let _ = fs::remove_dir_all(path);
@@ -15990,7 +15930,7 @@ mod tests {
     fn startup_runtime_changes_include_graph_only_domains() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16027,7 +15967,7 @@ mod tests {
     fn adding_second_ingestor_restarts_existing_ingestor_and_starts_new_one() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -16084,7 +16024,7 @@ mod tests {
     fn apply_batch_rejects_missing_references_without_persisting() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16104,10 +16044,9 @@ mod tests {
         ));
         assert!(
             registry
-                .get(
+                .get::<CreateIngestor>(
                     &domain,
-                    ModelKind::Ingestor,
-                    &Identifier::parse("kafka_ingestor").expect("valid identifier")
+                    IngestorName::parse("kafka_ingestor").expect("valid ingestor name"),
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -16120,7 +16059,7 @@ mod tests {
     fn ingestor_rejects_codec_without_decode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(
@@ -16150,7 +16089,7 @@ mod tests {
     fn emitter_rejects_codec_without_encode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(
@@ -16180,21 +16119,21 @@ mod tests {
     fn emitter_accepts_same_schema_inputs_from_different_named_branches() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
         };
         emitter.from = ProcessorInputs::new(
-            vec![identifier("source_a"), identifier("source_b")],
+            vec![named("source_a"), named("source_b")],
             vec![
                 nervix_models::ProcessorInputWhere {
-                    relay: identifier("source_a"),
+                    relay: named("source_a"),
                     where_clause: nervix_nspl::parse_expression("input.value = 'one'")
                         .expect("valid source filter"),
                 },
                 nervix_models::ProcessorInputWhere {
-                    relay: identifier("source_b"),
+                    relay: named("source_b"),
                     where_clause: nervix_nspl::parse_expression("input.value = 'two'")
                         .expect("valid source filter"),
                 },
@@ -16252,15 +16191,12 @@ mod tests {
     fn emitter_rejects_inputs_with_different_declared_schema_names() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        emitter.from = ProcessorInputs::new(
-            vec![identifier("source_a"), identifier("source_b")],
-            Vec::new(),
-        );
+        emitter.from = ProcessorInputs::new(vec![named("source_a"), named("source_b")], Vec::new());
 
         let error = registry
             .apply_batch(
@@ -16293,17 +16229,14 @@ mod tests {
     fn emitter_materialized_state_must_match_every_input_branch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
         else {
             unreachable!("emitter helper must build an emitter model")
         };
-        emitter.from = ProcessorInputs::new(
-            vec![identifier("source_a"), identifier("source_b")],
-            Vec::new(),
-        );
+        emitter.from = ProcessorInputs::new(vec![named("source_a"), named("source_b")], Vec::new());
         emitter.materialized_state = vec![nervix_models::MaterializedStateDependency {
-            relay: identifier("profiles"),
+            relay: named("profiles"),
             policy: nervix_models::MaterializedStatePolicy::RequiredSkip,
         }];
         let Model::Relay(mut profiles) = relay_branched_by("profiles", "event_schema", "branch_a")
@@ -16346,14 +16279,14 @@ mod tests {
     fn sentry_emitter_rejects_http_client() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut sentry_emitter) =
             emitter("emit", "notifications", "event_codec", "sentry_main")
         else {
             unreachable!("emitter helper must build an emitter model")
         };
         sentry_emitter.sink = Box::new(EmitSink::Sentry {
-            client: identifier("sentry_main"),
+            client: named("sentry_main"),
         });
         sentry_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
             retry_policy: RetryPolicy {
@@ -16370,7 +16303,7 @@ mod tests {
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
                     Model::ClientHttp(CreateClientHttp {
-                        name: identifier("sentry_main"),
+                        name: named("sentry_main"),
                         mount: None,
                         config: vec![ClientConfigEntry {
                             key: "dsn".to_string(),
@@ -16397,16 +16330,16 @@ mod tests {
     fn apply_batch_rejects_incompatible_codec_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: FieldName::parse("value").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::U32,
                             optional: false,
                             sensitive: false,
@@ -16430,29 +16363,29 @@ mod tests {
     fn syslog_codec_accepts_an_exact_subset_of_its_field_contract() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: identifier("syslog_event"),
+                        name: named("syslog_event"),
                         fields: vec![
                             SchemaField {
-                                name: identifier("facility"),
+                                name: named("facility"),
                                 ty: ParseAsType::U8,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: identifier("timestamp"),
+                                name: named("timestamp"),
                                 ty: ParseAsType::Datetime,
                                 optional: true,
                                 sensitive: true,
                             },
                             SchemaField {
-                                name: identifier("message"),
+                                name: named("message"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -16472,7 +16405,7 @@ mod tests {
         for (field, expected_reason) in [
             (
                 SchemaField {
-                    name: identifier("facility"),
+                    name: named("facility"),
                     ty: ParseAsType::U16,
                     optional: false,
                     sensitive: false,
@@ -16481,7 +16414,7 @@ mod tests {
             ),
             (
                 SchemaField {
-                    name: identifier("hostname"),
+                    name: named("hostname"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -16490,7 +16423,7 @@ mod tests {
             ),
             (
                 SchemaField {
-                    name: identifier("payload"),
+                    name: named("payload"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -16500,13 +16433,13 @@ mod tests {
         ] {
             let path = temp_db_path();
             let registry = Registry::open(&path).expect("registry should open");
-            let domain = Domain::parse("default").expect("valid domain");
+            let domain = DomainName::parse("default").expect("valid domain");
             let error = registry
                 .apply_batch(
                     &domain,
                     vec![
                         Model::Schema(CreateSchema {
-                            name: identifier("syslog_event"),
+                            name: named("syslog_event"),
                             fields: vec![field],
                         }),
                         syslog_codec("syslog_codec", "syslog_event"),
@@ -16525,13 +16458,13 @@ mod tests {
     fn syslog_emitter_requires_priority_and_message_fields() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "events", "syslog_codec", "syslog_out")
         else {
             unreachable!("emitter helper must build an emitter")
         };
         emitter.sink = Box::new(EmitSink::Syslog {
-            client: identifier("syslog_out"),
+            client: named("syslog_out"),
         });
 
         let error = registry
@@ -16539,9 +16472,9 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: identifier("syslog_event"),
+                        name: named("syslog_event"),
                         fields: vec![SchemaField {
-                            name: identifier("message"),
+                            name: named("message"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
@@ -16563,256 +16496,102 @@ mod tests {
         let _ = fs::remove_dir_all(path);
     }
 
-    #[test]
-    fn apply_batch_requires_explicit_rfc3339_encoding_for_json_string_datetime() {
+    #[rstest]
+    #[case::requires_explicit_rfc3339_for_json_string_datetime(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::String,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    #[case::accepts_explicit_rfc3339_for_json_string_datetime(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::String,
+            rfc3339_field: Some("value"),
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::rejects_rfc3339_for_unknown_field(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::String,
+            rfc3339_field: Some("missing"),
+        },
+        CodecTypeExpectation::InvalidModel
+    )]
+    #[case::rejects_rfc3339_for_non_datetime_field(
+        CodecTypeCase::Json {
+            internal: ParseAsType::String,
+            wire: JsonType::String,
+            rfc3339_field: Some("value"),
+        },
+        CodecTypeExpectation::InvalidModel
+    )]
+    #[case::rejects_rfc3339_without_json_string_wire_datetime(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::Number,
+            rfc3339_field: Some("value"),
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    #[case::accepts_json_integer_for_internal_u32(
+        CodecTypeCase::Json {
+            internal: ParseAsType::U32,
+            wire: JsonType::Integer,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_json_number_for_internal_f32(
+        CodecTypeCase::Json {
+            internal: ParseAsType::F32,
+            wire: JsonType::Number,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::rejects_avro_long_internal_i32_coercion(
+        CodecTypeCase::Avro {
+            internal: ParseAsType::I32,
+            wire: nervix_models::AvroType::Long,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    fn validates_codec_schema_type_matrix(
+        #[case] codec_type: CodecTypeCase,
+        #[case] expected: CodecTypeExpectation,
+    ) {
+        let case = format!("{codec_type:?}");
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
+        let result = registry.apply_batch(&domain, codec_type.models());
 
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    codec("event_codec", "event_schema"),
-                ],
-            )
-            .expect_err("implicit string datetime parsing must fail");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_accepts_explicit_rfc3339_encoding_for_json_string_datetime() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    rfc3339_json_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect("explicit RFC3339 encoding should allow string datetime wire field");
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_rfc3339_encoding_for_unknown_field() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    rfc3339_json_codec_for_field(
-                        "event_codec",
-                        "event_wire",
-                        "event_schema",
-                        "missing",
+        match expected {
+            CodecTypeExpectation::Accepted => {
+                result.unwrap_or_else(|error| panic!("{case} should be accepted: {error:#}"));
+            }
+            CodecTypeExpectation::IncompatibleSchema => {
+                let error = result.expect_err("incompatible codec types must be rejected");
+                assert!(
+                    matches!(
+                        error.current_context(),
+                        RegistryError::IncompatibleSchema { .. }
                     ),
-                ],
-            )
-            .expect_err("RFC3339 encoding must reference an internal schema field");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::InvalidModel { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_rfc3339_encoding_for_non_datetime_field() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::String,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::String),
-                    rfc3339_json_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect_err("RFC3339 encoding must target a DATETIME internal schema field");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::InvalidModel { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_rfc3339_encoding_without_json_string_wire_datetime() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::Datetime,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::Number),
-                    rfc3339_json_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect_err("RFC3339 encoding must require string wire field");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
-        ));
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_accepts_json_integer_shape_for_internal_integer_widths() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::U32,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::Integer),
-                    codec("event_codec", "event_schema"),
-                ],
-            )
-            .expect("json integer shape should support internal U32");
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_accepts_json_number_shape_for_internal_f32() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::F32,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    json_wire_schema_with_type("event_wire", JsonType::Number),
-                    codec("event_codec", "event_schema"),
-                ],
-            )
-            .expect("json number shape should support internal F32");
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn apply_batch_rejects_avro_long_internal_width_coercion() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
-
-        let err = registry
-            .apply_batch(
-                &domain,
-                vec![
-                    Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
-                        fields: vec![SchemaField {
-                            name: identifier("value"),
-                            ty: ParseAsType::I32,
-                            optional: false,
-                            sensitive: false,
-                        }],
-                    }),
-                    avro_wire_schema_with_type("event_wire", nervix_models::AvroType::Long),
-                    avro_codec("event_codec", "event_wire", "event_schema"),
-                ],
-            )
-            .expect_err("avro long must not implicitly match I32");
-
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
-        ));
+                    "unexpected error for {case}: {error:#}"
+                );
+            }
+            CodecTypeExpectation::InvalidModel => {
+                let error = result.expect_err("invalid codec configuration must be rejected");
+                assert!(
+                    matches!(error.current_context(), RegistryError::InvalidModel { .. }),
+                    "unexpected error for {case}: {error:#}"
+                );
+            }
+        }
 
         let _ = fs::remove_dir_all(path);
     }
@@ -16821,16 +16600,16 @@ mod tests {
     fn apply_batch_rejects_branching_value_type_mismatch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: identifier("event_schema"),
+                        name: named("event_schema"),
                         fields: vec![SchemaField {
-                            name: identifier("value"),
+                            name: named("value"),
                             ty: ParseAsType::String,
                             optional: false,
                             sensitive: false,
@@ -16840,9 +16619,9 @@ mod tests {
                     codec("event_codec", "event_schema"),
                     relay_branched_by_relay_branch("events", "event_schema"),
                     Model::Schema(CreateSchema {
-                        name: identifier("value_branch"),
+                        name: named("value_branch"),
                         fields: vec![SchemaField {
-                            name: identifier("value"),
+                            name: named("value"),
                             ty: ParseAsType::U32,
                             optional: false,
                             sensitive: false,
@@ -16881,26 +16660,26 @@ mod tests {
     fn apply_batch_rejects_wire_and_internal_optionality_mismatch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: FieldName::parse("value").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::String,
                             optional: false,
                             sensitive: false,
                         }],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![WireSchemaField {
-                            name: Identifier::parse("value").expect("valid identifier"),
+                            name: FieldName::parse("value").expect("valid identifier"),
                             ty: JsonType::String,
                             optional: true,
                         }],
@@ -16922,7 +16701,7 @@ mod tests {
     fn apply_batch_rejects_incompatible_deduplicator_stream_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16930,16 +16709,16 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("wide_schema").expect("valid identifier"),
+                        name: SchemaName::parse("wide_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("extra").expect("valid identifier"),
+                                name: FieldName::parse("extra").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -16967,7 +16746,7 @@ mod tests {
     fn apply_batch_rejects_multiple_deduplicator_inputs_with_different_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -16975,16 +16754,16 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     Model::Schema(CreateSchema {
-                        name: identifier("wide_schema"),
+                        name: named("wide_schema"),
                         fields: vec![
                             SchemaField {
-                                name: identifier("value"),
+                                name: named("value"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: identifier("extra"),
+                                name: named("extra"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -16995,13 +16774,13 @@ mod tests {
                     explicitly_unbranched_relay("notifications_b", "wide_schema"),
                     explicitly_unbranched_relay("deduped", "event_schema"),
                     Model::Deduplicator(CreateDeduplicator {
-                        name: identifier("dedup_notifications"),
+                        name: named("dedup_notifications"),
                         from: ProcessorInputs::new(
-                            vec![identifier("notifications_a"), identifier("notifications_b")],
+                            vec![named("notifications_a"), named("notifications_b")],
                             Vec::new(),
                         ),
-                        output_routes: (ProcessorOutputs::single(identifier("deduped")))
-                            .with_flush_policy("IMMEDIATE".to_string(), None),
+                        output_routes: (ProcessorOutputs::single(named("deduped")))
+                            .with_flush_policy(FlushPolicy::Immediate),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: vec![
                             nervix_nspl::parse_expression("input.value")
@@ -17029,23 +16808,23 @@ mod tests {
     fn apply_batch_rejects_sensitive_passthrough_to_non_sensitive_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: identifier("sensitive_event"),
+                        name: named("sensitive_event"),
                         fields: vec![
                             SchemaField {
-                                name: identifier("user_id"),
+                                name: named("user_id"),
                                 ty: ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: identifier("secret"),
+                                name: named("secret"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: true,
@@ -17053,16 +16832,16 @@ mod tests {
                         ],
                     }),
                     Model::Schema(CreateSchema {
-                        name: identifier("public_event"),
+                        name: named("public_event"),
                         fields: vec![
                             SchemaField {
-                                name: identifier("user_id"),
+                                name: named("user_id"),
                                 ty: ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: identifier("secret"),
+                                name: named("secret"),
                                 ty: ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -17072,8 +16851,8 @@ mod tests {
                     explicitly_unbranched_relay("sensitive_events", "sensitive_event"),
                     explicitly_unbranched_relay("public_events", "public_event"),
                     Model::Reingestor(CreateReingestor {
-                        name: identifier("leak_events"),
-                        from: ProcessorInputs::single(identifier("sensitive_events")),
+                        name: named("leak_events"),
+                        from: ProcessorInputs::single(named("sensitive_events")),
                         output_routes: unbranched_transforming_outputs("public_events"),
                         mode: AckMode::Attached,
                         filter_where: None,
@@ -17096,7 +16875,7 @@ mod tests {
     fn apply_batch_rejects_incompatible_junction_stream_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17104,16 +16883,16 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("wide_schema").expect("valid identifier"),
+                        name: SchemaName::parse("wide_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("extra").expect("valid identifier"),
+                                name: FieldName::parse("extra").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -17146,31 +16925,31 @@ mod tests {
     fn apply_batch_rejects_incompatible_array_lengths() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("short_schema").expect("valid identifier"),
+                        name: SchemaName::parse("short_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("window").expect("valid identifier"),
+                            name: FieldName::parse("window").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::Array {
                                 element: Box::new(nervix_models::ParseAsType::F32),
-                                len: 2,
+                                len: nonzero!(2u32),
                             },
                             optional: false,
                             sensitive: false,
                         }],
                     }),
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("long_schema").expect("valid identifier"),
+                        name: SchemaName::parse("long_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
-                            name: Identifier::parse("window").expect("valid identifier"),
+                            name: FieldName::parse("window").expect("valid identifier"),
                             ty: nervix_models::ParseAsType::Array {
                                 element: Box::new(nervix_models::ParseAsType::F32),
-                                len: 3,
+                                len: nonzero!(3u32),
                             },
                             optional: false,
                             sensitive: false,
@@ -17202,7 +16981,7 @@ mod tests {
     fn apply_batch_rejects_deduplicator_field_missing_from_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17507,7 +17286,7 @@ mod tests {
     fn apply_batch_rejects_window_message_target() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17544,7 +17323,7 @@ mod tests {
     fn apply_batch_rejects_window_aggregate_argument_outside_input() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17581,7 +17360,7 @@ mod tests {
     fn apply_batch_rejects_branched_by_fields_missing_from_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17621,29 +17400,29 @@ mod tests {
     fn apply_batch_rejects_incomplete_ingestor_branch_construction() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -17651,21 +17430,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -17691,31 +17470,34 @@ mod tests {
                         &["tenant", "user_id"],
                     ),
                     Model::Ingestor(CreateIngestor {
-                        name: identifier("ing_b"),
+                        name: named("ing_b"),
                         output_routes: with_output_branch(
-                            with_inherit_all(ProcessorOutputs::single(identifier("notifications")))
-                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            with_inherit_all(ProcessorOutputs::single(named("notifications")))
+                                .with_flush_policy(FlushPolicy::Each {
+                                    interval: "100ms".to_string(),
+                                    max_batch_size: "1MiB".to_string(),
+                                }),
                             OutputBranch::BranchedBy {
                                 branch: branch_name_for_relay("notifications"),
                                 assignments: vec![Assignment {
                                     target: AssignmentTarget {
                                         scope: AssignmentTargetScope::Bare,
-                                        field: identifier("user_id"),
+                                        field: named("user_id"),
                                     },
                                     value: Expression::Field(FieldReference::scoped(
                                         FieldScope::Message,
-                                        identifier("user_id"),
+                                        named("user_id"),
                                     )),
                                 }],
                             },
                         ),
-                        decode_using_codec: identifier("event_codec"),
+                        decode_using_codec: named("event_codec"),
                         timestamp_source: None,
                         source: IngestSource::Kafka {
-                            client: identifier("broker_in_2"),
-                            topic: identifier("notifications"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(identifier("cg")),
-                            instances: 1,
+                            client: named("broker_in_2"),
+                            topic: named("notifications"),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
+                            instances: nonzero!(1u64),
                             mode: KafkaIngestMode::AckSequential {
                                 timeout: "30s".to_string(),
                                 retry_policy: nervix_models::RetryPolicy {
@@ -17748,7 +17530,7 @@ mod tests {
     fn apply_batch_rejects_ingestor_branch_name_mismatch_with_same_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Ingestor(mut ingestor) = ingestor_with_params(
             "ing",
             "notifications",
@@ -17765,7 +17547,7 @@ mod tests {
         else {
             unreachable!("ingestor helper must build a branched ingestor")
         };
-        *ingestor_branch = identifier("branch_b");
+        *ingestor_branch = named("branch_b");
 
         let err = registry
             .apply_batch(
@@ -17800,11 +17582,11 @@ mod tests {
     fn apply_batch_rejects_processor_crossing_same_schema_branch_names() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Deduplicator(mut processor) = processor("project", "input", "output") else {
             unreachable!("processor helper must build a deduplicator model")
         };
-        processor.branched_by = BranchSelection::branched_by(identifier("branch_b"));
+        processor.branched_by = BranchSelection::branched_by(named("branch_b"));
 
         let err = registry
             .apply_batch(
@@ -17839,7 +17621,7 @@ mod tests {
     fn apply_batch_rejects_generator_crossing_same_schema_branch_names() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         let Model::Relay(mut input) = relay_branched_by("input", "event_schema", "branch_a") else {
             unreachable!("relay helper must build a relay model")
         };
@@ -17856,20 +17638,17 @@ mod tests {
                     branch("branch_a", "value_branch"),
                     branch("branch_b", "value_branch"),
                     Model::Generator(CreateGenerator {
-                        name: identifier("generate"),
-                        materialized_relay: identifier("input"),
-                        branched_by: BranchSelection::branched_by(identifier("branch_b")),
+                        name: named("generate"),
+                        materialized_relay: named("input"),
+                        branched_by: BranchSelection::branched_by(named("branch_b")),
                         each: "100ms".to_string(),
                         output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
-                            relay: identifier("output"),
+                            relay: named("output"),
                             construction: nervix_nspl::parse_route_construction(
                                 "SET value = relay_state.input.value",
                             )
                             .expect("generator route must parse"),
-                            flush_policy: Some(nervix_models::OutputFlushPolicy {
-                                flush_each: "IMMEDIATE".to_string(),
-                                max_batch_size: None,
-                            }),
+                            flush_policy: Some(FlushPolicy::Immediate),
                             message_error_policy: MessageErrorPolicy::Log,
                             branch: None,
                         }]),
@@ -17897,7 +17676,7 @@ mod tests {
     fn apply_batch_rejects_duplicate_vhost_hostnames() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -17925,29 +17704,29 @@ mod tests {
     fn apply_batch_infers_stream_branching_through_deduplicator_chain() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -17955,21 +17734,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18005,7 +17784,7 @@ mod tests {
         let projected = graph
             .node(
                 ModelKind::Relay,
-                &Identifier::parse("projected").expect("valid identifier"),
+                &ModelName::from(&RelayName::parse("projected").expect("valid relay name")),
             )
             .expect("projected relay should exist");
 
@@ -18015,7 +17794,7 @@ mod tests {
                 .as_ref()
                 .expect("projected relay should be branched")
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant", "user_id"]
         );
@@ -18027,29 +17806,29 @@ mod tests {
     fn apply_batch_infers_stream_branching_through_reingestor_outputs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18057,21 +17836,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18104,12 +17883,12 @@ mod tests {
                     ),
                     branch("by_route_logs", "tenant_user_id_branch"),
                     Model::Reingestor(CreateReingestor {
-                        name: identifier("route_logs"),
-                        from: ProcessorInputs::single(identifier("notifications")),
+                        name: named("route_logs"),
+                        from: ProcessorInputs::single(named("notifications")),
                         output_routes: with_output_branch(
                             with_inherit_all(ProcessorOutputs::new(vec![
                                 ProcessorOutput {
-                                    relay: identifier("errors"),
+                                    relay: named("errors"),
                                     construction: nervix_nspl::parse_route_construction(
                                         r#"WHERE input.value = "error""#,
                                     )
@@ -18119,7 +17898,7 @@ mod tests {
                                     branch: None,
                                 },
                                 ProcessorOutput {
-                                    relay: identifier("warnings"),
+                                    relay: named("warnings"),
                                     construction: nervix_nspl::parse_route_construction(
                                         r#"WHERE input.value = "warn""#,
                                     )
@@ -18128,9 +17907,12 @@ mod tests {
                                     message_error_policy: MessageErrorPolicy::Log,
                                     branch: None,
                                 },
-                                ProcessorOutput::new(identifier("info")),
+                                ProcessorOutput::new(named("info")),
                             ]))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                             branched_by("route_logs", &["tenant", "user_id"]),
                         ),
                         mode: AckMode::Attached,
@@ -18149,7 +17931,7 @@ mod tests {
             let relay = graph
                 .node(
                     ModelKind::Relay,
-                    &Identifier::parse(relay_name).expect("valid identifier"),
+                    &ModelName::from(&RelayName::parse(relay_name).expect("valid identifier")),
                 )
                 .expect("routed relay should exist");
 
@@ -18159,7 +17941,7 @@ mod tests {
                     .as_ref()
                     .expect("routed relay should be branched")
                     .iter()
-                    .map(Identifier::as_str)
+                    .map(|name| name.as_str())
                     .collect::<Vec<_>>(),
                 vec!["tenant", "user_id"]
             );
@@ -18172,23 +17954,23 @@ mod tests {
     fn apply_batch_rejects_output_predicate_missing_from_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18196,16 +17978,16 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18227,12 +18009,12 @@ mod tests {
                         &["tenant"],
                     ),
                     Model::Reingestor(CreateReingestor {
-                        name: identifier("route_logs"),
-                        from: ProcessorInputs::single(identifier("notifications")),
+                        name: named("route_logs"),
+                        from: ProcessorInputs::single(named("notifications")),
                         output_routes: with_output_branch(
                             with_inherit_all(ProcessorOutputs::new(vec![
                                 ProcessorOutput {
-                                    relay: identifier("errors"),
+                                    relay: named("errors"),
                                     construction: nervix_nspl::parse_route_construction(
                                         r#"WHERE input.missing = "error""#,
                                     )
@@ -18241,9 +18023,12 @@ mod tests {
                                     message_error_policy: MessageErrorPolicy::Log,
                                     branch: None,
                                 },
-                                ProcessorOutput::new(identifier("info")),
+                                ProcessorOutput::new(named("info")),
                             ]))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            .with_flush_policy(FlushPolicy::Each {
+                                interval: "100ms".to_string(),
+                                max_batch_size: "1MiB".to_string(),
+                            }),
                             OutputBranch::BranchedBy {
                                 branch: branch_name_for_relay("notifications"),
                                 assignments: Vec::new(),
@@ -18273,7 +18058,7 @@ mod tests {
     fn apply_batch_rejects_deduplicator_without_explicit_upstream_branching_alias() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18307,24 +18092,23 @@ mod tests {
     fn apply_batch_infers_stream_branching_through_deduplicators() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let changes = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("notification").expect("valid identifier"),
+                        name: SchemaName::parse("notification").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("transaction_id")
-                                    .expect("valid identifier"),
+                                name: FieldName::parse("transaction_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18332,17 +18116,16 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("transaction_id")
-                                    .expect("valid identifier"),
+                                name: FieldName::parse("transaction_id").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18377,14 +18160,14 @@ mod tests {
             .expect("graph should be present")
             .schedule_for_domain(
                 &domain,
-                &["node-1".to_string()],
+                &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
                 PlacementPolicy::Neutral,
             );
         let deduped = scheduled_node(&schedule, ModelKind::Relay, "deduped");
         assert_eq!(
             deduped.effective_branching,
-            Some(vec![Identifier::parse("tenant").expect("valid identifier")])
+            Some(vec![FieldName::parse("tenant").expect("valid field name")])
         );
 
         let _ = fs::remove_dir_all(path);
@@ -18394,7 +18177,7 @@ mod tests {
     fn apply_batch_rejects_deduplicator_without_explicit_upstream_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18434,29 +18217,29 @@ mod tests {
     fn apply_batch_constructs_reingestor_target_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18464,21 +18247,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18521,7 +18304,9 @@ mod tests {
         let target = graph
             .node(
                 ModelKind::Relay,
-                &Identifier::parse("tenant_notifications").expect("valid identifier"),
+                &ModelName::from(
+                    &RelayName::parse("tenant_notifications").expect("valid relay name"),
+                ),
             )
             .expect("target relay should exist");
 
@@ -18531,7 +18316,7 @@ mod tests {
                 .as_ref()
                 .expect("target relay should be branched")
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
@@ -18539,7 +18324,7 @@ mod tests {
             target
                 .effective_branching_schema
                 .as_ref()
-                .map(Identifier::as_str),
+                .map(|name| name.as_str()),
             Some("tenant_branch")
         );
 
@@ -18570,23 +18355,23 @@ mod tests {
     fn apply_batch_accepts_reingestor_from_unbranched_source_to_branched_target() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::U32,
                                 optional: false,
                                 sensitive: false,
@@ -18611,13 +18396,13 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
         let source = graph
-            .node(ModelKind::Relay, &identifier("notifications"))
+            .node(ModelKind::Relay, &named("notifications"))
             .expect("source relay should exist");
         assert_eq!(source.effective_branching, Some(Vec::new()));
         assert_eq!(source.effective_branching_schema, None);
 
         let target = graph
-            .node(ModelKind::Relay, &identifier("tenant_notifications"))
+            .node(ModelKind::Relay, &named("tenant_notifications"))
             .expect("target relay should exist");
         assert_eq!(
             target
@@ -18625,7 +18410,7 @@ mod tests {
                 .as_ref()
                 .expect("target relay should be branched")
                 .iter()
-                .map(Identifier::as_str)
+                .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tenant"]
         );
@@ -18633,7 +18418,7 @@ mod tests {
             target
                 .effective_branching_schema
                 .as_ref()
-                .map(Identifier::as_str),
+                .map(|name| name.as_str()),
             Some("tenant_branch")
         );
 
@@ -18644,7 +18429,7 @@ mod tests {
     fn apply_batch_rejects_junction_without_explicit_upstream_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18678,29 +18463,29 @@ mod tests {
     fn apply_batch_rejects_incompatible_branches_for_one_relay() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
-                        name: Identifier::parse("event_schema").expect("valid identifier"),
+                        name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::I64,
                                 optional: false,
                                 sensitive: false,
                             },
                             SchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: nervix_models::ParseAsType::String,
                                 optional: false,
                                 sensitive: false,
@@ -18708,21 +18493,21 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: Identifier::parse("event_wire").expect("valid identifier"),
+                        name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
-                                name: Identifier::parse("tenant").expect("valid identifier"),
+                                name: FieldName::parse("tenant").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("user_id").expect("valid identifier"),
+                                name: FieldName::parse("user_id").expect("valid identifier"),
                                 ty: JsonType::Integer,
                                 optional: false,
                             },
                             WireSchemaField {
-                                name: Identifier::parse("value").expect("valid identifier"),
+                                name: FieldName::parse("value").expect("valid identifier"),
                                 ty: JsonType::String,
                                 optional: false,
                             },
@@ -18772,7 +18557,7 @@ mod tests {
 
     #[test]
     fn apply_batch_is_order_independent() {
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let path_a = temp_db_path();
         let registry_a = Registry::open(&path_a).expect("registry should open");
@@ -18826,7 +18611,7 @@ mod tests {
     fn failed_batch_does_not_mutate_registry_state() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -18851,30 +18636,28 @@ mod tests {
         );
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &domain,
-                    ModelKind::Schema,
-                    &Identifier::parse("event_schema").expect("valid identifier")
+                    SchemaName::parse("event_schema").expect("valid schema name"),
                 )
                 .expect("read should succeed")
                 .is_none()
         );
         assert!(
             registry
-                .get(
+                .get_of_kind(
                     &domain,
                     ModelKind::Client,
-                    &Identifier::parse("broker_out").expect("valid identifier")
+                    RelayName::parse("broker_out").expect("valid relay name")
                 )
                 .expect("read should succeed")
                 .is_none()
         );
         assert!(
             registry
-                .get(
+                .get::<CreateEmitter>(
                     &domain,
-                    ModelKind::Emitter,
-                    &Identifier::parse("emit").expect("valid identifier")
+                    EmitterName::parse("emit").expect("valid emitter name"),
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -18887,7 +18670,7 @@ mod tests {
     fn planned_schema_alters_do_not_mutate_until_committed() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -18903,10 +18686,10 @@ mod tests {
                 &domain,
                 &[
                     RegistryMutation::AlterSchema(AlterSchema {
-                        schema: identifier("event_schema"),
+                        schema: named("event_schema"),
                         operations: vec![AlterSchemaOperation::AddField {
                             field: SchemaField {
-                                name: identifier("note"),
+                                name: named("note"),
                                 ty: ParseAsType::String,
                                 optional: true,
                                 sensitive: false,
@@ -18914,10 +18697,10 @@ mod tests {
                         }],
                     }),
                     RegistryMutation::AlterWireJsonSchema(AlterWireSchema {
-                        schema: identifier("event_wire"),
+                        schema: named("event_wire"),
                         operations: vec![AlterWireSchemaOperation::AddField {
                             field: WireSchemaField {
-                                name: identifier("note"),
+                                name: named("note"),
                                 ty: JsonType::String,
                                 optional: true,
                             },
@@ -18927,26 +18710,20 @@ mod tests {
             )
             .expect("planning should succeed");
 
-        let Model::Schema(before) = registry
-            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+        let before = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(before.fields.len(), 1, "planning must not persist");
 
         registry
             .commit_planned(planned)
             .expect("commit should succeed");
 
-        let Model::Schema(after) = registry
-            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+        let after = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(after.fields.len(), 2);
 
         let _ = fs::remove_dir_all(path);
@@ -18956,7 +18733,7 @@ mod tests {
     fn failed_mixed_schema_alter_batch_applies_nothing() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(&domain, vec![schema("event_schema")])
             .expect("create should succeed");
@@ -18967,18 +18744,18 @@ mod tests {
                 vec![
                     RegistryMutation::Create(Box::new(schema("new_schema"))),
                     RegistryMutation::AlterSchema(AlterSchema {
-                        schema: identifier("event_schema"),
+                        schema: named("event_schema"),
                         operations: vec![
                             AlterSchemaOperation::AddField {
                                 field: SchemaField {
-                                    name: identifier("note"),
+                                    name: named("note"),
                                     ty: ParseAsType::String,
                                     optional: true,
                                     sensitive: false,
                                 },
                             },
                             AlterSchemaOperation::DropField {
-                                field: identifier("missing"),
+                                field: named("missing"),
                             },
                         ],
                     }),
@@ -18992,17 +18769,14 @@ mod tests {
         ));
         assert!(
             registry
-                .get(&domain, ModelKind::Schema, &identifier("new_schema"))
+                .get::<CreateSchema>(&domain, named::<ModelName>("new_schema"))
                 .expect("read should succeed")
                 .is_none()
         );
-        let Model::Schema(schema) = registry
-            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+        let schema = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(schema.fields.len(), 1);
 
         let _ = fs::remove_dir_all(path);
@@ -19012,7 +18786,7 @@ mod tests {
     fn schema_alter_revalidates_dependent_codec() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
         registry
             .apply_batch(
                 &domain,
@@ -19028,9 +18802,9 @@ mod tests {
             .apply_mutation_batch(
                 &domain,
                 vec![RegistryMutation::AlterSchema(AlterSchema {
-                    schema: identifier("event_schema"),
+                    schema: named("event_schema"),
                     operations: vec![AlterSchemaOperation::SetFieldType {
-                        field: identifier("value"),
+                        field: named("value"),
                         ty: ParseAsType::F64,
                     }],
                 })],
@@ -19041,13 +18815,10 @@ mod tests {
             RegistryError::IncompatibleSchema { .. }
         ));
 
-        let Model::Schema(schema) = registry
-            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+        let schema = registry
+            .get::<CreateSchema>(&domain, named::<ModelName>("event_schema"))
             .expect("read should succeed")
-            .expect("schema should exist")
-        else {
-            panic!("expected schema");
-        };
+            .expect("schema should exist");
         assert_eq!(schema.fields[0].ty, ParseAsType::String);
 
         let _ = fs::remove_dir_all(path);
@@ -19057,7 +18828,7 @@ mod tests {
     fn deduplicator_dependencies_participate_in_candidate_graph_validation() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let err = registry
             .apply_batch(
@@ -19088,7 +18859,7 @@ mod tests {
     fn apply_batch_builds_full_graph_in_single_batch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -19107,7 +18878,7 @@ mod tests {
     fn dataflow_graph_includes_deduplicator_between_two_relays() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19205,7 +18976,7 @@ mod tests {
     fn dataflow_graph_includes_wasm_processor_between_two_relays() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19267,7 +19038,7 @@ mod tests {
     fn dataflow_graph_keeps_reused_ingest_and_emit_client_nodes_separate() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19331,7 +19102,7 @@ mod tests {
     fn dataflow_graph_includes_correlator_between_input_and_output_relays() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19355,17 +19126,17 @@ mod tests {
                         };
                         correlator.timeout_policy = CorrelationTimeoutPolicy {
                             left: CorrelationTimeoutAction::SendTo {
-                                relay: identifier("uncorrelated_left_events"),
+                                relay: named("uncorrelated_left_events"),
                             },
                             right: CorrelationTimeoutAction::SendTo {
-                                relay: identifier("uncorrelated_right_events"),
+                                relay: named("uncorrelated_right_events"),
                             },
                         };
                         correlator.output_routes.routes[0].message_error_policy =
                             MessageErrorPolicy::Dlq {
-                                relay: identifier("correlator_errors"),
+                                relay: named("correlator_errors"),
                                 assignments: vec![Assignment {
-                                    target: AssignmentTarget::bare(identifier("value")),
+                                    target: AssignmentTarget::bare(named("value")),
                                     value: nervix_nspl::parse_expression("left.value")
                                         .expect("error assignment must parse"),
                                 }],
@@ -19438,16 +19209,16 @@ mod tests {
     fn correlator_message_error_set_uses_structured_scopes_and_all_optional_partial_output() {
         fn error_schema() -> Model {
             Model::Schema(CreateSchema {
-                name: identifier("error_schema"),
+                name: named("error_schema"),
                 fields: vec![
                     SchemaField {
-                        name: identifier("reference"),
+                        name: named("reference"),
                         ty: ParseAsType::String,
                         optional: false,
                         sensitive: false,
                     },
                     SchemaField {
-                        name: identifier("fields"),
+                        name: named("fields"),
                         ty: ParseAsType::Vec {
                             element: Box::new(ParseAsType::String),
                         },
@@ -19455,7 +19226,7 @@ mod tests {
                         sensitive: false,
                     },
                     SchemaField {
-                        name: identifier("attempted"),
+                        name: named("attempted"),
                         ty: ParseAsType::String,
                         optional: false,
                         sensitive: false,
@@ -19474,20 +19245,20 @@ mod tests {
                 unreachable!("helper must return correlator")
             };
             correlator.output_routes.routes[0].message_error_policy = MessageErrorPolicy::Dlq {
-                relay: identifier("correlator_errors"),
+                relay: named("correlator_errors"),
                 assignments: vec![
                     Assignment {
-                        target: AssignmentTarget::bare(identifier("reference")),
+                        target: AssignmentTarget::bare(named("reference")),
                         value: nervix_nspl::parse_expression("error.reference")
                             .expect("error reference must parse"),
                     },
                     Assignment {
-                        target: AssignmentTarget::bare(identifier("fields")),
+                        target: AssignmentTarget::bare(named("fields")),
                         value: nervix_nspl::parse_expression("error.fields")
                             .expect("error fields must parse"),
                     },
                     Assignment {
-                        target: AssignmentTarget::bare(identifier("attempted")),
+                        target: AssignmentTarget::bare(named("attempted")),
                         value: nervix_nspl::parse_expression(assignment_source)
                             .expect("attempted value must parse"),
                     },
@@ -19508,7 +19279,7 @@ mod tests {
         Registry::open(&valid_path)
             .expect("registry should open")
             .apply_batch(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 models_with_policy("coalesce(partial_output.value, 'missing')"),
             )
             .expect("structured correlator error construction should validate");
@@ -19518,7 +19289,7 @@ mod tests {
         let error = Registry::open(&invalid_path)
             .expect("registry should open")
             .apply_batch(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 models_with_policy("input.value"),
             )
             .expect_err("correlator error construction must not expose input");
@@ -19536,11 +19307,11 @@ mod tests {
         ) else {
             unreachable!("helper must return correlator")
         };
-        correlator.branched_by = BranchSelection::branched_by(identifier("event_branch"));
+        correlator.branched_by = BranchSelection::branched_by(named("event_branch"));
         correlator.output_routes.routes[0].message_error_policy = MessageErrorPolicy::Dlq {
-            relay: identifier("correlator_errors"),
+            relay: named("correlator_errors"),
             assignments: vec![Assignment {
-                target: AssignmentTarget::bare(identifier("value")),
+                target: AssignmentTarget::bare(named("value")),
                 value: nervix_nspl::parse_expression("left.value")
                     .expect("correlator error input must parse"),
             }],
@@ -19549,7 +19320,7 @@ mod tests {
         let error = Registry::open(&path)
             .expect("registry should open")
             .apply_batch(
-                &Domain::parse("default").expect("valid domain"),
+                &DomainName::parse("default").expect("valid domain"),
                 vec![
                     schema("event_schema"),
                     schema("error_schema"),
@@ -19573,10 +19344,10 @@ mod tests {
     }
 
     #[test]
-    fn dataflow_graph_excludes_synthetic_materializer_nodes() {
+    fn dataflow_graph_represents_materialized_state_with_the_relay_node() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19618,10 +19389,6 @@ mod tests {
             node_ids.contains(&"relay:state_txns"),
             "relay missing from {node_ids:?}"
         );
-        assert!(
-            !node_ids.contains(&"materializer:state_txns"),
-            "materializer must not be part of dataflow graph: {node_ids:?}"
-        );
         let edges = dataflow_graph
             .edges
             .iter()
@@ -19642,7 +19409,7 @@ mod tests {
     fn drop_batch_removes_unused_model() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19655,17 +19422,17 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Client,
-                    name: Identifier::parse("broker_in").expect("valid identifier"),
+                    name: ModelName::parse("broker_in").expect("valid identifier"),
                 }],
             )
             .expect("drop should succeed");
 
         assert!(
             registry
-                .get(
+                .get_of_kind(
                     &domain,
                     ModelKind::Client,
-                    &Identifier::parse("broker_in").expect("valid identifier")
+                    RelayName::parse("broker_in").expect("valid relay name")
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -19683,7 +19450,7 @@ mod tests {
     fn drop_batch_rejects_delete_when_model_is_in_use() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -19694,7 +19461,7 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Schema,
-                    name: Identifier::parse("event_schema").expect("valid identifier"),
+                    name: ModelName::parse("event_schema").expect("valid identifier"),
                 }],
             )
             .expect_err("drop should be rejected while schema is in use");
@@ -19705,10 +19472,9 @@ mod tests {
         ));
         assert!(
             registry
-                .get(
+                .get::<CreateSchema>(
                     &domain,
-                    ModelKind::Schema,
-                    &Identifier::parse("event_schema").expect("valid identifier")
+                    SchemaName::parse("event_schema").expect("valid schema name"),
                 )
                 .expect("read should succeed")
                 .is_some()
@@ -19721,7 +19487,7 @@ mod tests {
     fn drop_batch_allows_delete_of_emitter() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(&domain, full_graph_batch())
@@ -19732,17 +19498,16 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Emitter,
-                    name: Identifier::parse("emit").expect("valid identifier"),
+                    name: ModelName::parse("emit").expect("valid identifier"),
                 }],
             )
             .expect("emitter should be droppable");
 
         assert!(
             registry
-                .get(
+                .get::<CreateEmitter>(
                     &domain,
-                    ModelKind::Emitter,
-                    &Identifier::parse("emit").expect("valid identifier")
+                    EmitterName::parse("emit").expect("valid emitter name"),
                 )
                 .expect("read should succeed")
                 .is_none()
@@ -19755,7 +19520,7 @@ mod tests {
     fn drop_batch_rejects_delete_of_deduplicator_output_stream() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         registry
             .apply_batch(
@@ -19780,7 +19545,7 @@ mod tests {
                 &domain,
                 vec![DropModel {
                     kind: ModelKind::Relay,
-                    name: Identifier::parse("output").expect("valid identifier"),
+                    name: ModelName::parse("output").expect("valid identifier"),
                 }],
             )
             .expect_err("deduplicator output relay should be blocked");
@@ -19797,7 +19562,7 @@ mod tests {
     fn ingestor_rejects_protobuf_codec_without_decode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(
@@ -19827,7 +19592,7 @@ mod tests {
     fn emitter_rejects_protobuf_codec_without_encode_capability() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = Domain::parse("default").expect("valid domain");
+        let domain = DomainName::parse("default").expect("valid domain");
 
         let error = registry
             .apply_batch(

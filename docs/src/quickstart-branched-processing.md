@@ -2,7 +2,7 @@
 
 One external feed usually mixes many tenants, customers, or devices. Branches are how Nervix
 processes those groups independently: when a new group key appears, the branched part of the graph
-gets its own relay instances and processor state for that group, fully isolated from every other
+gets its own relay presence and processor state for that group, fully isolated from every other
 group. See [Streams, Branch Keys, And Branches](relay.md#streams-branch-keys-and-branches).
 
 This step partitions orders per customer and deduplicates them inside each customer's branch, so

@@ -41,6 +41,7 @@ Feature: Redis emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT redis_main
         TYPE REDIS
+        POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
         };

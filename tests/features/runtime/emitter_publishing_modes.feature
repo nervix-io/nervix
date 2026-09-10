@@ -33,7 +33,7 @@ Feature: Emitter publishing modes
       CREATE CLIENT nats_main TYPE NATS CONFIG {
         'addr' = 'nats://127.0.0.1:4222'
       };
-      CREATE CLIENT redis_main TYPE REDIS CONFIG {
+      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
         'addr' = 'redis://127.0.0.1:6379/'
       };
       CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
@@ -53,13 +53,13 @@ Feature: Emitter publishing modes
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE CLIENT postgres_main TYPE POSTGRES CONFIG {
-        'addr' = 'host=127.0.0.1 port=5432 user=postgres password=nervix dbname=postgres'
+      CREATE CLIENT postgres_main TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
+        'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
       };
-      CREATE CLIENT mysql_main TYPE MYSQL CONFIG {
+      CREATE CLIENT mysql_main TYPE MYSQL POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
       };
-      CREATE CLIENT mongodb_main TYPE MONGODB CONFIG {
+      CREATE CLIENT mongodb_main TYPE MONGODB POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
@@ -372,6 +372,10 @@ Feature: Emitter publishing modes
     Then the last command output contains
       """
       sink: CLICKHOUSE client=clickhouse_main table=clickhouse_events max_batch=2
+      """
+    And the last command output contains
+      """
+      flush: FLUSH IMMEDIATE
       """
     When these NSPL commands are executed on the leader node
       """

@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateCorrelator, CreateStatement, ProcessorInputs,
@@ -7,11 +8,12 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, collect_for, correlator_name,
-        duration_lit, flushed_explicit_processor_outputs, from_relay_clause_with_boundary,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, collect_for,
+        correlator_name, duration_lit, expression_error_message,
+        flushed_explicit_processor_outputs, from_relay_clause_with_boundary,
         from_where_boundary_token, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
         kw_phrase3, lex_input, materialized_state_dependencies, relay_ref,
-        render_vm_program_tokens, suggest_from, tok, vm_program_error_message,
+        render_expression_tokens, suggest_from, tok,
     },
 };
 
@@ -38,9 +40,9 @@ fn correlate_where_clause<'src>()
                 .labelled("correlate_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
 }
 
@@ -77,9 +79,9 @@ fn right_from_where_boundary_token(token: &Token) -> bool {
 fn side_from_clauses<'src>(
     side: Identifier,
 ) -> impl Parser<'src, &'src [Token], ProcessorInputs, extra::Err<ParseError<'src>>> + Clone {
-    let boundary = match side {
-        Identifier::Left => left_from_where_boundary_token as fn(&Token) -> bool,
-        Identifier::Right => right_from_where_boundary_token as fn(&Token) -> bool,
+    let boundary: fn(&Token) -> bool = match side {
+        Identifier::Left => left_from_where_boundary_token,
+        Identifier::Right => right_from_where_boundary_token,
         _ => unreachable!("correlator inputs expose only left and right sides"),
     };
     kw(side)
@@ -189,14 +191,18 @@ pub fn parse_create_correlator_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_correlator(
     input: &str,
 ) -> Result<CreateStatement<CreateCorrelator>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_correlator_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -207,6 +213,8 @@ pub fn suggest_create_correlator(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::FlushPolicy;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -347,9 +355,8 @@ mod tests {
             parsed.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "IMMEDIATE"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Immediate
         );
     }
 

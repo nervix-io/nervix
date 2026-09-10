@@ -1,4 +1,5 @@
 use futures_util::FutureExt;
+use nervix_models::TopicName;
 use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},
@@ -26,11 +27,8 @@ impl KafkaEmitter {
         resolved: Option<&ResolvedClientConfig>,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
-        let producer = Self::producer_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )?;
+        let producer =
+            Self::producer_from_config(client_config_entries(resolved, client.config.as_slice()))?;
         Ok(Self {
             producer: Some(producer),
             mode,
@@ -49,7 +47,7 @@ impl KafkaEmitter {
 
     pub(super) async fn publish(
         &self,
-        topic: &Identifier,
+        topic: &TopicName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -62,6 +60,58 @@ impl KafkaEmitter {
         };
 
         outcome.delivered.reserve(records.len());
+        match self.mode {
+            BrokerPublishingMode::NoAck => {
+                Self::publish_unconfirmed(producer, topic, records, &mut outcome).await;
+            }
+            BrokerPublishingMode::Ack(confirmation) => {
+                Self::publish_confirmed(producer, topic, records, confirmation, &mut outcome).await;
+            }
+        }
+        outcome
+    }
+
+    /// `MODE NO_ACK`: a record is delivered once the producer accepts it, and the delivery report
+    /// it would have produced is dropped rather than awaited.
+    async fn publish_unconfirmed(
+        producer: &FutureProducer,
+        topic: &TopicName,
+        records: Vec<EncodedBrokerRecord>,
+        outcome: &mut PerRecordPublishOutcome,
+    ) {
+        for record in records {
+            tokio::task::consume_budget().await;
+            record.acks.ack_alive();
+            let position = record.position();
+            match Self::enqueue(producer, topic, &record) {
+                Ok(confirmation) => {
+                    drop(confirmation);
+                    outcome.deliver(position);
+                }
+                Err(error) if Self::is_record_rejection(&error) => {
+                    outcome.reject(position, format!("kafka rejected record: {error}"));
+                }
+                Err(error) => {
+                    outcome.fail(emitter_publish_error(error));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `MODE ACK`: at most `max_in_flight` delivery reports are outstanding at once, and every one
+    /// is awaited before the batch finishes. The window carries the confirmation settings, so the
+    /// drain below never has to ask a mode that has no confirmations what its timeout is.
+    async fn publish_confirmed(
+        producer: &FutureProducer,
+        topic: &TopicName,
+        records: Vec<EncodedBrokerRecord>,
+        AckConfirmation {
+            max_in_flight,
+            timeout,
+        }: AckConfirmation,
+        outcome: &mut PerRecordPublishOutcome,
+    ) {
         let mut pending: VecDeque<PendingKafkaConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
@@ -69,7 +119,7 @@ impl KafkaEmitter {
                 confirmation.acks.ack_alive();
             }
             record.acks.ack_alive();
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let confirmation = match Self::enqueue(producer, topic, &record) {
                 Ok(confirmation) => confirmation,
                 Err(error) if Self::is_record_rejection(&error) => {
@@ -78,51 +128,34 @@ impl KafkaEmitter {
                 }
                 Err(error) => {
                     outcome.fail(emitter_publish_error(error));
-                    return outcome;
+                    return;
                 }
             };
-            match self.mode {
-                BrokerPublishingMode::NoAck => {
-                    drop(confirmation);
-                    outcome.deliver(position);
-                }
-                BrokerPublishingMode::Ack {
-                    max_in_flight,
-                    timeout,
-                } => {
-                    pending.push_back(PendingKafkaConfirmation {
-                        position,
-                        acks: record.acks,
-                        deadline: Instant::now() + timeout,
-                        confirmation,
-                    });
-                    if pending.len() >= max_in_flight
-                        && let Err(error) =
-                            Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
-                    {
-                        outcome.fail(error);
-                        return outcome;
-                    }
-                }
+            pending.push_back(PendingKafkaConfirmation {
+                position,
+                acks: record.acks,
+                deadline: Instant::now() + timeout,
+                confirmation,
+            });
+            if pending.len() >= max_in_flight.get()
+                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await
+            {
+                outcome.fail(error);
+                return;
             }
         }
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
-            let timeout = match self.mode {
-                BrokerPublishingMode::Ack { timeout, .. } => timeout,
-                BrokerPublishingMode::NoAck => unreachable!("NO_ACK has no confirmations"),
-            };
-            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
+            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await {
                 outcome.fail(error);
-                return outcome;
+                return;
             }
         }
-        outcome
     }
 
     fn enqueue(
         producer: &FutureProducer,
-        topic: &Identifier,
+        topic: &TopicName,
         message: &EncodedBrokerRecord,
     ) -> Result<DeliveryFuture, KafkaError> {
         let mut record =
@@ -208,6 +241,13 @@ impl KafkaEmitter {
         }
     }
 
+    /// Collects the records behind the oldest one whose confirmation already resolved.
+    ///
+    /// The caller reached here because the oldest record failed or timed out, and it is about to
+    /// return that failure for the whole publish. Records behind it that already succeeded or were
+    /// individually rejected are recorded so the retry does not send them again. Anything else is
+    /// deliberately left in neither list: its failure is the same infrastructure failure the
+    /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingKafkaConfirmation>,
         outcome: &mut PerRecordPublishOutcome,
@@ -221,9 +261,10 @@ impl KafkaEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready Kafka confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Ok(_delivery)) => outcome.deliver(confirmation.position),
                 Ok(Err((source, _message))) if Self::is_record_rejection(&source) => outcome

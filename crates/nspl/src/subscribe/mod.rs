@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, SubscriptionBinding, SubscriptionDeliveryBehavior,
     SubscriptionLiteral,
@@ -7,9 +8,10 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2, lex_input,
-        relay_ref, render_vm_program_tokens, session_subscription_name, session_subscription_ref,
-        string_lit, suggest_from, tok, vm_program_error_message, word_raw,
+        LexedInput, ParseError, ParseFromSourceError, expression_error_message, field_ref,
+        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, render_expression_tokens,
+        session_subscription_name, session_subscription_ref, string_lit, suggest_from, tok,
+        word_raw,
     },
 };
 
@@ -93,8 +95,8 @@ fn subscription_where_clause<'src>()
                 .collect::<Vec<_>>(),
         )
         .try_map(|tokens, span| {
-            crate::parse_expression(&render_vm_program_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+            crate::parse_expression(&render_expression_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
 }
 
@@ -140,10 +142,10 @@ pub fn create_subscription_query(
     }
     if let Some(where_clause) = where_clause {
         query.push_str(" WHERE ");
-        query.push_str(
-            &nervix_models::expression_to_nspl(where_clause)
-                .expect("a parsed subscription expression must be canonically renderable"),
-        );
+        query.push_str(&nervix_models::expression_to_nspl(where_clause).verified(
+            "the expression came from this parser, and every parsed expression renders back to \
+             NSPL",
+        ));
     }
     query.push(';');
     query
@@ -172,12 +174,16 @@ pub fn parse_create_subscription_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_subscription(input: &str) -> Result<CreateSubscription, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_subscription_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -360,7 +366,7 @@ mod tests {
     fn delete_after_name_has_no_parameter_suggestions() {
         let input = "DELETE SUBSCRIPTION live_notifications ";
         let prefix = current_word_prefix(input);
-        let (_, _, tokens) = lex_input(input).expect("input should lex");
+        let LexedInput { tokens, .. } = lex_input(input).expect("input should lex");
         let output = delete_subscription_parser()
             .then_ignore(end())
             .parse(tokens.as_slice());
@@ -379,7 +385,7 @@ mod tests {
     fn delete_suggests_a_session_subscription_reference() {
         let input = "DELETE SUBSCRIPTION ";
         let prefix = current_word_prefix(input);
-        let (_, _, tokens) = lex_input(input).expect("input should lex");
+        let LexedInput { tokens, .. } = lex_input(input).expect("input should lex");
         let output = delete_subscription_parser()
             .then_ignore(end())
             .parse(tokens.as_slice());

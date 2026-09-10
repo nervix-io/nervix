@@ -1,11 +1,12 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::DescribeWasmProcessor;
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, suggest_from, tok,
-        wasm_processor_ref,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input,
+        suggest_from, tok, wasm_processor_ref,
     },
 };
 
@@ -30,14 +31,18 @@ pub fn parse_describe_wasm_processor_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_describe_wasm_processor(
     input: &str,
 ) -> Result<DescribeWasmProcessor, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_wasm_processor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

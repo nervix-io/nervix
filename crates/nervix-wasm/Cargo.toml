@@ -1,4 +1,5 @@
 [package]
+description = "Wasmtime host for Nervix WASM processors: instances, limits, epoch deadlines and the guest ABI"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-wasm"
@@ -8,10 +9,15 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+arch-into = { workspace = true }
 bytes = { workspace = true }
+error-stack = { workspace = true }
 flatbuffers = { workspace = true }
+meticulous = { workspace = true }
 nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
+nonzero_ext = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }

@@ -3,6 +3,7 @@ use std::{ops::Range, sync::Arc};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_wasm_protocol::{
     AckSidecar, Envelope, EnvelopeRef, OutputColumnRef, ProcessorType, ProtocolError, RoutedOutput,
 };
@@ -33,8 +34,15 @@ impl InputBatch {
                 }));
             };
             let arrow_ipc = input.arrow_ipc_batch();
-            let start = arrow_ipc.as_ptr() as usize - bytes.as_ptr() as usize;
-            (start..start + arrow_ipc.len(), input.acks())
+            let start = arrow_ipc
+                .as_ptr()
+                .addr()
+                .checked_sub(bytes.as_ptr().addr())
+                .assured("the accessor returns a subslice of the envelope bytes");
+            let end = start
+                .checked_add(arrow_ipc.len())
+                .assured("the subslice ends inside the envelope bytes");
+            (start..end, input.acks())
         };
         let reader = StreamReader::try_new(&bytes[arrow.clone()], None)?;
         let batches = reader.collect::<Result<Vec<_>, _>>()?;
@@ -69,9 +77,15 @@ impl InputBatch {
     }
 
     pub fn row_count(&self) -> u64 {
-        self.batches.iter().fold(0_u64, |rows, batch| {
-            rows.saturating_add(batch.num_rows() as u64)
-        })
+        self.batches
+            .iter()
+            .try_fold(0_u64, |rows, batch| {
+                rows.checked_add(
+                    u64::try_from(batch.num_rows())
+                        .assured("usize fits u64 on every architecture supported by the WASM SDK"),
+                )
+            })
+            .assured("the rows counted here belong to batches this guest already holds in memory")
     }
 }
 
@@ -93,8 +107,10 @@ impl OutputEnvelope {
     /// match the nullability of every destination field that references the
     /// column; several routes may reference the same index.
     pub fn add_generated_column(&mut self, array: ArrayRef, optional: bool) -> u32 {
+        let index = u32::try_from(self.generated.len())
+            .assured("WebAssembly linear memory limits generated column indices to u32");
         self.generated.push((array, optional));
-        (self.generated.len() - 1) as u32
+        index
     }
 
     /// Adds one routed output whose `columns` align positionally with the
@@ -255,10 +271,8 @@ mod tests {
     #[test]
     fn output_envelope_encodes_shared_generated_pool() {
         let mut output = OutputEnvelope::new();
-        let bucket = output.add_generated_column(
-            Arc::new(StringArray::from(vec![Some("EVEN")])) as ArrayRef,
-            false,
-        );
+        let bucket =
+            output.add_generated_column(Arc::new(StringArray::from(vec![Some("EVEN")])), false);
         output.add_route(
             "enriched_events",
             vec![

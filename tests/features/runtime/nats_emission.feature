@@ -98,7 +98,11 @@ Feature: NATS emission
       relay="columnar_events"
       """
     When emitter "columnar_events_out" leaves stall mode
-    Then within "5s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
+    # The stall releases every buffered message at once, so this drains a larger burst than the
+    # streaming scenario below and is given the same budget. Measured drain of 32768 messages is
+    # about four seconds on an idle machine, which left the previous five second bound inside its
+    # own margin: it failed attempts on CI for this branch and for main alike.
+    Then within "90s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
       """
       route=primary
       route=columnar

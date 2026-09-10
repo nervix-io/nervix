@@ -7,28 +7,22 @@ pub(in crate::runtime) struct ZeroMqIngestor;
 impl ZeroMqIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
-        client: CreateClientZeroMq,
-        ingestor: CreateIngestor,
+        plan: ZeroMqIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let ZeroMqIngestorStartPlan {
+            ingestor,
+            client,
+            mode: _,
+        } = plan;
+        let domain = &ingestor.domain;
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
             });
         }
-
-        match &ingestor.source {
-            IngestSource::ZeroMq { .. } => {}
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected ZeroMQ ingestor source".to_string(),
-                });
-            }
-        };
 
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
@@ -42,13 +36,15 @@ impl ZeroMqIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled ZeroMQ ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events.clone();
+        let task_events = runtime.events().clone();
         let task = tokio::spawn(async move {
             let mut backoff = RuntimeReconnectBackoff::default();
             let mut collector =
@@ -67,10 +63,14 @@ impl ZeroMqIngestor {
                 {
                     break;
                 }
-                if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime
+                    .inner
+                    .fault_injection
+                    .ingestor_is_failed(&task_ingestor)
+                {
                     continue;
                 }
-                let mut socket = match Self::pull_socket_from_client(&client).await {
+                let mut socket = match Self::pull_socket_from_config(&client.config).await {
                     Ok(socket) => socket,
                     Err(error) => {
                         task_runtime.record_ingestor_transient_error(
@@ -110,13 +110,13 @@ impl ZeroMqIngestor {
                             })
                             .await
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to dispatch buffered zeromq payload for ingestor '{}' in \
                                  domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         continue;
                     }
@@ -130,13 +130,13 @@ impl ZeroMqIngestor {
                             )
                             .await
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to flush accepted zeromq messages before quiescing \
                                  ingestor '{}' in domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
@@ -154,14 +154,15 @@ impl ZeroMqIngestor {
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                let _ = task_runtime
+                                task_runtime
                                     .flush_ingest_collector(
                                         &task_domain,
                                         &task_ingestor,
                                         &branched_senders,
                                         &mut collector,
                                     )
-                                    .await;
+                                    .await
+                                    .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                                 break 'outer;
                             }
                         }
@@ -175,12 +176,12 @@ impl ZeroMqIngestor {
                                 )
                                 .await
                             {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                         }
                         frame = socket.recv() => {
@@ -200,7 +201,7 @@ impl ZeroMqIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                        BufferedIngestMetadata::without_headers(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         quiesce.intake(0, payload, false)
@@ -220,12 +221,12 @@ impl ZeroMqIngestor {
                                             })
                                             .await
                                         {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                         }
                                             if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                 && let Err(error) = task_runtime
@@ -237,37 +238,38 @@ impl ZeroMqIngestor {
                                                     )
                                                     .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(
+                                                task_events.report_error(
                                                     format!(
                                                         "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
                                                     ),
-                                                ));
+                                                );
                                             }
                                     }
                                 }
                                 Err(error) => {
-                                    let _ = task_runtime
+                                    task_runtime
                                         .flush_ingest_collector(
                                             &task_domain,
                                             &task_ingestor,
                                             &branched_senders,
                                             &mut collector,
                                         )
-                                        .await;
+                                        .await
+                                        .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                                     task_runtime.record_ingestor_transient_error(
                                         &task_domain,
                                         &task_ingestor,
                                         format!("zeromq receive failed: {error}"),
                                     );
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                    task_events.report_error(format!(
                                         "failed to receive zeromq message for ingestor '{}' in domain '{}': {}",
                                         task_ingestor.as_str(),
                                         task_domain.as_str(),
                                         error
-                                    )));
+                                    ));
                                     warn!(
                                         domain = task_domain.as_str(),
                                         ingestor = task_ingestor.as_str(),
@@ -292,7 +294,7 @@ impl ZeroMqIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -304,9 +306,12 @@ impl ZeroMqIngestor {
         Ok(())
     }
 
-    async fn pull_socket_from_client(client: &CreateClientZeroMq) -> Result<PullSocket, String> {
-        let addr = Self::addr_from_client(client)?;
-        let bind = Self::bind_from_client(client);
+    async fn pull_socket_from_config(config: &[ClientConfigEntry]) -> Result<PullSocket, String> {
+        let addr = client_config_value(config, "addr", || {
+            "missing ZeroMQ client config key 'addr'".to_string()
+        })?;
+        let bind = optional_client_config_value(config, "bind")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
         let mut socket = PullSocket::new();
         if bind {
             socket
@@ -322,17 +327,20 @@ impl ZeroMqIngestor {
         Ok(socket)
     }
 
-    pub(in crate::runtime) fn addr_from_client(
-        client: &CreateClientZeroMq,
+    #[cfg(test)]
+    pub(in crate::runtime) fn addr_from_config(
+        config: &[ClientConfigEntry],
     ) -> Result<String, String> {
-        client_config_value(&client.config, "addr", || {
+        client_config_value(config, "addr", || {
             "missing ZeroMQ client config key 'addr'".to_string()
         })
     }
 
-    pub(in crate::runtime) fn bind_from_client(client: &CreateClientZeroMq) -> bool {
-        optional_client_config_value(&client.config, "bind")
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+    #[cfg(test)]
+    pub(in crate::runtime) fn bind_from_config(config: &[ClientConfigEntry]) -> bool {
+        match optional_client_config_value(config, "bind") {
+            Some(value) => value.eq_ignore_ascii_case("true"),
+            None => false,
+        }
     }
 }

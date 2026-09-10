@@ -1,15 +1,25 @@
-use std::ops::Range;
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    ops::Range,
+};
 
 use chumsky::{
     error::{RichPattern, RichReason},
     prelude::*,
 };
+use error_stack::Report;
 use nervix_models::{
-    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, ClientConfigEntry,
-    Domain, EmitterAckWindow, Expression, GeneralErrorPolicy, Identifier as ModelIdentifier,
-    InputCollectPolicy, MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy,
-    OutputBranch, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RetryPolicy, RouteConstruction,
+    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchName, BranchSelection,
+    ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CollectionName,
+    ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, EmitterAckWindow, EmitterName,
+    EndpointName, Expression, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    InferencerName, IngestorName, InputCollectPolicy, JunctionName, LookupName,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError,
+    OutputBranch, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName,
+    ReordererName, ResourceName, RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName,
+    SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName,
+    WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -44,8 +54,8 @@ macro_rules! suggest_from {
         let cursor: usize = $cursor;
         let (source, prefix) = $crate::parser_support::completion_context(input, cursor);
 
-        let offer = |source: &str| match $crate::parser_support::lex_input(source) {
-            Ok((_, _, tokens)) => {
+        let offer = |source: &str| match $crate::parser_support::completion_tokens(source) {
+            Some(tokens) => {
                 let out = $parser
                     .then_ignore(chumsky::prelude::end())
                     .parse(tokens.as_slice());
@@ -55,7 +65,7 @@ macro_rules! suggest_from {
                     Vec::new()
                 }
             }
-            Err(_) => Vec::new(),
+            None => Vec::new(),
         };
 
         let suggestions = offer(&source);
@@ -234,20 +244,13 @@ pub fn sequential_ack_window<'src>()
 
 /// The positive bound in `PARALLEL MAX <n>`, shared by ingestor and emitter modes.
 pub fn parallel_ack_window<'src>()
--> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Parallel)
         .ignore_then(kw(Identifier::Max))
-        .ignore_then(u64_value().labelled("max_in_flight"))
-        .try_map(|max, span| {
-            if max == 0 {
-                Err(Rich::custom(
-                    span,
-                    "parallel max in-flight must be greater than zero",
-                ))
-            } else {
-                Ok(max)
-            }
-        })
+        .ignore_then(nonzero_u64_value(
+            "max_in_flight",
+            "parallel max in-flight must be greater than zero",
+        ))
         .boxed()
 }
 
@@ -319,29 +322,87 @@ pub fn u64_value<'src>()
     .boxed()
 }
 
+/// An integer written where zero has no meaning, parsed straight into `NonZeroU64`.
+///
+/// The bound belongs to the value, so this is the one place NSPL text turns into such a count and
+/// the only place that has to say what zero would mean. Downstream Models, the registry, and the
+/// runtime take the non-zero type and never re-check it.
+///
+/// The label goes on the integer itself, not on the checked parser: labelling the check would
+/// rewrite `zero_reason` into a bare expectation and lose the explanation.
+pub fn nonzero_u64_value<'src>(
+    label: &'static str,
+    zero_reason: &'static str,
+) -> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    u64_value()
+        .labelled(label)
+        .try_map(move |value, span| {
+            NonZeroU64::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
+        })
+        .boxed()
+}
+
+/// An integer written where the count is bounded by the 32-bit range its Model uses.
+///
+/// The bound belongs to the value, so a count outside it is rejected where it is written rather
+/// than narrowed later: the message names the range instead of leaving a truncated number behind.
+pub fn u32_value<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], u32, extra::Err<ParseError<'src>>> + Clone {
+    // Each alternative carries the label for the same reason `u64_value` does: chumsky only
+    // rewrites an alternative error whose position matches the start of the labelled parser.
+    choice((
+        select! { Token::NumberLiteral(v) => v }.labelled(label),
+        word_raw().labelled(label),
+    ))
+    .try_map(|raw, span| {
+        raw.parse::<u32>().map_err(|_| {
+            Rich::custom(
+                span,
+                format!("invalid integer '{raw}'; expected 0 through {}", u32::MAX),
+            )
+        })
+    })
+    .boxed()
+}
+
+/// A 32-bit count written where zero has no meaning, parsed straight into `NonZeroU32`.
+///
+/// The label goes on the integer itself, not on the checked parser: labelling the check would
+/// rewrite `zero_reason` into a bare expectation and lose the explanation.
+pub fn nonzero_u32_value<'src>(
+    label: &'static str,
+    zero_reason: &'static str,
+) -> impl Parser<'src, &'src [Token], NonZeroU32, extra::Err<ParseError<'src>>> + Clone {
+    u32_value(label)
+        .try_map(move |value, span| {
+            NonZeroU32::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
+        })
+        .boxed()
+}
+
 pub fn schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:schema")
+-> impl Parser<'src, &'src [Token], SchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:schema", SchemaName::parse)
 }
 
 pub fn placement_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("placement_name")
+-> impl Parser<'src, &'src [Token], PlacementName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("placement_name", PlacementName::parse)
 }
 
 pub fn placement_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:placement")
+-> impl Parser<'src, &'src [Token], PlacementName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:placement", PlacementName::parse)
 }
 
 pub fn runtime_node_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:runtime_node")
+-> impl Parser<'src, &'src [Token], ModelName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:runtime_node", ModelName::parse)
 }
 
 pub fn branch_definition_header<'src>()
--> impl Parser<'src, &'src [Token], (ModelIdentifier, String), extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], (SchemaName, String), extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Schema)
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Ttl))
@@ -405,9 +466,9 @@ fn materialized_default_assignments<'src>()
                 .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
         )
         .try_map(|tokens, span| {
-            let source = format!("SET {}", render_vm_program_tokens(&tokens));
+            let source = format!("SET {}", render_expression_tokens(&tokens));
             let construction = crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))?;
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))?;
             if construction.inherit.is_some()
                 || construction.where_clause.is_some()
                 || !construction.invocations.is_empty()
@@ -460,167 +521,179 @@ pub fn materialized_state_dependencies<'src>()
 }
 
 pub fn domain_name<'src>()
--> impl Parser<'src, &'src [Token], Domain, extra::Err<ParseError<'src>>> + Clone {
-    parse_domain("domain_name")
+-> impl Parser<'src, &'src [Token], DomainName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("domain_name", DomainName::parse)
 }
 
 pub fn user_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("user_name")
+-> impl Parser<'src, &'src [Token], UserName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("user_name", UserName::parse)
 }
 
 pub fn schema_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("schema_name")
+-> impl Parser<'src, &'src [Token], SchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("schema_name", SchemaName::parse)
 }
 
 pub fn wire_json_schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_json_schema")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wire_json_schema", WireSchemaName::parse)
 }
 
 pub fn wire_cbor_schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_cbor_schema")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wire_cbor_schema", WireSchemaName::parse)
 }
 
 pub fn wire_avro_schema_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_avro_schema")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wire_avro_schema", WireSchemaName::parse)
 }
 
 pub fn wire_schema_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("wire_schema_name")
+-> impl Parser<'src, &'src [Token], WireSchemaName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("wire_schema_name", WireSchemaName::parse)
 }
 
 pub fn codec_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:codec")
+-> impl Parser<'src, &'src [Token], CodecName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:codec", CodecName::parse)
 }
 
 pub fn codec_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("codec_name")
+-> impl Parser<'src, &'src [Token], CodecName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("codec_name", CodecName::parse)
 }
 
 pub fn field_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("field_name")
+-> impl Parser<'src, &'src [Token], FieldName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("field_name", FieldName::parse)
 }
 
 pub fn relay_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch])
+-> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name_excluding_reserved(
+        "ref:relay",
+        &[Identifier::Message, Identifier::Branch],
+        RelayName::parse,
+    )
 }
 
 pub fn message_error_relay_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch])
+-> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name_excluding_reserved(
+        "ref:relay",
+        &[Identifier::Message, Identifier::Branch],
+        RelayName::parse,
+    )
 }
 
 pub fn resource_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:resource")
+-> impl Parser<'src, &'src [Token], ResourceName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:resource", ResourceName::parse)
 }
 
 pub fn relay_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier_excluding_reserved("relay_name", &[Identifier::Message, Identifier::Branch])
+-> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name_excluding_reserved(
+        "relay_name",
+        &[Identifier::Message, Identifier::Branch],
+        RelayName::parse,
+    )
 }
 
 pub fn junction_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:junction")
+-> impl Parser<'src, &'src [Token], JunctionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:junction", JunctionName::parse)
 }
 
 pub fn junction_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("junction_name")
+-> impl Parser<'src, &'src [Token], JunctionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("junction_name", JunctionName::parse)
 }
 
 pub fn deduplicator_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:deduplicator")
+-> impl Parser<'src, &'src [Token], DeduplicatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:deduplicator", DeduplicatorName::parse)
 }
 
 pub fn deduplicator_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("deduplicator_name")
+-> impl Parser<'src, &'src [Token], DeduplicatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("deduplicator_name", DeduplicatorName::parse)
 }
 
 pub fn correlator_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:correlator")
+-> impl Parser<'src, &'src [Token], CorrelatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:correlator", CorrelatorName::parse)
 }
 
 pub fn correlator_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("correlator_name")
+-> impl Parser<'src, &'src [Token], CorrelatorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("correlator_name", CorrelatorName::parse)
 }
 
 pub fn window_processor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("window_processor_name")
+-> impl Parser<'src, &'src [Token], WindowProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("window_processor_name", WindowProcessorName::parse)
 }
 
 pub fn window_processor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:window_processor")
+-> impl Parser<'src, &'src [Token], WindowProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:window_processor", WindowProcessorName::parse)
 }
 
 pub fn client_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:client")
+-> impl Parser<'src, &'src [Token], ClientName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:client", ClientName::parse)
 }
 
 pub fn client_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("client_name")
+-> impl Parser<'src, &'src [Token], ClientName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("client_name", ClientName::parse)
 }
 
 pub fn vhost_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:vhost")
+-> impl Parser<'src, &'src [Token], VhostName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:vhost", VhostName::parse)
 }
 
 pub fn vhost_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("vhost_name")
+-> impl Parser<'src, &'src [Token], VhostName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("vhost_name", VhostName::parse)
 }
 
 pub fn branch_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:branch")
+-> impl Parser<'src, &'src [Token], BranchName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:branch", BranchName::parse)
 }
 
 pub fn branch_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("branch_name")
+-> impl Parser<'src, &'src [Token], BranchName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("branch_name", BranchName::parse)
 }
 
 pub fn endpoint_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:endpoint")
+-> impl Parser<'src, &'src [Token], EndpointName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:endpoint", EndpointName::parse)
 }
 
 pub fn endpoint_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("endpoint_name")
+-> impl Parser<'src, &'src [Token], EndpointName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("endpoint_name", EndpointName::parse)
 }
 
 pub fn signaling_protocol_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:signaling_protocol")
+-> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:signaling_protocol", SignalingProtocolName::parse)
 }
 
 pub fn signaling_protocol_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("signaling_protocol_name")
+-> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("signaling_protocol_name", SignalingProtocolName::parse)
 }
 
 pub fn signaling_protocol_clause<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], SignalingProtocolName, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase3(
         Identifier::With,
         Identifier::Signaling,
@@ -654,146 +727,156 @@ pub fn config_entries_block<'src>()
 }
 
 pub fn generator_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("generator_name")
+-> impl Parser<'src, &'src [Token], GeneratorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("generator_name", GeneratorName::parse)
 }
 
 pub fn generator_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:generator")
+-> impl Parser<'src, &'src [Token], GeneratorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:generator", GeneratorName::parse)
 }
 
 pub fn inferencer_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("inferencer_name")
+-> impl Parser<'src, &'src [Token], InferencerName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("inferencer_name", InferencerName::parse)
 }
 
 pub fn wasm_processor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("wasm_processor_name")
+-> impl Parser<'src, &'src [Token], WasmProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("wasm_processor_name", WasmProcessorName::parse)
 }
 
 pub fn wasm_processor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wasm_processor")
+-> impl Parser<'src, &'src [Token], WasmProcessorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:wasm_processor", WasmProcessorName::parse)
 }
 
 pub fn udf_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("udf_name")
+-> impl Parser<'src, &'src [Token], UdfName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("udf_name", UdfName::parse)
 }
 
 pub fn udf_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:udf")
+-> impl Parser<'src, &'src [Token], UdfName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:udf", UdfName::parse)
 }
 
 pub fn inferencer_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:inferencer")
+-> impl Parser<'src, &'src [Token], InferencerName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:inferencer", InferencerName::parse)
 }
 
 pub fn ingestor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:ingestor")
+-> impl Parser<'src, &'src [Token], IngestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:ingestor", IngestorName::parse)
 }
 
 pub fn ingestor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ingestor_name")
+-> impl Parser<'src, &'src [Token], IngestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ingestor_name", IngestorName::parse)
 }
 
 pub fn reingestor_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:reingestor")
+-> impl Parser<'src, &'src [Token], ReingestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:reingestor", ReingestorName::parse)
 }
 
 pub fn lookup_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:lookup")
+-> impl Parser<'src, &'src [Token], LookupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:lookup", LookupName::parse)
 }
 
 pub fn lookup_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("lookup_name")
+-> impl Parser<'src, &'src [Token], LookupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("lookup_name", LookupName::parse)
 }
 
 pub fn reingestor_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("reingestor_name")
+-> impl Parser<'src, &'src [Token], ReingestorName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("reingestor_name", ReingestorName::parse)
 }
 
 pub fn reorderer_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("reorderer_name")
+-> impl Parser<'src, &'src [Token], ReordererName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("reorderer_name", ReordererName::parse)
 }
 
 pub fn reorderer_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:reorderer")
+-> impl Parser<'src, &'src [Token], ReordererName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:reorderer", ReordererName::parse)
 }
 
 pub fn emitter_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:emitter")
+-> impl Parser<'src, &'src [Token], EmitterName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:emitter", EmitterName::parse)
 }
 
 pub fn emitter_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("emitter_name")
+-> impl Parser<'src, &'src [Token], EmitterName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("emitter_name", EmitterName::parse)
 }
 
 pub fn topic_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("topic_name")
+-> impl Parser<'src, &'src [Token], TopicName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("topic_name", TopicName::parse)
 }
 
 pub fn mqtt_topic_filter<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     choice((
         string_lit(),
-        parse_identifier("mqtt_topic_filter").map(|topic| topic.as_str().to_string()),
+        parse_name("mqtt_topic_filter", TopicName::parse).map(|topic| topic.as_str().to_string()),
     ))
 }
 
+pub fn subject_ref<'src>()
+-> impl Parser<'src, &'src [Token], SubjectName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("subject_name", SubjectName::parse)
+}
+
+pub fn collection_ref<'src>()
+-> impl Parser<'src, &'src [Token], CollectionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("collection_name", CollectionName::parse)
+}
+
 pub fn queue_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("queue_name")
+-> impl Parser<'src, &'src [Token], QueueName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("queue_name", QueueName::parse)
 }
 
 pub fn nats_queue_group_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("queue_group")
+-> impl Parser<'src, &'src [Token], QueueGroupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("queue_group", QueueGroupName::parse)
 }
 
 pub fn channel_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("channel_name")
+-> impl Parser<'src, &'src [Token], ChannelName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("channel_name", ChannelName::parse)
 }
 
 pub fn table_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("table_name")
+-> impl Parser<'src, &'src [Token], TableName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("table_name", TableName::parse)
 }
 
 pub fn consumer_group_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("consumer_group")
+-> impl Parser<'src, &'src [Token], ConsumerGroupName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("consumer_group", ConsumerGroupName::parse)
 }
 
 pub fn subscription_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("subscription_name")
+-> impl Parser<'src, &'src [Token], PulsarSubscriptionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("subscription_name", PulsarSubscriptionName::parse)
 }
 
 pub fn session_subscription_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("session_subscription_name")
+-> impl Parser<'src, &'src [Token], SubscriptionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("session_subscription_name", SubscriptionName::parse)
 }
 
 pub fn session_subscription_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:session_subscription")
+-> impl Parser<'src, &'src [Token], SubscriptionName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:session_subscription", SubscriptionName::parse)
 }
 
 pub fn string_lit<'src>()
@@ -870,14 +953,16 @@ pub fn collect_for<'src>()
 }
 
 pub fn flush_each<'src>()
--> impl Parser<'src, &'src [Token], (String, Option<String>), extra::Err<ParseError<'src>>> + Clone
-{
+-> impl Parser<'src, &'src [Token], FlushPolicy, extra::Err<ParseError<'src>>> + Clone {
     choice((
         kw_phrase2(Identifier::Flush, Identifier::Each)
             .ignore_then(duration_lit())
             .then(max_batch_size_clause())
-            .map(|(flush_each, max_batch_size)| (flush_each, Some(max_batch_size))),
-        kw_phrase2(Identifier::Flush, Identifier::Immediate).to(("IMMEDIATE".to_string(), None)),
+            .map(|(interval, max_batch_size)| FlushPolicy::Each {
+                interval,
+                max_batch_size,
+            }),
+        kw_phrase2(Identifier::Flush, Identifier::Immediate).to(FlushPolicy::Immediate),
     ))
     .boxed()
 }
@@ -958,17 +1043,12 @@ pub fn alter_flushed_route_body<'src>()
         .then(flush_each())
         .then(alter_message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction: construction.unwrap_or_default(),
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -998,17 +1078,12 @@ pub fn alter_generator_route_body<'src>()
         .then(flush_each())
         .then(alter_message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction,
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction,
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -1023,17 +1098,11 @@ pub fn alter_ingestor_route_body<'src>()
         .then(flush_each())
         .then(alter_message_error_policy())
         .map(
-            |(
-                (((relay, construction), branch), (flush_each, max_batch_size)),
-                message_error_policy,
-            )| {
+            |((((relay, construction), branch), flush_policy), message_error_policy)| {
                 ProcessorOutput {
                     relay,
                     construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
+                    flush_policy: Some(flush_policy),
                     message_error_policy,
                     branch: Some(branch),
                 }
@@ -1265,9 +1334,9 @@ fn route_construction_clause<'src>(
         .ignore_then(body)
         .try_map(move |tail, span| {
             let head: &'static str = head.into();
-            let source = format!("{head} {}", render_vm_program_tokens(&tail));
+            let source = format!("{head} {}", render_expression_tokens(&tail));
             crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1365,9 +1434,9 @@ fn explicit_route_construction<'src>()
     kw(Identifier::Set)
         .ignore_then(route_construction_body("set_assignments"))
         .try_map(|tokens, span| {
-            let source = format!("SET {}", render_vm_program_tokens(&tokens));
+            let source = format!("SET {}", render_expression_tokens(&tokens));
             crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .try_map(|construction, span| {
             if construction.assignments.is_empty() {
@@ -1400,9 +1469,9 @@ fn source_where_clause_with_boundary<'src>(
                 .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1424,9 +1493,9 @@ where
                 .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1445,8 +1514,8 @@ where
         .at_least(1)
         .collect::<Vec<_>>()
         .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_vm_program_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+            crate::parse_expression_list(&render_expression_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .labelled(label)
         .boxed()
@@ -1457,7 +1526,7 @@ pub fn from_relay_clause_with_boundary<'src>(
 ) -> impl Parser<
     'src,
     &'src [Token],
-    (ModelIdentifier, Vec<ProcessorInputWhere>),
+    (RelayName, Vec<ProcessorInputWhere>),
     extra::Err<ParseError<'src>>,
 > + Clone {
     relay_ref()
@@ -1475,12 +1544,9 @@ pub fn from_relay_clause_with_boundary<'src>(
         .boxed()
 }
 
-pub fn from_relay_clause<'src>() -> impl Parser<
-    'src,
-    &'src [Token],
-    (ModelIdentifier, Vec<ProcessorInputWhere>),
-    extra::Err<ParseError<'src>>,
-> + Clone {
+pub fn from_relay_clause<'src>()
+-> impl Parser<'src, &'src [Token], (RelayName, Vec<ProcessorInputWhere>), extra::Err<ParseError<'src>>>
++ Clone {
     from_relay_clause_with_boundary(from_where_boundary_token)
 }
 
@@ -1518,9 +1584,9 @@ pub fn filter_where_clause<'src>()
                 .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
+            let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
         })
         .boxed()
 }
@@ -1551,17 +1617,12 @@ fn flushed_processor_output_route<'src>()
         .then(flush_each())
         .then(message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction: construction.unwrap_or_default(),
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -1575,17 +1636,12 @@ fn flushed_explicit_processor_output_route<'src>()
         .then(flush_each())
         .then(message_error_policy())
         .map(
-            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
-                ProcessorOutput {
-                    relay,
-                    construction,
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
-                    message_error_policy,
-                    branch: None,
-                }
+            |(((relay, construction), flush_policy), message_error_policy)| ProcessorOutput {
+                relay,
+                construction,
+                flush_policy: Some(flush_policy),
+                message_error_policy,
+                branch: None,
             },
         )
         .boxed()
@@ -1600,17 +1656,11 @@ fn flushed_ingestor_output_route<'src>()
         .then(flush_each())
         .then(message_error_policy())
         .map(
-            |(
-                (((relay, construction), branch), (flush_each, max_batch_size)),
-                message_error_policy,
-            )| {
+            |((((relay, construction), branch), flush_policy), message_error_policy)| {
                 ProcessorOutput {
                     relay,
                     construction: construction.unwrap_or_default(),
-                    flush_policy: Some(OutputFlushPolicy {
-                        flush_each,
-                        max_batch_size,
-                    }),
+                    flush_policy: Some(flush_policy),
                     message_error_policy,
                     branch: Some(branch),
                 }
@@ -1661,7 +1711,13 @@ pub fn flushed_ingestor_outputs<'src>()
 
 pub fn hostname_lit<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    let atom = choice((select! { Token::NumberLiteral(value) => value }, word_raw()));
+    // Each alternative carries the label, because chumsky only rewrites an alternative error whose
+    // position matches the start of the labelled parser. Without it, a hostname continued after
+    // `-` or `.` reports raw token expectations and completion has nothing to offer there.
+    let atom = choice((
+        select! { Token::NumberLiteral(value) => value }.labelled("hostname_label"),
+        word_raw().labelled("hostname_label"),
+    ));
     let label = atom
         .clone()
         .then(
@@ -1698,29 +1754,40 @@ pub fn hostname_lit<'src>()
         .labelled("hostname")
 }
 
-pub fn node_id<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    hostname_lit().labelled("node_id")
+pub fn cluster_node_name<'src>()
+-> impl Parser<'src, &'src [Token], ClusterNodeName, extra::Err<ParseError<'src>>> + Clone {
+    hostname_lit()
+        .try_map(|raw: String, span| {
+            ClusterNodeName::parse(raw.as_str())
+                .map_err(|err| Rich::custom(span, format!("invalid node_id: {err}")))
+        })
+        .labelled("node_id")
 }
 
-fn parse_identifier<'src>(
+/// Parse one word as the named concept `N`, validated by the name type itself.
+///
+/// `parse` is the name type's own constructor, so the grammar never restates what a name of that
+/// kind may contain; it only says which kind of name this position holds.
+fn parse_name<'src, N: Clone + 'static>(
     label: &'static str,
-) -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse: fn(&str) -> Result<N, Report<NameError>>,
+) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
     word_raw()
-        .try_map(move |raw, span| {
-            ModelIdentifier::try_from(raw.as_str())
-                .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
+        .try_map(move |raw: String, span| {
+            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
         })
         .labelled(label)
         .boxed()
 }
 
-fn parse_identifier_excluding_reserved<'src>(
+/// Parse one word as the named concept `N`, rejecting words the surrounding grammar reserves.
+fn parse_name_excluding_reserved<'src, N: Clone + 'static>(
     label: &'static str,
     reserved: &'static [Identifier],
-) -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse: fn(&str) -> Result<N, Report<NameError>>,
+) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
     word_raw()
-        .try_map(move |raw, span| {
+        .try_map(move |raw: String, span| {
             if reserved
                 .iter()
                 .any(|reserved| raw.eq_ignore_ascii_case((*reserved).into()))
@@ -1730,28 +1797,33 @@ fn parse_identifier_excluding_reserved<'src>(
                     format!("invalid {label}: '{raw}' is reserved"),
                 ));
             }
-            ModelIdentifier::try_from(raw.as_str())
-                .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
+            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
         })
         .labelled(label)
         .boxed()
 }
 
-fn parse_domain<'src>(
-    label: &'static str,
-) -> impl Parser<'src, &'src [Token], Domain, extra::Err<ParseError<'src>>> + Clone {
-    word_raw()
-        .try_map(move |raw, span| {
-            Domain::try_from(raw.as_str())
-                .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
-        })
-        .labelled(label)
-        .boxed()
+/// One lexed statement, kept together because every grammar entry point needs all three views of
+/// it: the original source for diagnostics, the spanned tokens for mapping token spans back onto
+/// that source, and the bare tokens the parser consumes.
+pub struct LexedInput {
+    pub source: String,
+    pub spanned_tokens: Vec<SpannedToken>,
+    pub tokens: Vec<Token>,
 }
 
-pub fn lex_input(
-    input: &str,
-) -> Result<(String, Vec<SpannedToken>, Vec<Token>), ParseFromSourceError> {
+/// The tokens a completion offer is derived from, or none when `source` does not lex.
+///
+/// Completion runs on text the user is still typing, so a source that does not lex is the ordinary
+/// case rather than a failure: an unterminated string or a half-written number leaves the lexer
+/// with nothing, and a caller with no tokens has no expectations to turn into suggestions. The
+/// diagnostics the lexer would produce belong to parsing, which reports them to the user; a
+/// completion offer is not the place to raise them.
+pub fn completion_tokens(source: &str) -> Option<Vec<Token>> {
+    lex_input(source).ok().map(|lexed| lexed.tokens)
+}
+
+pub fn lex_input(input: &str) -> Result<LexedInput, ParseFromSourceError> {
     let source = input.to_string();
     let spanned_tokens = lex(input).map_err(|errs| ParseFromSourceError::Lex {
         source: source.clone(),
@@ -1769,7 +1841,11 @@ pub fn lex_input(
         .map(|t| t.token.clone())
         .collect::<Vec<_>>();
 
-    Ok((source, spanned_tokens, tokens))
+    Ok(LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    })
 }
 
 pub fn into_parse_error(
@@ -1909,10 +1985,10 @@ fn format_parse_error(err: &ParseError<'_>) -> String {
                 expected.join(" | ")
             };
 
-            let found_text = found
-                .as_deref()
-                .map(format_found_token)
-                .unwrap_or_else(|| "end of input".to_string());
+            let found_text = match found.as_deref() {
+                Some(found) => format_found_token(found),
+                None => "end of input".to_string(),
+            };
 
             format!("expected {expected_text}, found {found_text}")
         }
@@ -1974,18 +2050,18 @@ fn format_found_token(token: &Token) -> String {
     }
 }
 
-pub fn render_vm_program_tokens(tokens: &[Token]) -> String {
+pub fn render_expression_tokens(tokens: &[Token]) -> String {
     let mut rendered = String::new();
     for (index, token) in tokens.iter().enumerate() {
         if index > 0 && !matches!(tokens[index - 1], Token::Dot) && !matches!(token, Token::Dot) {
             rendered.push(' ');
         }
-        rendered.push_str(&vm_program_token_to_source(token));
+        rendered.push_str(&expression_token_to_source(token));
     }
     rendered
 }
 
-fn vm_program_token_to_source(token: &Token) -> String {
+fn expression_token_to_source(token: &Token) -> String {
     match token {
         Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
         Token::Word(Word::UnknownWord(raw)) => raw.clone(),
@@ -2026,13 +2102,13 @@ fn vm_program_token_to_source(token: &Token) -> String {
     }
 }
 
-pub fn vm_program_error_message(error: crate::vm_program::ParseFromSourceError) -> String {
+pub fn expression_error_message(error: ParseFromSourceError) -> String {
     match error {
-        crate::vm_program::ParseFromSourceError::Lex { diagnostics, .. }
-        | crate::vm_program::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics
-            .first()
-            .map(|diagnostic| diagnostic.message.clone())
-            .unwrap_or_else(|| "invalid FILTER-MAP program".to_string()),
+        ParseFromSourceError::Lex { diagnostics, .. }
+        | ParseFromSourceError::Parse { diagnostics, .. } => match diagnostics.first() {
+            Some(diagnostic) => diagnostic.message.clone(),
+            None => "invalid expression".to_string(),
+        },
     }
 }
 
@@ -2041,8 +2117,8 @@ mod tests {
     use chumsky::prelude::*;
 
     use super::{
-        ParseError, current_word_prefix, format_parse_error, into_parse_error, kw, lex_input,
-        schema_ref, suggestions_from_errors, token_span_to_source_span,
+        LexedInput, ParseError, current_word_prefix, format_parse_error, into_parse_error, kw,
+        lex_input, schema_ref, suggestions_from_errors, token_span_to_source_span,
     };
     use crate::lexer::Identifier;
 
@@ -2059,7 +2135,7 @@ mod tests {
 
     #[test]
     fn suggestions_filter_by_prefix_but_keep_reference_placeholders() {
-        let (_, _, tokens) = lex_input("").expect("lex should succeed");
+        let LexedInput { tokens, .. } = lex_input("").expect("lex should succeed");
         let output = choice((
             kw(Identifier::Create),
             kw(Identifier::Client),
@@ -2076,8 +2152,11 @@ mod tests {
 
     #[test]
     fn into_parse_error_maps_parse_spans_back_to_source() {
-        let (source, spanned_tokens, tokens) =
-            lex_input("create kafka").expect("lex should succeed");
+        let LexedInput {
+            source,
+            spanned_tokens,
+            tokens,
+        } = lex_input("create kafka").expect("lex should succeed");
         let output = kw(Identifier::Create)
             .ignore_then(kw(Identifier::Json))
             .then_ignore(end())
@@ -2102,7 +2181,8 @@ mod tests {
 
     #[test]
     fn token_span_to_source_span_handles_empty_and_out_of_bounds_ranges() {
-        let (_, spanned_tokens, _) = lex_input("create json").expect("lex should succeed");
+        let LexedInput { spanned_tokens, .. } =
+            lex_input("create json").expect("lex should succeed");
 
         assert_eq!(token_span_to_source_span(0..0, &[], 42), 0..0);
         assert_eq!(

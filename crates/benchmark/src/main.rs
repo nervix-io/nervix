@@ -9,14 +9,14 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
+use meticulous::OptionExt as _;
 use nervix_benchmark::{
     AbArm, AbSummary, BenchmarkCatalog, BenchmarkDependency, BenchmarkRunFailure,
     BenchmarkSuiteReport, ContainerImplementation, Implementation, KafkaRenderInputs, LoadShape,
     LoadedBenchmark, NERVIX_METRICS_PROMETHEUS_FILE, NERVIX_METRICS_REPORT_FILE,
     NervixMetricsReport, RunSettings, provision_topics,
 };
-use nervix_client_core::{Client, ConnectOptions};
-use nervix_nspl::client_statement::parse_client_statement_sources;
+use nervix_client_core::{Client, ConnectOptions, split_query_statements};
 use nervix_test_environment::{
     ContainerMode, ContainerReadiness, DependencyEnvironment, KAFKA_ADDR, KAFKA_DOCKER_ADDR,
     KAFKA_DOCKER_NETWORK, ManagedContainerInfo, configure_process_lifecycle,
@@ -35,7 +35,7 @@ const DEFAULT_DOMAIN: &str = "default";
 const DEFAULT_USERNAME: &str = "default";
 const NERVIX_GRPC_PORT: ContainerPort = ContainerPort::Tcp(47391);
 const NERVIX_OBSERVABILITY_PORT: ContainerPort = ContainerPort::Tcp(9090);
-const NERVIX_CLUSTER_API_PORT: u16 = 47397;
+const NERVIX_INTERCONNECT_PORT: u16 = 47395;
 const NERVIX_HTTP_PORT: u16 = 8080;
 const NERVIX_HTTPS_PORT: u16 = 8443;
 const NERVIX_WEB_CONSOLE_PORT: u16 = 47420;
@@ -107,14 +107,17 @@ struct WorkloadOptions {
 
 impl WorkloadOptions {
     fn resolve_artifacts_root(&self, repository_root: &Path) -> PathBuf {
-        self.artifacts_root
-            .as_deref()
-            .map(|path| absolute_or_repository_path(repository_root, path))
-            .unwrap_or_else(|| repository_root.join(DEFAULT_ARTIFACTS_ROOT))
+        match self.artifacts_root.as_deref() {
+            Some(path) => absolute_or_repository_path(repository_root, path),
+            None => repository_root.join(DEFAULT_ARTIFACTS_ROOT),
+        }
     }
 }
 
-const DEFAULT_AB_RUNS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
+const DEFAULT_AB_RUNS: NonZeroUsize = match NonZeroUsize::new(3) {
+    Some(runs) => runs,
+    None => panic!("three is nonzero"),
+};
 
 #[derive(Debug, clap::Args)]
 struct RunAbArgs {
@@ -704,7 +707,7 @@ impl ResolvedRun {
             .unwrap_or(benchmark.definition().load.warmup_seconds);
         ensure!(partitions > 0, "partition count must be positive");
         ensure!(
-            partitions <= i32::MAX as u32,
+            i32::try_from(partitions).is_ok(),
             "partition count exceeds Kafka's supported range"
         );
         ensure!(value_bytes > 0, "value byte count must be positive");
@@ -764,6 +767,7 @@ async fn start_nervix(
     docker_network: &str,
 ) -> Result<Subject> {
     let password = format!("benchmark-{}", resolved.run_token);
+    let interconnect_tls = InterconnectTlsFiles::generate(repository_root).await?;
     match args.options.nervix_mode {
         NervixMode::Local => {
             let server_binary = absolute_or_repository_path(
@@ -790,7 +794,7 @@ async fn start_nervix(
                 .env("NERVIX_INIT_DEFAULT_USER_PASSWORD", &password)
                 .env("NERVIX_DB_PATH", state_directory.join("db"))
                 .env("RUST_LOG", "info")
-                .args(ports.server_arguments(&resolved.run_token))
+                .args(ports.server_arguments(&interconnect_tls))
                 .stdout(Stdio::from(log))
                 .stderr(Stdio::from(stderr))
                 .kill_on_drop(true);
@@ -817,9 +821,9 @@ async fn start_nervix(
             let server_args = vec![
                 "/usr/local/bin/nervix-server".to_string(),
                 "--node-id".to_string(),
-                format!("bench-node-{}", resolved.run_token),
+                "node-1".to_string(),
                 "--cluster-id".to_string(),
-                format!("bench-cluster-{}", resolved.run_token),
+                "default".to_string(),
                 "--addr".to_string(),
                 "0.0.0.0:47391".to_string(),
                 "--http-listen-addr".to_string(),
@@ -830,15 +834,22 @@ async fn start_nervix(
                 "0.0.0.0:9090".to_string(),
                 "--web-console-listen-addr".to_string(),
                 format!("0.0.0.0:{NERVIX_WEB_CONSOLE_PORT}"),
-                "--cluster-api-listen-addr".to_string(),
-                format!("0.0.0.0:{NERVIX_CLUSTER_API_PORT}"),
-                "--cluster-api-advertise-addr".to_string(),
-                format!("127.0.0.1:{NERVIX_CLUSTER_API_PORT}"),
+                "--interconnect-listen-addr".to_string(),
+                format!("0.0.0.0:{NERVIX_INTERCONNECT_PORT}"),
+                "--interconnect-advertise-addr".to_string(),
+                format!("127.0.0.1:{NERVIX_INTERCONNECT_PORT}"),
+                "--interconnect-tls-ca".to_string(),
+                "/tmp/nervix-interconnect-ca.pem".to_string(),
+                "--interconnect-tls-cert".to_string(),
+                "/tmp/nervix-interconnect-node.pem".to_string(),
+                "--interconnect-tls-key".to_string(),
+                "/tmp/nervix-interconnect-node-key.pem".to_string(),
                 "--allow-bootstrap".to_string(),
             ];
             let timeout = resolved.wait_timeout;
             let network = docker_network.to_string();
             let password_for_container = password.clone();
+            let tls_for_container = interconnect_tls.clone();
             let info = environment
                 .start_generic(
                     "benchmark-subject",
@@ -855,6 +866,18 @@ async fn start_nervix(
                                     .with_expected_status_code(200_u16),
                             ))
                             .with_network(network.clone())
+                            .with_copy_to(
+                                "/tmp/nervix-interconnect-ca.pem",
+                                tls_for_container.ca.clone(),
+                            )
+                            .with_copy_to(
+                                "/tmp/nervix-interconnect-node.pem",
+                                tls_for_container.certificate.clone(),
+                            )
+                            .with_copy_to(
+                                "/tmp/nervix-interconnect-node-key.pem",
+                                tls_for_container.private_key.clone(),
+                            )
                             .with_env_var(
                                 "NERVIX_INIT_DEFAULT_USER_PASSWORD",
                                 password_for_container.clone(),
@@ -1026,15 +1049,15 @@ impl Subject {
         graph: &str,
         output_path: &Path,
     ) -> Result<()> {
-        let statements = parse_client_statement_sources(graph)
+        let statements = split_query_statements(graph)
             .map_err(|error| anyhow!("failed to split the benchmark graph: {error}"))?;
         ensure!(
             !statements.is_empty(),
             "benchmark graph contains no statements"
         );
         let mut transcript = String::new();
-        for statement in &statements {
-            let source = graph[statement.span.clone()].trim();
+        for statement in statements {
+            let source = statement.trim();
             let outcome = client
                 .execute(source)
                 .await
@@ -1247,11 +1270,21 @@ async fn run_load_driver(
     }
     fs::write(&go_file, b"go\n")?;
 
+    const COMPLETION_GRACE_SECONDS: u64 = 30;
+    const SECONDS_FIT: &str =
+        "a benchmark run is configured in seconds, far below the u64 second range";
+
+    let waited = resolved
+        .wait_timeout
+        .as_secs()
+        .checked_mul(4)
+        .assured(SECONDS_FIT);
+    let run = waited
+        .checked_add(resolved.duration_seconds)
+        .assured(SECONDS_FIT);
     let completion_timeout = Duration::from_secs(
-        resolved
-            .duration_seconds
-            .saturating_add(resolved.wait_timeout.as_secs().saturating_mul(4))
-            .saturating_add(30),
+        run.checked_add(COMPLETION_GRACE_SECONDS)
+            .assured(SECONDS_FIT),
     );
     let completion_deadline = tokio::time::Instant::now() + completion_timeout;
     let status = loop {
@@ -1279,7 +1312,7 @@ struct LocalPorts {
     https: u16,
     observability: u16,
     web_console: u16,
-    cluster_api: u16,
+    interconnect: u16,
 }
 
 impl LocalPorts {
@@ -1291,16 +1324,16 @@ impl LocalPorts {
             https: ports[2],
             observability: ports[3],
             web_console: ports[4],
-            cluster_api: ports[5],
+            interconnect: ports[5],
         })
     }
 
-    fn server_arguments(&self, token: &str) -> Vec<String> {
+    fn server_arguments(&self, tls: &InterconnectTlsFiles) -> Vec<String> {
         vec![
             "--node-id".to_string(),
-            format!("bench-node-{token}"),
+            "node-1".to_string(),
             "--cluster-id".to_string(),
-            format!("bench-cluster-{token}"),
+            "default".to_string(),
             "--addr".to_string(),
             format!("127.0.0.1:{}", self.grpc),
             "--http-listen-addr".to_string(),
@@ -1311,12 +1344,46 @@ impl LocalPorts {
             format!("127.0.0.1:{}", self.observability),
             "--web-console-listen-addr".to_string(),
             format!("127.0.0.1:{}", self.web_console),
-            "--cluster-api-listen-addr".to_string(),
-            format!("127.0.0.1:{}", self.cluster_api),
-            "--cluster-api-advertise-addr".to_string(),
-            format!("127.0.0.1:{}", self.cluster_api),
+            "--interconnect-listen-addr".to_string(),
+            format!("127.0.0.1:{}", self.interconnect),
+            "--interconnect-advertise-addr".to_string(),
+            format!("127.0.0.1:{}", self.interconnect),
+            "--interconnect-tls-ca".to_string(),
+            tls.ca.display().to_string(),
+            "--interconnect-tls-cert".to_string(),
+            tls.certificate.display().to_string(),
+            "--interconnect-tls-key".to_string(),
+            tls.private_key.display().to_string(),
             "--allow-bootstrap".to_string(),
         ]
+    }
+}
+
+#[derive(Clone)]
+struct InterconnectTlsFiles {
+    ca: PathBuf,
+    certificate: PathBuf,
+    private_key: PathBuf,
+}
+
+impl InterconnectTlsFiles {
+    async fn generate(repository_root: &Path) -> Result<Self> {
+        let status = Command::new("bash")
+            .arg(repository_root.join("scripts/generate_dev_tls.sh"))
+            .current_dir(repository_root)
+            .status()
+            .await
+            .context("failed to generate development interconnect TLS identity")?;
+        ensure!(
+            status.success(),
+            "development interconnect TLS generation failed with {status}"
+        );
+        let directory = repository_root.join("tls/dev");
+        Ok(Self {
+            ca: directory.join("ca.pem"),
+            certificate: directory.join("node.pem"),
+            private_key: directory.join("node-key.pem"),
+        })
     }
 }
 

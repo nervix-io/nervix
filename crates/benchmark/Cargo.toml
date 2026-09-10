@@ -1,5 +1,6 @@
 [package]
 default-run = "nervix-benchmark"
+description = "Benchmark harness that runs Nervix and comparable systems under a shared load definition and compares the results"
 edition = "2024"
 license-file = "../../LICENSE.md"
 name = "nervix-benchmark"
@@ -11,10 +12,14 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+arch-into = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 humantime = { workspace = true }
+meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
-nervix-nspl = { workspace = true }
+nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
 nervix-test-environment = { workspace = true }
 ordered-float = { workspace = true }
 parking_lot = { workspace = true }

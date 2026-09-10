@@ -83,7 +83,7 @@ Feature: Entity-pause model alterations
       | 3            |
 
   @entity_pause_drain_timeout_rollback
-  Scenario Outline: A timed-out entity drain leaves the old junction model active
+  Scenario Outline: A timed-out entity drain preserves the junction model
     Given entity gate deadline is configured as "250ms"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -131,6 +131,26 @@ Feature: Entity-pause model alterations
       """
       {"seq":3}
       """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
+      """
+      {"seq":4}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
+      """
+      {"seq":5}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
+      """
+      {"seq":6}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
+      """
+      {"seq":7}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
+      """
+      {"seq":8}
+      """
     Then within "5s" DESCRIBE EMITTER "blocked_sink" on the leader node contains
       """
       transient error: fault injector stalled emitter publish
@@ -153,6 +173,11 @@ Feature: Entity-pause model alterations
       "seq":1
       "seq":2
       "seq":3
+      "seq":4
+      "seq":5
+      "seq":6
+      "seq":7
+      "seq":8
       """
     When these NSPL commands are executed on the leader node
       """

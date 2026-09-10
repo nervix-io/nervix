@@ -1,7 +1,10 @@
+pub(in crate::runtime) use mysql_async::Pool as MySqlPool;
 use mysql_async::{
-    Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Params as MySqlParams, Pool as MySqlPool,
+    Conn as MySqlPooledConn, Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder,
+    Params as MySqlParams, PoolConstraints as MySqlPoolConstraints, PoolOpts as MySqlPoolOpts,
     SslOpts as MySqlSslOpts, Value as MySqlValue, prelude::Queryable as MySqlQueryable,
 };
+use nervix_models::TableName;
 
 use super::*;
 
@@ -10,16 +13,44 @@ pub(in crate::runtime) struct MySqlEmitter {
     program: Option<CompiledSqlValuesProgram>,
 }
 
+/// This emitter's interest in the node's shared MySQL client.
+///
+/// The pool is the client's, not the emitter's: holding the lease keeps it open for as long as
+/// this emitter can write, and every other local emitter on the same client borrows from it too.
 struct MySqlEmitterClient {
-    pool: MySqlPool,
+    lease: SharedClientLease,
+    /// The client borrowed from, named in this emitter's diagnostics and in its pool wait.
+    client: ClientName,
+    runtime: Runtime,
+    /// This emitter, as the key its pool wait is recorded under for `DESCRIBE` to read.
+    waiter: DomainNodeRef,
+}
+
+impl MySqlEmitterClient {
+    /// Borrow a connection for one insert, reporting the wait until the pool hands one over.
+    ///
+    /// The borrow lasts for the insert and no longer: the connection returns to the shared pool
+    /// when the returned guard is dropped, so a flush between inserts holds none.
+    async fn connection(&self) -> Result<MySqlPooledConn, Report<SharedClientError>> {
+        let pool = self.lease.client().mysql(&self.client)?;
+        let waiting = self.runtime.pool_wait_guard(&self.waiter, &self.client);
+        let conn = pool.get_conn().await.map_err(|source| {
+            Report::new(SharedClientError::Open {
+                client: self.client.as_str().to_string(),
+            })
+            .attach_printable(source.to_string())
+        });
+        drop(waiting);
+        conn
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 enum MySqlWriteError {
     #[error("invalid MySQL VALUES: {0}")]
     InvalidValues(String),
-    #[error("failed to connect to MySQL: {0}")]
-    Connect(mysql_async::Error),
+    #[error("{0}")]
+    Pool(String),
     #[error("MySQL insert failed: {0}")]
     Execute(mysql_async::Error),
 }
@@ -37,15 +68,13 @@ impl MySqlWriteError {
             Self::Execute(mysql_async::Error::Server(error)) => Some(error),
             _ => None,
         };
-        server_error.map_or_else(
-            || "MySQL rejected record".to_string(),
-            |error| {
-                format!(
-                    "MySQL rejected record with SQLSTATE {} and code {}",
-                    error.state, error.code
-                )
-            },
-        )
+        match server_error {
+            Some(error) => format!(
+                "MySQL rejected record with SQLSTATE {} and code {}",
+                error.state, error.code
+            ),
+            None => "MySQL rejected record".to_string(),
+        }
     }
 
     fn into_report(self) -> Report<EmitterRuntimeError> {
@@ -66,28 +95,150 @@ impl MySqlWriteError {
     }
 }
 
+/// How often an idle MySQL pool is topped back up to its declared minimum.
+const MYSQL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The node's shared MySQL pool, with the task that keeps it at its declared minimum.
+pub(in crate::runtime) struct MySqlSharedPool {
+    pool: MySqlPool,
+    /// Aborted when the shared client closes, which is what stops maintenance with the pool it
+    /// maintains rather than leaving it reconnecting to a database nothing is writing to.
+    _maintenance: AbortOnDropHandle<()>,
+}
+
+impl MySqlSharedPool {
+    pub(in crate::runtime) fn pool(&self) -> &MySqlPool {
+        &self.pool
+    }
+}
+
+/// Keep `pool` at `minimum` established connections without waiting for traffic.
+///
+/// `mysql_async` treats its minimum as a retention floor: it keeps that many idle connections once
+/// they have been returned, but never opens one. A client whose emitters are idle would therefore
+/// sit below its declared minimum indefinitely, so the shortfall is opened here and released
+/// straight back. Only the shortfall is opened, so this neither exceeds the maximum nor takes
+/// capacity a writer already holds.
+async fn maintain_mysql_minimum(pool: MySqlPool, minimum: usize) {
+    loop {
+        tokio::task::consume_budget().await;
+        tokio::time::sleep(MYSQL_MAINTENANCE_INTERVAL).await;
+        let established = pool.metrics().connection_count.load(Ordering::Relaxed);
+        let Some(shortfall) = minimum.checked_sub(established) else {
+            continue;
+        };
+        // Held together and released together: taking them one at a time would let the pool hand
+        // the same connection back for the next iteration and never reach the minimum.
+        let mut opened = Vec::with_capacity(shortfall);
+        for _ in 0..shortfall {
+            match pool.get_conn().await {
+                Ok(conn) => opened.push(conn),
+                // A database that cannot supply the minimum is a client infrastructure condition
+                // reported by whoever tries to write; maintenance simply retries on the next tick.
+                Err(_) => break,
+            }
+        }
+        drop(opened);
+    }
+}
+
+/// Open the node's shared MySQL pool for one named client, sized by its declared bounds.
+///
+/// The bounds are the driver's own constraints, so the ceiling is enforced by the pool that hands
+/// out connections rather than by any emitter counting its own. Initialization validates one
+/// authenticated connection before the first user becomes operational, and returns it immediately.
+pub(in crate::runtime) async fn open_mysql_pool(
+    config: &[nervix_models::ClientConfigEntry],
+    bounds: ClientPoolBounds,
+) -> Result<MySqlSharedPool, Report<OpenClientError>> {
+    let Some(addr) = optional_client_config_value(config, "addr") else {
+        return Err(Report::new(OpenClientError::MissingConfig {
+            transport: "MySQL",
+            key: "addr",
+        }));
+    };
+    let opts = MySqlOpts::from_url(addr).map_err(|source| {
+        Report::new(OpenClientError::InvalidConfig {
+            transport: "MySQL",
+            reason: format!("failed to parse client addr: {source}"),
+        })
+    })?;
+    let builder = if let Some(ca_file) = optional_client_config_value(config, "tls_ca_file") {
+        let ssl_opts = MySqlSslOpts::default()
+            .with_root_certs(vec![PathBuf::from(ca_file).into()])
+            .with_disable_built_in_roots(true);
+        MySqlOptsBuilder::from_opts(opts).ssl_opts(Some(ssl_opts))
+    } else {
+        MySqlOptsBuilder::from_opts(opts)
+    };
+    let invalid = |reason: String| {
+        Report::new(OpenClientError::InvalidConfig {
+            transport: "MySQL",
+            reason,
+        })
+    };
+    let minimum = usize::try_from(bounds.minimum())
+        .map_err(|_| invalid("POOL SIZE MIN exceeds this platform's pointer width".to_string()))?;
+    let maximum = usize::try_from(bounds.maximum().get())
+        .map_err(|_| invalid("POOL SIZE MAX exceeds this platform's pointer width".to_string()))?;
+    let constraints = MySqlPoolConstraints::new(minimum, maximum).ok_or_else(|| {
+        invalid(format!(
+            "driver rejected pool bounds MIN {minimum} MAX {maximum}"
+        ))
+    })?;
+    let pool =
+        MySqlPool::new(builder.pool_opts(MySqlPoolOpts::default().with_constraints(constraints)));
+    let mut conn = pool.get_conn().await.map_err(|source| {
+        Report::new(OpenClientError::Connect {
+            transport: "MySQL",
+            reason: source.to_string(),
+        })
+    })?;
+    conn.query_drop("SELECT 1").await.map_err(|source| {
+        Report::new(OpenClientError::Connect {
+            transport: "MySQL",
+            reason: format!("failed to validate connection: {source}"),
+        })
+    })?;
+    drop(conn);
+    let maintenance =
+        AbortOnDropHandle::new(tokio::spawn(maintain_mysql_minimum(pool.clone(), minimum)));
+    Ok(MySqlSharedPool {
+        pool,
+        _maintenance: maintenance,
+    })
+}
+
 impl MySqlEmitter {
     fn is_record_server_error(state: &str, code: u16) -> bool {
         state.starts_with("22") || state.starts_with("23") || matches!(code, 1153 | 1366)
     }
 
     pub(in crate::runtime) async fn new(
+        model: &Model,
         client: &nervix_models::CreateClientMySql,
         resolved: Option<&ResolvedClientConfig>,
         context: &EmitterSinkContext,
         values: &[MySqlValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let client = match Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
-        .await
+        let client = match context
+            .runtime
+            .lease_shared_client(&context.domain, &client.name, model, resolved)
+            .await
         {
-            Ok(client) => Some(client),
+            Ok(lease) => Some(MySqlEmitterClient {
+                lease,
+                client: client.name.clone(),
+                runtime: context.runtime.clone(),
+                waiter: DomainNodeRef::node_in(
+                    context.domain.clone(),
+                    ModelKind::Emitter,
+                    context.emitter.clone(),
+                ),
+            }),
             Err(error) => {
-                context.report_init_error("mysql", &emitter_error_message(&error));
+                context.report_init_error("mysql", &error.to_string());
                 None
             }
         };
@@ -100,7 +251,7 @@ impl MySqlEmitter {
         ) {
             Ok(program) => Some(program),
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(error.to_string()));
+                context.runtime.events().report_error(error.to_string());
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),
@@ -111,34 +262,6 @@ impl MySqlEmitter {
             }
         };
         Self { client, program }
-    }
-
-    async fn client_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<MySqlEmitterClient> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing MySQL client config key 'addr'".to_string()
-        })?;
-        let opts = MySqlOpts::from_url(&addr).map_err(|source| {
-            emitter_config_error(format!("failed to parse MySQL client addr: {source}"))
-        })?;
-        let opts = if let Some(ca_file) = optional_client_config_value(config, "tls_ca_file") {
-            let ssl_opts = MySqlSslOpts::default()
-                .with_root_certs(vec![PathBuf::from(ca_file).into()])
-                .with_disable_built_in_roots(true);
-            MySqlOptsBuilder::from_opts(opts).ssl_opts(Some(ssl_opts))
-        } else {
-            MySqlOptsBuilder::from_opts(opts)
-        };
-        let pool = MySqlPool::new(opts);
-        let mut conn = pool.get_conn().await.map_err(|source| {
-            emitter_init_error(format!("failed to connect to MySQL: {source}"))
-        })?;
-        conn.query_drop("SELECT 1").await.map_err(|source| {
-            emitter_init_error(format!("failed to validate MySQL connection: {source}"))
-        })?;
-        drop(conn);
-        Ok(MySqlEmitterClient { pool })
     }
 
     fn value(value: &serde_json::Value) -> MySqlValue {
@@ -169,7 +292,7 @@ impl MySqlEmitter {
 
     async fn publish_rows(
         client: &MySqlEmitterClient,
-        table: &Identifier,
+        table: &TableName,
         mappings: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
         rows: &[&[serde_json::Value]],
@@ -216,10 +339,9 @@ impl MySqlEmitter {
             params.extend(row.iter().map(Self::value));
         }
         let mut conn = client
-            .pool
-            .get_conn()
+            .connection()
             .await
-            .map_err(MySqlWriteError::Connect)?;
+            .map_err(|error| MySqlWriteError::Pool(error.to_string()))?;
         conn.exec_drop(sql, MySqlParams::Positional(params))
             .await
             .map_err(MySqlWriteError::Execute)?;
@@ -261,7 +383,7 @@ impl MySqlEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
         batch: &RelayRecordBatch,
@@ -315,7 +437,10 @@ impl MySqlEmitter {
             {
                 Ok(_) => {
                     for row in chunk {
-                        outcome.deliver((batch_index, *row));
+                        outcome.deliver(BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        });
                     }
                 }
                 Err(error) if error.is_record_error() && chunk.len() > 1 => {
@@ -341,10 +466,17 @@ impl MySqlEmitter {
                         )
                         .await
                         {
-                            Ok(_) => outcome.deliver((batch_index, *row)),
-                            Err(error) if error.is_record_error() => {
-                                outcome.reject((batch_index, *row), error.record_reason())
-                            }
+                            Ok(_) => outcome.deliver(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            }),
+                            Err(error) if error.is_record_error() => outcome.reject(
+                                BrokerRecordPosition {
+                                    batch_index,
+                                    row_index: *row,
+                                },
+                                error.record_reason(),
+                            ),
                             Err(error) => {
                                 outcome.fail(error.into_report());
                                 return outcome;
@@ -354,7 +486,13 @@ impl MySqlEmitter {
                 }
                 Err(error) if error.is_record_error() => {
                     if let Some(row) = chunk.first() {
-                        outcome.reject((batch_index, *row), error.record_reason());
+                        outcome.reject(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.record_reason(),
+                        );
                     }
                 }
                 Err(error) => {
@@ -379,15 +517,19 @@ impl MySqlEmitter {
         indices
             .iter()
             .map(|row| {
-                rows.get(*row)
-                    .and_then(|values| values.as_ref().ok())
-                    .map(Vec::as_slice)
-                    .ok_or_else(|| {
-                        MySqlWriteError::InvalidValues(format!(
-                            "pending row {row} has no mapped VALUES in batch with {} rows",
-                            rows.len()
-                        ))
-                    })
+                let Some(values) = rows.get(*row) else {
+                    return Err(MySqlWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                let Ok(values) = values else {
+                    return Err(MySqlWriteError::InvalidValues(format!(
+                        "pending row {row} has no mapped VALUES in batch with {} rows",
+                        rows.len()
+                    )));
+                };
+                Ok(values.as_slice())
             })
             .collect()
     }

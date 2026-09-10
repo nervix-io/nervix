@@ -46,6 +46,7 @@ Feature: Ingestor branch consistency
 
       CREATE CLIENT redis_main
         TYPE REDIS
+        POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
         }; CREATE INGESTOR mqtt_notifications
