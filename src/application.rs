@@ -3611,11 +3611,6 @@ struct BasicAuthCredentials {
     password: String,
 }
 
-struct ResolvedDomainStart {
-    concrete_start: DomainStartPoint,
-    clock: DomainClockState,
-}
-
 #[derive(Debug, Error)]
 enum GrpcAuthenticationError {
     #[error("authentication required")]
@@ -3636,6 +3631,11 @@ enum ActiveDomainError {
     Invalid,
     #[error("domain '{domain}' does not exist")]
     NotFound { domain: DomainName },
+}
+
+struct ResolvedDomainStart {
+    concrete_start: DomainStartPoint,
+    clock: DomainClockState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12157,7 +12157,7 @@ impl SessionServiceImpl {
         domain: &DomainState,
         requested_start: &DomainStartPoint,
     ) -> Result<ResolvedDomainStart, Report<TimestampError>> {
-        let mut wall_started_at = current_timestamp();
+        let wall_started_at = current_timestamp();
         let (mut logical_start, time_rate) = requested_start.resolve_at(wall_started_at);
         if let DomainPace::Paced = domain.config.pace
             && let DomainStartPoint::Resume = requested_start
@@ -12166,15 +12166,17 @@ impl SessionServiceImpl {
             logical_start = resume_at;
         }
         #[cfg(feature = "testing")]
-        if let DomainPace::Paced = domain.config.pace
+        let wall_started_at = if let DomainPace::Paced = domain.config.pace
             && let DomainStartPoint::Now { .. } | DomainStartPoint::At { .. } = requested_start
             && let Some(initial_elapsed) = self
                 .inner
                 .runtime
                 .take_domain_clock_initial_elapsed(domain_id)
         {
-            wall_started_at = wall_started_at.checked_sub(initial_elapsed)?;
-        }
+            wall_started_at.checked_sub(initial_elapsed)?
+        } else {
+            wall_started_at
+        };
         let concrete_start = match requested_start {
             DomainStartPoint::Resume => DomainStartPoint::Resume,
             DomainStartPoint::Now { .. } => DomainStartPoint::At {
@@ -17991,9 +17993,11 @@ async fn run_domain_clock_authority_reconciliation(
         }
         tokio::select! {
             _ = shutdown.cancelled() => break,
-            changed = topology_changes.changed() => changed.assured(
-                "the consensus handle retains its topology sender for the server lifetime",
-            ),
+            open = topology_changes.changed() => {
+                if !open {
+                    break;
+                }
+            }
             changed = domain_changes.changed() => changed.assured(
                 "the consensus store retains its domain sender for the server lifetime",
             ),
@@ -18249,7 +18253,8 @@ async fn deliver_domain_clock_progress(
     }
 }
 
-const DEFAULT_TRACE_FILTER: &str = "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
+const DEFAULT_TRACE_FILTER: &str =
+    "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 

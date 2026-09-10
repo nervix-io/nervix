@@ -83,8 +83,8 @@ use uuid::Uuid;
 
 use crate::common::{
     cluster::{
-        BrokerObserver, Cluster, InterconnectCredentialFault, StallableTcpProxy,
-        DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, TEST_AUTH_USERNAME, TestClusterConfig,
+        BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
+        InterconnectCredentialFault, StallableTcpProxy, TEST_AUTH_USERNAME, TestClusterConfig,
         TestSession, WebsocketExchangeAction, client_connect_options,
     },
     dependencies::{
@@ -314,10 +314,11 @@ impl ScenarioWorld {
         let node_id = expand_placeholders(self, node_id);
         tokio::time::timeout(
             duration,
-            self.fault_injection.wait_for_domain_clock_progress_pause_on(
-                &domain,
-                &crate::common::cluster::node_name(&node_id),
-            ),
+            self.fault_injection
+                .wait_for_domain_clock_progress_pause_on(
+                    &domain,
+                    &crate::common::cluster::node_name(&node_id),
+                ),
         )
         .await
         .unwrap_or_else(|error| {

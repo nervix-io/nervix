@@ -40,9 +40,10 @@ use openraft::{
     BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
     Vote,
     error::{ClientWriteError, RPCError, RaftError, StreamingError},
+    metrics::RaftServerMetrics,
     network::{RPCOption, RaftNetworkV2},
     type_config::{
-        alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf},
+        alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf, WatchReceiverOf},
         async_runtime::watch::WatchReceiver,
     },
 };
@@ -808,6 +809,21 @@ pub struct Observer {
     inner: Arc<ConsensusState>,
 }
 
+/// Retained Raft leadership and membership observation.
+pub struct RaftTopologyWatcher {
+    state: WatchReceiverOf<TypeConfig, RaftServerMetrics<TypeConfig>>,
+}
+
+impl RaftTopologyWatcher {
+    /// Wait for a server-state change, returning `false` after the Raft core has stopped.
+    pub async fn changed(&mut self) -> bool {
+        match self.state.changed().await {
+            Ok(()) => true,
+            Err(_) => false,
+        }
+    }
+}
+
 /// Proposes replicated commands and includes read-only observation.
 ///
 /// This capability authorizes proposal attempts. Leadership may change after an earlier
@@ -891,7 +907,6 @@ struct ConsensusState {
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
-    topology_changes: watch::Sender<()>,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -1026,14 +1041,11 @@ impl Consensus {
         .await
         .map_err(|_| ConsensusError::Startup)?;
         let events = ConsensusEvents::new();
-        let (topology_changes, _) = watch::channel(());
         let metrics_raft = raft.clone();
         let metrics_events = events.clone();
-        let metrics_topology_changes = topology_changes.clone();
         let metrics_task = tokio::spawn(async move {
             let mut rx = metrics_raft.metrics();
             let mut last_transition = None;
-            let mut last_topology = None;
             loop {
                 tokio::task::consume_budget().await;
                 if rx.changed().await.is_err() {
@@ -1064,18 +1076,6 @@ impl Consensus {
                     metrics_events.report(summary);
                     last_transition = Some(transition);
                 }
-                let topology = RaftTopology {
-                    leader: metrics.current_leader,
-                    voters: metrics
-                        .membership_config
-                        .membership()
-                        .voter_ids()
-                        .collect(),
-                };
-                if last_topology.as_ref() != Some(&topology) {
-                    metrics_topology_changes.send_replace(());
-                    last_topology = Some(topology);
-                }
             }
         });
 
@@ -1090,7 +1090,6 @@ impl Consensus {
                 peer_health: RwLock::new(BTreeMap::new()),
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
-                topology_changes,
                 metrics_task: Mutex::new(Some(metrics_task)),
             }),
         };
@@ -1307,10 +1306,11 @@ impl Observer {
         self.inner.store.inner.transaction_tx.subscribe()
     }
 
-    /// Observe retained leadership and voter-set changes without coupling callers to OpenRaft's
-    /// complete metrics stream.
-    pub fn subscribe_topology(&self) -> watch::Receiver<()> {
-        self.inner.topology_changes.subscribe()
+    /// Observe retained leadership and membership changes without exposing OpenRaft to callers.
+    pub fn subscribe_topology(&self) -> RaftTopologyWatcher {
+        RaftTopologyWatcher {
+            state: self.inner.raft.server_metrics(),
+        }
     }
 
     pub async fn current_schedule(&self) -> ClusterSchedule {
@@ -3031,13 +3031,6 @@ struct RaftTransition {
     state: String,
     term: u64,
     leader: Option<ClusterNodeName>,
-}
-
-/// The Raft state whose change can alter a control-plane decision about eligible cluster owners.
-#[derive(PartialEq, Eq)]
-struct RaftTopology {
-    leader: Option<ClusterNodeName>,
-    voters: BTreeSet<ClusterNodeName>,
 }
 
 fn read_key<T: DeserializeOwned>(keyspace: &Keyspace, key: &[u8]) -> io::Result<Option<T>> {

@@ -863,7 +863,9 @@ impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
 
     const NAME: &'static str = "subscription_interest_visibility";
     const CLASS: PoolClass = PoolClass::Management;
-    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
+    // Gossip convergence can keep this request open, so it must not occupy capacity reserved for
+    // short liveness probes.
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
     // This request spans gossip convergence during membership changes. Target departure and node
     // shutdown cancel it independently, so the deadline is only the bound for a live but
     // non-converging cluster.
@@ -1997,6 +1999,16 @@ mod tests {
         assert_eq!(
             liveness.verified("the liveness response was checked by the assertion above"),
             LivenessResponse
+        );
+    }
+
+    #[test]
+    fn subscription_interest_visibility_uses_shared_request_capacity() {
+        assert_eq!(
+            <SubscriptionInterestVisibilityRequest as InterconnectRequest>::SUBQUOTA,
+            RequestSubquota::Shared,
+            "a request that can remain open for gossip convergence must not reserve liveness \
+             capacity",
         );
     }
 

@@ -160,7 +160,7 @@ impl InterconnectStateWatcher {
     ) -> impl std::future::Future<Output = ()> + '_ {
         let next_unavailability = {
             self.state
-                .borrow_and_update()
+                .borrow()
                 .next_unavailability_deadline(self.unavailability_timeout, Instant::now())
         };
         async move {
@@ -197,8 +197,7 @@ impl ClusterStateWatcher {
             live_node_states,
             interconnect_state,
         } = self;
-        let interconnect_change =
-            interconnect_state.wait_for_change_or_next_unavailability();
+        let interconnect_change = interconnect_state.wait_for_change_or_next_unavailability();
         async move {
             tokio::select! {
                 changed = live_node_states.changed() => changed.assured(
@@ -1279,7 +1278,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn interconnect_watcher_consumes_an_existing_change_before_waiting_for_deadline() {
+    async fn interconnect_watcher_reports_an_existing_change_once_before_waiting_for_deadline() {
         let unavailability_timeout = Duration::from_secs(10);
         let node = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let (state, receiver) = watch::channel(InterconnectStateSnapshot::default());
@@ -1300,7 +1299,17 @@ mod tests {
 
         tokio::select! {
             biased;
-            _ = &mut waiting => panic!("an existing watch update must not cause a busy wake"),
+            _ = &mut waiting => {}
+            () = tokio::task::yield_now() => {
+                panic!("an unseen watch update must wake the waiter once")
+            }
+        }
+        drop(waiting);
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+
+        tokio::select! {
+            biased;
+            _ = &mut waiting => panic!("a reported watch update must not cause a busy wake"),
             () = tokio::task::yield_now() => {}
         }
         tokio::time::advance(unavailability_timeout).await;
@@ -1364,6 +1373,7 @@ mod tests {
                 unavailability_timeout,
             },
         };
+        watcher.wait_for_change_or_next_unavailability().await;
         let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
 
         tokio::time::advance(before_deadline).await;

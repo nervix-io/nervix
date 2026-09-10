@@ -107,7 +107,7 @@ impl IngestionProbe {
             tokio::task::consume_budget().await;
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .assured("clock probe responds within five seconds");
+                .assured("the clock probe responds within the public probe timeout");
             let event = self
                 .observation(world, remaining)
                 .await
@@ -178,7 +178,7 @@ async fn retained_admission(
     let period_nanos = u128::from(period.as_nanos());
     let upper_position = DomainAdmissionWindow::RETAINED_POSITION_COUNT
         .checked_add(1)
-        .assured("the retained position count is far below u64::MAX");
+        .assured("the retained position count is far below u32::MAX");
     let upper_offset = u128::from(upper_position)
         .checked_mul(period_nanos)
         .assured("the fixture period and retained history fit u128");

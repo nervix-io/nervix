@@ -108,6 +108,7 @@ const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(40);
 const TEST_NODE_UNAVAILABILITY_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_TEST_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
     match TEST_NODE_UNAVAILABILITY_TIMEOUT.checked_add(STATUS_TIMEOUT) {
         Some(timeout) => timeout,
@@ -119,13 +120,22 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
     branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
-/// Consensus must persist queued work and the cluster, interconnect, and database owners must
-/// finish after the bounded application and runtime drains. Give those event-driven finalization
-/// phases the same watchdog allowance as opening the node during startup.
-const SHUTDOWN_FINALIZATION_GRACE: Duration = STARTUP_TIMEOUT;
+const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
+    match DEFAULT_TEST_DRAIN_TIMEOUT.checked_add(DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT) {
+        Some(timeout) => timeout,
+        None => panic!("the default node shutdown phase budgets must fit in Duration"),
+    };
+/// Runtime shutdown waits through a data-dependent number of task deadlines sequentially, and
+/// consensus and database finalization are event-driven. This is therefore an outer liveness
+/// policy, not an upper bound on valid shutdown. Configured bounded phases may raise its floor.
+const NODE_SHUTDOWN_LIVENESS_WATCHDOG: Duration = Duration::from_secs(5 * 60);
 const _: () = assert!(
     DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos() > DEFAULT_DOMAIN_DRAIN_TIMEOUT.as_nanos(),
     "the runtime branch stop budget must include its post-drain grace"
+);
+const _: () = assert!(
+    NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos() >= DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR.as_nanos(),
+    "the node shutdown watchdog must cover the default bounded shutdown phases"
 );
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const NODE_START_ATTEMPTS: usize = 8;
@@ -602,7 +612,7 @@ impl Default for TestClusterConfig {
             transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
-            drain_timeout: Duration::from_secs(30),
+            drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             memory_pressure: None,
             temp_dir: None,
             dependencies: DependencyEndpoints::default(),
@@ -2195,7 +2205,7 @@ impl NodeHandle {
         }
     }
 
-    fn shutdown_timeout(&self) -> io::Result<Duration> {
+    fn shutdown_watchdog_timeout(&self) -> io::Result<Duration> {
         let application_drain_timeout = if self.config.graceful_shutdown_drain {
             self.config.drain_timeout
         } else {
@@ -2205,19 +2215,19 @@ impl NodeHandle {
             .fault_injection
             .domain_drain_timeout()
             .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
-        application_drain_timeout
+        let configured_phase_floor = application_drain_timeout
             .checked_add(branch_task_stop_timeout(domain_drain_timeout))
-            .and_then(|timeout| timeout.checked_add(SHUTDOWN_FINALIZATION_GRACE))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "configured node shutdown phase budgets exceed Duration::MAX",
+                    "configured bounded node shutdown phases exceed Duration::MAX",
                 )
-            })
+            })?;
+        Ok(NODE_SHUTDOWN_LIVENESS_WATCHDOG.max(configured_phase_floor))
     }
 
     async fn wait_stopped(&mut self) -> io::Result<()> {
-        let shutdown_timeout = self.shutdown_timeout()?;
+        let shutdown_timeout = self.shutdown_watchdog_timeout()?;
         let Some(mut task) = self.task.take() else {
             return Ok(());
         };

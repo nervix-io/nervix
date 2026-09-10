@@ -38,8 +38,7 @@ impl DomainAdmissionWindow {
         let period_nanos = u128::from(period.as_nanos());
         let frontier = elapsed.as_nanos() / period_nanos;
         let retained_position_count = u128::from(Self::RETAINED_POSITION_COUNT);
-        let retained_preceding_position_count =
-            u128::from(Self::RETAINED_PRECEDING_POSITION_COUNT);
+        let retained_preceding_position_count = u128::from(Self::RETAINED_PRECEDING_POSITION_COUNT);
         // Retention clamps at the origin until the complete nonnegative history exists.
         let first_position = if frontier < retained_position_count {
             0
@@ -128,8 +127,7 @@ mod tests {
         let period = Duration::from_nanos(100)
             .try_into()
             .assured("period is positive");
-        let retained_position_count =
-            i64::from(DomainAdmissionWindow::RETAINED_POSITION_COUNT);
+        let retained_position_count = i64::from(DomainAdmissionWindow::RETAINED_POSITION_COUNT);
         let retained_preceding_position_count = retained_position_count
             .checked_sub(1)
             .assured("a nonnegative retained position count is above i64::MIN");
@@ -155,7 +153,7 @@ mod tests {
             .assured("fixture time is nonnegative");
             let first = frontier
                 .checked_sub(retained_preceding_position_count)
-                .assured("fixture frontier is nonnegative")
+                .assured("a nonnegative frontier minus a u32-sized count fits i64")
                 .max(0);
             for position in 0..=frontier
                 .checked_add(1)
