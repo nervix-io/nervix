@@ -23,7 +23,7 @@ pub(super) async fn flush_branch_inferencer_output(
         materialized_state,
         execution_now,
     } = context;
-    output_routes.routes[output_index].clear_flush_deadline();
+    output_routes.routes[output_index].clear_flush_timer();
     let pending = output_buffer.take_pending();
     if pending.is_empty() {
         return;

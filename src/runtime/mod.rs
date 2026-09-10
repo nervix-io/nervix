@@ -162,6 +162,7 @@ use crate::{
 };
 
 mod branch_aggregated_state;
+mod branch_buffering;
 mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
@@ -243,6 +244,11 @@ use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
     decode_branch_aggregated_snapshot, encode_branch_aggregated_snapshot,
 };
+use branch_buffering::{
+    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingError, BranchBufferTimingResult,
+    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    wait_for_branch_buffer_deadlines,
+};
 use branch_instance_registry::BranchInstanceRegistry;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use client_config::{client_tls_paths, read_tls_file, render_client_config_template};
@@ -318,9 +324,8 @@ use processors::{
     RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
     RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
     RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
-    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, RuntimeInputCollector,
-    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
-    WindowFlushContext,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
+    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -339,7 +344,6 @@ pub(crate) use relay_channel::{
 };
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
-    RuntimeInputCollectPolicy,
 };
 pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
 use std::str::FromStr;
@@ -348,10 +352,9 @@ pub(crate) use branch_key::BranchKey;
 use branch_key::branch_key_display;
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, IngestorRouteRuntime,
-    MaterializedBatchWaitContext, PendingMaterializedBatch, RuntimeFlushPolicy,
-    branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
-    output_error_policies, persist_branch_instance_lru_snapshot,
-    wall_duration_until_domain_deadline,
+    MaterializedBatchWaitContext, PendingMaterializedBatch, branch_lru_placement,
+    flush_branch_junction, internal_processor_error_policies, output_error_policies,
+    persist_branch_instance_lru_snapshot, wall_duration_until_domain_deadline,
 };
 pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 use client_config::{
@@ -365,9 +368,9 @@ use correlator::{
     handle_correlator_timeout_action,
 };
 use domain_clock::{
-    DomainClock, DomainClockAccessResult, DomainClockLifecycle, advance_scheduled_timestamp,
-    checked_add_duration_to_timestamp, current_domain_logical_time, current_timestamp,
-    wall_duration_until_logical_target,
+    DomainClock, DomainClockAccessResult, DomainClockLifecycle, DomainExecutionSnapshot,
+    LogicalDeadline, advance_scheduled_timestamp, checked_add_duration_to_timestamp,
+    current_domain_logical_time, current_timestamp, wall_duration_until_logical_target,
 };
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
@@ -456,8 +459,8 @@ pub(in crate::runtime) use processor_branch_task::{
 use processor_output::{
     PendingProcessorOutputBatch, PendingProcessorOutputMessageError, ProcessorMaterializedState,
     ProcessorOutputBatchScope, ProcessorOutputDispatchContext, ProcessorOutputFilterSource,
-    dispatch_processor_output, dispatch_processor_outputs, flush_due_processor_outputs,
-    pending_output_batches_by_key, processor_output_input_sensitivity,
+    dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
+    flush_due_processor_outputs, pending_output_batches_by_key, processor_output_input_sensitivity,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, wasm_guest_call_schemas,

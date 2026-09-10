@@ -148,6 +148,17 @@ the process monotonic clock. The two deadline kinds cannot be interchanged. A lo
 revalidates its domain and generation after every wake and returns both the logical instant that
 became due and a fresh execution-time snapshot. Cancellation is a separate typed outcome.
 
+`COLLECT FOR` and `FLUSH EACH` are domain-logical durations. A paced domain's `TIME RATE` therefore
+accelerates or slows them, and a stopped clock cannot silently turn either policy into a wall-clock
+wait. Each source relay and concrete branch owns its collection deadline; each concrete output
+branch owns its route deadline. A deadline starts only when data enters an empty buffer and is
+cleared when that buffer is released by time, size, force flush, shutdown, or error handling.
+
+`FLUSH IMMEDIATE` instead uses a physical 100 µs minimum on the process monotonic clock, regardless
+of domain rate. The ingestor source-group limit of 1,024 messages and 5 ms idle close are also
+physical and run before route-local flushing. Connector retry and backoff timers remain separate
+physical controls; none of these operational waits is projected through the domain clock.
+
 ## Execution-Time Snapshots
 
 Each accepted unit of domain work reads its domain clock once and uses that execution-time snapshot

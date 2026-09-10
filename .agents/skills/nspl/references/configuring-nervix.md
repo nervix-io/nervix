@@ -165,7 +165,8 @@ relay. Do not use them to scan across branches.
   only with branched input.
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
   duration, and is absent when immediate input execution is intended. Correlator sides are checked
-  independently; ingestors never declare input collection.
+  independently; ingestors never declare input collection. Treat the duration as domain-logical
+  and start it only on an empty-to-buffered source-and-branch collector transition.
 - Every route constructs all required output fields. `INHERIT` appears only on a transforming
   route; set-only routes use explicit `SET` assignments.
 - Every field scope is valid for its node: use documented `input`, `message`, `output`, `branch`,
@@ -177,7 +178,9 @@ relay. Do not use them to scan across branches.
   in a WASM processor.
 - Every agent-generated UDF includes Roto `test` blocks. Those tests run during `CREATE UDF` and
   must pass before the declaration is persisted.
-- Every flush-based route has a flush policy and every route has a message error policy.
+- Every flush-based route has a flush policy and every route has a message error policy. Treat
+  `FLUSH EACH` as a branch-local domain-logical duration and `FLUSH IMMEDIATE` as a branch-local
+  physical 100 µs minimum; start either only when its route buffer changes from empty to non-empty.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   `NO_ACK`.

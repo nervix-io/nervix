@@ -1778,6 +1778,7 @@ mod tests {
             )])),
             runtime: runtime.clone(),
             domain: root_domain.clone(),
+            domain_clock: test_domain_clock(&root_domain),
             source_kind: ModelKind::Ingestor,
             source: named("metric_ingestor"),
             root_relay: root_relay.clone(),
