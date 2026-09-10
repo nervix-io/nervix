@@ -41,6 +41,34 @@ impl Runtime {
             .map(RuntimeStateStore::from_database)
             .transpose()?
             .map(Arc::new);
+        let prepared_runtime_state_handoffs = DashMap::default();
+        if let Some(store) = state_store.as_ref() {
+            let persisted_handoffs = store
+                .handoff_preparations()
+                .map_err(|error| error.current_context().clone())?;
+            for persisted in persisted_handoffs {
+                let mut checkpoints = Vec::with_capacity(persisted.checkpoints.len());
+                for (placement, snapshot) in persisted.checkpoints {
+                    let placement = RuntimeStatePlacement::from_remote(placement)
+                        .map_err(RuntimePersistenceError::DecodeState)?;
+                    checkpoints.push((placement, snapshot));
+                }
+                prepared_runtime_state_handoffs.insert(
+                    DomainNodeRef::node_in(persisted.domain, persisted.kind, persisted.identifier),
+                    PreparedRuntimeStateHandoff {
+                        operation_id: persisted.operation_id,
+                        source: persisted.source,
+                        destination: persisted.destination,
+                        source_incarnation: persisted.source_incarnation,
+                        destination_incarnation: persisted.destination_incarnation,
+                        base_schedule_fingerprint: persisted.base_schedule_fingerprint,
+                        target_schedule_fingerprint: persisted.target_schedule_fingerprint,
+                        activation_authorized: false,
+                        checkpoints,
+                    },
+                );
+            }
+        }
         let branch_instance_expiration_scan_interval = fault_injection
             .branch_instance_expiration_scan_interval()
             .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL);
@@ -78,6 +106,8 @@ impl Runtime {
                 force_flush_by_domain: DashMap::default(),
                 node_quiesce_counters: DashMap::default(),
                 entity_gate_holds: Arc::new(DashMap::default()),
+                frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
+                ownership_handoff_freeze_changed: Arc::new(Notify::new()),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_schema_fingerprints: DashMap::default(),
                 domain_graphs: DashMap::default(),
@@ -91,12 +121,22 @@ impl Runtime {
                 remote_dispatcher: RwLock::new(None),
                 remote_dispatch: Arc::new(RemoteDispatchRegistry {
                     local_node_id: RwLock::new(None),
+                    local_node_incarnation: RwLock::new(None),
                     next_ack_id: AtomicU64::new(1),
                     pending_acks: DashMap::default(),
                     pending_relay_admissions: DashMap::default(),
                 }),
                 next_state_sync_correlation_id: AtomicU64::new(1),
                 pending_state_syncs: DashMap::default(),
+                state_checkpoint_notifications: DashMap::default(),
+                pending_state_replica_syncs: DashMap::default(),
+                pending_state_checkpoint_announcements: DashMap::default(),
+                passive_runtime_state_snapshots: DashMap::default(),
+                replicated_branch_lru_snapshots: DashMap::default(),
+                prepared_runtime_state_handoffs,
+                activated_runtime_state_handoffs: DashMap::default(),
+                prepared_forced_runtime_state_recoveries: DashMap::default(),
+                prepared_runtime_state_snapshots: DashMap::default(),
                 expiring_stream_states: DashMap::default(),
                 latest_resource_versions: DashMap::default(),
                 replicated_deduplicator_states: DashMap::default(),
@@ -190,6 +230,14 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_command_admission_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub async fn pause_ownership_handoff_after_preparation_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_ownership_handoff_after_preparation_if_armed(domain)
             .await;
     }
 
@@ -316,12 +364,7 @@ impl Runtime {
             }
         }
         self.stop_message_error_routes_for_domain(domain).await;
-        if !self
-            .inner
-            .domains
-            .get(domain)
-            .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Paused))
-        {
+        if !self.inner.domains.contains_key(domain) {
             self.clear_runtime_state_for_domain(domain);
         }
     }

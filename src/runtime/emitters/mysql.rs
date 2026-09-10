@@ -201,10 +201,8 @@ pub(in crate::runtime) async fn open_mysql_pool(
         })
     })?;
     drop(conn);
-    let maintenance = AbortOnDropHandle::new(tokio::spawn(maintain_mysql_minimum(
-        pool.clone(),
-        minimum,
-    )));
+    let maintenance =
+        AbortOnDropHandle::new(tokio::spawn(maintain_mysql_minimum(pool.clone(), minimum)));
     Ok(MySqlSharedPool {
         pool,
         _maintenance: maintenance,
