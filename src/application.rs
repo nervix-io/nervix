@@ -15612,6 +15612,7 @@ fn dataflow_node_status_to_envelope(
 ) -> DataflowNodeStatusEnvelope {
     let status = match status {
         DataflowNodeStatus::Ok => "OK",
+        DataflowNodeStatus::Waiting => "WAITING",
         DataflowNodeStatus::Error => "ERROR",
     };
     DataflowNodeStatusEnvelope {
@@ -15627,6 +15628,8 @@ fn dataflow_node_status_from_envelope(envelope: DataflowNodeStatusEnvelope) -> D
     DataflowNodeHealth {
         status: if envelope.status.eq_ignore_ascii_case("ERROR") {
             DataflowNodeStatus::Error
+        } else if envelope.status.eq_ignore_ascii_case("WAITING") {
+            DataflowNodeStatus::Waiting
         } else {
             DataflowNodeStatus::Ok
         },
@@ -16209,6 +16212,10 @@ fn format_emitter_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     if let Some(status) = status {
         lines.extend([
+            format!("status: {}", status.status),
+            // What the node is doing when it is neither working nor broken, such as waiting for a
+            // connection from a shared client's pool.
+            format!("detail: {}", status.detail.as_deref().unwrap_or("-")),
             format!(
                 "transient error: {}",
                 status.transient_error.as_deref().unwrap_or("-")

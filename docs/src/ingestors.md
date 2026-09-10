@@ -475,7 +475,8 @@ ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
 keep the subscriber healthy; payloads are either retained locally within the declared bound or
-discarded and counted.
+discarded and counted. A `TYPE REDIS` client declares connection-pool bounds even when only
+ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
 
 ### MQTT
 

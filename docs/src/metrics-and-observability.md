@@ -132,6 +132,12 @@ DESCRIBE DOMAIN;
 section aggregates metrics for all runtime nodes in the domain, including
 processing nodes.
 
+`DESCRIBE EMITTER` reports a `status:` of `OK`, `WAITING`, or `ERROR`, with a `detail:` line
+explaining anything other than ordinary operation. `WAITING` means the emitter is healthy but holds
+no connection because it has asked a shared client's pool for one and has not been given it yet;
+see [Database Client Connection Pools](database-client-pools.md). A full pool is a waiting state,
+not a failure, so an acquisition timeout or a lost connection is reported as `ERROR` instead.
+
 `DESCRIBE INGESTOR` also reports the declared `quiesce:` policy, current `quiesce state:`, and all
 four quiesce values using their Prometheus family names. A connected ingestor in any active mode is
 reported as `status: quiesced`, not `stopped`. Per-payload activity remains at debug or trace log

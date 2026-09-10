@@ -4543,6 +4543,12 @@ impl GraphViewNode {
             (NodeKind::Ingestor, DataflowNodeStatus::Ok) => "node-hit ingestor status-ok",
             (NodeKind::Processor, DataflowNodeStatus::Ok) => "node-hit processor status-ok",
             (NodeKind::Emitter, DataflowNodeStatus::Ok) => "node-hit emitter status-ok",
+            (NodeKind::Client, DataflowNodeStatus::Waiting) => "node-hit client status-waiting",
+            (NodeKind::Ingestor, DataflowNodeStatus::Waiting) => "node-hit ingestor status-waiting",
+            (NodeKind::Processor, DataflowNodeStatus::Waiting) => {
+                "node-hit processor status-waiting"
+            }
+            (NodeKind::Emitter, DataflowNodeStatus::Waiting) => "node-hit emitter status-waiting",
             (NodeKind::Client, DataflowNodeStatus::Error) => "node-hit client status-error",
             (NodeKind::Ingestor, DataflowNodeStatus::Error) => "node-hit ingestor status-error",
             (NodeKind::Processor, DataflowNodeStatus::Error) => "node-hit processor status-error",
@@ -4564,6 +4570,7 @@ impl GraphViewNode {
     const fn status_label(&self) -> &'static str {
         match self.status {
             DataflowNodeStatus::Ok => "OK",
+            DataflowNodeStatus::Waiting => "WAITING",
             DataflowNodeStatus::Error => "ERROR",
         }
     }

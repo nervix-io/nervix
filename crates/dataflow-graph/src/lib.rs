@@ -148,6 +148,10 @@ pub enum DataflowNodeKind {
 pub enum DataflowNodeStatus {
     #[default]
     Ok,
+    /// The node is healthy but holds no connection: it has asked a shared client's pool for one
+    /// and has not been given it yet. A full pool is a waiting state, not a failure, so this is
+    /// distinct from both a working node and a broken one.
+    Waiting,
     Error,
 }
 

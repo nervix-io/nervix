@@ -51,6 +51,7 @@ use mysql_async::{
 };
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{Client, TransactionState as ClientTransactionState};
+use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, application::InternalTransportMode,
     memory_pressure::MemoryPressureConfig,
@@ -66,9 +67,14 @@ use playwright_rs::{
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
+use sqlx::{
+    AssertSqlSafe as SqlxAssertSqlSafe, Row as _,
+    postgres::{
+        PgConnectOptions as SqlxPgConnectOptions, PgPool as SqlxPgPool,
+        PgPoolOptions as SqlxPgPoolOptions, PgSslMode as SqlxPgSslMode,
+    },
+};
 use tempfile::TempDir;
-use tokio_postgres::{Client as PostgresClient, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
@@ -122,6 +128,9 @@ struct ScenarioWorld {
     clickhouse_tls: bool,
     postgres_table: Option<String>,
     postgres_tls: bool,
+    /// Releases the Postgres table lock a contention scenario is holding, if one is held. The
+    /// lock lives in a spawned task because it must outlive the step that took it.
+    postgres_lock_release: Option<tokio::sync::oneshot::Sender<()>>,
     mysql_table: Option<String>,
     mysql_tls: bool,
     mysql_insert_command_baseline: Option<u64>,
@@ -203,6 +212,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("clickhouse_tls", &self.clickhouse_tls)
             .field("postgres_table", &self.postgres_table)
             .field("postgres_tls", &self.postgres_tls)
+            .field("postgres_lock_held", &self.postgres_lock_release.is_some())
             .field("mysql_table", &self.mysql_table)
             .field("mysql_tls", &self.mysql_tls)
             .field(
@@ -1915,50 +1925,34 @@ async fn clickhouse_post_for_world(world: &ScenarioWorld, query: &str) -> Result
     }
 }
 
+/// A verification client for the Postgres the scenario wrote to.
+///
+/// The same driver the product uses, so a scenario cannot pass against a connection contract the
+/// runtime does not actually speak.
 async fn postgres_client(
     dependencies: &DependencyEndpoints,
     tls: bool,
-) -> Result<PostgresClient, String> {
+) -> Result<SqlxPgPool, String> {
     let addr = if tls {
         dependencies.get(POSTGRES_TLS_ADDR)
     } else {
         dependencies.get(POSTGRES_ADDR)
     }
     .map_err(|error| error.to_string())?;
+    let mut options: SqlxPgConnectOptions = addr.parse().map_err(|source| format!("{source}"))?;
     if tls {
         let ca_file = dependencies
             .tls_ca_path()
             .map_err(|error| error.to_string())?;
-        let ca_pem = std::fs::read(ca_file)
-            .map_err(|source| format!("failed to read Postgres TLS CA: {source}"))?;
-        let mut roots = RootCertStore::empty();
-        for cert in CertificateDer::pem_slice_iter(&ca_pem) {
-            let cert =
-                cert.map_err(|source| format!("failed to parse Postgres TLS CA: {source}"))?;
-            roots
-                .add(cert)
-                .map_err(|source| format!("failed to add Postgres TLS CA: {source}"))?;
-        }
-        let tls_config = RustlsClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        let (client, connection) =
-            tokio_postgres::connect(addr, MakeRustlsConnect::new(tls_config))
-                .await
-                .map_err(|source| source.to_string())?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        Ok(client)
-    } else {
-        let (client, connection) = tokio_postgres::connect(addr, NoTls)
-            .await
-            .map_err(|source| source.to_string())?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        Ok(client)
+        options = options
+            .ssl_mode(SqlxPgSslMode::VerifyFull)
+            .ssl_root_cert(ca_file);
     }
+    SqlxPgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .map_err(|source| source.to_string())
 }
 
 fn mysql_pool(dependencies: &DependencyEndpoints, tls: bool) -> Result<MySqlPool, String> {
@@ -9311,6 +9305,54 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     }
 }
 
+/// Assert that one of two emitters reports the given text.
+///
+/// Which of two peers contending for the last connection ends up holding it and which ends up
+/// waiting is a race, and the claim under test is about the waiter rather than about a particular
+/// name, so naming one of them would test the race instead of the behaviour.
+#[then(expr = "within {string} DESCRIBE EMITTER {string} or {string} on the leader node contains")]
+async fn then_describe_one_of_two_emitters_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first: String,
+    second: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let emitters = [
+        expand_placeholders(world, &first),
+        expand_placeholders(world, &second),
+    ];
+    let expected = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+
+    loop {
+        tokio::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let mut outputs = Vec::with_capacity(emitters.len());
+        for emitter in &emitters {
+            let output =
+                run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                    .await
+                    .expect("describe emitter command must succeed");
+            if output.contains(expected.trim()) {
+                world.last_command_output = Some(output);
+                return;
+            }
+            outputs.push(output);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {} or {} to contain {}. last outputs: {outputs:?}",
+            emitters[0],
+            emitters[1],
+            expected.trim()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "within {string} DESCRIBE EMITTER {string} on the leader node contains")]
 async fn then_within_duration_describe_emitter_on_leader_contains(
     world: &mut ScenarioWorld,
@@ -10132,13 +10174,13 @@ async fn given_postgres_table_rejecting_poison_actions_exists(
     let client = postgres_client(world.dependencies.endpoints(), false)
         .await
         .expect("failed to connect to Postgres");
-    client
-        .batch_execute(&format!(
-            "ALTER TABLE {table} ADD CONSTRAINT reject_poison_action CHECK (postgres_action <> \
-             'poison')"
-        ))
-        .await
-        .expect("failed to add Postgres poison-record constraint");
+    sqlx::raw_sql(SqlxAssertSqlSafe(format!(
+        "ALTER TABLE {table} ADD CONSTRAINT reject_poison_action CHECK (postgres_action <> \
+         'poison')"
+    )))
+    .execute(&client)
+    .await
+    .expect("failed to add Postgres poison-record constraint");
 }
 
 #[given(expr = "Postgres table {string} recording insert statement sizes exists")]
@@ -10157,25 +10199,25 @@ async fn given_postgres_table_recording_insert_statement_sizes_exists(
     let client = postgres_client(world.dependencies.endpoints(), false)
         .await
         .expect("failed to connect to Postgres");
-    client
-        .batch_execute(&format!(
-            "DROP TABLE IF EXISTS {audit_table};
-             DROP FUNCTION IF EXISTS {trigger_function}();
-             CREATE TABLE {audit_table} (row_count bigint NOT NULL);
-             CREATE FUNCTION {trigger_function}() RETURNS trigger AS $$
-             BEGIN
-               INSERT INTO {audit_table} (row_count)
-               SELECT count(*) FROM inserted_rows;
-               RETURN NULL;
-             END;
-             $$ LANGUAGE plpgsql;
-             CREATE TRIGGER record_insert_statement_size
-             AFTER INSERT ON {table}
-             REFERENCING NEW TABLE AS inserted_rows
-             FOR EACH STATEMENT EXECUTE FUNCTION {trigger_function}();"
-        ))
-        .await
-        .expect("failed to install Postgres insert statement recorder");
+    sqlx::raw_sql(SqlxAssertSqlSafe(format!(
+        "DROP TABLE IF EXISTS {audit_table};
+         DROP FUNCTION IF EXISTS {trigger_function}();
+         CREATE TABLE {audit_table} (row_count bigint NOT NULL);
+         CREATE FUNCTION {trigger_function}() RETURNS trigger AS $$
+         BEGIN
+           INSERT INTO {audit_table} (row_count)
+           SELECT count(*) FROM inserted_rows;
+           RETURN NULL;
+         END;
+         $$ LANGUAGE plpgsql;
+         CREATE TRIGGER record_insert_statement_size
+         AFTER INSERT ON {table}
+         REFERENCING NEW TABLE AS inserted_rows
+         FOR EACH STATEMENT EXECUTE FUNCTION {trigger_function}();"
+    )))
+    .execute(&client)
+    .await
+    .expect("failed to install Postgres insert statement recorder");
 }
 
 #[given(expr = "Postgres TLS table {string} exists")]
@@ -10205,22 +10247,22 @@ async fn prepare_postgres_table_schema(
     let client = postgres_client(world.dependencies.endpoints(), tls)
         .await
         .expect("failed to connect to Postgres");
-    client
-        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+    sqlx::raw_sql(SqlxAssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
+        .execute(&client)
         .await
         .expect("failed to drop Postgres table");
-    client
-        .batch_execute(&format!(
-            "CREATE TABLE {table} (postgres_user_id integer, postgres_now text, postgres_action \
-             text{})",
-            if primary_key {
-                ", PRIMARY KEY (postgres_user_id)"
-            } else {
-                ""
-            }
-        ))
-        .await
-        .expect("failed to create Postgres table");
+    sqlx::raw_sql(SqlxAssertSqlSafe(format!(
+        "CREATE TABLE {table} (postgres_user_id integer, postgres_now text, postgres_action \
+         text{})",
+        if primary_key {
+            ", PRIMARY KEY (postgres_user_id)"
+        } else {
+            ""
+        }
+    )))
+    .execute(&client)
+    .await
+    .expect("failed to create Postgres table");
     world.postgres_table = Some(table);
     world.postgres_tls = tls;
 }
@@ -13075,6 +13117,146 @@ async fn then_clickhouse_table_eventually_contains_rows_in_parts(
     }
 }
 
+/// The connections one Nervix client holds on the database, counted server-side.
+///
+/// `application_name` is what distinguishes them from the harness's own connections and from any
+/// other application, which is how an operator checks a declared budget too.
+async fn postgres_application_connections(world: &ScenarioWorld, application: &str) -> i64 {
+    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+        .await
+        .expect("failed to connect to Postgres");
+    sqlx::query("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+        .bind(application)
+        .fetch_one(&client)
+        .await
+        .expect("failed to count Postgres connections")
+        .get(0)
+}
+
+#[then(expr = "Postgres never reports more than {int} connections for application {string}")]
+async fn then_postgres_connections_stay_within(
+    world: &mut ScenarioWorld,
+    maximum: i64,
+    application: String,
+) {
+    let application = expand_placeholders(world, &application);
+    // Sampled over a window rather than once: a single reading could miss a pool that briefly
+    // opened more connections than it declared.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut observed_peak = 0;
+    while Instant::now() < deadline {
+        let observed = postgres_application_connections(world, &application).await;
+        observed_peak = observed_peak.max(observed);
+        assert!(
+            observed <= maximum,
+            "expected at most {maximum} Postgres connections for {application}, observed \
+             {observed}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        observed_peak > 0,
+        "expected {application} to hold at least one Postgres connection, observed none"
+    );
+}
+
+#[then(expr = "Postgres eventually reports at least {int} connections for application {string}")]
+async fn then_postgres_eventually_reports_at_least_connections(
+    world: &mut ScenarioWorld,
+    expected: i64,
+    application: String,
+) {
+    let application = expand_placeholders(world, &application);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let observed = postgres_application_connections(world, &application).await;
+        if observed >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for at least {expected} Postgres connections for {application}; \
+             observed {observed}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[then(expr = "Postgres eventually reports {int} connections for application {string}")]
+async fn then_postgres_eventually_reports_connections(
+    world: &mut ScenarioWorld,
+    expected: i64,
+    application: String,
+) {
+    let application = expand_placeholders(world, &application);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let observed = postgres_application_connections(world, &application).await;
+        if observed == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} Postgres connections for {application}; observed \
+             {observed}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[given(expr = "the Postgres table is locked against inserts")]
+async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before locking it")
+        .clone();
+    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+        .await
+        .expect("failed to connect to Postgres");
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut transaction = client
+            .begin()
+            .await
+            .expect("failed to open the Postgres locking transaction");
+        sqlx::raw_sql(SqlxAssertSqlSafe(format!(
+            "LOCK TABLE {table} IN EXCLUSIVE MODE"
+        )))
+        .execute(&mut *transaction)
+        .await
+        .expect("failed to lock the Postgres table");
+        locked_tx
+            .send(())
+            .expect("the locking step must still be waiting for its lock");
+        // Held until the scenario releases it, which is what keeps one pooled connection busy.
+        // A dropped sender means the scenario ended without releasing, and the lock goes with it.
+        release_rx
+            .await
+            .discarded("a scenario that ends without releasing drops the lock anyway");
+        transaction
+            .commit()
+            .await
+            .expect("failed to release the Postgres table lock");
+    });
+    locked_rx
+        .await
+        .expect("the Postgres locking task must acquire its lock");
+    world.postgres_lock_release = Some(release_tx);
+}
+
+#[when("the Postgres table lock is released")]
+async fn when_postgres_table_lock_is_released(world: &mut ScenarioWorld) {
+    let release = world
+        .postgres_lock_release
+        .take()
+        .expect("a Postgres table lock must be held before releasing it");
+    release
+        .send(())
+        .expect("the Postgres locking task must still be holding its lock");
+}
+
 #[then("the Postgres table eventually contains a row")]
 async fn then_postgres_table_eventually_contains_row(
     world: &mut ScenarioWorld,
@@ -13091,13 +13273,12 @@ async fn then_postgres_table_eventually_contains_row(
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = client
-            .query(
-                &format!("SELECT postgres_user_id, postgres_action FROM {table}"),
-                &[],
-            )
-            .await
-            .expect("failed to query Postgres table");
+        let rows = sqlx::query(SqlxAssertSqlSafe(format!(
+            "SELECT postgres_user_id, postgres_action FROM {table}"
+        )))
+        .fetch_all(&client)
+        .await
+        .expect("failed to query Postgres table");
         let observed = rows
             .iter()
             .map(|row| {
@@ -13139,11 +13320,12 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let observed_rows: i64 = client
-            .query_one(&format!("SELECT count(*) FROM {table}"), &[])
-            .await
-            .expect("failed to count Postgres rows")
-            .get(0);
+        let observed_rows: i64 =
+            sqlx::query(SqlxAssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&client)
+                .await
+                .expect("failed to count Postgres rows")
+                .get(0);
         if observed_rows == expected_rows {
             return;
         }
@@ -13177,17 +13359,14 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         tokio::task::consume_budget().await;
-        let row = client
-            .query_one(
-                &format!(
-                    "SELECT (SELECT count(*) FROM {table}),
-                            (SELECT count(*) FROM {audit_table}),
-                            COALESCE((SELECT max(row_count) FROM {audit_table}), 0)"
-                ),
-                &[],
-            )
-            .await
-            .expect("failed to query Postgres insert statement recorder");
+        let row = sqlx::query(SqlxAssertSqlSafe(format!(
+            "SELECT (SELECT count(*) FROM {table}),
+                    (SELECT count(*) FROM {audit_table}),
+                    COALESCE((SELECT max(row_count) FROM {audit_table}), 0)"
+        )))
+        .fetch_one(&client)
+        .await
+        .expect("failed to query Postgres insert statement recorder");
         let observed_rows: i64 = row.get(0);
         let observed_inserts: i64 = row.get(1);
         let largest_insert: i64 = row.get(2);

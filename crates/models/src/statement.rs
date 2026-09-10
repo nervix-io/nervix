@@ -4,6 +4,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use error_stack::Report;
 use indexmap::IndexMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -2162,9 +2163,67 @@ pub struct ClientConfigEntry {
     pub value: String,
 }
 
+/// Why a declared pair of connection-pool sizes is not a usable bound.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ClientPoolBoundsError {
+    #[error("minimum pool size {minimum} must not exceed maximum pool size {maximum}")]
+    MinimumExceedsMaximum { minimum: u32, maximum: NonZeroU32 },
+}
+
+/// The connection-pool bounds a database client declares.
+///
+/// The two counts only mean anything together: a minimum above its maximum asks for a maintained
+/// size the ceiling forbids. [`ClientPoolBounds::new`] is the one place that ordering is decided,
+/// so every holder of a pair already knows its minimum is reachable.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct ClientPoolBounds {
+    minimum: u32,
+    maximum: NonZeroU32,
+}
+
+impl ClientPoolBounds {
+    /// Pair a declared minimum with its maximum, rejecting a minimum the ceiling cannot reach.
+    pub fn new(minimum: u32, maximum: NonZeroU32) -> Result<Self, Report<ClientPoolBoundsError>> {
+        if minimum > maximum.get() {
+            return Err(Report::new(ClientPoolBoundsError::MinimumExceedsMaximum {
+                minimum,
+                maximum,
+            }));
+        }
+        Ok(Self { minimum, maximum })
+    }
+
+    /// The declared number of established, usable connections to keep available.
+    pub const fn minimum(&self) -> u32 {
+        self.minimum
+    }
+
+    /// The declared ceiling on managed connections, counting those being established or retired.
+    pub const fn maximum(&self) -> NonZeroU32 {
+        self.maximum
+    }
+}
+
 /// Declare clients that share the connector-owned name, mount and configuration shape.
+///
+/// A pooled client carries its declared [`ClientPoolBounds`] as well, because connection capacity
+/// belongs to the client itself rather than to the connector's string configuration.
 macro_rules! declare_clients {
-    ($($Client:ident => $Config:ident,)+) => {
+    (
+        unpooled { $($Client:ident => $Config:ident,)+ }
+        pooled { $($PooledClient:ident => $PooledConfig:ident,)+ }
+    ) => {
         $(
             #[derive(
                 Debug,
@@ -2185,31 +2244,56 @@ macro_rules! declare_clients {
 
             pub type $Config = ClientConfigEntry;
         )+
+        $(
+            #[derive(
+                Debug,
+                Clone,
+                PartialEq,
+                Eq,
+                Serialize,
+                Deserialize,
+                Archive,
+                RkyvSerialize,
+                RkyvDeserialize,
+            )]
+            pub struct $PooledClient {
+                pub name: ClientName,
+                pub pool: ClientPoolBounds,
+                pub mount: Option<ResourceName>,
+                pub config: Vec<ClientConfigEntry>,
+            }
+
+            pub type $PooledConfig = ClientConfigEntry;
+        )+
     };
 }
 
 declare_clients! {
-    CreateClientKafka => KafkaConfigEntry,
-    CreateClientPulsar => PulsarConfigEntry,
-    CreateClientHttp => HttpConfigEntry,
-    CreateClientSentry => SentryConfigEntry,
-    CreateClientOtel => OtelConfigEntry,
-    CreateClientPrometheus => PrometheusConfigEntry,
-    CreateClientMqtt => MqttConfigEntry,
-    CreateClientNats => NatsConfigEntry,
-    CreateClientRabbitMq => RabbitMqConfigEntry,
-    CreateClientRedis => RedisConfigEntry,
-    CreateClientZeroMq => ZeroMqConfigEntry,
-    CreateClientSqs => SqsConfigEntry,
-    CreateClientSyslog => SyslogConfigEntry,
-    CreateClientClickHouse => ClickHouseConfigEntry,
-    CreateClientPostgres => PostgresConfigEntry,
-    CreateClientMySql => MySqlConfigEntry,
-    CreateClientMongoDb => MongoDbConfigEntry,
-    CreateClientS3 => S3ConfigEntry,
-    CreateClientGcs => GcsConfigEntry,
-    CreateClientAzureBlob => AzureBlobConfigEntry,
-    CreateClientIcebergRest => IcebergRestConfigEntry,
+    unpooled {
+        CreateClientKafka => KafkaConfigEntry,
+        CreateClientPulsar => PulsarConfigEntry,
+        CreateClientHttp => HttpConfigEntry,
+        CreateClientSentry => SentryConfigEntry,
+        CreateClientOtel => OtelConfigEntry,
+        CreateClientPrometheus => PrometheusConfigEntry,
+        CreateClientMqtt => MqttConfigEntry,
+        CreateClientNats => NatsConfigEntry,
+        CreateClientRabbitMq => RabbitMqConfigEntry,
+        CreateClientZeroMq => ZeroMqConfigEntry,
+        CreateClientSqs => SqsConfigEntry,
+        CreateClientSyslog => SyslogConfigEntry,
+        CreateClientClickHouse => ClickHouseConfigEntry,
+        CreateClientS3 => S3ConfigEntry,
+        CreateClientGcs => GcsConfigEntry,
+        CreateClientAzureBlob => AzureBlobConfigEntry,
+        CreateClientIcebergRest => IcebergRestConfigEntry,
+    }
+    pooled {
+        CreateClientRedis => RedisConfigEntry,
+        CreateClientPostgres => PostgresConfigEntry,
+        CreateClientMySql => MySqlConfigEntry,
+        CreateClientMongoDb => MongoDbConfigEntry,
+    }
 }
 
 #[derive(
@@ -4840,12 +4924,13 @@ mod tests {
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
         AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
-        ClusterSchedule, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
-        CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
-        EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
-        InferencerTensorSchema, KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind,
-        PlacementPolicy, RelayBranching, RetryPolicy, ScheduledNode,
+        ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule, CreateDeduplicator,
+        CreateEmitter, CreateGenerator, CreatePlacement, CreateReingestor, CreateRelay,
+        CreateReorderer, CreateSchema, DomainSchedule, EmitSink, EmitterPublishingMode,
+        ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDimension,
+        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
+        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, PlacementPolicy,
+        RelayBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
         ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
@@ -4853,6 +4938,26 @@ mod tests {
         MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         SchemaField,
     };
+
+    #[test]
+    fn pool_bounds_accept_a_minimum_up_to_the_maximum_and_reject_one_above_it() {
+        let bounds = ClientPoolBounds::new(0, nonzero!(1u32)).expect("zero is below one");
+        assert_eq!(bounds.minimum(), 0);
+        assert_eq!(bounds.maximum(), nonzero!(1u32));
+
+        let bounds = ClientPoolBounds::new(3, nonzero!(3u32)).expect("equal bounds are allowed");
+        assert_eq!(bounds.minimum(), 3);
+        assert_eq!(bounds.maximum(), nonzero!(3u32));
+
+        let error = ClientPoolBounds::new(4, nonzero!(3u32)).expect_err("four exceeds three");
+        assert_eq!(
+            error.current_context(),
+            &ClientPoolBoundsError::MinimumExceedsMaximum {
+                minimum: 4,
+                maximum: nonzero!(3u32),
+            }
+        );
+    }
 
     fn named<N>(raw: &str) -> N
     where

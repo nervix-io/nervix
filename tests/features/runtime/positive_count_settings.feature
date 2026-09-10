@@ -75,8 +75,8 @@ Feature: Positive count settings
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT postgres_main TYPE POSTGRES CONFIG {
-        'url' = 'postgres://nervix:nervix@127.0.0.1:5432/nervix'
+      CREATE CLIENT postgres_main TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
+        'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
       };
       """
     And these NSPL commands fail with "max batch size must be greater than zero"

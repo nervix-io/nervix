@@ -280,6 +280,7 @@ pub enum Identifier {
     By,
     SlidingWindow,
     Size,
+    Pool,
     Step,
     Width,
     Duration,

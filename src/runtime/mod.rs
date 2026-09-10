@@ -59,22 +59,22 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
-    ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-    CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec,
-    CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateUdf, DomainClockAuthority, DomainClockState, DomainConfig,
-    DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState, EmitSink, EmitterAckWindow,
-    EmitterName, EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName,
-    FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
-    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
-    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    ClientPoolBounds, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName,
+    CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob,
+    CreateClientGcs, CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt,
+    CreateClientNats, CreateClientOtel, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup,
+    CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainClockAuthority,
+    DomainClockState, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule,
+    DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
+    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
+    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
+    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
     OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
@@ -219,6 +219,7 @@ mod schedule_apply;
 mod schedule_delta;
 mod scheduled_node;
 mod service_url;
+mod shared_clients;
 mod state_replication;
 mod state_store;
 mod syslog;
@@ -463,6 +464,9 @@ use scheduled_node::{
     ScheduledNodeTask,
 };
 use service_url::ServiceUrl;
+pub(in crate::runtime) use shared_clients::{
+    OpenClientError, SharedClientError, SharedClientLease,
+};
 pub(crate) use state_replication::StateSyncAck;
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
@@ -695,6 +699,12 @@ struct RuntimeInner {
     emitter_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
     emitter_retry_statuses: DashMap<DomainNodeRef, EmitterRetryStatus, RandomState>,
     emitter_confirmation_waits: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
+    /// One connector instance per named client on this node, keyed by the client it belongs to and
+    /// held open by the emitters and ingestors leasing it.
+    shared_clients: DashMap<DomainNodeRef, shared_clients::SharedClientSlot, RandomState>,
+    /// The graph nodes that have asked a shared client for a connection and not yet been given
+    /// one, keyed by the waiting node rather than the client it waits on.
+    pool_waits: DashMap<DomainNodeRef, shared_clients::PoolWait, RandomState>,
     executions: DashMap<DomainName, DomainExecution, RandomState>,
     message_error_routes: DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
     compiled_domain_udfs: DashMap<DomainName, CompiledDomainUdfs, RandomState>,

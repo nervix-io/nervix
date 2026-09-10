@@ -1,4 +1,7 @@
-use std::{num::NonZeroU64, ops::Range};
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    ops::Range,
+};
 
 use chumsky::{
     error::{RichPattern, RichReason},
@@ -335,6 +338,45 @@ pub fn nonzero_u64_value<'src>(
         .labelled(label)
         .try_map(move |value, span| {
             NonZeroU64::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
+        })
+        .boxed()
+}
+
+/// An integer written where the count is bounded by the 32-bit range its Model uses.
+///
+/// The bound belongs to the value, so a count outside it is rejected where it is written rather
+/// than narrowed later: the message names the range instead of leaving a truncated number behind.
+pub fn u32_value<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], u32, extra::Err<ParseError<'src>>> + Clone {
+    // Each alternative carries the label for the same reason `u64_value` does: chumsky only
+    // rewrites an alternative error whose position matches the start of the labelled parser.
+    choice((
+        select! { Token::NumberLiteral(v) => v }.labelled(label),
+        word_raw().labelled(label),
+    ))
+    .try_map(|raw, span| {
+        raw.parse::<u32>().map_err(|_| {
+            Rich::custom(
+                span,
+                format!("invalid integer '{raw}'; expected 0 through {}", u32::MAX),
+            )
+        })
+    })
+    .boxed()
+}
+
+/// A 32-bit count written where zero has no meaning, parsed straight into `NonZeroU32`.
+///
+/// The label goes on the integer itself, not on the checked parser: labelling the check would
+/// rewrite `zero_reason` into a bare expectation and lose the explanation.
+pub fn nonzero_u32_value<'src>(
+    label: &'static str,
+    zero_reason: &'static str,
+) -> impl Parser<'src, &'src [Token], NonZeroU32, extra::Err<ParseError<'src>>> + Clone {
+    u32_value(label)
+        .try_map(move |value, span| {
+            NonZeroU32::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
         })
         .boxed()
 }

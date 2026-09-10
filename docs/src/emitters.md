@@ -293,7 +293,7 @@ Transport-specific expectations:
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf.
 - `CLICKHOUSE`: use an `https://...` `addr`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
-- `POSTGRES`: include `sslmode=require` in `addr`; Nervix honors `tls_ca_file`.
+- `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
 - `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. Optional `tls_ca_file` adds a server trust root;
   optional `tls_cert_file` and `tls_key_file` configure client authentication and must appear
@@ -377,7 +377,8 @@ TO REDIS PUBSUB <client> CHANNEL <channel>
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
-failures retry the undelivered work.
+failures retry the undelivered work. A `TYPE REDIS` client declares its connection-pool bounds; see
+[Database Client Connection Pools](database-client-pools.md).
 
 ### MQTT
 
@@ -695,17 +696,23 @@ ON CONFLICT DO NOTHING
 
 `DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, and requires a conflict target. `DO NOTHING` may be used with or without a target.
 
-Postgres clients use a tokio-postgres connection string:
+Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
+`postgresql://` URL. The URL must select one of two TLS policies: `sslmode=disable` for an
+unencrypted connection, or `sslmode=verify-full` for TLS with certificate-chain and hostname
+verification. There is no opportunistic fallback and no encrypted connection without peer
+verification. See [Database Client Connection Pools](database-client-pools.md) for the accepted
+pool counts:
 
 ```nspl
 CREATE CLIENT pg
   TYPE POSTGRES
+  POOL SIZE MIN 2 MAX 8
   CONFIG {
-    'addr' = 'host=127.0.0.1 port=5432 user=postgres password=nervix dbname=postgres'
+    'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
   };
 ```
 
-For TLS connections, include `sslmode=require`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
 
 ### MySQL
 
@@ -739,11 +746,13 @@ ON CONFLICT DO NOTHING
 
 MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table, so the NSPL conflict policy does not accept a target list. `DO UPDATE` uses `ON DUPLICATE KEY UPDATE` for all mapped `VALUES` columns. `DO NOTHING` uses a no-op duplicate-key update.
 
-MySQL clients use a mysql_async connection URL:
+MySQL clients declare their connection-pool bounds and use a mysql_async connection URL. See
+[Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
 ```nspl
 CREATE CLIENT mysql
   TYPE MYSQL
+  POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
   };
@@ -786,11 +795,13 @@ MongoDB conflict policies require a target list because the emitter must build a
 Emitters using either MongoDB `ON CONFLICT` form require MongoDB 8.0 or newer because those modes
 execute as one bulk write per chunk.
 
-MongoDB clients use a MongoDB connection URL and database name:
+MongoDB clients declare their connection-pool bounds and use a MongoDB connection URL and database
+name. See [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
 ```nspl
 CREATE CLIENT mongodb
   TYPE MONGODB
+  POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
     'database' = 'nervix'

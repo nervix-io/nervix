@@ -1084,8 +1084,36 @@ pub fn alter_avro_wire_schema_to_canonical_nspl(
     alter_wire_schema_to_nspl("AVRO", alter)
 }
 
+/// The clauses between `CREATE CLIENT <name>` and its `CONFIG` block.
+///
+/// This is the whole of what a pooled client renders differently: it carries a `POOL SIZE` clause
+/// between the type and the mount, because that is the order the grammar accepts.
+macro_rules! client_head_clauses {
+    ($client:expr, $type_label:literal, unpooled) => {
+        vec![Clause::line(format!(
+            "TYPE {}{}",
+            $type_label,
+            client_mount_clause($client.mount.as_ref()),
+        ))]
+    };
+    ($client:expr, $type_label:literal, pooled) => {{
+        let mut clauses = vec![
+            Clause::line(format!("TYPE {}", $type_label)),
+            Clause::line(format!(
+                "POOL SIZE MIN {} MAX {}",
+                $client.pool.minimum(),
+                $client.pool.maximum(),
+            )),
+        ];
+        if let Some(mount) = $client.mount.as_ref() {
+            clauses.push(Clause::line(format!("MOUNT {}", mount.as_str())));
+        }
+        clauses
+    }};
+}
+
 macro_rules! impl_standard_client_canonical_nspl {
-    ($($Client:ident => $type_label:literal,)+) => {
+    ($($Client:ident => $type_label:literal, $pooling:ident;)+) => {
         $(
             impl $Client {
                 pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
@@ -1096,16 +1124,12 @@ macro_rules! impl_standard_client_canonical_nspl {
                         .collect::<Result<Vec<_>, CanonicalNsplError>>()?
                         .join(", ");
 
+                    let mut clauses = client_head_clauses!(self, $type_label, $pooling);
+                    clauses.push(Clause::braced("CONFIG", split_config_entries(&config)));
+
                     Ok(clause_statement(
                         format!("CREATE CLIENT {}", self.name.as_str()),
-                        vec![
-                            Clause::line(format!(
-                                "TYPE {}{}",
-                                $type_label,
-                                client_mount_clause(self.mount.as_ref()),
-                            )),
-                            Clause::braced("CONFIG", split_config_entries(&config)),
-                        ],
+                        clauses,
                     ))
                 }
             }
@@ -1114,26 +1138,26 @@ macro_rules! impl_standard_client_canonical_nspl {
 }
 
 impl_standard_client_canonical_nspl! {
-    CreateClientKafka => "KAFKA",
-    CreateClientPulsar => "PULSAR",
-    CreateClientHttp => "HTTP",
-    CreateClientSentry => "SENTRY",
-    CreateClientOtel => "OTEL",
-    CreateClientPrometheus => "PROMETHEUS",
-    CreateClientMqtt => "MQTT",
-    CreateClientNats => "NATS",
-    CreateClientRabbitMq => "RABBITMQ",
-    CreateClientRedis => "REDIS",
-    CreateClientZeroMq => "ZEROMQ",
-    CreateClientSqs => "SQS",
-    CreateClientGcs => "GCS",
-    CreateClientAzureBlob => "AZURE_BLOB",
-    CreateClientIcebergRest => "ICEBERG_REST",
-    CreateClientSyslog => "SYSLOG",
-    CreateClientClickHouse => "CLICKHOUSE",
-    CreateClientPostgres => "POSTGRES",
-    CreateClientMySql => "MYSQL",
-    CreateClientMongoDb => "MONGODB",
+    CreateClientKafka => "KAFKA", unpooled;
+    CreateClientPulsar => "PULSAR", unpooled;
+    CreateClientHttp => "HTTP", unpooled;
+    CreateClientSentry => "SENTRY", unpooled;
+    CreateClientOtel => "OTEL", unpooled;
+    CreateClientPrometheus => "PROMETHEUS", unpooled;
+    CreateClientMqtt => "MQTT", unpooled;
+    CreateClientNats => "NATS", unpooled;
+    CreateClientRabbitMq => "RABBITMQ", unpooled;
+    CreateClientZeroMq => "ZEROMQ", unpooled;
+    CreateClientSqs => "SQS", unpooled;
+    CreateClientGcs => "GCS", unpooled;
+    CreateClientAzureBlob => "AZURE_BLOB", unpooled;
+    CreateClientIcebergRest => "ICEBERG_REST", unpooled;
+    CreateClientSyslog => "SYSLOG", unpooled;
+    CreateClientClickHouse => "CLICKHOUSE", unpooled;
+    CreateClientRedis => "REDIS", pooled;
+    CreateClientPostgres => "POSTGRES", pooled;
+    CreateClientMySql => "MYSQL", pooled;
+    CreateClientMongoDb => "MONGODB", pooled;
 }
 
 impl CreateClientS3 {
@@ -3530,27 +3554,30 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use nonzero_ext::nonzero;
 
     use crate::{
-        AckMode, AvroType, BinaryOperator, BranchSelection, CodecEncoding, CodecEncodingRule,
-        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
-        CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+        AckMode, AvroType, BinaryOperator, BranchSelection, ClientPoolBounds, CodecEncoding,
+        CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-        CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis, CreateClientSentry,
-        CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq,
-        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
-        CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
-        CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor,
-        CreateWireSchema, EmitSink, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-        ErrorPolicies, Expression, FieldScope, FlushPolicy, GeneralErrorPolicy, HttpConfigEntry,
-        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal,
-        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
-        ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresValueMapping,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
-        SchemaField, SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        CreateClientPostgres, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
+        CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets,
+        CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+        CreateEndpoint, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+        CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterPublishingMode,
+        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope, FlushPolicy,
+        GeneralErrorPolicy, HttpConfigEntry, IngestSource, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
+        MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
+        PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
+        SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
         SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
         WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode, expression_to_nspl,
     };
@@ -3649,6 +3676,14 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
         }
+    }
+
+    fn pool_bounds(minimum: u32, maximum: u32) -> ClientPoolBounds {
+        ClientPoolBounds::new(
+            minimum,
+            NonZeroU32::new(maximum).expect("test maximum is positive"),
+        )
+        .expect("test minimum does not exceed its maximum")
     }
 
     #[test]
@@ -3924,12 +3959,27 @@ mod tests {
             (
                 CreateClientRedis {
                     name: named("redis_main"),
+                    pool: pool_bounds(1, 4),
                     mount: None,
                     config: vec![config_entry("url", "redis://localhost:6379")],
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT redis_main\n  TYPE REDIS\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
+                "CREATE CLIENT redis_main\n  TYPE REDIS\n  POOL SIZE MIN 1 MAX 4\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
+            ),
+            (
+                CreateClientPostgres {
+                    name: named("postgres_tls"),
+                    pool: pool_bounds(0, 1),
+                    mount: Some(named("dev_tls")),
+                    config: vec![
+                        config_entry("addr", "postgresql://db.example.com/nervix?sslmode=verify-full"),
+                        config_entry("tls_ca_file", "{{ dev_tls }}/ca.pem"),
+                    ],
+                }
+                .to_canonical_nspl()
+                .expect("must render"),
+                "CREATE CLIENT postgres_tls\n  TYPE POSTGRES\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
             ),
             (
                 CreateClientZeroMq {

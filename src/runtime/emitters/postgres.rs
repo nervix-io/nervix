@@ -1,30 +1,84 @@
 use nervix_models::TableName;
-use postgres_types::ToSql;
-use tokio_postgres::{Client as PostgresClient, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
+pub(in crate::runtime) use sqlx::postgres::PgPool;
+use sqlx::{
+    AssertSqlSafe, Executor as _, Row as _,
+    pool::PoolConnection as SqlxPoolConnection,
+    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode, Postgres as SqlxPostgres},
+};
+use url::Url;
+
+/// One connection borrowed from the shared Postgres pool, returned when it is dropped.
+type PgPoolConnection = SqlxPoolConnection<SqlxPostgres>;
 
 use super::*;
+
+/// How long a borrower waits for a connection, including pool wait, establishment,
+/// authentication and validation. Independent of how long an accepted query then runs.
+const POSTGRES_ACQUIRE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long a connection above the maintained minimum may sit idle before it is retired.
+const POSTGRES_IDLE_LIFETIME: Duration = Duration::from_secs(10 * 60);
+
+/// How old any connection may become before it is retired and replaced within the same maximum.
+const POSTGRES_MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 pub(in crate::runtime) struct PostgresEmitter {
     client: Option<PostgresEmitterClient>,
     program: Option<CompiledSqlValuesProgram>,
 }
 
+/// This emitter's interest in the node's shared Postgres pool.
+///
+/// The pool belongs to the named client, so every local emitter of that client borrows from it and
+/// the declared maximum bounds the node's connections rather than this emitter's.
 struct PostgresEmitterClient {
-    client: PostgresClient,
-    _connection_task: JoinHandle<()>,
+    lease: SharedClientLease,
+    /// The client borrowed from, named in this emitter's diagnostics and in its pool wait.
+    client: ClientName,
+    runtime: Runtime,
+    /// This emitter, as the key its pool wait is recorded under for `DESCRIBE` to read.
+    waiter: DomainNodeRef,
+}
+
+impl PostgresEmitterClient {
+    /// Borrow a connection for one operation, reporting the wait until the pool hands one over.
+    ///
+    /// The borrow covers a bounded insert or its metadata work and no more: between inserts, and
+    /// across a flush interval or a retry backoff, this emitter holds no connection.
+    async fn connection(&self) -> Result<PgPoolConnection, Report<SharedClientError>> {
+        let pool = self.lease.client().postgres(&self.client)?;
+        let waiting = self.runtime.pool_wait_guard(&self.waiter, &self.client);
+        let connection = pool.acquire().await.map_err(|source| {
+            Report::new(SharedClientError::Open {
+                client: self.client.as_str().to_string(),
+            })
+            .attach_printable(source.to_string())
+        });
+        drop(waiting);
+        connection
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 enum PostgresWriteError {
     #[error("failed to load Postgres table metadata: {0}")]
-    Metadata(tokio_postgres::Error),
+    Metadata(sqlx::Error),
     #[error("Postgres table '{table}' has no column '{column}'")]
     MissingColumn { table: String, column: String },
     #[error("invalid Postgres VALUES: {0}")]
     InvalidValues(String),
     #[error("Postgres insert failed: {0}")]
-    Execute(tokio_postgres::Error),
+    Execute(sqlx::Error),
+    #[error("{0}")]
+    Pool(String),
+}
+
+/// The SQLSTATE a database error carries, when it came from the server at all.
+fn postgres_sqlstate(error: &sqlx::Error) -> Option<String> {
+    let sqlx::Error::Database(error) = error else {
+        return None;
+    };
+    error.code().map(|code| code.into_owned())
 }
 
 impl PostgresWriteError {
@@ -32,14 +86,15 @@ impl PostgresWriteError {
         let Self::Execute(error) = self else {
             return false;
         };
-        error
-            .as_db_error()
-            .is_some_and(|error| PostgresEmitter::is_record_sqlstate(error.code().code()))
+        match postgres_sqlstate(error) {
+            Some(code) => PostgresEmitter::is_record_sqlstate(&code),
+            None => false,
+        }
     }
 
     fn record_reason(&self) -> String {
         let code = match self {
-            Self::Execute(error) => error.as_db_error().map(|error| error.code().code()),
+            Self::Execute(error) => postgres_sqlstate(error),
             _ => None,
         };
         match code {
@@ -54,9 +109,9 @@ impl PostgresWriteError {
                 Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
             }
             Self::Execute(error) => {
-                let code = match error.as_db_error() {
-                    Some(error) => error.code().code(),
-                    None => "unknown",
+                let code = match postgres_sqlstate(&error) {
+                    Some(code) => code,
+                    None => "unknown".to_string(),
                 };
                 Report::new(EmitterRuntimeError::PublishBatch)
                     .attach_printable(format!("Postgres request failed with SQLSTATE {code}"))
@@ -68,27 +123,144 @@ impl PostgresWriteError {
     }
 }
 
+/// Open the node's shared Postgres pool for one named client, sized by its declared bounds.
+///
+/// SQLx's own pool enforces the ceiling, validates a connection before handing it out, and retires
+/// idle and aged connections within the same maximum. The acquisition deadline covers pool wait,
+/// establishment, authentication and validation, and is independent of how long an accepted query
+/// then runs.
+pub(in crate::runtime) async fn open_postgres_pool(
+    config: &[nervix_models::ClientConfigEntry],
+    bounds: ClientPoolBounds,
+) -> Result<PgPool, Report<OpenClientError>> {
+    let Some(addr) = optional_client_config_value(config, "addr") else {
+        return Err(Report::new(OpenClientError::MissingConfig {
+            transport: "Postgres",
+            key: "addr",
+        }));
+    };
+    let options = postgres_connect_options(addr, config)?;
+    PgPoolOptions::new()
+        .min_connections(bounds.minimum())
+        .max_connections(bounds.maximum().get())
+        .acquire_timeout(POSTGRES_ACQUIRE_DEADLINE)
+        .idle_timeout(Some(POSTGRES_IDLE_LIFETIME))
+        .max_lifetime(Some(POSTGRES_MAX_LIFETIME))
+        .test_before_acquire(true)
+        .connect_with(options)
+        .await
+        .map_err(|source| {
+            Report::new(OpenClientError::Connect {
+                transport: "Postgres",
+                reason: source.to_string(),
+            })
+        })
+}
+
+/// The connection options one Postgres client connects with.
+///
+/// The URL carries the endpoint, the user and the database explicitly, and selects one of two TLS
+/// policies. Mounted files are the client's TLS-file interface: an opportunistic fallback and an
+/// encrypted connection without peer verification are both refused rather than silently allowed.
+fn postgres_connect_options(
+    addr: &str,
+    config: &[nervix_models::ClientConfigEntry],
+) -> Result<PgConnectOptions, Report<OpenClientError>> {
+    let invalid = |reason: String| {
+        Report::new(OpenClientError::InvalidConfig {
+            transport: "Postgres",
+            reason,
+        })
+    };
+    let url = Url::parse(addr).map_err(|source| invalid(format!("invalid addr: {source}")))?;
+    if url.scheme() != "postgres" && url.scheme() != "postgresql" {
+        return Err(invalid(format!(
+            "addr must be a postgres:// or postgresql:// URL, found '{}'",
+            url.scheme()
+        )));
+    }
+    let mut options: PgConnectOptions = addr
+        .parse()
+        .map_err(|source| invalid(format!("invalid addr: {source}")))?;
+
+    let ssl_mode = url
+        .query_pairs()
+        .find(|(key, _)| key == "sslmode")
+        .map(|(_, value)| value.to_string());
+    let verify_full = match ssl_mode.as_deref() {
+        Some("verify-full") => true,
+        Some("disable") => false,
+        Some(other) => {
+            return Err(invalid(format!(
+                "sslmode must be 'disable' or 'verify-full', found '{other}'"
+            )));
+        }
+        None => {
+            return Err(invalid(
+                "addr must select sslmode=disable or sslmode=verify-full".to_string(),
+            ));
+        }
+    };
+    options = options.ssl_mode(if verify_full {
+        PgSslMode::VerifyFull
+    } else {
+        PgSslMode::Disable
+    });
+
+    let tls = client_tls_paths(config);
+    if !tls.is_empty() && !verify_full {
+        return Err(invalid(
+            "TLS files require sslmode=verify-full on the client addr".to_string(),
+        ));
+    }
+    match (&tls.cert_file, &tls.key_file) {
+        (Some(cert_file), Some(key_file)) => {
+            options = options.ssl_client_cert(cert_file).ssl_client_key(key_file);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(invalid(
+                "TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(ca_file) = &tls.ca_file {
+        options = options.ssl_root_cert(ca_file);
+    }
+    Ok(options)
+}
+
 impl PostgresEmitter {
     fn is_record_sqlstate(code: &str) -> bool {
         code.starts_with("22") || code.starts_with("23")
     }
 
     pub(in crate::runtime) async fn new(
+        model: &Model,
         client: &nervix_models::CreateClientPostgres,
         resolved: Option<&ResolvedClientConfig>,
         context: &EmitterSinkContext,
         values: &[PostgresValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let client = match Self::client_from_config(client_config_entries(
-            resolved,
-            client.config.as_slice(),
-        ))
-        .await
+        let client = match context
+            .runtime
+            .lease_shared_client(&context.domain, &client.name, model, resolved)
+            .await
         {
-            Ok(client) => Some(client),
+            Ok(lease) => Some(PostgresEmitterClient {
+                lease,
+                client: client.name.clone(),
+                runtime: context.runtime.clone(),
+                waiter: DomainNodeRef::node_in(
+                    context.domain.clone(),
+                    ModelKind::Emitter,
+                    context.emitter.clone(),
+                ),
+            }),
             Err(error) => {
-                context.report_init_error("postgres", &emitter_error_message(&error));
+                context.report_init_error("postgres", &error.to_string());
                 None
             }
         };
@@ -114,51 +286,6 @@ impl PostgresEmitter {
         Self { client, program }
     }
 
-    async fn client_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<PostgresEmitterClient> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing Postgres client config key 'addr'".to_string()
-        })?;
-        if let Some(tls_config) = RustlsClientConfigSource::new(config)
-            .build()
-            .map_err(emitter_config_error)?
-        {
-            let connector = MakeRustlsConnect::new((*tls_config).clone());
-            let (client, connection) =
-                tokio_postgres::connect(&addr, connector)
-                    .await
-                    .map_err(|source| {
-                        emitter_init_error(format!("failed to connect to Postgres: {source}"))
-                    })?;
-            let connection_task = tokio::spawn(async move {
-                if let Err(error) = connection.await {
-                    warn!(error = %error, "postgres connection task failed");
-                }
-            });
-            Ok(PostgresEmitterClient {
-                client,
-                _connection_task: connection_task,
-            })
-        } else {
-            let (client, connection) =
-                tokio_postgres::connect(&addr, NoTls)
-                    .await
-                    .map_err(|source| {
-                        emitter_init_error(format!("failed to connect to Postgres: {source}"))
-                    })?;
-            let connection_task = tokio::spawn(async move {
-                if let Err(error) = connection.await {
-                    warn!(error = %error, "postgres connection task failed");
-                }
-            });
-            Ok(PostgresEmitterClient {
-                client,
-                _connection_task: connection_task,
-            })
-        }
-    }
-
     fn value_to_text(value: &serde_json::Value) -> Option<String> {
         match value {
             serde_json::Value::Null => None,
@@ -173,22 +300,29 @@ impl PostgresEmitter {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 
+    /// The declared type of each mapped column, read on a connection borrowed for this lookup
+    /// alone and returned before the inserts that follow it.
     async fn column_types(
-        client: &PostgresClient,
+        client: &PostgresEmitterClient,
         table: &TableName,
         columns: &[String],
     ) -> Result<Vec<String>, PostgresWriteError> {
+        let mut connection = client
+            .connection()
+            .await
+            .map_err(|error| PostgresWriteError::Pool(error.to_string()))?;
         let table_name = table.as_str().to_string();
         let column_refs = columns.to_vec();
-        let rows = client
-            .query(
-                "SELECT a.attname, a.atttypid::regtype::text FROM pg_attribute a WHERE a.attrelid \
-                 = to_regclass($1) AND a.attname = ANY($2::text[]) AND a.attnum > 0 AND NOT \
-                 a.attisdropped",
-                &[&table_name, &column_refs],
-            )
-            .await
-            .map_err(PostgresWriteError::Metadata)?;
+        let rows = sqlx::query(
+            "SELECT a.attname, a.atttypid::regtype::text FROM pg_attribute a WHERE a.attrelid = \
+             to_regclass($1) AND a.attname = ANY($2::text[]) AND a.attnum > 0 AND NOT \
+             a.attisdropped",
+        )
+        .bind(table_name)
+        .bind(column_refs)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(PostgresWriteError::Metadata)?;
         let types_by_column = rows
             .into_iter()
             .map(|row| {
@@ -210,8 +344,10 @@ impl PostgresEmitter {
             .collect()
     }
 
+    /// One bounded insert, on a connection borrowed for that insert and returned after it, so a
+    /// flush of several chunks lets other local emitters through between them.
     async fn publish_rows_with_types(
-        client: &PostgresClient,
+        client: &PostgresEmitterClient,
         table: &TableName,
         mappings: &[PostgresValueMapping],
         conflict_action: &PostgresConflictAction,
@@ -238,10 +374,6 @@ impl PostgresEmitter {
                 column_values[index].push(Self::value_to_text(value));
             }
         }
-        let params = column_values
-            .iter()
-            .map(|values| -> &(dyn ToSql + Sync) { values })
-            .collect::<Vec<_>>();
         let param_refs = (1..=columns.len())
             .map(|index| format!("${index}::text[]"))
             .collect::<Vec<_>>()
@@ -264,10 +396,21 @@ impl PostgresEmitter {
              AS t({unnest_columns}){conflict_clause}",
             Self::quote_ident(table.as_str()),
         );
-        client
-            .execute(&sql, &params)
+        // Every value is a bound parameter and every identifier went through `quote_ident`, so the
+        // only thing interpolated into this statement is a quoted name or a positional placeholder.
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        for values in column_values {
+            query = query.bind(values);
+        }
+        let mut connection = client
+            .connection()
             .await
-            .map_err(PostgresWriteError::Execute)
+            .map_err(|error| PostgresWriteError::Pool(error.to_string()))?;
+        let result = connection
+            .execute(query)
+            .await
+            .map_err(PostgresWriteError::Execute)?;
+        Ok(result.rows_affected())
     }
 
     fn conflict_clause(
@@ -376,7 +519,7 @@ impl PostgresEmitter {
         let request_acks = batch.merged_acks();
         let column_types = match await_emitter_confirmation(
             &request_acks,
-            Self::column_types(&client.client, table, &columns),
+            Self::column_types(client, table, &columns),
         )
         .await
         {
@@ -398,7 +541,7 @@ impl PostgresEmitter {
             match await_emitter_confirmation(
                 &request_acks,
                 Self::publish_rows_with_types(
-                    &client.client,
+                    client,
                     table,
                     values,
                     conflict_action,
@@ -436,7 +579,7 @@ impl PostgresEmitter {
                         match await_emitter_confirmation(
                             &request_acks,
                             Self::publish_rows_with_types(
-                                &client.client,
+                                client,
                                 table,
                                 values,
                                 conflict_action,

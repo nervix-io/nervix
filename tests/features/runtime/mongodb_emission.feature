@@ -43,6 +43,7 @@ Feature: MongoDB emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT mongodb_client
         TYPE MONGODB
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
@@ -123,6 +124,7 @@ Feature: MongoDB emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT mongodb_client
         TYPE MONGODB
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
@@ -204,6 +206,7 @@ Feature: MongoDB emission
       ON GENERAL ERROR LOG;
       CREATE CLIENT mongodb_client
       TYPE MONGODB
+      POOL SIZE MIN 2 MAX 8
       CONFIG {
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
@@ -285,7 +288,7 @@ Feature: MongoDB emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT mongodb_client TYPE MONGODB CONFIG {
+      CREATE CLIENT mongodb_client TYPE MONGODB POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };

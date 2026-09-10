@@ -106,6 +106,25 @@ Feature: NSPL file formatting
         SCHEMA order UNBRANCHED CAPACITY 1;
       """
 
+  Scenario: A pooled client is rewritten with its pool clause between the type and the mount
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create client postgres_main type postgres pool size min 2 max 8 mount dev_tls
+        config { 'addr' = 'postgresql://HOST:5432/DATABASE?sslmode=verify-full' };
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      CREATE CLIENT postgres_main
+        TYPE POSTGRES
+        POOL SIZE MIN 2 MAX 8
+        MOUNT dev_tls
+        CONFIG {
+          'addr' = 'postgresql://HOST:5432/DATABASE?sslmode=verify-full'
+        };
+      """
+
   Scenario: A directory is searched recursively for NSPL files
     Given an NSPL file "top.nspl" containing
       """

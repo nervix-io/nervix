@@ -114,6 +114,7 @@ UPLOAD RESOURCE dev_tls VERSION './tls/dev';
 
 CREATE IF NOT EXISTS CLIENT redis_tls
   TYPE REDIS
+  POOL SIZE MIN 1 MAX 4
   MOUNT dev_tls
   CONFIG {
     'addr' = 'rediss://127.0.0.1:6380/',
