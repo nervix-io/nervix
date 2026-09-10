@@ -1315,48 +1315,49 @@ impl TransportState {
             if self.admission_closed.is_cancelled() {
                 return Err(TransportError::ShuttingDown);
             }
-            let target = if let Some(target) = self.targets.get(node_id) {
-                target.value().clone()
-            } else {
-                return Err(TransportError::MissingTarget(node_id.clone()));
-            };
-            self.ensure_class_slots(node_id, &target, class);
+            if let Some(target) = self
+                .targets
+                .get(node_id)
+                .map(|target| target.value().clone())
+            {
+                self.ensure_class_slots(node_id, &target, class);
 
-            let count = class.connections_per_peer();
-            let start = self
-                .next_connection
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.checked_add(1).unwrap_or_default())
-                })
-                .assured("the round-robin cursor update always returns a value")
-                % count;
-            for offset in 0..count {
-                let index = (start + offset) % count;
-                let key = ConnectionSlotKey {
-                    node_id: node_id.clone(),
-                    target: target.clone(),
-                    class,
-                    slot: index,
-                };
-                let Some(connection) = self.connections.get(&key).map(|item| item.clone()) else {
-                    continue;
-                };
-                let stream_slots = connection
-                    .stream_slots
-                    .for_subquota(subquota)
-                    .assured("reserved stream subquotas are only assigned to management requests");
-                let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => continue,
-                };
-                if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
-                    continue;
+                let count = class.connections_per_peer();
+                let start = self
+                    .next_connection
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                        Some(current.checked_add(1).unwrap_or_default())
+                    })
+                    .assured("the round-robin cursor update always returns a value")
+                    % count;
+                for offset in 0..count {
+                    let index = (start + offset) % count;
+                    let key = ConnectionSlotKey {
+                        node_id: node_id.clone(),
+                        target: target.clone(),
+                        class,
+                        slot: index,
+                    };
+                    let Some(connection) = self.connections.get(&key).map(|item| item.clone())
+                    else {
+                        continue;
+                    };
+                    let stream_slots = connection.stream_slots.for_subquota(subquota).assured(
+                        "reserved stream subquotas are only assigned to management requests",
+                    );
+                    let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => continue,
+                    };
+                    if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
+                        continue;
+                    }
+                    return Ok(StreamLease {
+                        connection,
+                        slot: Some(permit),
+                        state: self.clone(),
+                    });
                 }
-                return Ok(StreamLease {
-                    connection,
-                    slot: Some(permit),
-                    state: self.clone(),
-                });
             }
 
             tokio::select! {

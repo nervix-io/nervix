@@ -1313,8 +1313,7 @@ Feature: Relocating runtime nodes onto a named cluster node
 
   @planned-handoff-timeout
   Scenario: A unit that cannot drain aborts whole and succeeds after the stall clears
-    Given entity gate deadline is configured as "250ms"
-    And the production sticky scheduler is configured
+    Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
     And the leader node is configured with these NSPL commands
@@ -1369,6 +1368,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       transient error: fault injector stalled emitter publish
       """
+    Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these NSPL commands fail with "timed out draining domain"
       """
       RELOCATE FROM JUNCTION abort_route TO EMITTER stalled_emitter

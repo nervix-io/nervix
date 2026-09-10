@@ -63,7 +63,12 @@ impl Runtime {
                         destination_incarnation: persisted.destination_incarnation,
                         base_schedule_fingerprint: persisted.base_schedule_fingerprint,
                         target_schedule_fingerprint: persisted.target_schedule_fingerprint,
-                        activation_authorized: false,
+                        activation_authorization: super::state_replication::
+                            OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest,
+                        activation: watch::channel(
+                            super::state_replication::OwnershipHandoffActivation::Prepared,
+                        )
+                        .0,
                         checkpoints,
                     },
                 );
@@ -198,6 +203,13 @@ impl Runtime {
 
     pub fn entity_gate_deadline(&self) -> Duration {
         self.inner.entity_gate_deadline
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_forced_entity_drain_timeout(domain)
     }
 
     #[cfg(feature = "testing")]

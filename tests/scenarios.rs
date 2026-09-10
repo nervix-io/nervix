@@ -2258,6 +2258,19 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
     );
 }
 
+#[given(expr = "the next pending entity drain in domain {string} is forced to time out")]
+async fn given_next_pending_entity_drain_is_forced_to_time_out(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .force_next_entity_drain_timeout(domain);
+}
+
 #[given("graceful shutdown drain is enabled")]
 async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
     assert!(

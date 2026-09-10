@@ -737,20 +737,11 @@ Feature: Inferencer resources
       CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
       """
-    And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
+    When http payloads are posted concurrently to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
       """
       {"tenant":"acme","features":[1.0,10.0],"mask":[100.0,1000.0]}
-      """
-    And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
-      """
       {"tenant":"beta","features":[100.0,1000.0],"mask":[1.0,10.0]}
-      """
-    And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
-      """
       {"tenant":"acme","features":[3.0,30.0],"mask":[300.0,3000.0]}
-      """
-    And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"
-      """
       {"tenant":"beta","features":[300.0,3000.0],"mask":[3.0,30.0]}
       """
     Then within "5s" the relay subscription receives payloads containing all fragments

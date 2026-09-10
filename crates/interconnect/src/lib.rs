@@ -19,8 +19,8 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
-    ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainClockProgress, DomainName,
-    EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainClockProgress,
+    DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
     SubscriptionBinding,
@@ -364,14 +364,14 @@ pub enum ControlEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionInterestVisibilityRequest {
-    pub subscriber_node_id: ClusterNodeName,
+    pub subscriber: ClusterNodeIdentity,
     pub domain: DomainName,
     pub relay: RelayName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionInterestVisibilityResponse {
-    pub result: Result<bool, String>,
+    pub result: Result<(), String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -864,7 +864,7 @@ impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
     const NAME: &'static str = "subscription_interest_visibility";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_millis(250);
+    const TIMEOUT: Duration = Duration::from_secs(5);
 }
 
 #[derive(Debug)]
@@ -1073,8 +1073,6 @@ pub enum TransportError {
     },
     #[error("interconnect connection capacity is exhausted")]
     PoolExhausted,
-    #[error("no authenticated target is configured for node '{0}'")]
-    MissingTarget(ClusterNodeName),
     #[error("connection setup with {peer} timed out after {timeout:?}")]
     ConnectionSetupTimeout { peer: SocketAddr, timeout: Duration },
     #[error("request to node '{peer}' timed out after {timeout:?}")]
@@ -1164,6 +1162,7 @@ mod tests {
         },
     };
 
+    use futures_util::FutureExt as _;
     use meticulous::ResultExt as _;
     use nervix_execution::{CpuClass, MemoryClass};
     use nervix_models::RemoteAckOutcome;
@@ -1174,7 +1173,7 @@ mod tests {
     use tempfile::{TempDir, tempdir};
     use tokio::{
         sync::{Notify, watch},
-        time::timeout,
+        time::{Instant, timeout, timeout_at},
     };
 
     use super::*;
@@ -1379,13 +1378,30 @@ mod tests {
     #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
     struct BlockingProgressResponse;
 
+    const LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS: u64 = 30;
+    const LIVENESS_QUOTA_REQUEST_TIMEOUT_MULTIPLIER: u64 = 2;
+    const LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = match LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS
+        .checked_mul(LIVENESS_QUOTA_REQUEST_TIMEOUT_MULTIPLIER)
+    {
+        Some(seconds) => seconds,
+        None => panic!("the fixed liveness quota test deadlines fit in u64"),
+    };
+    const LIVENESS_QUOTA_EVENT_FAILSAFE: Duration =
+        Duration::from_secs(LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS);
+    const LIVENESS_QUOTA_REQUEST_TIMEOUT: Duration =
+        Duration::from_secs(LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS);
+    const _: () = assert!(
+        LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS > LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS,
+        "blocked progress requests must remain active throughout the liveness observation"
+    );
+
     impl InterconnectRequest for BlockingProgressRequest {
         type Response = BlockingProgressResponse;
 
         const NAME: &'static str = "test_blocking_progress";
         const CLASS: PoolClass = PoolClass::Management;
         const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-        const TIMEOUT: Duration = Duration::from_secs(2);
+        const TIMEOUT: Duration = LIVENESS_QUOTA_REQUEST_TIMEOUT;
     }
 
     #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -1400,7 +1416,7 @@ mod tests {
         const NAME: &'static str = "test_liveness";
         const CLASS: PoolClass = PoolClass::Management;
         const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-        const TIMEOUT: Duration = Duration::from_secs(2);
+        const TIMEOUT: Duration = LIVENESS_QUOTA_REQUEST_TIMEOUT;
     }
 
     #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -1431,6 +1447,18 @@ mod tests {
     }
 
     async fn connected_transports_with_options(options: TransportOptions) -> ConnectedTransports {
+        let transports = bound_transports_with_options(options).await;
+        transports
+            .transport_a
+            .register_outbound_target(
+                transports.node_b.clone(),
+                PeerTarget::new(transports.transport_b.local_addr(), "localhost"),
+            )
+            .expect("authenticated test target should register");
+        transports
+    }
+
+    async fn bound_transports_with_options(options: TransportOptions) -> ConnectedTransports {
         let authority = TestCertificateAuthority::new();
         let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
         let node_b = ClusterNodeName::parse("node-b").expect("test node name should be valid");
@@ -1456,12 +1484,6 @@ mod tests {
         )
         .await
         .expect("second test transport should bind");
-        transport_a
-            .register_outbound_target(
-                node_b.clone(),
-                PeerTarget::new(transport_b.local_addr(), "localhost"),
-            )
-            .expect("authenticated test target should register");
         let live_nodes = BTreeSet::from([node_a.clone(), node_b.clone()]);
         transport_a.replace_live_nodes(&live_nodes);
         transport_b.replace_live_nodes(&live_nodes);
@@ -1474,6 +1496,44 @@ mod tests {
             _incoming_a: incoming_a,
             incoming_b,
         }
+    }
+
+    #[tokio::test]
+    async fn send_waits_for_a_target_registered_after_the_operation_starts() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            mut incoming_b,
+            ..
+        } = bound_transports_with_options(TransportOptions::default()).await;
+        let mut send =
+            Box::pin(transport_a.send(&node_b, Envelope::Control(ControlEnvelope::Terminate)));
+
+        assert!(
+            send.as_mut().now_or_never().is_none(),
+            "send should await the transport's target notification"
+        );
+        transport_a
+            .register_outbound_target(
+                node_b.clone(),
+                PeerTarget::new(transport_b.local_addr(), "localhost"),
+            )
+            .expect("authenticated test target should register");
+
+        send.await.expect("control delivery should succeed");
+        let received = incoming_b
+            .recv()
+            .now_or_never()
+            .expect("the control is queued before the successful response")
+            .expect("the peer's incoming queue should remain open");
+        assert!(matches!(
+            received.envelope,
+            Envelope::Control(ControlEnvelope::Terminate)
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
     }
 
     #[test]
@@ -1840,17 +1900,24 @@ mod tests {
             node_b,
             ..
         } = connected_transports().await;
-        let started = StdArc::new(AtomicUsize::new(0));
+        let observation_deadline = Instant::now()
+            .checked_add(LIVENESS_QUOTA_EVENT_FAILSAFE)
+            .assured("the fixed liveness quota test failsafe fits in Tokio's instant range");
+        let (progress_started, mut progress_started_rx) = watch::channel(0_usize);
         let (release, release_rx) = watch::channel(false);
         transport_b
             .register_handler::<BlockingProgressRequest, _, _>({
-                let started = StdArc::clone(&started);
                 let release_rx = release_rx.clone();
+                let progress_started = progress_started.clone();
                 move |_context, _request| {
-                    let started = StdArc::clone(&started);
                     let mut release_rx = release_rx.clone();
+                    let progress_started = progress_started.clone();
                     async move {
-                        started.fetch_add(1, Ordering::AcqRel);
+                        progress_started.send_modify(|started| {
+                            *started = started.checked_add(1).assured(
+                                "the test starts only one bounded set of progress requests",
+                            );
+                        });
                         release_rx.wait_for(|released| *released).await.assured(
                             "the test retains its release sender until every request joins",
                         );
@@ -1859,9 +1926,16 @@ mod tests {
                 }
             })
             .assured("the fresh test transport has no progress handler with this name");
+        let (liveness_entered, mut liveness_entered_rx) = watch::channel(false);
         transport_b
-            .register_handler::<LivenessRequest, _, _>(|_context, _request| async move {
-                LivenessResponse
+            .register_handler::<LivenessRequest, _, _>({
+                move |_context, _request| {
+                    let liveness_entered = liveness_entered.clone();
+                    async move {
+                        liveness_entered.send_replace(true);
+                        LivenessResponse
+                    }
+                }
             })
             .assured("the fresh test transport has no liveness handler with this name");
 
@@ -1873,25 +1947,34 @@ mod tests {
                 requester.request(&target, BlockingProgressRequest).await
             }));
         }
-        timeout(Duration::from_secs(2), async {
-            loop {
-                tokio::task::consume_budget().await;
-                if started.load(Ordering::Acquire) == connection::MANAGEMENT_PROGRESS_STREAMS {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .assured("the test requests start before their two-second request deadlines");
-
-        let liveness = timeout(
-            Duration::from_millis(250),
-            transport_a.request(&node_b, LivenessRequest),
+        timeout_at(
+            observation_deadline,
+            progress_started_rx
+                .wait_for(|started| *started == connection::MANAGEMENT_PROGRESS_STREAMS),
         )
-        .await;
+        .await
+        .assured("every reserved progress stream enters its handler within the test failsafe")
+        .assured("the registered progress handler retains its watch sender");
+
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        let liveness =
+            tokio::spawn(async move { requester.request(&target, LivenessRequest).await });
+        timeout_at(
+            observation_deadline,
+            liveness_entered_rx.wait_for(|entered| *entered),
+        )
+        .await
+        .assured(
+            "the liveness handler enters while every progress handler remains blocked within the \
+             test failsafe",
+        )
+        .assured("the registered liveness handler retains its watch sender");
 
         release.send_replace(true);
+        let liveness = liveness
+            .await
+            .assured("the liveness request task contains no panic path");
         for request in blocked {
             let response = request
                 .await
@@ -1907,12 +1990,6 @@ mod tests {
         assert!(
             liveness.is_ok(),
             "liveness must retain a physical management stream: {liveness:?}"
-        );
-        let liveness =
-            liveness.verified("the liveness timeout result was checked by the assertion above");
-        assert!(
-            liveness.is_ok(),
-            "liveness request should succeed: {liveness:?}"
         );
         assert_eq!(
             liveness.verified("the liveness response was checked by the assertion above"),

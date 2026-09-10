@@ -37,7 +37,7 @@ use parking_lot::{Mutex, RwLock};
 use rkyv::{Archive, Deserialize, Serialize};
 use tokio::{
     net::lookup_host,
-    sync::{broadcast, mpsc},
+    sync::{broadcast, mpsc, watch},
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
@@ -604,6 +604,12 @@ impl ClusterHandle {
         )
     }
 
+    pub(crate) async fn subscribe_live_node_states(
+        &self,
+    ) -> watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
+        self.chitchat.lock().await.live_nodes_watcher()
+    }
+
     pub async fn status_lines(&self) -> Vec<String> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
@@ -702,9 +708,7 @@ impl ClusterHandle {
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
-        chitchat
-            .self_node_state()
-            .set(KEY_RUNTIME_REVISION_READY, revision.to_string());
+        advance_runtime_revision_readiness(chitchat.self_node_state(), revision);
     }
 
     pub async fn nodes_ready_for_runtime_revision(
@@ -782,6 +786,34 @@ impl ClusterHandle {
         }
 
         interested
+    }
+
+    /// Wait until this node's live Chitchat view contains the interest advertised by the exact
+    /// subscriber incarnation. The interconnect request that calls this method owns the deadline.
+    pub(crate) async fn wait_for_subscription_interest(
+        &self,
+        subscriber: &ClusterNodeIdentity,
+        domain: &str,
+        relay: &str,
+    ) {
+        let key = subscription_interest_key(domain, relay);
+        let mut live_node_states = self.subscribe_live_node_states().await;
+        loop {
+            tokio::task::consume_budget().await;
+            let visible = {
+                let states = live_node_states.borrow_and_update();
+                states.iter().any(|(chitchat_id, state)| {
+                    cluster_node_identity(chitchat_id).as_ref() == Some(subscriber)
+                        && state.get(&key).is_some()
+                })
+            };
+            if visible {
+                return;
+            }
+            live_node_states.changed().await.assured(
+                "the cluster handle retains its Chitchat state sender for the server lifetime",
+            );
+        }
     }
 
     pub fn record_interconnect_connected(&self, node_id: &ClusterNodeName, target_addr: String) {
@@ -904,10 +936,20 @@ fn subscription_interest_key(domain: &str, relay: &str) -> String {
 }
 
 fn runtime_revision_is_ready(state: &NodeState, revision: u64) -> bool {
-    state
-        .get(KEY_RUNTIME_REVISION_READY)
-        .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|ready_revision| ready_revision >= revision)
+    let Some(value) = state.get(KEY_RUNTIME_REVISION_READY) else {
+        return false;
+    };
+    let Ok(ready_revision) = value.parse::<u64>() else {
+        return false;
+    };
+    ready_revision >= revision
+}
+
+fn advance_runtime_revision_readiness(state: &mut NodeState, revision: u64) {
+    if runtime_revision_is_ready(state, revision) {
+        return;
+    }
+    state.set(KEY_RUNTIME_REVISION_READY, revision.to_string());
 }
 
 fn cluster_node_identity(node_id: &ChitchatId) -> Option<ClusterNodeIdentity> {
@@ -1038,5 +1080,17 @@ mod tests {
             .expect("IPv6 socket address should parse");
         assert_eq!(parsed.to_string(), "[::1]:47392");
         assert_eq!(parsed.url_authority(), "[::1]:47392");
+    }
+
+    #[test]
+    fn runtime_revision_readiness_advances_monotonically() {
+        let mut state = NodeState::for_test();
+
+        advance_runtime_revision_readiness(&mut state, 12);
+        advance_runtime_revision_readiness(&mut state, 11);
+        assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("12"));
+
+        advance_runtime_revision_readiness(&mut state, 13);
+        assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("13"));
     }
 }

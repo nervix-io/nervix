@@ -48,6 +48,8 @@ struct FaultInjectionState {
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_otel_clients: DashMap<String, (), RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
+    /// One-shot, domain-scoped drain failures consumed after a pending status is observed.
+    forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
@@ -139,6 +141,7 @@ impl Default for FaultInjection {
                 failed_ingestors: DashMap::default(),
                 unavailable_otel_clients: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
+                forced_entity_drain_timeouts: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 bulk_executions: DashMap::default(),
@@ -255,6 +258,13 @@ impl FaultInjection {
         self.inner
             .failed_schedule_publications
             .insert(domain.to_ascii_lowercase(), ());
+    }
+
+    /// Forces the next pending entity drain in `domain` to report its normal timeout outcome
+    /// after collecting one complete status observation. The one-shot seam lets timeout recovery
+    /// tests exercise that outcome without making successful cluster work race a short duration.
+    pub fn force_next_entity_drain_timeout(&self, domain: DomainName) {
+        self.inner.forced_entity_drain_timeouts.insert(domain, ());
     }
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
@@ -599,6 +609,14 @@ impl FaultInjection {
         self.inner
             .failed_schedule_publications
             .remove(&domain.as_str().to_ascii_lowercase())
+            .is_some()
+    }
+
+    /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
+    pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
+        self.inner
+            .forced_entity_drain_timeouts
+            .remove(domain)
             .is_some()
     }
 
