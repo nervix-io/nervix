@@ -18,7 +18,7 @@ permissions:
   issues: write
 
 env:
-  KACHE_VERSION: "0.18.0"
+  KACHE_VERSION: "0.19.0"
 
 jobs:
   meta:
