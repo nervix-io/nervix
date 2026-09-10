@@ -37,9 +37,9 @@ pub use canonical::{
 };
 pub use cluster_node::{ClusterNodeIdentity, ClusterNodeIncarnation};
 pub use domain_clock::{
-    DomainClockAdvancement, DomainClockAuthority, DomainClockAuthorityRevision,
-    DomainClockBoundary, DomainClockError, DomainClockPeriod, DomainClockProgress,
-    DomainClockState, DomainTimeRate,
+    DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
+    DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
+    DomainClockProgress, DomainClockState, DomainTimeRate,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,

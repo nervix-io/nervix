@@ -11,12 +11,11 @@ use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 #[cfg(test)]
 use nervix_models::DomainTick;
 use nervix_models::{
-    DomainClockAuthority, DomainClockError, DomainClockProgress, DomainClockState, DomainName,
-    DomainPace, DomainState, Timestamp,
+    DomainAdmissionWindow, DomainClockAuthority, DomainClockError, DomainClockPeriod,
+    DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
 };
 use nervix_wasm::{DomainClock as WasmDomainClock, WasmExecutionContext};
 use thiserror::Error;
@@ -24,7 +23,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
-use super::{DOMAIN_TICK_HISTORY_LIMIT, ObservedDomainTick, Runtime, VmExecutionContext};
+use super::{ObservedDomainTick, Runtime, VmExecutionContext};
 use crate::runtime::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -56,6 +55,8 @@ pub enum DomainClockAccessError {
         domain: DomainName,
         operation: DomainClockArithmetic,
     },
+    #[error("domain '{domain}' has invalid ingestion timing configuration")]
+    AdmissionConfiguration { domain: DomainName },
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -341,8 +342,15 @@ pub struct DomainClock {
 
 impl DomainClock {
     pub fn snapshot(&self) -> DomainClockAccessResult<DomainExecutionSnapshot> {
-        let wall_now = actual_utc_now();
         let mut shared = self.inner.state.lock();
+        self.read(&mut shared)
+    }
+
+    fn read(
+        &self,
+        shared: &mut DomainClockSharedState,
+    ) -> DomainClockAccessResult<DomainExecutionSnapshot> {
+        let wall_now = actual_utc_now();
         let source = self.source(&shared.installation)?;
         let projected = source.now(&self.inner.domain, wall_now)?;
         let now = match &shared.last_read {
@@ -359,6 +367,40 @@ impl DomainClock {
         };
         shared.last_read = Some(snapshot.clone());
         Ok(snapshot)
+    }
+
+    pub(super) fn ingestion_snapshot(
+        &self,
+        period: &str,
+        skew: &str,
+    ) -> DomainClockAccessResult<DomainIngestionSnapshot> {
+        let mut shared = self.inner.state.lock();
+        let snapshot = self.read(&mut shared)?;
+        let window = match self.source(&shared.installation)? {
+            DomainClockSource::Unpaced => None,
+            DomainClockSource::Paced(mapping) => {
+                let context = || DomainClockAccessError::AdmissionConfiguration {
+                    domain: self.inner.domain.clone(),
+                };
+                let period = period
+                    .parse::<DomainClockPeriod>()
+                    .change_context(context())?;
+                let skew = humantime::parse_duration(skew).change_context(context())?;
+                Some(
+                    DomainAdmissionWindow::reached(
+                        mapping.logical_start(),
+                        snapshot.now(),
+                        period,
+                        skew,
+                    )
+                    .assured(
+                        "a projected, nondecreasing clock read never precedes its generation's \
+                         origin",
+                    ),
+                )
+            }
+        };
+        Ok(DomainIngestionSnapshot { snapshot, window })
     }
 
     pub fn deadline_at(&self, due_at: Timestamp) -> LogicalDeadline {
@@ -488,6 +530,12 @@ impl DomainClock {
     }
 }
 
+/// Delivery time and admission boundaries captured together from one installed generation.
+pub(super) struct DomainIngestionSnapshot {
+    pub(super) snapshot: DomainExecutionSnapshot,
+    pub(super) window: Option<DomainAdmissionWindow>,
+}
+
 /// The time value handed to one VM or WASM invocation after its clock generation is validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainExecutionSnapshot {
@@ -602,52 +650,6 @@ pub(super) fn current_timestamp() -> Timestamp {
     actual_utc_now()
 }
 
-pub(super) fn domain_clock_window_matches(
-    clock: &DomainClockState,
-    period: Duration,
-    skew: Duration,
-    event_timestamp: Timestamp,
-) -> bool {
-    let tick_spacing_nanos =
-        (period.as_nanos().approx_into::<f64>() / clock.time_rate().get()).max(1.0);
-    let first_tick = clock.wall_started_at();
-    let event_offset_nanos = (i128::from(event_timestamp.unix_nanos())
-        - i128::from(first_tick.unix_nanos()))
-    .approx_into::<f64>();
-    let approx_index = event_offset_nanos / tick_spacing_nanos;
-    let candidates = [
-        approx_index.floor() - 1.0,
-        approx_index.floor(),
-        approx_index.ceil(),
-        approx_index.ceil() + 1.0,
-        0.0,
-    ];
-
-    for candidate in candidates {
-        if candidate < 0.0 {
-            continue;
-        }
-        let Some(candidate_offset_nanos) = (candidate * tick_spacing_nanos)
-            .round()
-            .checked_approx_into::<u64>()
-        else {
-            continue;
-        };
-        let Ok(tick_wall) = first_tick.checked_add(Duration::from_nanos(candidate_offset_nanos))
-        else {
-            continue;
-        };
-        let distance = (i128::from(event_timestamp.unix_nanos())
-            - i128::from(tick_wall.unix_nanos()))
-        .unsigned_abs();
-        if distance <= skew.as_nanos() {
-            return true;
-        }
-    }
-
-    false
-}
-
 pub(super) fn current_domain_logical_time(
     clock: &DomainClockState,
     wall_now: Timestamp,
@@ -708,20 +710,17 @@ impl Runtime {
             return Ok(());
         }
 
-        let mut ticks = entry.ticks.lock();
-        if ticks.back().is_some_and(|observed| {
+        let mut observed = entry.progress.lock();
+        if observed.as_ref().is_some_and(|observed| {
             observed.tick_id >= progress.tick.tick_id
                 || observed.wall_clock > progress.tick.wall_clock
         }) {
             return Ok(());
         }
-        ticks.push_back(ObservedDomainTick {
+        *observed = Some(ObservedDomainTick {
             tick_id: progress.tick.tick_id,
             wall_clock: progress.tick.wall_clock,
         });
-        while ticks.len() > DOMAIN_TICK_HISTORY_LIMIT {
-            ticks.pop_front();
-        }
         Ok(())
     }
 
@@ -803,49 +802,15 @@ mod tests {
 
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainClockAuthorityRevision,
-        DomainClockProgress, DomainClockState, DomainConfig, DomainTick, DomainTimeRate, Timestamp,
+        DomainClockProgress, DomainClockState, DomainConfig, DomainTick, DomainTimeRate,
+        IngestTimestampSource, Timestamp,
     };
 
     use super::*;
-    use crate::runtime::{domain, named, paced_domain_state, test_domain_clock_authority};
-
-    #[test]
-    fn paced_domains_accept_records_inside_tick_window() {
-        let runtime = Runtime::new();
-        let mut domains = BTreeMap::new();
-        domains.insert(domain("paced"), paced_domain_state("paced"));
-        runtime.sync_domains(&domains);
-        runtime
-            .handle_domain_tick(
-                &domain("paced"),
-                &DomainTick {
-                    tick_id: 1,
-                    logical_timestamp: Timestamp::from_unix_nanos(0),
-                    wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
-                    period: "1s".parse().expect("fixture period is valid"),
-                },
-            )
-            .expect("the fixture domain exists");
-
-        assert!(
-            runtime
-                .ensure_domain_allows_ingestion(
-                    &domain("paced"),
-                    &named("ing"),
-                    Timestamp::from_unix_nanos(10_200_000_000),
-                )
-                .is_ok()
-        );
-        assert!(
-            runtime
-                .ensure_domain_allows_ingestion(
-                    &domain("paced"),
-                    &named("ing"),
-                    Timestamp::from_unix_nanos(10_400_000_000),
-                )
-                .is_err()
-        );
-    }
+    use crate::{
+        runtime::{RuntimeValue, domain, named, paced_domain_state, test_domain_clock_authority},
+        runtime_schema::test_runtime_row,
+    };
 
     #[test]
     fn progress_requires_the_committed_generation_revision_identity_and_peer() {
@@ -929,9 +894,8 @@ mod tests {
             .domains
             .get(&domain_id)
             .expect("the fixture domain remains installed");
-        let ticks = observed.ticks.lock();
-        assert_eq!(ticks.len(), 1);
-        assert_eq!(ticks.front().map(|tick| tick.tick_id), Some(3));
+        let progress = observed.progress.lock();
+        assert_eq!(progress.as_ref().map(|tick| tick.tick_id), Some(3));
     }
 
     #[test]
@@ -1020,7 +984,7 @@ mod tests {
             .domains
             .get(&domain_id)
             .expect("the restarted domain remains installed");
-        assert!(observed.ticks.lock().is_empty());
+        assert!(observed.progress.lock().is_none());
         let installed = observed.clock.inner.state.lock();
         assert!(matches!(
             &installed.installation,
@@ -1082,7 +1046,7 @@ mod tests {
             .get(&domain_id)
             .expect("the later generation remains installed");
         assert!(
-            observed.ticks.lock().is_empty(),
+            observed.progress.lock().is_none(),
             "progress retained from the skipped STOP belongs to the previous generation"
         );
         drop(observed);
@@ -1095,13 +1059,13 @@ mod tests {
             .get(&domain_id)
             .expect("the later generation remains installed");
         assert_eq!(
-            observed.ticks.lock().back().map(|tick| tick.tick_id),
+            observed.progress.lock().as_ref().map(|tick| tick.tick_id),
             Some(1)
         );
     }
 
     #[test]
-    fn progress_history_retains_only_the_bounded_newest_frontier() {
+    fn progress_retains_the_latest_accepted_report() {
         let runtime = Runtime::new();
         let domain_id = domain("paced");
         let mut state = paced_domain_state("paced");
@@ -1117,11 +1081,7 @@ mod tests {
             .owner()
             .cloned()
             .expect("the fixture authority is assigned");
-        let final_tick = u64::try_from(DOMAIN_TICK_HISTORY_LIMIT)
-            .expect("the fixed history limit fits in u64")
-            .checked_add(3)
-            .expect("the fixed history limit can advance by three");
-
+        let final_tick = 300_u64;
         for tick_id in 1..=final_tick {
             let timestamp = i64::try_from(tick_id).expect("fixture tick ids fit in a timestamp");
             runtime
@@ -1148,43 +1108,8 @@ mod tests {
             .domains
             .get(&domain_id)
             .expect("the domain remains installed");
-        let ticks = observed.ticks.lock();
-        assert_eq!(ticks.len(), DOMAIN_TICK_HISTORY_LIMIT);
-        assert_eq!(ticks.front().map(|tick| tick.tick_id), Some(4));
-        assert_eq!(ticks.back().map(|tick| tick.tick_id), Some(final_tick));
-    }
-
-    #[test]
-    fn paced_domains_accept_records_while_clock_is_running_before_ticks_arrive() {
-        let runtime = Runtime::new();
-        let mut domains = BTreeMap::new();
-        let mut state = paced_domain_state("paced");
-        state.clock = Some(DomainClockState::new(
-            Timestamp::from_unix_nanos(10_000_000_000),
-            Timestamp::from_unix_nanos(10_000_000_000),
-            DomainTimeRate::ONE,
-        ));
-        domains.insert(domain("paced"), state);
-        runtime.sync_domains(&domains);
-
-        assert!(
-            runtime
-                .ensure_domain_allows_ingestion(
-                    &domain("paced"),
-                    &named("ing"),
-                    Timestamp::from_unix_nanos(10_200_000_000),
-                )
-                .is_ok()
-        );
-        assert!(
-            runtime
-                .ensure_domain_allows_ingestion(
-                    &domain("paced"),
-                    &named("ing"),
-                    Timestamp::from_unix_nanos(11_200_000_000),
-                )
-                .is_ok()
-        );
+        let progress = observed.progress.lock();
+        assert_eq!(progress.as_ref().map(|tick| tick.tick_id), Some(final_tick));
     }
 
     #[test]
@@ -1207,23 +1132,30 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "expected clock-contract failure owned by domain clocks task 05"]
     fn paced_domains_admit_the_logical_origin() {
         let runtime = Runtime::new();
         let mut domains = BTreeMap::new();
         let mut state = paced_domain_state("paced");
         state.clock = Some(DomainClockState::new(
-            Timestamp::from_unix_nanos(10_000_000_000),
+            current_timestamp(),
             Timestamp::from_unix_nanos(0),
             DomainTimeRate::ONE,
         ));
         domains.insert(domain("paced"), state);
         runtime.sync_domains(&domains);
 
-        let admission = runtime.ensure_domain_allows_ingestion(
-            &domain("paced"),
-            &named("ing"),
-            Timestamp::from_unix_nanos(0),
+        let domain = domain("paced");
+        let ingestor = named("ing");
+        let time = runtime
+            .ingestion_time(&domain, &ingestor)
+            .assured("the fixture installs a running clock");
+        let record = test_runtime_row([(
+            "occurred_at".to_string(),
+            RuntimeValue::Datetime(Timestamp::from_unix_nanos(0).into_datetime().fixed_offset()),
+        )]);
+        let admission = time.select(
+            Some(&IngestTimestampSource::At(named("occurred_at"))),
+            &record,
         );
 
         assert!(

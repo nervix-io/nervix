@@ -333,7 +333,7 @@ Feature: Domain clock contract regressions
       | 3            | 1677-09-21T00:12:43.145224191Z |
       | 3            | 2262-04-11T23:47:16.854775808Z |
 
-  @clock_contract_expected_failure @logical_origin_admission
+  @logical_origin_admission
   Scenario Outline: A paced domain admits an event at its historical logical origin
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

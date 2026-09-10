@@ -314,6 +314,52 @@ async fn a_queued_vote_runs_between_ready_append_entries() -> TestResult {
 }
 
 #[tokio::test]
+async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestResult {
+    let harness = Harness::new().await?;
+    let pause = harness
+        .store
+        .inner
+        .faults
+        .pause_next("append".into(), StorageBoundary::BeforeCommit);
+    let mut log = harness.store.clone();
+    let append = tokio::spawn(async move {
+        log.blocking_append([EntryOf::<TypeConfig>::new_blank(Harness::log_id(1))])
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
+
+    append.abort();
+    let Err(cancelled) = append.await else {
+        panic!("the abandoned append future must be cancelled");
+    };
+    assert!(cancelled.is_cancelled());
+
+    let store = harness.store.clone();
+    let idle = tokio::spawn(async move { store.wait_for_idle().await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while harness.executor.snapshot().consensus_storage.pending == 0 {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(!idle.is_finished(), "the idle barrier passed a running job");
+
+    pause.release();
+    idle.await??;
+    let Harness {
+        directory,
+        store,
+        executor,
+    } = harness;
+    drop(store);
+    drop(executor);
+    let reopened = Database::builder(directory.path()).open()?;
+    drop(reopened);
+    Ok(())
+}
+
+#[tokio::test]
 async fn purge_and_truncation_recover_with_their_position_metadata() -> TestResult {
     for operation in ["purge", "truncate"] {
         tokio::task::consume_budget().await;
@@ -849,8 +895,6 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
     drop(store);
     let result =
         FjallStore::from_database(Database::builder(directory.path()).open()?, executor).await;
-    assert!(
-        matches!(result, Err(ConsensusError::Storage(error)) if error.to_string().contains("recreate"))
-    );
+    assert!(matches!(result, Err(error) if error.to_string().contains("recreate")));
     Ok(())
 }

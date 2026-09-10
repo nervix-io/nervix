@@ -338,6 +338,7 @@ static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ConsensusSettings {
     pub cluster_name: String,
     pub node_id: ClusterNodeName,
+    pub interconnect_advertise_addr: String,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
     pub node_unavailability_timeout: Duration,
@@ -884,6 +885,7 @@ struct ConsensusState {
     // The Raft runtime independently owns the store as both log storage and state machine.
     store: FjallStore,
     local_node_id: ClusterNodeName,
+    interconnect_advertise_addr: String,
     interconnect: Transport,
     node_unavailability_timeout: Duration,
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
@@ -988,7 +990,9 @@ impl Consensus {
         db: Database,
         settings: ConsensusSettings,
     ) -> Result<Self, ConsensusError> {
-        let store = FjallStore::from_database(db, settings.executor.clone()).await?;
+        let store = FjallStore::from_database(db, settings.executor.clone())
+            .await
+            .map_err(ConsensusError::Storage)?;
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
@@ -998,6 +1002,9 @@ impl Consensus {
                     .unwrap_or(u64::MAX),
                 election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
                     .unwrap_or(u64::MAX),
+                // A single consensus command may use the full interconnect command-byte budget.
+                // Replicate one entry per request so catch-up cannot exceed that bounded payload.
+                max_payload_entries: 1,
                 snapshot_policy: openraft::SnapshotPolicy::Never,
                 ..Default::default()
             }
@@ -1061,6 +1068,7 @@ impl Consensus {
                 raft,
                 store,
                 local_node_id: settings.node_id,
+                interconnect_advertise_addr: settings.interconnect_advertise_addr,
                 interconnect: settings.interconnect,
                 node_unavailability_timeout: settings.node_unavailability_timeout,
                 peer_health: RwLock::new(BTreeMap::new()),
@@ -1242,6 +1250,9 @@ impl Consensus {
         self.inner.raft.shutdown().await.discarded(
             "openraft joins its core task inside this call and always answers Ok; the core's own \
              outcome is not exposed here",
+        );
+        self.inner.store.wait_for_idle().await.assured(
+            "the live consensus executor owns the ordered worker and its no-op barrier cannot fail",
         );
         let handle = self.inner.metrics_task.lock().take();
         if let Some(handle) = handle {
@@ -1834,14 +1845,20 @@ impl Administrator {
     }
 
     pub async fn maybe_initialize(&self) -> Result<bool, ConsensusError> {
-        if self.inner.store.has_raft_state().await? {
+        if self
+            .inner
+            .store
+            .has_raft_state()
+            .await
+            .map_err(ConsensusError::Storage)?
+        {
             return Ok(false);
         }
 
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
-            BasicNode::new(self.inner.local_node_id.to_string()),
+            BasicNode::new(self.inner.interconnect_advertise_addr.clone()),
         );
         self.inner
             .raft
