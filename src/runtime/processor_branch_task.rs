@@ -1,3 +1,13 @@
+//! Branch-local processor task lifecycle and persisted handoff state.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** Processor branch task creation, FIFO input execution, ticking, checkpointing,
+//!   handoff, and eviction.
+//! - **Depends on.** Planned processor templates, concrete branch runtimes, runtime persistence,
+//!   and relay boundaries.
+//! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
+
 use super::*;
 
 pub(super) const PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -924,6 +934,7 @@ pub(super) async fn expire_processor_branch_instances(
             &key,
             Some(BranchEvictionReason::Ttl),
         );
+        runtime.invalidate_branch_relay_generation(domain, &key);
         stop_processor_branch_task(
             domain,
             processor.clone(),
@@ -957,6 +968,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
             &key,
             Some(BranchEvictionReason::Lru),
         );
+        runtime.invalidate_branch_relay_generation(domain, &key);
         stop_processor_branch_task(
             domain,
             processor.clone(),

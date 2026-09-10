@@ -106,9 +106,11 @@ Examples of state that is not treated as a durable commit log:
 - intermediate processor handoff
 
 For relay movement between nodes, Nervix uses Arrow IPC batch serialization on the interconnect
-path. Admission responses hold the producer or owner dispatch slot until the receiving node has
-accepted the batch, while the attached ACK chain continues through downstream consumers. Control
-traffic such as lookups and state-sync RPCs still uses separate control-envelope formats.
+path. A producer or owner dispatch slot is scoped to one concrete branch and remains held until the
+receiving runtime atomically admits or rejects that batch. Other branches continue concurrently,
+while the attached ACK chain reports downstream processing after admission. A body receipt alone
+does not mean the runtime admitted the batch. Control traffic such as lookups and state-sync RPCs
+still uses separate control-envelope formats.
 
 Runtime graph metrics are maintained alongside the data plane. Prometheus export uses branch-aggregated series to keep label cardinality bounded, while `DESCRIBE` can report branch-local metrics where a concrete relay branch is being inspected. See [Metrics And Observability](metrics-and-observability.md).
 
