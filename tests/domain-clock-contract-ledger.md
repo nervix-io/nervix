@@ -258,3 +258,18 @@ Recorded on 9 September 2026 against the task 05 worktree:
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell by two. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 06 validation record
+
+Recorded on 10 September 2026 against the task 06 worktree, including the merged `origin/main`:
+
+| Probe | Result |
+| --- | --- |
+| `Domain execution time` | Pass; all six one- and three-node scenarios and all 64 steps bound ingestion, processor, subscription, generated-error, WASM, generated-metadata, and window expressions to historical domain execution time. |
+| Focused generator, inferencer, emitter, and telemetry scenarios | Pass; 24 scenarios and 272 steps covered generator and inferencer mappings, SQS groups, PostgreSQL, MySQL, ClickHouse, MongoDB, Iceberg, Sentry, and OTEL clock classes. |
+| `nervix-vm` unit suite | Pass; 102 tests covered explicit execution contexts with no context-free runtime execution entry point. |
+| `nervix-server` library suite | Pass; 793 tests passed after merging the current consensus and startup paths. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. The relay-boundary tests moved to their focused module, and bare-error signature debt fell from 844 to 843. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
