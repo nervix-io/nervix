@@ -3,21 +3,21 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The current request and response shapes for publishing resource replica state and
-//!   reading one bounded archive chunk.
+//!   opening one bounded archive stream.
 //! - **Depends on.** Resource vocabulary and the authenticated interconnect request contract.
 //! - **Must not know.** Resource-store paths, HTTP endpoints, cluster discovery, or handler logic.
 
 use std::time::Duration;
 
-use nervix_interconnect::{InterconnectRequest, PoolClass};
+use nervix_interconnect::{
+    InterconnectRequest, InterconnectStreamRequest, PoolClass, RequestSubquota,
+};
 use nervix_models::{ClusterNodeName, ResourceId, ResourceNodeStatus};
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
 pub(crate) enum ResourceInterconnectError {
-    #[error("failed to read the resource archive: {0}")]
-    ArchiveRead(String),
     #[error("authenticated node '{authenticated}' cannot publish resource state for '{declared}'")]
     ReplicaOrigin {
         authenticated: ClusterNodeName,
@@ -28,32 +28,20 @@ pub(crate) enum ResourceInterconnectError {
 }
 
 impl ResourceInterconnectError {
-    pub(crate) fn archive_read(error: impl std::fmt::Display) -> Self {
-        Self::ArchiveRead(error.to_string())
-    }
-
     pub(crate) fn replica_publish(error: impl std::fmt::Display) -> Self {
         Self::ReplicaPublish(error.to_string())
     }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct FetchResourceArchiveChunk {
+pub(crate) struct FetchResourceArchive {
     pub(crate) id: ResourceId,
-    pub(crate) offset: u64,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ResourceArchiveChunk {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) eof: bool,
-}
-
-impl InterconnectRequest for FetchResourceArchiveChunk {
-    type Response = Result<ResourceArchiveChunk, ResourceInterconnectError>;
-
-    const NAME: &'static str = "fetch_resource_archive_chunk";
+impl InterconnectStreamRequest for FetchResourceArchive {
+    const NAME: &'static str = "fetch_resource_archive";
     const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
     const TIMEOUT: Duration = Duration::from_secs(30);
 }
 

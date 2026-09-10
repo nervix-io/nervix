@@ -22,8 +22,9 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
+use futures_util::Stream;
 use meticulous::ResultExt as _;
-use nervix_execution::{BudgetedBuffer, Executor, Reservation};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
 use nervix_models::ClusterNodeName;
 use rkyv::{
     Archive, Deserialize, Serialize,
@@ -46,6 +47,7 @@ use super::{
     PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest, Transport,
     TransportError, wire,
 };
+use crate::connection::OutboundByteStreamRequest;
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,6 +168,8 @@ where
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RequestSubquota {
     Shared,
+    Resource,
+    Snapshot,
     Discovery,
     Liveness,
     Progress,
@@ -185,6 +189,50 @@ pub trait InterconnectRequest: RkyvMessage {
 
     /// Discovery requests are permitted before the first live-membership view exists.
     const REQUIRES_LIVE_TARGET: bool = true;
+}
+
+/// A typed request whose response is an incrementally flow-controlled byte stream.
+pub trait InterconnectStreamRequest: RkyvMessage {
+    const NAME: &'static str;
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
+    const TIMEOUT: Duration;
+    const REQUIRES_LIVE_TARGET: bool = true;
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct StreamHandlerError {
+    message: String,
+}
+
+impl StreamHandlerError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+pub type OutgoingByteStream =
+    Pin<Box<dyn Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static>>;
+
+/// A producer-owned stream with its exact byte count declared before response headers are sent.
+pub struct StreamingResponse {
+    pub(crate) content_length: u64,
+    pub(crate) chunks: OutgoingByteStream,
+}
+
+impl StreamingResponse {
+    pub fn new<S>(content_length: u64, chunks: S) -> Self
+    where
+        S: Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static,
+    {
+        Self {
+            content_length,
+            chunks: Box::pin(chunks),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -231,14 +279,30 @@ pub enum RequestError {
         node: ClusterNodeName,
         request: &'static str,
     },
+    #[error("streamed response for '{request}' from node '{node}' failed: {reason}")]
+    Stream {
+        node: ClusterNodeName,
+        request: &'static str,
+        reason: String,
+    },
+    #[error(
+        "streamed response for '{request}' from node '{node}' declared {declared} bytes but \
+         delivered {received}"
+    )]
+    StreamLengthMismatch {
+        node: ClusterNodeName,
+        request: &'static str,
+        declared: u64,
+        received: u64,
+    },
 }
 
 #[derive(Debug, Error)]
 pub enum HandlerRegistrationError {
     #[error("a handler for interconnect request '{request}' is already registered")]
     AlreadyRegistered { request: &'static str },
-    #[error("{subquota:?} request '{request}' must use the management pool")]
-    ReservedRequiresManagement {
+    #[error("{subquota:?} request '{request}' does not belong to its configured pool")]
+    SubquotaClassMismatch {
         request: &'static str,
         subquota: RequestSubquota,
     },
@@ -257,6 +321,7 @@ impl HandledResponse {
 
 pub(crate) struct RequestState {
     handlers: DashMap<&'static str, Arc<Box<dyn ErasedRequestHandler>>, RandomState>,
+    stream_handlers: DashMap<&'static str, Arc<Box<dyn ErasedStreamHandler>>, RandomState>,
     live_nodes: DashMap<ClusterNodeName, (), RandomState>,
     live_nodes_observed: AtomicBool,
     membership_changed: Notify,
@@ -264,12 +329,14 @@ pub(crate) struct RequestState {
     inbound: RequestQuotas,
 }
 
-struct RequestAdmission {
+pub(crate) struct RequestAdmission {
     _permit: OwnedSemaphorePermit,
 }
 
 struct RequestQuotas {
     shared: StdArc<Semaphore>,
+    resource: StdArc<Semaphore>,
+    snapshot: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
     progress: StdArc<Semaphore>,
@@ -282,6 +349,8 @@ impl RequestQuotas {
     fn new(capacity: usize) -> Self {
         Self {
             shared: StdArc::new(Semaphore::new(capacity)),
+            resource: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
+            snapshot: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
             discovery: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
             liveness: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
             progress: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
@@ -294,6 +363,8 @@ impl RequestQuotas {
     fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
         match subquota {
             RequestSubquota::Shared => &self.shared,
+            RequestSubquota::Resource => &self.resource,
+            RequestSubquota::Snapshot => &self.snapshot,
             RequestSubquota::Discovery => &self.discovery,
             RequestSubquota::Liveness => &self.liveness,
             RequestSubquota::Progress => &self.progress,
@@ -311,10 +382,24 @@ impl RequestQuotas {
     }
 }
 
+fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> bool {
+    match subquota {
+        RequestSubquota::Shared => true,
+        RequestSubquota::Resource | RequestSubquota::Snapshot => class == PoolClass::Bulk,
+        RequestSubquota::Discovery
+        | RequestSubquota::Liveness
+        | RequestSubquota::Progress
+        | RequestSubquota::Admission
+        | RequestSubquota::Cancellation
+        | RequestSubquota::Terminal => class == PoolClass::Management,
+    }
+}
+
 impl RequestState {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             handlers: DashMap::default(),
+            stream_handlers: DashMap::default(),
             live_nodes: DashMap::default(),
             live_nodes_observed: AtomicBool::new(false),
             membership_changed: Notify::new(),
@@ -323,7 +408,7 @@ impl RequestState {
         }
     }
 
-    fn try_admit_outbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
+    pub(crate) fn try_admit_outbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
         self.outbound.try_admit(subquota)
     }
 
@@ -335,6 +420,9 @@ impl RequestState {
 type HandlerFuture = Pin<
     Box<dyn Future<Output = Result<(Vec<u8>, Reservation), RemoteRequestFailure>> + Send + 'static>,
 >;
+
+type StreamHandlerFuture =
+    Pin<Box<dyn Future<Output = Result<StreamingResponse, RemoteRequestFailure>> + Send + 'static>>;
 
 trait ErasedRequestHandler: Send + Sync {
     fn class(&self) -> PoolClass;
@@ -349,9 +437,69 @@ trait ErasedRequestHandler: Send + Sync {
     ) -> HandlerFuture;
 }
 
+trait ErasedStreamHandler: Send + Sync {
+    fn class(&self) -> PoolClass;
+    fn subquota(&self) -> RequestSubquota;
+
+    fn handle(
+        &self,
+        executor: Executor,
+        context: RequestContext,
+        payload: Vec<u8>,
+    ) -> StreamHandlerFuture;
+}
+
 struct TypedRequestHandler<M, H> {
     handler: Arc<H>,
     request: PhantomData<fn(M)>,
+}
+
+struct TypedStreamHandler<M, H> {
+    handler: Arc<H>,
+    request: PhantomData<fn(M)>,
+}
+
+impl<M, H, F> ErasedStreamHandler for TypedStreamHandler<M, H>
+where
+    M: InterconnectStreamRequest,
+    H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
+    F: Future<Output = Result<StreamingResponse, StreamHandlerError>> + Send + 'static,
+{
+    fn class(&self) -> PoolClass {
+        M::CLASS
+    }
+
+    fn subquota(&self) -> RequestSubquota {
+        M::SUBQUOTA
+    }
+
+    fn handle(
+        &self,
+        executor: Executor,
+        context: RequestContext,
+        payload: Vec<u8>,
+    ) -> StreamHandlerFuture {
+        let handler = self.handler.clone();
+        Box::pin(async move {
+            let (request, _request_reservation) = M::decode_rkyv(executor, M::CLASS, payload)
+                .await
+                .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+            (handler)(context, request)
+                .await
+                .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))
+        })
+    }
+}
+
+pub(crate) struct HandledByteStream {
+    response: StreamingResponse,
+    admission: RequestAdmission,
+}
+
+impl HandledByteStream {
+    pub(crate) fn into_parts(self) -> (StreamingResponse, RequestAdmission) {
+        (self.response, self.admission)
+    }
 }
 
 impl<M, H, F> ErasedRequestHandler for TypedRequestHandler<M, H>
@@ -400,9 +548,9 @@ impl RequestState {
         H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
         F: Future<Output = M::Response> + Send + 'static,
     {
-        if M::SUBQUOTA != RequestSubquota::Shared && M::CLASS != PoolClass::Management {
+        if !subquota_belongs_to_class(M::SUBQUOTA, M::CLASS) {
             return Err(Report::new(
-                HandlerRegistrationError::ReservedRequiresManagement {
+                HandlerRegistrationError::SubquotaClassMismatch {
                     request: M::NAME,
                     subquota: M::SUBQUOTA,
                 },
@@ -421,6 +569,93 @@ impl RequestState {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn register_stream<M, H, F>(
+        &self,
+        handler: H,
+    ) -> Result<(), Report<HandlerRegistrationError>>
+    where
+        M: InterconnectStreamRequest,
+        H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<StreamingResponse, StreamHandlerError>> + Send + 'static,
+    {
+        if !subquota_belongs_to_class(M::SUBQUOTA, M::CLASS) {
+            return Err(Report::new(
+                HandlerRegistrationError::SubquotaClassMismatch {
+                    request: M::NAME,
+                    subquota: M::SUBQUOTA,
+                },
+            ));
+        }
+        if self.handlers.contains_key(M::NAME) {
+            return Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
+                request: M::NAME,
+            }));
+        }
+        let erased: Box<dyn ErasedStreamHandler> = Box::new(TypedStreamHandler::<M, H> {
+            handler: Arc::new(handler),
+            request: PhantomData,
+        });
+        match self.stream_handlers.entry(M::NAME) {
+            Entry::Occupied(_) => Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
+                request: M::NAME,
+            })),
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(erased));
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn handle_stream(
+        &self,
+        executor: &Executor,
+        peer_node_id: ClusterNodeName,
+        peer_advertised_host: String,
+        request: RequestEnvelope,
+    ) -> Result<HandledByteStream, RemoteRequestFailure> {
+        let handler = self
+            .stream_handlers
+            .get(request.request.as_str())
+            .map(|handler| handler.value().clone());
+        let payload_limit = request.class.payload_limit(executor);
+        let payload_bytes = u64::try_from(request.payload.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        let handler = match handler {
+            Some(_) if payload_bytes > payload_limit => {
+                return Err(RemoteRequestFailure::PayloadTooLarge {
+                    actual: payload_bytes,
+                    limit: payload_limit,
+                });
+            }
+            Some(handler) if handler.class() == request.class => handler,
+            Some(handler) => {
+                return Err(RemoteRequestFailure::WrongPoolClass {
+                    expected: handler.class(),
+                    actual: request.class,
+                });
+            }
+            None => return Err(RemoteRequestFailure::HandlerNotRegistered),
+        };
+        let subquota = handler.subquota();
+        let admission = self
+            .try_admit_inbound(subquota)
+            .ok_or(RemoteRequestFailure::AdmissionFull { subquota })?;
+        let response = handler
+            .handle(
+                executor.clone(),
+                RequestContext {
+                    peer_node_id,
+                    peer_advertised_host,
+                },
+                request.payload,
+            )
+            .await?;
+        Ok(HandledByteStream {
+            response,
+            admission,
+        })
     }
 
     pub(crate) async fn handle(
@@ -519,6 +754,7 @@ impl RequestState {
 
     pub(crate) fn shutdown(&self) {
         self.handlers.clear();
+        self.stream_handlers.clear();
         self.membership_changed.notify_waiters();
     }
 }
@@ -536,6 +772,18 @@ impl Transport {
         self.inner.requests().register::<M, H, F>(handler)
     }
 
+    pub fn register_stream_handler<M, H, F>(
+        &self,
+        handler: H,
+    ) -> Result<(), Report<HandlerRegistrationError>>
+    where
+        M: InterconnectStreamRequest,
+        H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<StreamingResponse, StreamHandlerError>> + Send + 'static,
+    {
+        self.inner.requests().register_stream::<M, H, F>(handler)
+    }
+
     pub fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
         self.inner.requests().replace_live_nodes(live_nodes);
         self.inner.retire_departed_connections(live_nodes);
@@ -550,6 +798,84 @@ impl Transport {
         M: InterconnectRequest,
     {
         self.request_with_timeout(node, message, M::TIMEOUT).await
+    }
+
+    pub async fn request_stream<M>(
+        &self,
+        node: &ClusterNodeName,
+        message: M,
+    ) -> Result<super::IncomingByteStream, Report<RequestError>>
+    where
+        M: InterconnectStreamRequest,
+    {
+        if self.inner.is_shutting_down() {
+            return Err(Report::new(RequestError::ShuttingDown {
+                node: node.clone(),
+                request: M::NAME,
+            }));
+        }
+        if M::REQUIRES_LIVE_TARGET && !self.inner.requests().target_is_live(node) {
+            return Err(Report::new(RequestError::TargetLeft {
+                node: node.clone(),
+                request: M::NAME,
+            }));
+        }
+        let admission = self
+            .inner
+            .requests()
+            .try_admit_outbound(M::SUBQUOTA)
+            .ok_or_else(|| {
+                Report::new(RequestError::AdmissionFull {
+                    request: M::NAME,
+                    subquota: M::SUBQUOTA,
+                })
+            })?;
+        let (payload, _payload_reservation) = message
+            .encode_rkyv(
+                self.inner.executor().clone(),
+                M::CLASS,
+                M::CLASS.payload_limit(self.inner.executor()),
+            )
+            .await
+            .map_err(|error| {
+                Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
+            })?;
+        let request = RequestEnvelope {
+            class: M::CLASS,
+            request: M::NAME.to_string(),
+            payload,
+        };
+        let body = wire::encode_rkyv(
+            self.inner.executor(),
+            M::CLASS.memory_class(),
+            M::CLASS.cpu_class(),
+            M::CLASS.control_body_limit(self.inner.executor()),
+            request,
+        )
+        .await
+        .map_err(|error| {
+            Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
+        })?;
+        self.inner
+            .open_byte_stream(
+                node,
+                OutboundByteStreamRequest {
+                    class: M::CLASS,
+                    subquota: M::SUBQUOTA,
+                    name: M::NAME,
+                    body,
+                    timeout: M::TIMEOUT,
+                    admission,
+                },
+            )
+            .await
+            .map_err(|error| {
+                Report::new(RequestError::Stream {
+                    node: node.clone(),
+                    request: M::NAME,
+                    reason: error.to_string(),
+                })
+            })
     }
 
     /// Send one typed request with a caller-owned end-to-end deadline.

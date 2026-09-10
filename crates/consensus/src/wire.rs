@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use nervix_interconnect::{InterconnectRequest, PoolClass};
+use nervix_interconnect::{InterconnectRequest, PoolClass, RequestSubquota};
 use nervix_models::ClusterNodeName;
 use openraft::{
     BasicNode, Entry, LogId, Membership, SnapshotMeta, StoredMembership, Vote, entry::EntryPayload,
@@ -461,6 +461,7 @@ impl InterconnectRequest for BeginSnapshotTransfer {
     type Response = Result<(), ConsensusRequestError>;
     const NAME: &'static str = "raft_begin_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
     const TIMEOUT: Duration = Duration::from_secs(30);
 }
 
@@ -475,6 +476,7 @@ impl InterconnectRequest for SnapshotChunk {
     type Response = Result<(), ConsensusRequestError>;
     const NAME: &'static str = "raft_snapshot_chunk";
     const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
     const TIMEOUT: Duration = Duration::from_secs(30);
 }
 
@@ -502,6 +504,7 @@ impl InterconnectRequest for FinishSnapshotTransfer {
     type Response = Result<SnapshotResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_finish_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
     const TIMEOUT: Duration = Duration::from_secs(30);
 }
 

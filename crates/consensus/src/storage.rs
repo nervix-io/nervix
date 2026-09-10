@@ -99,6 +99,7 @@ impl StateMachineData {
                 counters: Records::load(b'c', sm)?,
                 versions: Records::load(b'v', sm)?,
                 replicas: Records::load(b'r', sm)?,
+                uploads: Records::load(b'o', sm)?,
             },
             cordoned_node_ids: Records::load(b'n', sm)?,
             transactions: Records::load(b't', sm)?,
@@ -133,6 +134,9 @@ impl StateMachineData {
         self.resources
             .replicas
             .write_changes(&preceding.resources.replicas, b'r', batch, sm)?;
+        self.resources
+            .uploads
+            .write_changes(&preceding.resources.uploads, b'o', batch, sm)?;
         self.cordoned_node_ids
             .write_changes(&preceding.cordoned_node_ids, b'n', batch, sm)?;
         self.transactions

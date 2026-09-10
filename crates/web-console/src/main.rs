@@ -2463,10 +2463,18 @@ async fn upload_resource_files(
         }
     }
     input.set_value("");
+    let Some(window) = web_sys::window() else {
+        return "failed to access browser upload identity source".to_string();
+    };
+    let Ok(crypto) = window.crypto() else {
+        return "failed to access browser upload identity source".to_string();
+    };
+    let upload_identity = crypto.random_uuid();
     let url = web_console_resource_upload_url(
         upload_base_url.as_deref(),
         &resource,
         &domain,
+        &upload_identity,
         auth_token.as_deref(),
     );
     match gloo_net::http::Request::post(&url).body(form) {
@@ -2492,6 +2500,7 @@ fn web_console_resource_upload_url(
     base_url: Option<&str>,
     resource: &str,
     domain: &str,
+    upload_identity: &str,
     auth_token: Option<&str>,
 ) -> String {
     let auth_query = match auth_token {
@@ -2499,9 +2508,10 @@ fn web_console_resource_upload_url(
         None => String::new(),
     };
     let query = format!(
-        "resource={}&domain={}{}",
+        "resource={}&domain={}&upload_identity={}{}",
         encode_query_component(resource),
         encode_query_component(domain),
+        encode_query_component(upload_identity),
         auth_query
     );
     let path = format!("/console/resources/upload?{query}");
