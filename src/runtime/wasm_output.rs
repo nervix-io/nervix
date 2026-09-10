@@ -12,6 +12,7 @@ pub(super) struct WasmOutputContext<'a> {
     pub(super) output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     pub(super) key: &'a Option<BranchKey>,
     pub(super) dispatch_error: &'static str,
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct WasmDecodedOutputBatch {
@@ -655,6 +656,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
         output_schemas,
         key,
         dispatch_error,
+        execution_now,
     } = context;
     let validated_outputs = match (WasmOutputValidator {
         ack_map,
@@ -696,6 +698,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
                 error_policies,
                 message_error_relay: &message_error_relay,
                 message_error_policy: &message_error_policy,
+                execution_now,
             },
             ack_map,
             &output.acks,
@@ -708,8 +711,11 @@ pub(super) async fn dispatch_wasm_output_envelopes(
             output.batch,
             output.acks.rows,
             output.uninitialized_columns,
-            ack_map,
-            &mut token_use_counts,
+            WasmOutputAttributionContext {
+                ack_map,
+                token_use_counts: &mut token_use_counts,
+                execution_now,
+            },
         )?;
         if output_batch.batch.message_count() == 0 {
             continue;
@@ -723,6 +729,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
                 error_policies,
                 input_relays,
                 dispatch_error,
+                execution_now,
             },
             output_batch,
             output_route,
@@ -754,6 +761,7 @@ pub(super) struct WasmRouteDispatchContext<'a> {
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) input_relays: &'a [RelayName],
     pub(super) dispatch_error: &'static str,
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) async fn dispatch_wasm_output_route(
@@ -924,12 +932,7 @@ pub(super) async fn dispatch_wasm_output_route(
             );
         return None;
     };
-    let execution_now = context
-        .branch
-        .runtime
-        .current_stream_expiration_time(&context.branch.domain)
-        .ok()
-        .unwrap_or_else(current_timestamp);
+    let execution_now = context.execution_now;
     let owner_nodes = match context
         .branch
         .runtime
@@ -1116,6 +1119,7 @@ pub(super) async fn dispatch_wasm_output_route(
                 key: decoded.batch.keys[input_row].clone(),
                 record,
                 error: program.structured_side_error(
+                    execution_now,
                     format!(
                         "{} '{}' FILTER-MAP side error {}: {} at {}",
                         context.node_kind.as_str(),
@@ -1171,6 +1175,7 @@ pub(super) async fn dispatch_wasm_output_route(
             error: error.error,
             partial_output: error.partial_output,
             materialized_state: error.materialized_state,
+            execution_now,
         });
     }
     context
@@ -1323,6 +1328,7 @@ pub(super) struct WasmSidecarTerminalContext<'a> {
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) message_error_relay: &'a RelayName,
     pub(super) message_error_policy: &'a MessageErrorPolicy,
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) async fn apply_wasm_sidecar_terminal_decisions(
@@ -1337,6 +1343,7 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
         error_policies,
         message_error_relay,
         message_error_policy,
+        execution_now,
     } = context;
     for message_error in &sidecar.message_errors {
         for token in &message_error.tokens {
@@ -1368,9 +1375,12 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
             branch
                 .runtime
                 .handle_message_error_with_policy(
-                    &branch.domain,
-                    node_kind,
-                    processor,
+                    MessageErrorSourceContext {
+                        domain: &branch.domain,
+                        node_kind,
+                        node: processor,
+                        execution_now,
+                    },
                     message_error_policy,
                     RelayMessage {
                         key: branch.key.clone(),
@@ -1411,12 +1421,14 @@ pub(super) async fn persist_wasm_guest_state(
     processor: &ModelName,
     replicated_state: &ReplicatedWasmProcessorState,
     instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    execution_now: Timestamp,
 ) -> Result<(), String> {
     persist_wasm_guest_state_with_failure_mode(
         runtime,
         processor,
         replicated_state,
         instance,
+        execution_now,
         WasmStateSaveFailureMode::InvalidateInstance,
     )
     .await
@@ -1428,12 +1440,14 @@ pub(super) async fn checkpoint_wasm_guest_state(
     processor: &ModelName,
     replicated_state: &ReplicatedWasmProcessorState,
     instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    execution_now: Timestamp,
 ) -> OwnershipHandoffResult<()> {
     persist_wasm_guest_state_with_failure_mode(
         runtime,
         processor,
         replicated_state,
         instance,
+        execution_now,
         WasmStateSaveFailureMode::RetainInstance,
     )
     .await
@@ -1450,10 +1464,15 @@ async fn persist_wasm_guest_state_with_failure_mode(
     processor: &ModelName,
     replicated_state: &ReplicatedWasmProcessorState,
     instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    execution_now: Timestamp,
     failure_mode: WasmStateSaveFailureMode,
 ) -> OwnershipHandoffResult<()> {
     let save_result = match instance.as_mut() {
-        Some(instance) => instance.save_state().await,
+        Some(instance) => {
+            instance
+                .save_state_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
+                .await
+        }
         None => {
             return Err(OwnershipHandoffError::checkpoint(format!(
                 "wasm processor '{}' instance is unavailable while saving guest state",
@@ -1464,7 +1483,7 @@ async fn persist_wasm_guest_state_with_failure_mode(
     let guest_state = match save_result {
         Ok(guest_state) => guest_state,
         Err(error) => {
-            let resource_limit_exceeded = error.is_resource_limit_exceeded();
+            let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
             let reason = format!(
                 "wasm processor '{}' failed to save guest state: {}",
                 processor.as_str(),
@@ -1487,15 +1506,25 @@ async fn persist_wasm_guest_state_with_failure_mode(
         .map_err(OwnershipHandoffError::checkpoint)
 }
 
+pub(super) struct WasmOutputAttributionContext<'a> {
+    pub(super) ack_map: &'a mut WasmAckMap,
+    pub(super) token_use_counts: &'a mut HashMap<u64, usize>,
+    pub(super) execution_now: Timestamp,
+}
+
 pub(super) fn relay_batch_from_wasm_output(
     key: &Option<BranchKey>,
     schema: Arc<CompiledSchema>,
     batch: RuntimeRecordBatch,
     rows: Vec<WasmOutputRow>,
     uninitialized_columns: HashSet<usize>,
-    ack_map: &mut WasmAckMap,
-    token_use_counts: &mut HashMap<u64, usize>,
+    context: WasmOutputAttributionContext<'_>,
 ) -> Result<WasmDecodedOutputBatch, String> {
+    let WasmOutputAttributionContext {
+        ack_map,
+        token_use_counts,
+        execution_now,
+    } = context;
     let mut metadata = Vec::with_capacity(rows.len());
     let mut acks = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1505,8 +1534,7 @@ pub(super) fn relay_batch_from_wasm_output(
         metadata.push(match source_context {
             Some(context) => context.metadata.clone(),
             None => {
-                let now = current_timestamp();
-                RuntimeRecordMetadata::from_ingested_at_watermarks(now, now)
+                RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now)
             }
         });
         let mut row_ack_sets = Vec::with_capacity(row.tokens.len());
@@ -1954,8 +1982,11 @@ mod tests {
             first.batch,
             first.acks.rows,
             HashSet::default(),
-            &mut ack_map,
-            &mut token_use_counts,
+            WasmOutputAttributionContext {
+                ack_map: &mut ack_map,
+                token_use_counts: &mut token_use_counts,
+                execution_now: Timestamp::from_unix_nanos(100),
+            },
         )
         .expect("first routed batch must build");
         let completion_task = tokio::spawn(completion.wait());
@@ -1973,8 +2004,11 @@ mod tests {
             second.batch,
             second.acks.rows,
             HashSet::default(),
-            &mut ack_map,
-            &mut token_use_counts,
+            WasmOutputAttributionContext {
+                ack_map: &mut ack_map,
+                token_use_counts: &mut token_use_counts,
+                execution_now: Timestamp::from_unix_nanos(100),
+            },
         )
         .expect("second routed batch must build");
         second.batch.acks[0].ack_success();
@@ -1985,15 +2019,15 @@ mod tests {
         assert_eq!(outcome, AckOutcome::Ack);
     }
 
-    #[test]
-    fn wasm_guest_generated_rows_do_not_require_source_tokens() {
+    #[tokio::test]
+    async fn wasm_guest_generated_rows_use_execution_time_without_replacing_source_metadata() {
         let input_schema = test_schema(&[("input_value", ParseAsType::I32)]);
         let output_schema = test_schema(&[("value", ParseAsType::I32)]);
         let ipc = wasm_guest_column(
             output_schema.arrow_schema().field(0).clone(),
             StdArc::new(Int32Array::from(vec![42])),
         );
-        let outputs = validate_wasm_test_outputs(
+        let mut outputs = validate_wasm_test_outputs(
             &input_schema,
             &output_schema,
             &WasmAckMap::default(),
@@ -2009,6 +2043,71 @@ mod tests {
         .expect("fully generated output rows may omit a source token");
 
         assert_eq!(outputs[0].batch.batch().num_rows(), 1);
+
+        let execution_now = Timestamp::from_unix_nanos(946_684_800_000_000_000);
+        let mut ack_map = WasmAckMap::default();
+        let mut token_use_counts = wasm_output_token_use_counts(&outputs);
+        let output = outputs.remove(0);
+        let generated = relay_batch_from_wasm_output(
+            &None,
+            output.schema,
+            output.batch,
+            output.acks.rows,
+            output.uninitialized_columns,
+            WasmOutputAttributionContext {
+                ack_map: &mut ack_map,
+                token_use_counts: &mut token_use_counts,
+                execution_now,
+            },
+        )
+        .expect("generated output must build a relay batch");
+        assert_eq!(
+            generated.batch.metadata[0].ingested_at_low_watermark(),
+            execution_now
+        );
+        assert_eq!(
+            generated.batch.metadata[0].ingested_at_high_watermark(),
+            execution_now
+        );
+
+        let source_time = Timestamp::from_unix_nanos(123);
+        let source_record = test_runtime_row([("value".to_string(), RuntimeValue::I32(7))])
+            .with_ingested_at_watermarks(source_time);
+        let (input, mut ack_map) =
+            wasm_input_for_records(&output_schema, vec![source_record]).await;
+        let mut outputs = validate_wasm_test_outputs(
+            &output_schema,
+            &output_schema,
+            &ack_map,
+            vec![wasm_test_output(
+                vec![WasmOutputColumnRef::input(0)],
+                wasm_input_acks(&input).rows.clone(),
+            )],
+        )
+        .expect("source-backed output must validate");
+        let mut token_use_counts = wasm_output_token_use_counts(&outputs);
+        let output = outputs.remove(0);
+        let forwarded = relay_batch_from_wasm_output(
+            &None,
+            output.schema,
+            output.batch,
+            output.acks.rows,
+            output.uninitialized_columns,
+            WasmOutputAttributionContext {
+                ack_map: &mut ack_map,
+                token_use_counts: &mut token_use_counts,
+                execution_now,
+            },
+        )
+        .expect("source-backed output must build a relay batch");
+        assert_eq!(
+            forwarded.batch.metadata[0].ingested_at_low_watermark(),
+            source_time
+        );
+        assert_eq!(
+            forwarded.batch.metadata[0].ingested_at_high_watermark(),
+            source_time
+        );
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ pub(super) struct MessageErrorContext<'a> {
     pub(super) partial_output: Option<&'a RuntimeRecordBatch>,
     pub(super) materialized_state: &'a HashMap<String, RuntimeValue>,
     pub(super) ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct MessageErrorHandling<'a> {
@@ -23,12 +24,20 @@ pub(super) struct MessageErrorHandling<'a> {
     pub(super) partial_output: Option<RuntimeRecordBatch>,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
     pub(super) ingest_metadata: Option<IngestFilterMapMetadata>,
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct MessageErrorFailure {
     pub(super) source_route: Option<RelayName>,
     pub(super) reason: String,
     pub(super) operation: MessageErrorOperation,
+}
+
+pub(super) struct MessageErrorSourceContext<'a> {
+    pub(super) domain: &'a DomainName,
+    pub(super) node_kind: ModelKind,
+    pub(super) node: &'a ModelName,
+    pub(super) execution_now: Timestamp,
 }
 
 impl MessageErrorFailure {
@@ -71,6 +80,7 @@ pub(super) enum SingleRecordFilterMapOutcome {
 }
 
 pub(super) fn structured_message_error(
+    execution_now: Timestamp,
     code: MessageErrorCode,
     message: String,
     operation: MessageErrorOperation,
@@ -84,7 +94,7 @@ pub(super) fn structured_message_error(
         operation,
         operation_index,
         fields: SortedSet::from_unsorted(fields.into_iter().collect()),
-        occurred_at: current_timestamp(),
+        occurred_at: execution_now,
     }
 }
 
@@ -93,12 +103,14 @@ pub(super) fn planned_structured_message_error(
     error: StructuredMessageError,
     partial_output: Option<RuntimeRecordBatch>,
     materialized_state: HashMap<String, RuntimeValue>,
+    execution_now: Timestamp,
 ) -> PlannedMessageError {
     PlannedMessageError {
         message,
         error,
         partial_output,
         materialized_state,
+        execution_now,
     }
 }
 
@@ -231,13 +243,17 @@ pub(super) fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<Fie
 impl Runtime {
     pub(in crate::runtime) async fn handle_message_error(
         &self,
-        domain: &DomainName,
-        node_kind: ModelKind,
-        node: &ModelName,
+        context: MessageErrorSourceContext<'_>,
         policies: &ErrorPolicies,
         message: RelayMessage,
         failure: MessageErrorFailure,
     ) {
+        let MessageErrorSourceContext {
+            domain,
+            node_kind,
+            node,
+            execution_now,
+        } = context;
         let MessageErrorFailure {
             source_route,
             reason,
@@ -251,6 +267,7 @@ impl Runtime {
             policy: &policies.message,
             message,
             error: structured_message_error(
+                execution_now,
                 MessageErrorCode::External,
                 reason,
                 operation,
@@ -260,19 +277,24 @@ impl Runtime {
             partial_output: None,
             materialized_state: HashMap::default(),
             ingest_metadata: None,
+            execution_now,
         })
         .await;
     }
 
     pub(in crate::runtime) async fn handle_message_error_with_policy(
         &self,
-        domain: &DomainName,
-        node_kind: ModelKind,
-        node: &ModelName,
+        context: MessageErrorSourceContext<'_>,
         policy: &MessageErrorPolicy,
         message: RelayMessage,
         failure: MessageErrorFailure,
     ) {
+        let MessageErrorSourceContext {
+            domain,
+            node_kind,
+            node,
+            execution_now,
+        } = context;
         let MessageErrorFailure {
             source_route,
             reason,
@@ -286,6 +308,7 @@ impl Runtime {
             policy,
             message,
             error: structured_message_error(
+                execution_now,
                 MessageErrorCode::External,
                 reason,
                 operation,
@@ -295,6 +318,7 @@ impl Runtime {
             partial_output: None,
             materialized_state: HashMap::default(),
             ingest_metadata: None,
+            execution_now,
         })
         .await;
     }
@@ -314,6 +338,7 @@ impl Runtime {
             partial_output,
             materialized_state,
             ingest_metadata,
+            execution_now,
         } = handling;
         match policy {
             MessageErrorPolicy::Ignore => {
@@ -350,6 +375,7 @@ impl Runtime {
                     partial_output: partial_output.as_ref(),
                     materialized_state: &materialized_state,
                     ingest_metadata: ingest_metadata.as_ref(),
+                    execution_now,
                 };
                 if let Err(dispatch_error) = self
                     .dispatch_message_error_to_dlq(context, relay, assignments)
@@ -466,6 +492,7 @@ impl Runtime {
                 partial_output: error.partial_output,
                 materialized_state: error.materialized_state,
                 ingest_metadata: None,
+                execution_now: error.execution_now,
             })
             .await;
         }
@@ -492,6 +519,7 @@ impl Runtime {
                 partial_output: error.partial_output,
                 materialized_state: error.materialized_state,
                 ingest_metadata: None,
+                execution_now: error.execution_now,
             })
             .await;
         }
@@ -513,6 +541,7 @@ impl Runtime {
             partial_output,
             materialized_state,
             ingest_metadata,
+            execution_now,
         } = context;
         /// Everything the error route needs from the domain execution, resolved while the
         /// execution is borrowed so the delivery below runs without holding that borrow.
@@ -615,9 +644,7 @@ impl Runtime {
             partial_output,
             materialized_state,
             ingest_metadata,
-            self.current_stream_expiration_time(domain)
-                .ok()
-                .unwrap_or_else(current_timestamp),
+            execution_now,
         )
         .await?;
         let key = preserved_message_error_branch(&branching, &message.key, relay, error.reference)?;

@@ -468,12 +468,13 @@ Feature: Generator node
       | 3            | 0             |
       | 3            | 1             |
 
+  @domain_execution_time
   Scenario Outline: Generator routes share one immutable state snapshot per tick
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     When these NSPL commands are executed on the leader node
       """
@@ -530,13 +531,15 @@ Feature: Generator node
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION generated_values_subscription TO generated_values;
-      START;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     When http payload is posted to node "node-1" with host "generator-snapshot-{{test_id}}.example.com" path "/values"
       """
       {"id":"source-1","value":7}
       """
     Then within "5s" generated routes "original" value 7 and "doubled" value 14 share field "tick"
+    And the last relay subscription payload field "tick" is saved as timestamp placeholder "generator_execution_time"
+    And timestamp placeholder "generator_execution_time" is before "2001-01-01T00:00:00Z"
 
     Examples:
       | cluster_size | replica_count |

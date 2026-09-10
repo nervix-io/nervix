@@ -8,6 +8,8 @@
 //!   models.
 //! - **Must not know.** Runtime graphs, schedules, branch processing state, or external connectors.
 
+use futures_util::StreamExt as _;
+
 use super::*;
 
 impl TransportState {

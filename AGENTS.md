@@ -348,6 +348,12 @@ build and the existing tests, and nothing in it changes behavior.
 - Bare `+`, `-`, and `*` wrap silently in release builds, so they are checked arithmetic in debug
   only. Sizes, offsets, counters, capacities, and timestamps derived from untrusted or unbounded
   values use the checked form and say what bounds them.
+- Compile-time constants that participate in a relationship make that relationship executable.
+  Name the independent policy inputs, derive dependent constants with const arithmetic, and add
+  static `const` assertions for constraints the derivation cannot express. A capacity partition,
+  for example, asserts that every required reservation is nonzero, the reservations fit within the
+  owning capacity, and the complete partition equals that capacity. Never align independent magic
+  literals by hand and rely on review to preserve their relationship.
 
 ## Engineering Conventions
 

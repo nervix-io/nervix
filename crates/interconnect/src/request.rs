@@ -172,6 +172,7 @@ pub enum RequestSubquota {
     Snapshot,
     Discovery,
     Liveness,
+    Progress,
     Admission,
     Cancellation,
     Terminal,
@@ -338,6 +339,7 @@ struct RequestQuotas {
     snapshot: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
+    progress: StdArc<Semaphore>,
     admission: StdArc<Semaphore>,
     cancellation: StdArc<Semaphore>,
     terminal: StdArc<Semaphore>,
@@ -351,6 +353,7 @@ impl RequestQuotas {
             snapshot: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
             discovery: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
             liveness: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
+            progress: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
             admission: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
             cancellation: StdArc::new(Semaphore::new(capacity.clamp(1, 4))),
             terminal: StdArc::new(Semaphore::new(capacity.clamp(1, 4))),
@@ -364,6 +367,7 @@ impl RequestQuotas {
             RequestSubquota::Snapshot => &self.snapshot,
             RequestSubquota::Discovery => &self.discovery,
             RequestSubquota::Liveness => &self.liveness,
+            RequestSubquota::Progress => &self.progress,
             RequestSubquota::Admission => &self.admission,
             RequestSubquota::Cancellation => &self.cancellation,
             RequestSubquota::Terminal => &self.terminal,
@@ -384,6 +388,7 @@ fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> boo
         RequestSubquota::Resource | RequestSubquota::Snapshot => class == PoolClass::Bulk,
         RequestSubquota::Discovery
         | RequestSubquota::Liveness
+        | RequestSubquota::Progress
         | RequestSubquota::Admission
         | RequestSubquota::Cancellation
         | RequestSubquota::Terminal => class == PoolClass::Management,

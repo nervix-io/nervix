@@ -74,15 +74,6 @@ pub(super) fn message_timestamp(message: &RelayMessage) -> Timestamp {
     message.record.metadata().ingested_at_low_watermark()
 }
 
-pub(super) fn current_window_emit_high_watermark(
-    runtime: &Runtime,
-    domain: &DomainName,
-) -> Result<Timestamp, String> {
-    runtime
-        .current_stream_expiration_time(domain)
-        .map_err(|error| error.to_string())
-}
-
 pub(super) fn window_output_metadata(
     state: &WindowProcessorState,
     emit_high_watermark: Timestamp,
@@ -115,6 +106,7 @@ pub(super) async fn flush_ready_window_processor(
         branch,
         output_routes,
         materialized_state,
+        execution_now,
     } = context;
     if output_routes.routes.is_empty() {
         state.clear(aggregate);
@@ -163,28 +155,7 @@ pub(super) async fn flush_ready_window_processor(
         let Some(first_entry) = state.entries.front() else {
             break;
         };
-        let emit_high_watermark =
-            match current_window_emit_high_watermark(&branch.runtime, &branch.domain) {
-                Ok(timestamp) => timestamp,
-                Err(error) => {
-                    branch.runtime.handle_internal_processor_error_for_acks(
-                        &branch.domain,
-                        node_kind,
-                        processor,
-                        error_policies,
-                        state.entries.iter().map(|entry| &entry.message.acks),
-                        format!(
-                            "window processor '{}' cannot emit aggregate: {}",
-                            processor.as_str(),
-                            error
-                        ),
-                    );
-                    state.clear(aggregate);
-                    changed = true;
-                    break;
-                }
-            };
-        let output_metadata = match window_output_metadata(state, emit_high_watermark) {
+        let output_metadata = match window_output_metadata(state, execution_now) {
             Ok(metadata) => metadata,
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -223,27 +194,33 @@ pub(super) async fn flush_ready_window_processor(
                         break;
                     }
                 };
-            let output_batch =
-                match evaluate_window_aggregate(compiled_aggregate, state, &output_schema).await {
-                    Ok(record) => record,
-                    Err(error) => {
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            node_kind,
-                            processor,
-                            error_policies,
-                            state.entries.iter().map(|entry| &entry.message.acks),
-                            format!(
-                                "window processor '{}' output route '{}' aggregate failed: {}",
-                                processor.as_str(),
-                                output_relay.as_str(),
-                                error
-                            ),
-                        );
-                        route_failed = true;
-                        break;
-                    }
-                };
+            let output_batch = match evaluate_window_aggregate(
+                compiled_aggregate,
+                state,
+                &output_schema,
+                execution_now,
+            )
+            .await
+            {
+                Ok(record) => record,
+                Err(error) => {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        node_kind,
+                        processor,
+                        error_policies,
+                        state.entries.iter().map(|entry| &entry.message.acks),
+                        format!(
+                            "window processor '{}' output route '{}' aggregate failed: {}",
+                            processor.as_str(),
+                            output_relay.as_str(),
+                            error
+                        ),
+                    );
+                    route_failed = true;
+                    break;
+                }
+            };
             let output_message = RelayMessage {
                 key: first_entry.message.key.clone(),
                 record: match RuntimeRow::new(Arc::new(output_batch), 0, output_metadata.clone()) {
@@ -308,6 +285,7 @@ pub(super) async fn flush_ready_window_processor(
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
                         materialized_state,
                     ),
+                    execution_now,
                 },
                 output_routes,
                 forwarded,
@@ -1277,6 +1255,7 @@ pub(super) async fn evaluate_window_aggregate(
     program: &CompiledWindowAggregateProgram,
     state: &WindowProcessorState,
     output_schema: &CompiledSchema,
+    execution_now: Timestamp,
 ) -> Result<RuntimeRecordBatch, String> {
     let injector: Arc<Box<dyn VmFunctionInjector>> =
         Arc::new(Box::new(WindowAggregateFunctionInjector {
@@ -1296,6 +1275,7 @@ pub(super) async fn evaluate_window_aggregate(
                     &assignment.value,
                     &assignment.target.field,
                     injector.clone(),
+                    execution_now,
                 )
                 .await?,
             )
@@ -1322,6 +1302,7 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
     expr: &'a CompiledWindowAggregateExpr,
     target_field: &'a str,
     injector: Arc<Box<dyn VmFunctionInjector>>,
+    execution_now: Timestamp,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RuntimeValue, String>> + Send + 'a>>
 {
     Box::pin(async move {
@@ -1341,7 +1322,7 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
                     program,
                     &input,
                     &VmExecutionContext {
-                        now: Timestamp::now(),
+                        now: execution_now,
                         injector: Some(injector),
                     },
                 )
@@ -1366,8 +1347,13 @@ pub(super) fn evaluate_window_aggregate_expr<'a>(
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     values.push(
-                        evaluate_window_aggregate_expr(item, target_field, injector.clone())
-                            .await?,
+                        evaluate_window_aggregate_expr(
+                            item,
+                            target_field,
+                            injector.clone(),
+                            execution_now,
+                        )
+                        .await?,
                     );
                 }
                 if *fixed_size {
@@ -1546,13 +1532,20 @@ mod tests {
                     optional: false,
                     sensitive: false,
                 },
+                nervix_models::SchemaField {
+                    name: named("observed_at"),
+                    ty: ParseAsType::Datetime,
+                    optional: false,
+                    sensitive: false,
+                },
             ],
         });
         let aggregate = window_aggregate(
             "SET count = COUNT(input.latency), adjusted_count = COUNT(input.latency) + 2, p50 = \
              PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), latencies = \
              [PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), \
-             PERCENTILE_LINEAR_HISTOGRAM(input.latency, 100, 10, 0, 100, '2s')]",
+             PERCENTILE_LINEAR_HISTOGRAM(input.latency, 100, 10, 0, 100, '2s')], observed_at = \
+             now()",
         );
         let mut state = WindowProcessorState::new(&aggregate);
         for value in [10.0, 20.0, 30.0] {
@@ -1575,7 +1568,8 @@ mod tests {
 
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::F64, &output_schema);
-        let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
+        let execution_now = Timestamp::from_unix_nanos(946_684_800_000_000_000);
+        let record = evaluate_window_aggregate(&compiled, &state, &output_schema, execution_now)
             .await
             .expect("aggregate should evaluate");
 
@@ -1594,6 +1588,12 @@ mod tests {
                 RuntimeValue::F64(OrderedFloat(25.0)),
                 RuntimeValue::F64(OrderedFloat(35.0)),
             ]))
+        );
+        assert_eq!(
+            batch_value(&record, "observed_at"),
+            Some(RuntimeValue::Datetime(
+                execution_now.as_datetime().fixed_offset()
+            ))
         );
     }
 
@@ -1698,9 +1698,14 @@ mod tests {
 
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate");
+        let record = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate");
 
         assert_eq!(
             batch_value(&record, "p50"),
@@ -1797,9 +1802,14 @@ mod tests {
         .expect("window should advance");
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate");
+        let record = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate");
 
         assert_eq!(
             batch_value(&record, "p0"),
@@ -1853,9 +1863,14 @@ mod tests {
         .expect("window should advance");
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let retained = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate while delay retains value");
+        let retained = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate while delay retains value");
         assert_eq!(
             batch_value(&retained, "p0"),
             Some(RuntimeValue::F64(OrderedFloat(15.0)))
@@ -1873,9 +1888,14 @@ mod tests {
                 window_inputs(&aggregate, RuntimeValue::I64(90)),
             )
             .expect("aggregate state should accept message before delay expires");
-        let still_retained = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate before delay expires");
+        let still_retained = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate before delay expires");
         assert_eq!(
             batch_value(&still_retained, "p0"),
             Some(RuntimeValue::F64(OrderedFloat(15.0)))
@@ -1893,9 +1913,14 @@ mod tests {
                 window_inputs(&aggregate, RuntimeValue::I64(90)),
             )
             .expect("aggregate state should accept message after delay expires");
-        let expired = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate after delay expires");
+        let expired = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate after delay expires");
         assert_eq!(
             batch_value(&expired, "p0"),
             Some(RuntimeValue::F64(OrderedFloat(95.0)))
@@ -1965,9 +1990,14 @@ mod tests {
 
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate after timeout purge");
+        let record = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate after timeout purge");
         assert_eq!(
             batch_value(&record, "p0"),
             Some(RuntimeValue::F64(OrderedFloat(95.0)))
@@ -2042,9 +2072,14 @@ mod tests {
         );
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate");
+        let record = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate");
 
         assert_eq!(
             batch_value(&record, "first_latency"),
@@ -2069,9 +2104,14 @@ mod tests {
 
         advance_window(&mut state, &aggregate, Some(1), None, Timestamp::now())
             .expect("window should advance");
-        let record = evaluate_window_aggregate(&compiled, &state, &output_schema)
-            .await
-            .expect("aggregate should evaluate after removal");
+        let record = evaluate_window_aggregate(
+            &compiled,
+            &state,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("aggregate should evaluate after removal");
 
         assert_eq!(
             batch_value(&record, "first_latency"),
@@ -2217,9 +2257,14 @@ mod tests {
         .expect("snapshot should restore");
         let compiled =
             compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
-        let record = evaluate_window_aggregate(&compiled, &restored, &output_schema)
-            .await
-            .expect("restored aggregate should evaluate");
+        let record = evaluate_window_aggregate(
+            &compiled,
+            &restored,
+            &output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+        .expect("restored aggregate should evaluate");
 
         assert_eq!(restored.entries.len(), 2);
         assert_eq!(

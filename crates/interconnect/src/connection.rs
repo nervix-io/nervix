@@ -24,7 +24,7 @@ use std::{
 use bytes::Bytes;
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
-use futures_util::{StreamExt as _, stream::FuturesUnordered};
+use futures_util::stream::FuturesUnordered;
 use h2::{Reason, RecvStream, SendStream, client, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -51,7 +51,6 @@ use super::{
 };
 use crate::{
     identity::CertificateIdentity,
-    request::{RequestEnvelope, StreamingResponse},
     wire::{
         ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
         RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
@@ -146,121 +145,160 @@ struct ClientConnection {
     closed: CancellationToken,
 }
 
-#[derive(Clone)]
-struct StreamSlotQuotas {
-    class: PoolClass,
+/// Tokio's owned permits retain a `std::sync::Arc` to their one semaphore after the connection
+/// quota bundle is no longer borrowed. The surrounding `triomphe::Arc` keeps cloning a complete
+/// quota bundle to one reference-count operation.
+struct ManagementStreamSlotQuotas {
     shared: StdArc<Semaphore>,
-    resource: StdArc<Semaphore>,
-    snapshot: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
+    progress: StdArc<Semaphore>,
     admission: StdArc<Semaphore>,
     cancellation: StdArc<Semaphore>,
     terminal: StdArc<Semaphore>,
 }
 
-const MANAGEMENT_SHARED_STREAMS: usize = 40;
+struct BulkStreamSlotQuotas {
+    shared: StdArc<Semaphore>,
+    resource: StdArc<Semaphore>,
+    snapshot: StdArc<Semaphore>,
+}
+
+#[derive(Clone)]
+enum StreamSlotQuotas {
+    Management(Arc<ManagementStreamSlotQuotas>),
+    Bulk(Arc<BulkStreamSlotQuotas>),
+    Shared {
+        class: PoolClass,
+        slots: StdArc<Semaphore>,
+    },
+}
+
+const MANAGEMENT_TOTAL_STREAMS: usize = PoolClass::Management.stream_slots_per_connection();
 const MANAGEMENT_DISCOVERY_STREAMS: usize = 4;
 const MANAGEMENT_LIVENESS_STREAMS: usize = 8;
+pub(super) const MANAGEMENT_PROGRESS_STREAMS: usize = MANAGEMENT_LIVENESS_STREAMS;
 const MANAGEMENT_ADMISSION_STREAMS: usize = 4;
 const MANAGEMENT_CANCELLATION_STREAMS: usize = 4;
 const MANAGEMENT_TERMINAL_STREAMS: usize = 4;
-const BULK_SHARED_STREAMS: usize = 1;
+const MANAGEMENT_RESERVED_STREAMS: usize = MANAGEMENT_DISCOVERY_STREAMS
+    + MANAGEMENT_LIVENESS_STREAMS
+    + MANAGEMENT_PROGRESS_STREAMS
+    + MANAGEMENT_ADMISSION_STREAMS
+    + MANAGEMENT_CANCELLATION_STREAMS
+    + MANAGEMENT_TERMINAL_STREAMS;
+const _: () = assert!(
+    MANAGEMENT_RESERVED_STREAMS < MANAGEMENT_TOTAL_STREAMS,
+    "reserved management stream quotas must leave shared capacity",
+);
+pub(super) const MANAGEMENT_SHARED_STREAMS: usize =
+    MANAGEMENT_TOTAL_STREAMS - MANAGEMENT_RESERVED_STREAMS;
+const _: () = assert!(
+    MANAGEMENT_SHARED_STREAMS + MANAGEMENT_RESERVED_STREAMS == MANAGEMENT_TOTAL_STREAMS,
+    "management stream subquotas must exactly partition the HTTP/2 stream capacity",
+);
+const _: () = assert!(
+    MANAGEMENT_DISCOVERY_STREAMS > 0
+        && MANAGEMENT_LIVENESS_STREAMS > 0
+        && MANAGEMENT_PROGRESS_STREAMS > 0
+        && MANAGEMENT_ADMISSION_STREAMS > 0
+        && MANAGEMENT_CANCELLATION_STREAMS > 0
+        && MANAGEMENT_TERMINAL_STREAMS > 0,
+    "every reserved management stream class must have capacity",
+);
+const BULK_TOTAL_STREAMS: usize = PoolClass::Bulk.stream_slots_per_connection();
 const BULK_RESOURCE_STREAMS: usize = 2;
 const BULK_SNAPSHOT_STREAMS: usize = 1;
+const BULK_RESERVED_STREAMS: usize = BULK_RESOURCE_STREAMS + BULK_SNAPSHOT_STREAMS;
+const _: () = assert!(
+    BULK_RESERVED_STREAMS < BULK_TOTAL_STREAMS,
+    "reserved bulk stream quotas must leave shared capacity",
+);
+const BULK_SHARED_STREAMS: usize = BULK_TOTAL_STREAMS - BULK_RESERVED_STREAMS;
+const _: () = assert!(
+    BULK_SHARED_STREAMS + BULK_RESERVED_STREAMS == BULK_TOTAL_STREAMS,
+    "bulk stream subquotas must exactly partition the HTTP/2 stream capacity",
+);
 
 impl StreamSlotQuotas {
     fn new(class: PoolClass) -> Self {
         if class == PoolClass::Management {
-            return Self {
-                class,
+            return Self::Management(Arc::new(ManagementStreamSlotQuotas {
                 shared: StdArc::new(Semaphore::new(MANAGEMENT_SHARED_STREAMS)),
-                resource: StdArc::new(Semaphore::new(0)),
-                snapshot: StdArc::new(Semaphore::new(0)),
                 discovery: StdArc::new(Semaphore::new(MANAGEMENT_DISCOVERY_STREAMS)),
                 liveness: StdArc::new(Semaphore::new(MANAGEMENT_LIVENESS_STREAMS)),
+                progress: StdArc::new(Semaphore::new(MANAGEMENT_PROGRESS_STREAMS)),
                 admission: StdArc::new(Semaphore::new(MANAGEMENT_ADMISSION_STREAMS)),
                 cancellation: StdArc::new(Semaphore::new(MANAGEMENT_CANCELLATION_STREAMS)),
                 terminal: StdArc::new(Semaphore::new(MANAGEMENT_TERMINAL_STREAMS)),
-            };
+            }));
         }
         if class == PoolClass::Bulk {
-            return Self {
-                class,
+            return Self::Bulk(Arc::new(BulkStreamSlotQuotas {
                 shared: StdArc::new(Semaphore::new(BULK_SHARED_STREAMS)),
                 resource: StdArc::new(Semaphore::new(BULK_RESOURCE_STREAMS)),
                 snapshot: StdArc::new(Semaphore::new(BULK_SNAPSHOT_STREAMS)),
-                discovery: StdArc::new(Semaphore::new(0)),
-                liveness: StdArc::new(Semaphore::new(0)),
-                admission: StdArc::new(Semaphore::new(0)),
-                cancellation: StdArc::new(Semaphore::new(0)),
-                terminal: StdArc::new(Semaphore::new(0)),
-            };
+            }));
         }
-        Self {
+        Self::Shared {
             class,
-            shared: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
-            resource: StdArc::new(Semaphore::new(0)),
-            snapshot: StdArc::new(Semaphore::new(0)),
-            discovery: StdArc::new(Semaphore::new(0)),
-            liveness: StdArc::new(Semaphore::new(0)),
-            admission: StdArc::new(Semaphore::new(0)),
-            cancellation: StdArc::new(Semaphore::new(0)),
-            terminal: StdArc::new(Semaphore::new(0)),
+            slots: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
         }
     }
 
-    fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
-        match subquota {
-            RequestSubquota::Shared => &self.shared,
-            RequestSubquota::Resource => &self.resource,
-            RequestSubquota::Snapshot => &self.snapshot,
-            RequestSubquota::Discovery => &self.discovery,
-            RequestSubquota::Liveness => &self.liveness,
-            RequestSubquota::Admission => &self.admission,
-            RequestSubquota::Cancellation => &self.cancellation,
-            RequestSubquota::Terminal => &self.terminal,
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
+        match self {
+            Self::Management(quotas) => quotas.for_subquota(subquota),
+            Self::Bulk(quotas) => quotas.for_subquota(subquota),
+            Self::Shared { slots, .. } => {
+                if let RequestSubquota::Shared = subquota {
+                    Some(slots)
+                } else {
+                    None
+                }
+            }
         }
     }
 
     async fn drain(&self) {
-        if self.class != PoolClass::Management && self.class != PoolClass::Bulk {
-            let permits: u32 = self
-                .class
-                .stream_slots_per_connection()
-                .try_into()
-                .assured("stream slot counts are much smaller than u32::MAX");
-            let permit = StdArc::clone(&self.shared)
-                .acquire_many_owned(permits)
-                .await
-                .assured("interconnect stream-slot semaphores are never closed");
-            drop(permit);
-            return;
-        }
-        if self.class == PoolClass::Bulk {
-            let quotas = [
-                (RequestSubquota::Shared, BULK_SHARED_STREAMS),
-                (RequestSubquota::Resource, BULK_RESOURCE_STREAMS),
-                (RequestSubquota::Snapshot, BULK_SNAPSHOT_STREAMS),
-            ];
-            let mut drained = Vec::with_capacity(quotas.len());
-            for (subquota, permits) in quotas {
-                tokio::task::consume_budget().await;
-                let permits: u32 = permits
+        match self {
+            Self::Management(quotas) => quotas.drain().await,
+            Self::Bulk(quotas) => quotas.drain().await,
+            Self::Shared { class, slots } => {
+                let permits: u32 = class
+                    .stream_slots_per_connection()
                     .try_into()
-                    .assured("bulk stream subquotas are much smaller than u32::MAX");
-                let permit = StdArc::clone(self.for_subquota(subquota))
+                    .assured("stream slot counts are much smaller than u32::MAX");
+                let permit = StdArc::clone(slots)
                     .acquire_many_owned(permits)
                     .await
                     .assured("interconnect stream-slot semaphores are never closed");
-                drained.push(permit);
+                drop(permit);
             }
-            return;
         }
+    }
+}
+
+impl ManagementStreamSlotQuotas {
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
+        match subquota {
+            RequestSubquota::Shared => Some(&self.shared),
+            RequestSubquota::Discovery => Some(&self.discovery),
+            RequestSubquota::Liveness => Some(&self.liveness),
+            RequestSubquota::Progress => Some(&self.progress),
+            RequestSubquota::Admission => Some(&self.admission),
+            RequestSubquota::Cancellation => Some(&self.cancellation),
+            RequestSubquota::Terminal => Some(&self.terminal),
+            RequestSubquota::Resource | RequestSubquota::Snapshot => None,
+        }
+    }
+
+    async fn drain(&self) {
         let quotas = [
             (RequestSubquota::Shared, MANAGEMENT_SHARED_STREAMS),
             (RequestSubquota::Discovery, MANAGEMENT_DISCOVERY_STREAMS),
             (RequestSubquota::Liveness, MANAGEMENT_LIVENESS_STREAMS),
+            (RequestSubquota::Progress, MANAGEMENT_PROGRESS_STREAMS),
             (RequestSubquota::Admission, MANAGEMENT_ADMISSION_STREAMS),
             (
                 RequestSubquota::Cancellation,
@@ -274,7 +312,49 @@ impl StreamSlotQuotas {
             let permits: u32 = permits
                 .try_into()
                 .assured("management stream subquotas are much smaller than u32::MAX");
-            let permit = StdArc::clone(self.for_subquota(subquota))
+            let quota = self
+                .for_subquota(subquota)
+                .assured("the management drain list names only management subquotas");
+            let permit = StdArc::clone(quota)
+                .acquire_many_owned(permits)
+                .await
+                .assured("interconnect stream-slot semaphores are never closed");
+            drained.push(permit);
+        }
+    }
+}
+
+impl BulkStreamSlotQuotas {
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
+        match subquota {
+            RequestSubquota::Shared => Some(&self.shared),
+            RequestSubquota::Resource => Some(&self.resource),
+            RequestSubquota::Snapshot => Some(&self.snapshot),
+            RequestSubquota::Discovery
+            | RequestSubquota::Liveness
+            | RequestSubquota::Progress
+            | RequestSubquota::Admission
+            | RequestSubquota::Cancellation
+            | RequestSubquota::Terminal => None,
+        }
+    }
+
+    async fn drain(&self) {
+        let quotas = [
+            (RequestSubquota::Shared, BULK_SHARED_STREAMS),
+            (RequestSubquota::Resource, BULK_RESOURCE_STREAMS),
+            (RequestSubquota::Snapshot, BULK_SNAPSHOT_STREAMS),
+        ];
+        let mut drained = Vec::with_capacity(quotas.len());
+        for (subquota, permits) in quotas {
+            tokio::task::consume_budget().await;
+            let permits: u32 = permits
+                .try_into()
+                .assured("bulk stream subquotas are much smaller than u32::MAX");
+            let quota = self
+                .for_subquota(subquota)
+                .assured("the bulk drain list names only bulk subquotas");
+            let permit = StdArc::clone(quota)
                 .acquire_many_owned(permits)
                 .await
                 .assured("interconnect stream-slot semaphores are never closed");
@@ -1338,9 +1418,11 @@ impl TransportState {
                 let Some(connection) = self.connections.get(&key).map(|item| item.clone()) else {
                     continue;
                 };
-                let permit = match StdArc::clone(connection.stream_slots.for_subquota(subquota))
-                    .try_acquire_owned()
-                {
+                let stream_slots = connection
+                    .stream_slots
+                    .for_subquota(subquota)
+                    .assured("reserved stream subquotas are assigned to their configured pool");
+                let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => continue,
                 };
@@ -1402,7 +1484,7 @@ impl TransportState {
             let subquota = match &envelope {
                 Envelope::Ack(ack) => {
                     if ack.outcome == RemoteAckOutcome::Alive {
-                        RequestSubquota::Liveness
+                        RequestSubquota::Progress
                     } else {
                         RequestSubquota::Terminal
                     }
@@ -2185,69 +2267,6 @@ impl TransportState {
         .await
     }
 
-    async fn handle_stream_request(
-        &self,
-        peer_node_id: ClusterNodeName,
-        peer_advertised_host: String,
-        class: PoolClass,
-        body: RecvStream,
-        mut respond: server::SendResponse<Bytes>,
-    ) -> Result<(), Report<TransportError>> {
-        let bytes = read_body(
-            &self.executor,
-            class.memory_class(),
-            class.control_body_limit(&self.executor),
-            self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let decoded = wire::decode_rkyv::<RequestEnvelope>(
-            &self.executor,
-            class.memory_class(),
-            class.cpu_class(),
-            bytes,
-        )
-        .await?;
-        let (request, _reservation) = decoded.into_parts();
-        if request.class != class {
-            send_static_error(
-                &mut respond,
-                StatusCode::FORBIDDEN,
-                "wrong pool class",
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
-        }
-        let handled = tokio::select! {
-            handled = self.requests.handle_stream(
-                &self.executor,
-                peer_node_id,
-                peer_advertised_host,
-                request,
-            ) => handled,
-            reset = poll_fn(|context| respond.poll_reset(context)) => {
-                reset.map_err(TransportError::from)?;
-                return Ok(());
-            }
-        };
-        let handled = match handled {
-            Ok(handled) => handled,
-            Err(error) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::BAD_REQUEST,
-                    &error.to_string(),
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        let (response, _admission) = handled.into_parts();
-        send_streaming_response(respond, response, self.options.progress_timeout).await
-    }
-
     fn increment_peer(&self, node_id: &ClusterNodeName) -> Result<(), TransportError> {
         match self.peer_connections.entry(node_id.clone()) {
             Entry::Occupied(mut entry) => {
@@ -2640,122 +2659,6 @@ async fn send_body(
         }
     }
     stream.reserve_capacity(0);
-    Ok(())
-}
-
-async fn send_stream_chunk(
-    stream: &mut SendStream<Bytes>,
-    body: ChargedBytes,
-) -> Result<(), Report<TransportError>> {
-    let mut offset = 0;
-    while offset < body.len() {
-        tokio::task::consume_budget().await;
-        let remaining = body
-            .len()
-            .checked_sub(offset)
-            .verified("the send offset never advances beyond the streamed chunk");
-        let wanted = remaining.min(BODY_CHUNK_BYTES);
-        stream.reserve_capacity(wanted);
-        let assigned = poll_fn(|context| stream.poll_capacity(context))
-            .await
-            .ok_or_else(|| {
-                TransportError::Decode(
-                    "HTTP/2 stream closed while assigning send capacity".to_string(),
-                )
-            })?
-            .map_err(TransportError::from)?;
-        let ready = assigned.min(wanted);
-        if ready == 0 {
-            continue;
-        }
-        let end = offset
-            .checked_add(ready)
-            .verified("assigned capacity is bounded by the remaining streamed chunk");
-        let chunk = body
-            .slice(offset, end)
-            .verified("the streamed chunk bounds were checked against its body");
-        offset = end;
-        stream
-            .send_data(Bytes::from_owner(chunk), false)
-            .map_err(TransportError::from)?;
-    }
-    stream.reserve_capacity(0);
-    Ok(())
-}
-
-async fn send_streaming_response(
-    mut respond: server::SendResponse<Bytes>,
-    mut response: StreamingResponse,
-    progress_timeout: Duration,
-) -> Result<(), Report<TransportError>> {
-    let headers = Response::builder()
-        .status(StatusCode::OK)
-        .version(Version::HTTP_2)
-        .header(http::header::CONTENT_LENGTH, response.content_length)
-        .body(())
-        .map_err(|error| TransportError::Http(error.to_string()))?;
-    let mut stream = respond
-        .send_response(headers, false)
-        .map_err(TransportError::from)?;
-    let mut sent = 0_u64;
-    loop {
-        tokio::task::consume_budget().await;
-        let next = match timeout(progress_timeout, response.chunks.next()).await {
-            Ok(next) => next,
-            Err(_) => {
-                stream.send_reset(Reason::CANCEL);
-                return Err(Report::new(TransportError::ProgressTimeout {
-                    timeout: progress_timeout,
-                }));
-            }
-        };
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
-                stream.send_reset(Reason::INTERNAL_ERROR);
-                return Err(Report::new(TransportError::Decode(error.to_string())));
-            }
-        };
-        if chunk.is_empty() {
-            stream.send_reset(Reason::INTERNAL_ERROR);
-            return Err(Report::new(TransportError::Decode(
-                "stream producer yielded an empty chunk".to_string(),
-            )));
-        }
-        let chunk_bytes = u64::try_from(chunk.len())
-            .map_err(|error| TransportError::Decode(error.to_string()))?;
-        sent = sent.checked_add(chunk_bytes).ok_or_else(|| {
-            TransportError::Decode("streamed response byte count overflowed".to_string())
-        })?;
-        if sent > response.content_length {
-            stream.send_reset(Reason::INTERNAL_ERROR);
-            return Err(Report::new(TransportError::Decode(
-                "stream producer exceeded its declared content length".to_string(),
-            )));
-        }
-        match timeout(progress_timeout, send_stream_chunk(&mut stream, chunk)).await {
-            Ok(result) => result?,
-            Err(_) => {
-                stream.send_reset(Reason::CANCEL);
-                return Err(Report::new(TransportError::ProgressTimeout {
-                    timeout: progress_timeout,
-                }));
-            }
-        }
-    }
-    if sent != response.content_length {
-        stream.send_reset(Reason::INTERNAL_ERROR);
-        return Err(Report::new(TransportError::Decode(format!(
-            "stream producer declared {} bytes but produced {sent}",
-            response.content_length
-        ))));
-    }
-    stream
-        .send_data(Bytes::new(), true)
-        .map_err(TransportError::from)?;
     Ok(())
 }
 

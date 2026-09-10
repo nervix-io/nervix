@@ -264,6 +264,82 @@ Feature: Inferencer resources
       | field_type       | tensor_type       |
       | ARRAY<F32, 3, 2> | DENSE TENSOR<F32> |
 
+  @domain_execution_time
+  Scenario Outline: Inferencer input mappings observe domain execution time
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA inference_value (
+        value F32,
+        fallback F32
+      );
+      CREATE SCHEMA inference_result (
+        result F32
+      );
+      CREATE WIRE JSON SCHEMA inference_value_wire MODE STRICT (
+        value number,
+        fallback number
+      );
+      CREATE CODEC inference_value_codec
+        FROM WIRE JSON SCHEMA inference_value_wire
+        TO SCHEMA inference_value;
+      CREATE RELAY inference_values SCHEMA inference_value UNBRANCHED;
+      CREATE RELAY inference_results SCHEMA inference_result UNBRANCHED;
+      CREATE VHOST edge infer-execution-time-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/value' TYPE HTTP;
+      CREATE INGESTOR inference_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING inference_value_codec
+        TIMESTAMP NOW
+        TO inference_values
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INFERENCER observe_execution_time FROM inference_values
+        USING RESOURCE inference VERSION 1
+        FILE 'models/scalar_identity.onnx'
+        INPUTS {
+          "value" <tensor_type>[] = CASE
+            WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.value
+            ELSE input.fallback
+          END
+        }
+        OUTPUT SCHEMA { "result" <tensor_type>[] }
+        UNBRANCHED
+        TO inference_results
+        SET result = result
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION inference_results_subscription TO inference_results;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
+      """
+    And http payload is posted to host "infer-execution-time-{{test_id}}.example.com" path "/value"
+      """
+      {"value":42.0,"fallback":-1.0}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"result":42.0}
+      """
+
+    Examples:
+      | cluster_size | tensor_type       |
+      | 1            | DENSE TENSOR<F32> |
+      | 3            | DENSE TENSOR<F32> |
+
   Scenario Outline: Per-message inferencer preserves multidimensional tensor shape
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

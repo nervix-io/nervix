@@ -1163,6 +1163,7 @@ mod tests {
         },
     };
 
+    use meticulous::ResultExt as _;
     use nervix_execution::{CpuClass, MemoryClass};
     use nervix_models::RemoteAckOutcome;
     use rcgen::{
@@ -1368,6 +1369,36 @@ mod tests {
         const NAME: &'static str = "test_blocking_discovery";
         const CLASS: PoolClass = PoolClass::Management;
         const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BlockingProgressRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct BlockingProgressResponse;
+
+    impl InterconnectRequest for BlockingProgressRequest {
+        type Response = BlockingProgressResponse;
+
+        const NAME: &'static str = "test_blocking_progress";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct LivenessRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct LivenessResponse;
+
+    impl InterconnectRequest for LivenessRequest {
+        type Response = LivenessResponse;
+
+        const NAME: &'static str = "test_liveness";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
         const TIMEOUT: Duration = Duration::from_secs(2);
     }
 
@@ -1933,7 +1964,7 @@ mod tests {
             .expect("cancellation handler should register");
 
         let mut blocked = Vec::new();
-        for _ in 0..40 {
+        for _ in 0..connection::MANAGEMENT_SHARED_STREAMS {
             let requester = transport_a.clone();
             let target = node_b.clone();
             blocked.push(tokio::spawn(async move {
@@ -1943,7 +1974,7 @@ mod tests {
         timeout(Duration::from_secs(2), async {
             loop {
                 tokio::task::consume_budget().await;
-                if started.load(Ordering::Acquire) == 40 {
+                if started.load(Ordering::Acquire) == connection::MANAGEMENT_SHARED_STREAMS {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1973,6 +2004,9 @@ mod tests {
         transport_a.shutdown().await;
         transport_b.shutdown().await;
     }
+
+    #[path = "progress.rs"]
+    mod progress;
 
     #[tokio::test]
     async fn discovery_subquota_cannot_crowd_out_management_requests() {

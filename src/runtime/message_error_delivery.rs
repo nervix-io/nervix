@@ -129,11 +129,10 @@ impl MessageErrorRouteRuntime {
 }
 
 impl MessageErrorRouteTask {
-    fn now(&self) -> Timestamp {
+    fn now(&self) -> Result<Timestamp, String> {
         self.runtime
             .current_stream_expiration_time(&self.route.domain)
-            .ok()
-            .unwrap_or_else(current_timestamp)
+            .map_err(|error| error.to_string())
     }
 
     fn report_failure(&self, acks: &[AckSet], reason: String) {
@@ -227,10 +226,9 @@ impl MessageErrorRouteTask {
         }
     }
 
-    async fn accept(&mut self, delivery: MessageErrorDelivery) {
+    async fn accept(&mut self, delivery: MessageErrorDelivery, now: Timestamp) {
         let key = delivery.batch.key.clone();
         let estimated_bytes = delivery.batch.estimated_bytes();
-        let now = self.now();
         let pending =
             self.pending
                 .entry(key.clone())
@@ -283,7 +281,21 @@ impl MessageErrorRouteTask {
     ) {
         loop {
             tokio::task::consume_budget().await;
-            let now = self.now();
+            let now = match self.now() {
+                Ok(now) => now,
+                Err(error) => {
+                    let acks = self.pending_acks();
+                    self.report_failure(
+                        &[acks],
+                        format!(
+                            "message-error route for '{}' in domain '{}' lost its clock: {error}",
+                            self.route.node.identifier.as_str(),
+                            self.route.domain.as_str(),
+                        ),
+                    );
+                    break;
+                }
+            };
             let next_flush = self.next_flush();
             let flush_wait = match next_flush {
                 Some(deadline) => match wall_duration_until_domain_deadline(
@@ -317,13 +329,29 @@ impl MessageErrorRouteTask {
                     input.close();
                     while let Some(delivery) = input.recv().await {
                         tokio::task::consume_budget().await;
-                        self.accept(delivery).await;
+                        self.accept(delivery, now).await;
                     }
                     self.flush_all().await;
                     break;
                 }
                 _ = sleep(flush_wait), if next_flush.is_some() => {
-                    self.flush_due(self.now()).await;
+                    let flush_now = match self.now() {
+                        Ok(now) => now,
+                        Err(error) => {
+                            let acks = self.pending_acks();
+                            self.report_failure(
+                                &[acks],
+                                format!(
+                                    "message-error route for '{}' in domain '{}' lost its clock: \
+                                     {error}",
+                                    self.route.node.identifier.as_str(),
+                                    self.route.domain.as_str(),
+                                ),
+                            );
+                            break;
+                        }
+                    };
+                    self.flush_due(flush_now).await;
                 }
                 _ = sleep(REMOTE_ACK_ALIVE_INTERVAL), if next_flush.is_some() => {
                     self.ack_pending_alive();
@@ -333,7 +361,22 @@ impl MessageErrorRouteTask {
                         self.flush_all().await;
                         break;
                     };
-                    self.accept(delivery).await;
+                    let accepted_now = match self.now() {
+                        Ok(now) => now,
+                        Err(error) => {
+                            self.report_failure(
+                                &delivery.source_acks,
+                                format!(
+                                    "message-error route for '{}' in domain '{}' lost its clock: \
+                                     {error}",
+                                    self.route.node.identifier.as_str(),
+                                    self.route.domain.as_str(),
+                                ),
+                            );
+                            break;
+                        }
+                    };
+                    self.accept(delivery, accepted_now).await;
                 }
             }
         }

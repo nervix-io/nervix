@@ -382,13 +382,17 @@ impl MySqlEmitter {
 
     pub(super) async fn publish_pending_chunks(
         &self,
-        batch_index: usize,
+        context: EmitterBatchExecutionContext<'_>,
         table: &TableName,
         values: &[MySqlValueMapping],
         conflict_action: &MySqlConflictAction,
-        batch: &RelayRecordBatch,
         pending_chunks: &[Vec<usize>],
     ) -> PerRecordPublishOutcome {
+        let EmitterBatchExecutionContext {
+            batch_index,
+            batch,
+            execution_now,
+        } = context;
         let mut outcome = PerRecordPublishOutcome::empty();
         if pending_chunks.is_empty() {
             return outcome;
@@ -400,8 +404,7 @@ impl MySqlEmitter {
             );
             return outcome;
         };
-        let rows = match sql_mapped_batch_values(program, values, batch, current_timestamp()).await
-        {
+        let rows = match sql_mapped_batch_values(program, values, batch, execution_now).await {
             Ok(rows) => rows,
             Err(error) => {
                 outcome.fail(error);
