@@ -849,8 +849,6 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
     drop(store);
     let result =
         FjallStore::from_database(Database::builder(directory.path()).open()?, executor).await;
-    assert!(
-        matches!(result, Err(ConsensusError::Storage(error)) if error.to_string().contains("recreate"))
-    );
+    assert!(matches!(result, Err(error) if error.to_string().contains("recreate")));
     Ok(())
 }

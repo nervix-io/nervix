@@ -18233,6 +18233,7 @@ impl Application {
             ConsensusSettings {
                 cluster_name: cluster_id.clone(),
                 node_id: node_id.clone(),
+                interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
                 interconnect: interconnect.clone(),
                 executor: startup.runtime.executor().clone(),
                 node_unavailability_timeout,
@@ -20569,6 +20570,7 @@ mod tests {
             ConsensusSettings {
                 cluster_name: "test".to_string(),
                 node_id: expected_leader.clone(),
+                interconnect_advertise_addr: interconnect.local_addr().to_string(),
                 interconnect: interconnect.clone(),
                 executor: executor.clone(),
                 node_unavailability_timeout: Duration::from_secs(10),

@@ -28,9 +28,8 @@ use tokio::sync::watch;
 use triomphe::Arc;
 
 use crate::{
-    AppliedConsensusCommand, ConsensusError, LogIdOf, SnapshotOf, StateMachineChanges,
-    StateMachineData, StoredMembershipOf, StoredSnapshotData, TypeConfig, VoteOf,
-    apply_consensus_command,
+    AppliedConsensusCommand, LogIdOf, SnapshotOf, StateMachineChanges, StateMachineData,
+    StoredMembershipOf, StoredSnapshotData, TypeConfig, VoteOf, apply_consensus_command,
     durable_batch::{DurableBatch, StorageFailure},
     read_key,
     records::{Records, ResourceRecords, ScheduleRecords},
@@ -311,13 +310,8 @@ pub(super) struct FjallStore {
 }
 
 impl FjallStore {
-    pub(super) async fn from_database(
-        db: Database,
-        executor: Executor,
-    ) -> Result<Self, ConsensusError> {
-        let reservation = StoreInner::reserve(&executor, MemoryClass::Commands)
-            .await
-            .map_err(ConsensusError::Storage)?;
+    pub(super) async fn from_database(db: Database, executor: Executor) -> io::Result<Self> {
+        let reservation = StoreInner::reserve(&executor, MemoryClass::Commands).await?;
         let store_executor = executor.clone();
         executor
             .run_storage(
@@ -388,18 +382,16 @@ impl FjallStore {
                 },
             )
             .await
-            .map_err(|error| ConsensusError::Storage(io::Error::other(error)))?
-            .map_err(ConsensusError::Storage)
+            .map_err(io::Error::other)?
     }
 
-    pub(super) async fn has_raft_state(&self) -> Result<bool, ConsensusError> {
+    pub(super) async fn has_raft_state(&self) -> io::Result<bool> {
         self.inner
             .run(MemoryClass::Management, |inner, _| {
                 Ok(read_key::<VoteOf>(&inner.meta, KEY_VOTE)?.is_some()
                     || !inner.logs.is_empty().map_err(io::Error::other)?)
             })
             .await
-            .map_err(ConsensusError::Storage)
     }
 
     fn log_reader(&self) -> FjallLogReader {
