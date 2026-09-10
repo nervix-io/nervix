@@ -19,7 +19,7 @@ default = []
 benchmarks = []
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
-testing = []
+testing = ["nervix-consensus/testing"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -334,6 +334,7 @@ iceberg-storage-opendal = { version = "0.10", features = [
   "opendal-azdls",
 ] }
 ignore = "0.4.33"
+imbl = { version = "7.0.2", features = ["serde", "triomphe"] }
 indexmap = "2"
 intrusive-collections = "0.10.3"
 jaq-core = "3"

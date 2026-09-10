@@ -2052,7 +2052,7 @@ async fn handle_web_console_request(
                                     break;
                                 }
                                 if let Some(domain) = active_domain.as_ref()
-                                    && !domains_rx.borrow().contains_key(domain)
+                                    && service.inner.consensus.current_domain(domain).await.is_none()
                                 {
                                     active_domain = None;
                                 }
@@ -18235,6 +18235,7 @@ impl Application {
                 node_id: node_id.clone(),
                 interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
                 interconnect: interconnect.clone(),
+                executor: startup.runtime.executor().clone(),
                 node_unavailability_timeout,
                 raft_heartbeat_interval,
                 raft_election_timeout_min,
@@ -18250,6 +18251,8 @@ impl Application {
                 return Err(error);
             }
         };
+        #[cfg(feature = "testing")]
+        fault_injection.register_consensus(node_id.clone(), &consensus);
         startup.consensus = Some(consensus);
         let consensus = startup
             .consensus
@@ -18820,8 +18823,9 @@ impl Application {
         let runtime_for_resources = runtime.clone();
         let mut resources_rx = consensus.observer().subscribe_resources();
         let resources_shutdown = shutdown.clone();
+        let consensus_for_resources = consensus.observer();
         background_tasks.push(tokio::spawn(async move {
-            runtime_for_resources.update_resource_versions(resources_rx.borrow().clone());
+            runtime_for_resources.update_resource_versions(consensus_for_resources.current_resources().await);
             loop {
                 tokio::task::consume_budget().await;
                 tokio::select! {
@@ -18831,7 +18835,7 @@ impl Application {
                             break;
                         }
                         runtime_for_resources
-                            .update_resource_versions(resources_rx.borrow().clone());
+                            .update_resource_versions(consensus_for_resources.current_resources().await);
                     }
                 }
             }
@@ -19663,7 +19667,11 @@ impl Application {
 
             loop {
                 tokio::task::consume_budget().await;
-                let schedule = schedule_rx.borrow().clone();
+                let schedule = kafka_schedule_service
+                    .inner
+                    .consensus
+                    .current_schedule()
+                    .await;
                 kafka_schedule_service
                     .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
                     .await;
@@ -20556,6 +20564,7 @@ mod tests {
         );
         let expected_leader = test_node_name(id);
         let interconnect = test_interconnect("test", &expected_leader).await;
+        let executor = nervix_execution::Executor::default();
         let consensus = Consensus::from_database(
             db,
             ConsensusSettings {
@@ -20563,6 +20572,7 @@ mod tests {
                 node_id: expected_leader.clone(),
                 interconnect_advertise_addr: interconnect.local_addr().to_string(),
                 interconnect: interconnect.clone(),
+                executor: executor.clone(),
                 node_unavailability_timeout: Duration::from_secs(10),
                 raft_heartbeat_interval: Duration::from_millis(50),
                 raft_election_timeout_min: Duration::from_millis(150),
@@ -20606,11 +20616,8 @@ mod tests {
             &consensus,
             registry.clone(),
             Arc::new(
-                ResourceStore::open(
-                    path.join("resources"),
-                    nervix_execution::Executor::default(),
-                )
-                .expect("resource store should open"),
+                ResourceStore::open(path.join("resources"), executor)
+                    .expect("resource store should open"),
             ),
             interconnect,
         );
