@@ -392,6 +392,7 @@ Feature: Generator node
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+  @domain_cadence
   Scenario Outline: Paced generators follow domain logical time
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -402,11 +403,20 @@ Feature: Generator node
     When these NSPL commands are executed
       """
       CREATE SCHEMA notification (
+        tenant STRING,
         user_id I64,
         amount I64
       );
 
+      CREATE SCHEMA generated_notification (
+        tenant STRING,
+        user_id I64,
+        amount I64,
+        generated_at DATETIME
+      );
+
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
         user_id integer,
         amount integer
       );
@@ -415,12 +425,20 @@ Feature: Generator node
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
+      CREATE SCHEMA tenant_branch_schema (
+        tenant STRING
+      );
+
+      CREATE BRANCH tenant_branch
+        SCHEMA tenant_branch_schema
+        TTL 5m;
+
       CREATE RELAY notifications
-        SCHEMA notification UNBRANCHED
+        SCHEMA notification BRANCHED BY tenant_branch
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE RELAY generated_notifications
-        SCHEMA notification UNBRANCHED;
+        SCHEMA generated_notification BRANCHED BY tenant_branch;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -435,7 +453,8 @@ Feature: Generator node
         TIMESTAMP NOW
         TO notifications
           INHERIT ALL
-          UNBRANCHED
+          BRANCHED BY tenant_branch
+          SET tenant = message.tenant
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -443,10 +462,12 @@ Feature: Generator node
       CREATE GENERATOR synth_notifications
         USING MATERIALIZED STATE notifications
         EACH 2s
-        UNBRANCHED
+        BRANCHED BY tenant_branch
         TO generated_notifications
-          SET user_id = relay_state.notifications.user_id,
-              amount = relay_state.notifications.amount
+          SET tenant = relay_state.notifications.tenant,
+              user_id = relay_state.notifications.user_id,
+              amount = relay_state.notifications.amount,
+              generated_at = now()
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
 
@@ -455,12 +476,13 @@ Feature: Generator node
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
-      {"user_id":42,"amount":7}
+      {"tenant":"acme","user_id":42,"amount":7}
       """
-    Then within "500ms" the relay subscription receives a payload
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
-      {"amount":7,"user_id":42}
+      {"tenant":"beta","user_id":84,"amount":9}
       """
+    Then within "750ms" 3 generator occurrences preserve branches "acme,beta" in field "tenant" with shared timestamp field "generated_at"
 
     Examples:
       | cluster_size | replica_count |

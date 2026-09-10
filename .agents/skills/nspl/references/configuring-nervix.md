@@ -191,6 +191,10 @@ relay. Do not use them to scan across branches.
   USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint `RETRY
   AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT QOS 1`.
   Do not mix mode bodies between source types or infer a default.
+- HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` use domain-logical cadence. HTTP and
+  generators run once immediately; Prometheus first runs after one interval. Keep later work on
+  the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
+  due instant, and use a fresh execution snapshot for returned data and generated routes.
 - Treat Kafka emitter success as local librdkafka producer-queue admission. Even in `ATTACHED`
   mode, Nervix does not wait for a broker delivery receipt before completing its ACK share.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON

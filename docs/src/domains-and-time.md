@@ -148,6 +148,14 @@ the process monotonic clock. The two deadline kinds cannot be interchanged. A lo
 revalidates its domain and generation after every wake and returns both the logical instant that
 became due and a fresh execution-time snapshot. Cancellation is a separate typed outcome.
 
+HTTP `EVERY` polling and generator `EACH` scheduling have an immediate first occurrence;
+Prometheus `EVERY` polling first becomes due after one interval. Later occurrences remain anchored
+to that initial logical schedule. If work takes long enough to miss several occurrences, Nervix
+runs once for the newest due instant and advances directly to the first future boundary. It never
+bursts through the missed intervals. Prometheus sends the due instant as its query evaluation time,
+then takes a fresh domain execution snapshot when the response is decoded and evaluated. Skipped
+polls and generators during quiescing do not stop or re-anchor the cadence.
+
 `COLLECT FOR` and `FLUSH EACH` are domain-logical durations. A paced domain's `TIME RATE` therefore
 accelerates or slows them, and a stopped clock cannot silently turn either policy into a wall-clock
 wait. Each source relay and concrete branch owns its collection deadline; each concrete output

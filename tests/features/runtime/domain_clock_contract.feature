@@ -218,6 +218,179 @@ Feature: Domain clock contract regressions
       | 1            |
       | 3            |
 
+  @domain_cadence
+  Scenario Outline: HTTP polling follows paced domain cadence over multiple periods
+    Given the HTTP mock server is running
+    And clock source recorder "{{test_id}}" is reset
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA cadence_source_record (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA cadence_source_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC cadence_source_codec
+        FROM WIRE JSON SCHEMA cadence_source_wire
+        TO SCHEMA cadence_source_record;
+      CREATE RELAY cadence_source_records SCHEMA cadence_source_record UNBRANCHED;
+      CREATE CLIENT cadence_source
+        TYPE HTTP
+        CONFIG {
+          'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=http-cadence&delay_ms=25',
+          'method' = 'GET',
+          'timeout_ms' = 5000
+        };
+      CREATE INGESTOR cadence_source_reader
+        FROM HTTP cadence_source EVERY 1s
+        ON QUIESCE SUSPEND DECODE USING cadence_source_codec
+        TIMESTAMP NOW
+        TO cadence_source_records
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    Then within "650ms" clock source recorder "{{test_id}}" records 3 requests
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @domain_cadence
+  Scenario Outline: Slow external polling coalesces missed cadence with fresh due timestamps
+    Given the HTTP mock server is running
+    And clock source recorder "{{test_id}}" is reset
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA cadence_sample (
+        source STRING,
+        value F64,
+        timestamp STRING,
+        due STRING
+      );
+      CREATE WIRE JSON SCHEMA cadence_sample_wire MODE STRICT (
+        source string,
+        value number,
+        timestamp string,
+        due string
+      );
+      CREATE CODEC cadence_sample_codec
+        FROM WIRE JSON SCHEMA cadence_sample_wire
+        TO SCHEMA cadence_sample;
+      CREATE SCHEMA cadence_observation (
+        due STRING,
+        executed_at DATETIME
+      );
+      CREATE RELAY cadence_observations SCHEMA cadence_observation UNBRANCHED;
+      CREATE CLIENT cadence_prometheus
+        TYPE PROMETHEUS
+        CONFIG {
+          'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/350',
+          'timeout_ms' = 5000
+        };
+      CREATE INGESTOR cadence_reader
+        FROM PROMETHEUS cadence_prometheus QUERY 'vector(42.5)' EVERY 1s
+        ON QUIESCE SUSPEND DECODE USING cadence_sample_codec
+        TIMESTAMP NOW
+        TO cadence_observations
+          SET due = message.due,
+              executed_at = now()
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION cadence_subscription TO cadence_observations;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 10.0;
+      """
+    Then within "5s" clock source recorder "{{test_id}}" and relay subscription observe 3 fresh executions on "1s" due cadence separated by at least "3s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @domain_cadence
+  Scenario Outline: Polling cadence rebinds across slow and fast clock generations
+    Given the HTTP mock server is running
+    And clock source recorder "{{test_id}}" is reset
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA rebound_sample (
+        source STRING,
+        value F64,
+        timestamp STRING,
+        due STRING
+      );
+      CREATE WIRE JSON SCHEMA rebound_sample_wire MODE STRICT (
+        source string,
+        value number,
+        timestamp string,
+        due string
+      );
+      CREATE CODEC rebound_sample_codec
+        FROM WIRE JSON SCHEMA rebound_sample_wire
+        TO SCHEMA rebound_sample;
+      CREATE SCHEMA rebound_observation (
+        due STRING,
+        executed_at DATETIME
+      );
+      CREATE RELAY rebound_observations SCHEMA rebound_observation UNBRANCHED;
+      CREATE CLIENT rebound_prometheus
+        TYPE PROMETHEUS
+        CONFIG {
+          'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/10',
+          'timeout_ms' = 5000
+        };
+      CREATE INGESTOR rebound_reader
+        FROM PROMETHEUS rebound_prometheus QUERY 'vector(42.5)' EVERY 1s
+        ON QUIESCE SUSPEND DECODE USING rebound_sample_codec
+        TIMESTAMP NOW
+        TO rebound_observations
+          SET due = message.due,
+              executed_at = now()
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rebound_subscription TO rebound_observations;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
+      """
+    And physical time passes for "300ms"
+    Then within "50ms" clock source recorder "{{test_id}}" records 0 requests
+    When these NSPL commands are executed
+      """
+      STOP;
+      START AT '2010-01-01T00:00:00Z' TIME RATE 20.0;
+      """
+    Then within "5s" clock source recorder "{{test_id}}" and relay subscription observe 3 fresh executions on "1s" due cadence separated by at least "1s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @delayed_clock_progress
   Scenario Outline: Delayed clock progress cannot move observed logical time backwards
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

@@ -1,3 +1,5 @@
+use tokio_util::sync::CancellationToken;
+
 use super::*;
 
 pub(super) struct GeneratorTaskSpec {
@@ -198,7 +200,6 @@ impl GeneratorRouteInputProjection {
 
 #[derive(Default)]
 pub(super) struct GeneratorBranchTaskState {
-    pub(super) next_generation: Option<Timestamp>,
     pub(super) routes: Vec<GeneratorRouteBranchTaskState>,
 }
 
@@ -414,13 +415,16 @@ impl Runtime {
             context_projection,
             routes,
         } = spec;
-        let interval = Self::parse_runtime_node_duration_setting(
-            domain,
-            "generator",
-            &generator.name,
-            "each",
-            &generator.each,
-        )?;
+        let cadence = self
+            .bind_domain_cadence(domain, &generator.each, DomainCadenceStart::Immediate)
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "generator '{}' could not bind its cadence: {error}",
+                    generator.name.as_str(),
+                ),
+            })?;
+        let domain_clock = cadence.clock().clone();
         let routes = routes
             .into_iter()
             .map(|route| {
@@ -467,28 +471,22 @@ impl Runtime {
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
-        let domain_clock =
-            self.bind_domain_clock(domain)
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "generator '{}' could not bind its domain clock: {error}",
-                        generator.name.as_str(),
-                    ),
-                })?;
         let runtime = self.clone();
         let task_events = self.inner.events.clone();
 
         Ok(tokio::spawn(async move {
             let mut activity = DomainActivityGuard::new(generator_activity);
             let mut quiesce_activity = Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
-            let mut next_state_refresh = None::<Timestamp>;
+            let mut cadence = cadence;
+            let cadence_cancellation = CancellationToken::new();
+            let mut pending_occurrence = None::<DomainCadenceOccurrence>;
             let mut branch_states =
                 HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
             loop {
                 tokio::task::consume_budget().await;
                 if source_gate.is_closed() {
+                    pending_occurrence = None;
                     runtime
                         .flush_generator_route_buffers(
                             &task_domain,
@@ -522,6 +520,7 @@ impl Runtime {
                         matches!(state.status, nervix_models::DomainStatus::Paused)
                     })
                 {
+                    pending_occurrence = None;
                     runtime
                         .flush_generator_route_buffers(
                             &task_domain,
@@ -548,28 +547,11 @@ impl Runtime {
                     continue;
                 }
                 activity.set_active(true);
-                let execution_now = match domain_clock.snapshot() {
-                    Ok(snapshot) => snapshot.now(),
-                    Err(error) => {
-                        task_events.report_error(format!(
-                            "generator '{}' in domain '{}' lost its clock: {error}",
-                            task_generator.as_str(),
-                            task_domain.as_str(),
-                        ));
-                        break;
-                    }
-                };
-
-                if next_state_refresh.is_none() {
-                    next_state_refresh = Some(execution_now);
-                }
-                let should_refresh_state =
-                    next_state_refresh.is_some_and(|next| execution_now >= next);
                 let mut did_scheduled_work = false;
 
-                if should_refresh_state {
-                    advance_scheduled_timestamp(&mut next_state_refresh, interval, execution_now);
+                if let Some(occurrence) = pending_occurrence.take() {
                     did_scheduled_work = true;
+                    let due_at = occurrence.due_at();
 
                     let mut state_load_failed = false;
                     let state = match runtime
@@ -651,6 +633,29 @@ impl Runtime {
                     }
 
                     if !state_load_failed {
+                        if source_gate.is_closed()
+                            || runtime
+                                .inner
+                                .domains
+                                .get(&task_domain)
+                                .is_some_and(|state| {
+                                    matches!(state.status, nervix_models::DomainStatus::Paused)
+                                })
+                        {
+                            continue;
+                        }
+                        let execution_now = match domain_clock.snapshot() {
+                            Ok(snapshot) => snapshot.now(),
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "generator '{}' in domain '{}' could not obtain its fresh \
+                                     execution time for the occurrence due at '{due_at}': {error}",
+                                    task_generator.as_str(),
+                                    task_domain.as_str(),
+                                ));
+                                break;
+                            }
+                        };
                         let active_branch_keys = source_state_by_branch
                             .keys()
                             .cloned()
@@ -662,26 +667,11 @@ impl Runtime {
                             let branch_state = branch_states
                                 .entry(branch_key.clone())
                                 .or_insert_with(|| GeneratorBranchTaskState {
-                                    next_generation: None,
                                     routes: routes
                                         .iter()
                                         .map(|_| GeneratorRouteBranchTaskState::default())
                                         .collect(),
                                 });
-                            if branch_state.next_generation.is_none() {
-                                branch_state.next_generation = Some(execution_now);
-                            }
-                            if !branch_state
-                                .next_generation
-                                .is_some_and(|next| execution_now >= next)
-                            {
-                                continue;
-                            }
-                            advance_scheduled_timestamp(
-                                &mut branch_state.next_generation,
-                                interval,
-                                execution_now,
-                            );
 
                             for source_record in records {
                                 tokio::task::consume_budget().await;
@@ -956,30 +946,6 @@ impl Runtime {
                     continue;
                 }
 
-                let next_deadline = next_state_refresh
-                    .into_iter()
-                    .chain(
-                        branch_states
-                            .values()
-                            .filter_map(|state| state.next_generation),
-                    )
-                    .min();
-                let sleep_duration = if let Some(next) = next_deadline {
-                    match domain_clock.physical_duration_until(execution_now, next) {
-                        Ok(duration) => duration,
-                        Err(error) => {
-                            task_events.report_error(format!(
-                                "generator '{}' in domain '{}' could not schedule its logical \
-                                 deadline: {error}",
-                                task_generator.as_str(),
-                                task_domain.as_str(),
-                            ));
-                            break;
-                        }
-                    }
-                } else {
-                    interval
-                };
                 let buffer_deadlines = branch_states
                     .values()
                     .flat_map(|state| &state.routes)
@@ -991,6 +957,20 @@ impl Runtime {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             break;
+                        }
+                    }
+                    occurrence = cadence.next(&cadence_cancellation) => {
+                        match occurrence {
+                            Ok(occurrence) => pending_occurrence = Some(occurrence),
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "generator '{}' in domain '{}' could not advance its \
+                                     cadence: {error}",
+                                    task_generator.as_str(),
+                                    task_domain.as_str(),
+                                ));
+                                break;
+                            }
                         }
                     }
                     result = wait_for_branch_buffer_deadlines(&domain_clock, buffer_deadlines),
@@ -1006,7 +986,11 @@ impl Runtime {
                             break;
                         }
                     }
-                    _ = sleep(sleep_duration) => {}
+                    changed = domain_status_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
                     _ = source_gate.wait_closed() => {}
                 }
             }

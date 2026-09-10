@@ -1,4 +1,5 @@
 use reqwest::Client as HttpClient;
+use tokio_util::sync::CancellationToken;
 
 use super::super::*;
 
@@ -67,8 +68,9 @@ impl HttpIngestor {
                 reason,
             }
         })?;
-        let interval =
-            humantime::parse_duration(&every).map_err(|source| RuntimeError::StartIngestor {
+        let cadence = runtime
+            .bind_domain_cadence(domain, &every, DomainCadenceStart::Immediate)
+            .map_err(|source| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
                 reason: source.to_string(),
@@ -98,7 +100,8 @@ impl HttpIngestor {
         let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
             let _client_mounts = task_client_mounts;
-            let mut ticker = tokio::time::interval(interval);
+            let mut cadence = cadence;
+            let cadence_cancellation = CancellationToken::new();
 
             info!(
                 domain = task_domain.as_str(),
@@ -157,7 +160,15 @@ impl HttpIngestor {
                             break;
                         }
                     }
-                    _ = ticker.tick() => {
+                    occurrence = cadence.next(&cadence_cancellation) => {
+                        if let Err(error) = occurrence {
+                            task_events.report_error(format!(
+                                "http ingestor '{}' in domain '{}' could not advance its cadence: {error}",
+                                task_ingestor.as_str(),
+                                task_domain.as_str(),
+                            ));
+                            break;
+                        }
                         if task_quiesce.should_skip_poll() {
                             continue;
                         }
@@ -277,6 +288,7 @@ impl HttpIngestor {
                             }
                         }
                     }
+                    _ = task_quiesce.wait_for_change() => {}
                 }
             }
 

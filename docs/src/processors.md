@@ -456,6 +456,11 @@ CREATE GENERATOR synth_notifications
     ON MESSAGE ERROR LOG;
 ```
 
+The first occurrence is immediate. Later occurrences remain anchored to the declared `EACH`
+schedule. If reading or generating spans multiple periods, Nervix generates once for the newest
+due occurrence and continues at the first future boundary. Route expressions use a fresh domain
+execution snapshot taken after the materialized-state read.
+
 ### Altering Generators
 
 `ALTER GENERATOR` supports `SET MATERIALIZED STATE <relay>`, `SET EACH <duration>`,

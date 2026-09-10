@@ -14,8 +14,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 #[cfg(test)]
 use nervix_models::DomainTick;
 use nervix_models::{
-    DomainAdmissionWindow, DomainClockAuthority, DomainClockError, DomainClockPeriod,
-    DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
+    DomainAdmissionWindow, DomainClockAuthority, DomainClockPeriod, DomainClockProgress,
+    DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
 };
 use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
@@ -57,6 +57,11 @@ pub enum DomainClockAccessError {
     },
     #[error("domain '{domain}' has invalid ingestion timing configuration")]
     AdmissionConfiguration { domain: DomainName },
+    #[error("domain '{domain}' has invalid cadence interval '{interval}'")]
+    CadenceConfiguration {
+        domain: DomainName,
+        interval: String,
+    },
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +70,8 @@ pub enum DomainClockArithmetic {
     Projection,
     #[error("logical-deadline conversion")]
     DeadlineConversion,
+    #[error("cadence scheduling")]
+    CadenceScheduling,
 }
 
 pub type DomainClockAccessResult<T> = Result<T, Report<DomainClockAccessError>>;
@@ -291,23 +298,6 @@ impl DomainClockLifecycle {
             inner: self.inner.clone(),
             generation,
         })
-    }
-
-    pub(super) fn paced_mapping(&self) -> Option<DomainClockState> {
-        let shared = self.inner.state.lock();
-        match &shared.installation {
-            DomainClockInstallation::Installed {
-                source: DomainClockSource::Paced(mapping),
-                ..
-            } => Some(mapping.clone()),
-            DomainClockInstallation::Missing
-            | DomainClockInstallation::Stopped { .. }
-            | DomainClockInstallation::Uninstalled { .. }
-            | DomainClockInstallation::Installed {
-                source: DomainClockSource::Unpaced,
-                ..
-            } => None,
-        }
     }
 
     fn replace(&self, installation: DomainClockInstallation) {
@@ -618,6 +608,124 @@ impl LogicalDeadlineReached {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DomainCadenceStart {
+    Immediate,
+    AfterInterval,
+}
+
+/// One occurrence on a domain-bound recurring schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DomainCadenceOccurrence {
+    due_at: Timestamp,
+}
+
+impl DomainCadenceOccurrence {
+    pub(super) const fn due_at(&self) -> Timestamp {
+        self.due_at
+    }
+}
+
+/// A recurring logical schedule bound to one installed domain-clock generation.
+#[derive(Debug)]
+pub(super) struct DomainCadence {
+    clock: DomainClock,
+    interval: DomainClockPeriod,
+    next_due_at: Timestamp,
+}
+
+impl DomainCadence {
+    fn new(
+        clock: DomainClock,
+        interval: DomainClockPeriod,
+        start: DomainCadenceStart,
+    ) -> DomainClockAccessResult<Self> {
+        let snapshot = clock.snapshot()?;
+        let next_due_at = match start {
+            DomainCadenceStart::Immediate => snapshot.now(),
+            DomainCadenceStart::AfterInterval => snapshot
+                .now()
+                .checked_add(interval.as_duration())
+                .change_context(DomainClockAccessError::Arithmetic {
+                    domain: clock.inner.domain.clone(),
+                    operation: DomainClockArithmetic::CadenceScheduling,
+                })?,
+        };
+        Ok(Self {
+            clock,
+            interval,
+            next_due_at,
+        })
+    }
+
+    pub(super) const fn clock(&self) -> &DomainClock {
+        &self.clock
+    }
+
+    /// Returns the newest due occurrence and advances directly to the first future boundary.
+    pub(super) async fn next(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> DomainClockWaitResult<DomainCadenceOccurrence> {
+        let domain = self.clock.inner.domain.clone();
+        let snapshot = self
+            .clock
+            .snapshot()
+            .change_context(DomainClockWaitError::Clock {
+                domain: domain.clone(),
+            })?;
+        if let Some(occurrence) =
+            self.take_due(snapshot)
+                .change_context(DomainClockWaitError::Clock {
+                    domain: domain.clone(),
+                })?
+        {
+            return Ok(occurrence);
+        }
+
+        let reached = self
+            .clock
+            .wait_until(self.clock.deadline_at(self.next_due_at), cancellation)
+            .await?;
+        let occurrence = self
+            .take_due(reached.snapshot)
+            .change_context(DomainClockWaitError::Clock { domain })?
+            .assured("a completed cadence wait returns a snapshot at or after its due boundary");
+        Ok(occurrence)
+    }
+
+    fn take_due(
+        &mut self,
+        snapshot: DomainExecutionSnapshot,
+    ) -> DomainClockAccessResult<Option<DomainCadenceOccurrence>> {
+        if snapshot.now() < self.next_due_at {
+            return Ok(None);
+        }
+        let elapsed = snapshot
+            .now()
+            .duration_since(self.next_due_at)
+            .verified("this branch requires the cadence boundary to be reached");
+        let interval_nanos = u128::from(self.interval.as_nanos());
+        let elapsed_intervals = elapsed.as_nanos() / interval_nanos;
+        let due_offset_nanos = elapsed_intervals
+            .checked_mul(interval_nanos)
+            .assured("the whole-interval offset is no greater than the elapsed timestamp duration");
+        let due_offset_nanos = u64::try_from(due_offset_nanos)
+            .assured("the difference between two signed Unix-nanosecond timestamps fits in u64");
+        let due_at = self
+            .next_due_at
+            .checked_add(Duration::from_nanos(due_offset_nanos))
+            .assured("the coalesced due instant is no later than the observed timestamp");
+        self.next_due_at = due_at
+            .checked_add(self.interval.as_duration())
+            .change_context(DomainClockAccessError::Arithmetic {
+                domain: self.clock.inner.domain.clone(),
+                operation: DomainClockArithmetic::CadenceScheduling,
+            })?;
+        Ok(Some(DomainCadenceOccurrence { due_at }))
+    }
+}
+
 pub(super) fn checked_add_duration_to_timestamp(base: Timestamp, duration: Duration) -> Timestamp {
     // Saturation is the meaning here: a schedule further out than the nanosecond range is already
     // further out than any timestamp this clock will reach.
@@ -625,42 +733,26 @@ pub(super) fn checked_add_duration_to_timestamp(base: Timestamp, duration: Durat
         .unwrap_or_else(|_| Timestamp::from_unix_nanos(i64::MAX))
 }
 
-pub(super) fn advance_scheduled_timestamp(
-    next: &mut Option<Timestamp>,
-    interval: Duration,
-    current: Timestamp,
-) {
-    let mut scheduled = next.unwrap_or(current);
-    while scheduled <= current {
-        let advanced = checked_add_duration_to_timestamp(scheduled, interval);
-        if advanced <= scheduled {
-            break;
-        }
-        scheduled = advanced;
-    }
-    *next = Some(scheduled);
-}
-
 pub(super) fn current_timestamp() -> Timestamp {
     actual_utc_now()
 }
 
-pub(super) fn current_domain_logical_time(
-    clock: &DomainClockState,
-    wall_now: Timestamp,
-) -> Result<Timestamp, Report<DomainClockError>> {
-    clock.logical_time_at(wall_now)
-}
-
-pub(super) fn wall_duration_until_logical_target(
-    clock: &DomainClockState,
-    current_logical: Timestamp,
-    target_logical: Timestamp,
-) -> Result<Duration, Report<DomainClockError>> {
-    clock.wall_duration_until(current_logical, target_logical)
-}
-
 impl Runtime {
+    pub(super) fn bind_domain_cadence(
+        &self,
+        domain: &DomainName,
+        interval: &str,
+        start: DomainCadenceStart,
+    ) -> DomainClockAccessResult<DomainCadence> {
+        let interval = interval.parse::<DomainClockPeriod>().change_context(
+            DomainClockAccessError::CadenceConfiguration {
+                domain: domain.clone(),
+                interval: interval.to_string(),
+            },
+        )?;
+        DomainCadence::new(self.bind_domain_clock(domain)?, interval, start)
+    }
+
     pub(crate) fn domain_execution_snapshot(
         &self,
         domain: &DomainName,
@@ -810,7 +902,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::{RuntimeValue, domain, named, paced_domain_state, test_domain_clock_authority},
+        runtime::{
+            RuntimeValue, domain, named, paced_domain_state, test_domain_clock,
+            test_domain_clock_authority,
+        },
         runtime_schema::test_runtime_row,
     };
 
@@ -1122,9 +1217,11 @@ mod tests {
             DomainTimeRate::ONE,
         );
         let delayed_wall_time = Timestamp::from_unix_nanos(1_000_000_000);
-        let before_delivery = current_domain_logical_time(&clock, delayed_wall_time)
+        let before_delivery = clock
+            .logical_time_at(delayed_wall_time)
             .assured("the fixture uses a finite positive rate");
-        let after_delivery = current_domain_logical_time(&clock, delayed_wall_time)
+        let after_delivery = clock
+            .logical_time_at(delayed_wall_time)
             .assured("the fixture uses a finite positive rate");
 
         assert!(
@@ -1189,7 +1286,11 @@ mod tests {
             DomainTimeRate::ONE,
         );
 
-        assert!(current_domain_logical_time(&clock, Timestamp::from_unix_nanos(1)).is_err());
+        assert!(
+            clock
+                .logical_time_at(Timestamp::from_unix_nanos(1))
+                .is_err()
+        );
     }
 
     #[test]
@@ -1200,12 +1301,12 @@ mod tests {
             DomainTimeRate::try_from(4.0).expect("fixture rate is valid"),
         );
 
-        let wait = wall_duration_until_logical_target(
-            &clock,
-            Timestamp::from_unix_nanos(0),
-            Timestamp::from_unix_nanos(1_000_000_000),
-        )
-        .assured("the fixture uses a finite positive rate");
+        let wait = clock
+            .wall_duration_until(
+                Timestamp::from_unix_nanos(0),
+                Timestamp::from_unix_nanos(1_000_000_000),
+            )
+            .assured("the fixture uses a finite positive rate");
 
         assert_eq!(wait, Duration::from_millis(250));
     }
@@ -1539,6 +1640,129 @@ mod tests {
             reached.snapshot().wasm_context().now(),
             reached.snapshot().now()
         );
+    }
+
+    #[test]
+    fn cadence_coalesces_missed_occurrences_to_the_newest_due_boundary() {
+        let clock = test_domain_clock(&domain("cadence"));
+        let mut cadence = DomainCadence {
+            clock: clock.clone(),
+            interval: "10ns".parse().assured("fixture cadence is valid"),
+            next_due_at: Timestamp::from_unix_nanos(100),
+        };
+        let snapshot = DomainExecutionSnapshot {
+            generation: clock.generation,
+            now: Timestamp::from_unix_nanos(145),
+        };
+
+        let occurrence = cadence
+            .take_due(snapshot)
+            .assured("fixture cadence arithmetic stays in range")
+            .assured("the fixture snapshot reaches the cadence");
+
+        assert_eq!(occurrence.due_at(), Timestamp::from_unix_nanos(140));
+        assert_eq!(cadence.next_due_at, Timestamp::from_unix_nanos(150));
+    }
+
+    #[test]
+    fn cadence_advances_directly_across_the_complete_timestamp_range() {
+        let clock = test_domain_clock(&domain("fast_cadence"));
+        let mut cadence = DomainCadence {
+            clock: clock.clone(),
+            interval: "1ns".parse().assured("fixture cadence is valid"),
+            next_due_at: Timestamp::from_unix_nanos(i64::MIN),
+        };
+        let snapshot = DomainExecutionSnapshot {
+            generation: clock.generation,
+            now: Timestamp::from_unix_nanos(i64::MAX - 1),
+        };
+
+        let occurrence = cadence
+            .take_due(snapshot)
+            .assured("the final future boundary remains in range")
+            .assured("the fixture snapshot reaches the cadence");
+
+        assert_eq!(
+            occurrence.due_at(),
+            Timestamp::from_unix_nanos(i64::MAX - 1)
+        );
+        assert_eq!(cadence.next_due_at, Timestamp::from_unix_nanos(i64::MAX));
+    }
+
+    #[test]
+    fn cadence_reports_a_schedule_without_a_representable_future_boundary() {
+        let clock = test_domain_clock(&domain("bounded_cadence"));
+        let mut cadence = DomainCadence {
+            clock: clock.clone(),
+            interval: "1ns".parse().assured("fixture cadence is valid"),
+            next_due_at: Timestamp::from_unix_nanos(i64::MAX),
+        };
+        let snapshot = DomainExecutionSnapshot {
+            generation: clock.generation,
+            now: Timestamp::from_unix_nanos(i64::MAX),
+        };
+
+        let Err(error) = cadence.take_due(snapshot) else {
+            panic!("a cadence at the timestamp limit must have no future boundary");
+        };
+
+        assert!(matches!(
+            error.downcast_ref::<DomainClockAccessError>(),
+            Some(DomainClockAccessError::Arithmetic {
+                operation: DomainClockArithmetic::CadenceScheduling,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cadence_wait_revalidates_its_bound_generation() {
+        let clock_domain = domain("cadence_generation");
+        let lifecycle = DomainClockLifecycle::new(clock_domain);
+        lifecycle.install_paced(
+            1,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let clock = lifecycle
+            .bind()
+            .assured("fixture clock generation is installed");
+        let cadence = DomainCadence::new(
+            clock,
+            "1h".parse().assured("fixture cadence is valid"),
+            DomainCadenceStart::AfterInterval,
+        )
+        .assured("fixture cadence starts inside the timestamp range");
+        let wait = tokio::spawn(async move {
+            let mut cadence = cadence;
+            cadence.next(&CancellationToken::new()).await
+        });
+        tokio::task::yield_now().await;
+
+        lifecycle.install_paced(
+            2,
+            DomainClockState::new(
+                current_timestamp(),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
+        let result = wait.await.assured("fixture cadence task joins");
+        let Err(error) = result else {
+            panic!("the prior generation must not complete its cadence wait");
+        };
+
+        assert!(matches!(
+            error.downcast_ref::<DomainClockAccessError>(),
+            Some(DomainClockAccessError::StaleGeneration {
+                bound_generation: 1,
+                current_generation: 2,
+                ..
+            })
+        ));
     }
 
     #[test]

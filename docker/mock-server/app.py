@@ -41,6 +41,37 @@ async def handle_clock_source(request: web.Request) -> web.StreamResponse:
     return web.json_response({"user_id": 42})
 
 
+async def handle_prometheus_clock_source(request: web.Request) -> web.StreamResponse:
+    name = request.match_info["name"]
+    requests = clock_source_requests.setdefault(name, [])
+    requests.append(
+        {
+            "received_at_unix_nanos": time.time_ns(),
+            "received_at_monotonic_nanos": time.monotonic_ns(),
+            "query": dict(request.query),
+        }
+    )
+    delay_ms = int(request.match_info["delay_ms"])
+    if delay_ms > 0:
+        await asyncio.sleep(delay_ms / 1000)
+    query_time_text = request.query["time"]
+    query_time = float(query_time_text)
+    return web.json_response(
+        {
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {
+                        "metric": {"source": "clock", "due": query_time_text},
+                        "value": [query_time, "42.5"],
+                    }
+                ],
+            },
+        }
+    )
+
+
 async def clock_source_observations(request: web.Request) -> web.StreamResponse:
     name = request.match_info["name"]
     requests = clock_source_requests.get(name, [])
@@ -107,6 +138,10 @@ async def publish_ws(request: web.Request) -> web.StreamResponse:
 app = web.Application()
 app.router.add_get("/http/{name}", handle_http)
 app.router.add_get("/clock-source/{name}", handle_clock_source)
+app.router.add_get(
+    "/prometheus-clock-source/{name}/{delay_ms}/api/v1/query",
+    handle_prometheus_clock_source,
+)
 app.router.add_get("/clock-source-observations/{name}", clock_source_observations)
 app.router.add_delete("/clock-source-observations/{name}", reset_clock_source)
 app.router.add_get("/ws/{name}", handle_ws)

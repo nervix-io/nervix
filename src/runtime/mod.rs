@@ -67,7 +67,7 @@ use nervix_models::{
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup,
     CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainClockAuthority,
-    DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState, EmitSink,
+    DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitSink,
     EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
     ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
     IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
@@ -355,9 +355,9 @@ use correlator::{
     handle_correlator_timeout_action,
 };
 use domain_clock::{
-    DomainClock, DomainClockAccessResult, DomainClockLifecycle, DomainExecutionSnapshot,
-    LogicalDeadline, advance_scheduled_timestamp, checked_add_duration_to_timestamp,
-    current_domain_logical_time, current_timestamp, wall_duration_until_logical_target,
+    DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
+    DomainClockLifecycle, DomainExecutionSnapshot, LogicalDeadline,
+    checked_add_duration_to_timestamp, current_timestamp,
 };
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
