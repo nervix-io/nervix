@@ -22,6 +22,11 @@ pub struct DomainAdmissionWindow {
 }
 
 impl DomainAdmissionWindow {
+    /// The number of reached logical tick centers retained for ingestion admission.
+    pub const RETAINED_POSITION_COUNT: u64 = 256;
+
+    const RETAINED_PRECEDING_POSITION_COUNT: u64 = Self::RETAINED_POSITION_COUNT - 1;
+
     /// Before the origin there are no eligible centers. At the origin position zero is eligible.
     pub fn reached(
         origin: Timestamp,
@@ -32,13 +37,16 @@ impl DomainAdmissionWindow {
         let elapsed = now.duration_since(origin)?;
         let period_nanos = u128::from(period.as_nanos());
         let frontier = elapsed.as_nanos() / period_nanos;
-        // Retention clamps at the origin until all 256 nonnegative positions exist.
-        let first_position = if frontier < 256 {
+        let retained_position_count = u128::from(Self::RETAINED_POSITION_COUNT);
+        let retained_preceding_position_count =
+            u128::from(Self::RETAINED_PRECEDING_POSITION_COUNT);
+        // Retention clamps at the origin until the complete nonnegative history exists.
+        let first_position = if frontier < retained_position_count {
             0
         } else {
             frontier
-                .checked_sub(255)
-                .verified("the frontier has reached at least 256")
+                .checked_sub(retained_preceding_position_count)
+                .verified("the frontier has reached the complete retained history")
         };
         let center = |position: u128| {
             let offset = position
@@ -83,6 +91,8 @@ impl DomainAdmissionWindow {
         remainder <= self.skew.as_nanos() || distance_to_next <= self.skew.as_nanos()
     }
 }
+
+const _: () = assert!(DomainAdmissionWindow::RETAINED_POSITION_COUNT > 0);
 
 #[cfg(test)]
 mod tests {

@@ -65,6 +65,8 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
+    /// Wall time already elapsed when the next committed mapping for a domain starts.
+    domain_clock_initial_elapsed: DashMap<DomainName, Duration, RandomState>,
     state_replica_polling_paused: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
@@ -150,6 +152,7 @@ impl Default for FaultInjection {
                 remote_relay_admission_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
+                domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 branch_instance_expiration_scan_interval: RwLock::new(None),
@@ -475,6 +478,19 @@ impl FaultInjection {
             },
             Arc::new(TestPause::default()),
         );
+    }
+
+    pub fn set_domain_clock_initial_elapsed(&self, domain: DomainName, elapsed: Duration) {
+        self.inner
+            .domain_clock_initial_elapsed
+            .insert(domain, elapsed);
+    }
+
+    pub(crate) fn domain_clock_initial_elapsed(&self, domain: &DomainName) -> Option<Duration> {
+        self.inner
+            .domain_clock_initial_elapsed
+            .get(domain)
+            .map(|elapsed| *elapsed.value())
     }
 
     pub fn pause_domain_clock_progress_on(&self, domain: impl Into<String>, node: ClusterNodeName) {

@@ -149,13 +149,13 @@ impl InterconnectStateSnapshot {
     }
 }
 
-pub(crate) struct InterconnectStateWatcher {
+struct InterconnectStateWatcher {
     state: watch::Receiver<InterconnectStateSnapshot>,
     unavailability_timeout: Duration,
 }
 
 impl InterconnectStateWatcher {
-    pub(crate) fn wait_for_change_or_next_unavailability(
+    fn wait_for_change_or_next_unavailability(
         &mut self,
     ) -> impl std::future::Future<Output = ()> + '_ {
         let next_unavailability = {
@@ -174,6 +174,37 @@ impl InterconnectStateWatcher {
                         None => std::future::pending::<()>().await,
                     }
                 } => {}
+            }
+        }
+    }
+}
+
+/// Retained inputs whose changes can alter the node's effective cluster view.
+///
+/// Interconnect failure becomes effective after an elapsed monotonic deadline without changing
+/// either retained input. The watcher owns that deadline so consumers can re-evaluate cluster
+/// state without sampling it on an interval.
+pub(crate) struct ClusterStateWatcher {
+    live_node_states: watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
+    interconnect_state: InterconnectStateWatcher,
+}
+
+impl ClusterStateWatcher {
+    pub(crate) fn wait_for_change_or_next_unavailability(
+        &mut self,
+    ) -> impl std::future::Future<Output = ()> + '_ {
+        let Self {
+            live_node_states,
+            interconnect_state,
+        } = self;
+        let interconnect_change =
+            interconnect_state.wait_for_change_or_next_unavailability();
+        async move {
+            tokio::select! {
+                changed = live_node_states.changed() => changed.assured(
+                    "the cluster handle retains its Chitchat state sender for its lifetime",
+                ),
+                _ = interconnect_change => {}
             }
         }
     }
@@ -682,6 +713,13 @@ impl ClusterHandle {
         self.chitchat.lock().await.live_nodes_watcher()
     }
 
+    pub(crate) async fn subscribe_state_changes(&self) -> ClusterStateWatcher {
+        ClusterStateWatcher {
+            live_node_states: self.subscribe_live_node_states().await,
+            interconnect_state: self.subscribe_interconnect_state(),
+        }
+    }
+
     pub async fn status_lines(&self) -> Vec<String> {
         let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
@@ -1025,7 +1063,7 @@ impl ClusterHandle {
         self.unavailable_interconnect_nodes().contains(node_id)
     }
 
-    pub(crate) fn subscribe_interconnect_state(&self) -> InterconnectStateWatcher {
+    fn subscribe_interconnect_state(&self) -> InterconnectStateWatcher {
         InterconnectStateWatcher {
             state: self.interconnect_state.subscribe(),
             unavailability_timeout: self.node_unavailability_timeout,
@@ -1297,5 +1335,45 @@ mod tests {
                 panic!("a watch update after wait preparation must wake the waiter")
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cluster_state_watcher_wakes_when_interconnect_unavailability_becomes_effective() {
+        let unavailability_timeout = Duration::from_secs(10);
+        let before_deadline = unavailability_timeout / 2;
+        let remaining = unavailability_timeout
+            .checked_sub(before_deadline)
+            .assured("half of a positive timeout leaves a representable remainder");
+        let node = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let (_live_state, live_state_receiver) = watch::channel(BTreeMap::new());
+        let (interconnect_state, interconnect_state_receiver) =
+            watch::channel(InterconnectStateSnapshot::default());
+        interconnect_state.send_modify(|snapshot| {
+            snapshot.peers.insert(
+                node,
+                InterconnectPeerState::Disconnected {
+                    target_addr: None,
+                    since: Instant::now(),
+                },
+            );
+        });
+        let mut watcher = ClusterStateWatcher {
+            live_node_states: live_state_receiver,
+            interconnect_state: InterconnectStateWatcher {
+                state: interconnect_state_receiver,
+                unavailability_timeout,
+            },
+        };
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+
+        tokio::time::advance(before_deadline).await;
+        tokio::select! {
+            biased;
+            _ = &mut waiting => panic!("the effective unavailability deadline has not elapsed"),
+            () = tokio::task::yield_now() => {}
+        }
+        tokio::time::advance(remaining).await;
+        waiting.await;
+        drop(interconnect_state);
     }
 }

@@ -4422,8 +4422,7 @@ async fn apply_cluster_runtime_state(
     local_node_id: &ClusterNodeName,
     state: ConsensusRuntimeState,
 ) -> Result<(), crate::runtime::RuntimeError> {
-    let mut live_node_states = cluster.subscribe_live_node_states().await;
-    let mut interconnect_state = cluster.subscribe_interconnect_state();
+    let mut cluster_state = cluster.subscribe_state_changes().await;
     let has_running_domain = state
         .domains
         .values()
@@ -4469,8 +4468,8 @@ async fn apply_cluster_runtime_state(
     let mut deadline_elapsed = false;
     loop {
         tokio::task::consume_budget().await;
-        let interconnect_change = interconnect_state.wait_for_change_or_next_unavailability();
-        tokio::pin!(interconnect_change);
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
         let gossip = cluster.gossip_state().await;
         let expected_nodes = gossip.live_identities();
         let ready_nodes = cluster
@@ -4494,10 +4493,7 @@ async fn apply_cluster_runtime_state(
             _ = tokio::time::sleep_until(deadline) => {
                 deadline_elapsed = true;
             }
-            changed = live_node_states.changed() => changed.assured(
-                "the cluster handle retains its Chitchat state sender for the server lifetime",
-            ),
-            _ = &mut interconnect_change => {}
+            _ = &mut cluster_change => {}
         }
     }
 
@@ -17938,6 +17934,39 @@ async fn reconcile_domain_clock_tasks(
     }
 }
 
+async fn run_domain_clock_authority_reconciliation(
+    service: SessionServiceImpl,
+    shutdown: CancellationToken,
+) {
+    let mut topology_changes = service.inner.consensus.subscribe_topology();
+    let mut domain_changes = service.inner.consensus.subscribe_domains();
+    let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
+
+    loop {
+        tokio::task::consume_budget().await;
+        // Prepare the deadline-bearing wait before reading the effective cluster view. If the
+        // monotonic deadline elapses while reconciliation is running, the prepared sleep remains
+        // ready and causes a second predicate evaluation instead of losing that transition.
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
+        if service.inner.consensus.current_leader().await.as_ref()
+            == Some(service.inner.consensus.local_node_id())
+        {
+            service.reconcile_domain_clock_authorities().await;
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            changed = topology_changes.changed() => changed.assured(
+                "the consensus handle retains its topology sender for the server lifetime",
+            ),
+            changed = domain_changes.changed() => changed.assured(
+                "the consensus store retains its domain sender for the server lifetime",
+            ),
+            _ = &mut cluster_change => {}
+        }
+    }
+}
+
 async fn run_domain_clock(
     service: SessionServiceImpl,
     domain_id: DomainName,
@@ -17945,12 +17974,11 @@ async fn run_domain_clock(
     minimum_runtime_revision: u64,
     shutdown: CancellationToken,
 ) {
-    let mut live_node_states = service.inner.cluster.subscribe_live_node_states().await;
-    let mut interconnect_state = service.inner.cluster.subscribe_interconnect_state();
+    let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
     loop {
         tokio::task::consume_budget().await;
-        let interconnect_change = interconnect_state.wait_for_change_or_next_unavailability();
-        tokio::pin!(interconnect_change);
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
         let live_targets = service.inner.cluster.gossip_state().await.live_identities();
         let ready_targets = service
             .inner
@@ -17962,12 +17990,7 @@ async fn run_domain_clock(
         }
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            changed = live_node_states.changed() => {
-                changed.assured(
-                    "the cluster handle retains its Chitchat state sender for the server lifetime",
-                );
-            }
-            _ = &mut interconnect_change => {}
+            _ = &mut cluster_change => {}
         }
     }
 
@@ -18055,13 +18078,12 @@ async fn run_domain_clock(
         };
         // `due_advancement` returned `None`, so this boundary is strictly in the logical future.
         // The model converts that positive delta with ceiling and a one-nanosecond minimum.
+        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(cluster_change);
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = sleep(wait) => {}
-            changed = live_node_states.changed() => {
-                changed.assured(
-                    "the cluster handle retains its Chitchat state sender for the server lifetime",
-                );
+            _ = &mut cluster_change => {
                 if let Some(progress) = latest_progress.as_ref() {
                     deliver_domain_clock_progress(
                         &service,
@@ -19792,15 +19814,22 @@ impl Application {
                 }
                 if is_leader {
                     transaction_service.reconcile_transactions_once().await;
-                    transaction_service
-                        .reconcile_domain_clock_authorities()
-                        .await;
                 }
                 tokio::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}
                 }
             }
+        }));
+
+        let clock_authority_service = service.clone();
+        let clock_authority_shutdown = shutdown.clone();
+        background_tasks.push(tokio::spawn(async move {
+            run_domain_clock_authority_reconciliation(
+                clock_authority_service,
+                clock_authority_shutdown,
+            )
+            .await;
         }));
 
         let runtime_event_service = service.clone();

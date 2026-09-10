@@ -891,6 +891,7 @@ struct ConsensusState {
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
+    topology_changes: watch::Sender<u64>,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -1025,11 +1026,14 @@ impl Consensus {
         .await
         .map_err(|_| ConsensusError::Startup)?;
         let events = ConsensusEvents::new();
+        let (topology_changes, _) = watch::channel(0_u64);
         let metrics_raft = raft.clone();
         let metrics_events = events.clone();
+        let metrics_topology_changes = topology_changes.clone();
         let metrics_task = tokio::spawn(async move {
             let mut rx = metrics_raft.metrics();
             let mut last_transition = None;
+            let mut last_topology = None;
             loop {
                 tokio::task::consume_budget().await;
                 if rx.changed().await.is_err() {
@@ -1060,6 +1064,22 @@ impl Consensus {
                     metrics_events.report(summary);
                     last_transition = Some(transition);
                 }
+                let topology = RaftTopology {
+                    leader: metrics.current_leader,
+                    voters: metrics
+                        .membership_config
+                        .membership()
+                        .voter_ids()
+                        .collect(),
+                };
+                if last_topology.as_ref() != Some(&topology) {
+                    metrics_topology_changes.send_modify(|version| {
+                        *version = version
+                            .checked_add(1)
+                            .assured("a node cannot observe 2^64 Raft topology changes");
+                    });
+                    last_topology = Some(topology);
+                }
             }
         });
 
@@ -1074,6 +1094,7 @@ impl Consensus {
                 peer_health: RwLock::new(BTreeMap::new()),
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
+                topology_changes,
                 metrics_task: Mutex::new(Some(metrics_task)),
             }),
         };
@@ -1288,6 +1309,12 @@ impl Observer {
 
     pub fn subscribe_transactions(&self) -> watch::Receiver<u64> {
         self.inner.store.inner.transaction_tx.subscribe()
+    }
+
+    /// Observe retained leadership and voter-set changes without coupling callers to OpenRaft's
+    /// complete metrics stream.
+    pub fn subscribe_topology(&self) -> watch::Receiver<u64> {
+        self.inner.topology_changes.subscribe()
     }
 
     pub async fn current_schedule(&self) -> ClusterSchedule {
@@ -3008,6 +3035,13 @@ struct RaftTransition {
     state: String,
     term: u64,
     leader: Option<ClusterNodeName>,
+}
+
+/// The Raft state whose change can alter a control-plane decision about eligible cluster owners.
+#[derive(PartialEq, Eq)]
+struct RaftTopology {
+    leader: Option<ClusterNodeName>,
+    voters: BTreeSet<ClusterNodeName>,
 }
 
 fn read_key<T: DeserializeOwned>(keyspace: &Keyspace, key: &[u8]) -> io::Result<Option<T>> {
