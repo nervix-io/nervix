@@ -15,13 +15,17 @@ pub struct CreateSchema {
     pub fields: Vec<SchemaField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterSchema {
     pub schema: SchemaName,
     pub operations: Vec<AlterSchemaOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterSchemaOperation {
     AddField { field: SchemaField },
     DropField { field: FieldName },
@@ -53,13 +57,17 @@ pub struct CreateWireSchema<T> {
     pub fields: Vec<WireSchemaField<T>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterWireSchema<T> {
     pub schema: WireSchemaName,
     pub operations: Vec<AlterWireSchemaOperation<T>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterWireSchemaOperation<T> {
     SetMode { mode: WireSchemaStrictness },
     AddField { field: WireSchemaField<T> },

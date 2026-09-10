@@ -6,9 +6,6 @@ pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::f
 
 const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
-pub(super) type PendingStateSyncSender =
-    oneshot::Sender<Result<Option<PersistedRuntimeStateEntry>, String>>;
-
 #[derive(Debug)]
 pub(crate) struct StateSyncAck {
     pub(crate) placement: RuntimeStatePlacement,
@@ -2524,17 +2521,6 @@ impl Runtime {
         node.assigned_nodes.contains(&local_node_id)
     }
 
-    pub fn handle_state_sync_response(
-        &self,
-        correlation_id: u64,
-        result: Result<Option<PersistedRuntimeStateEntry>, String>,
-    ) {
-        let Some((_, tx)) = self.inner.pending_state_syncs.remove(&correlation_id) else {
-            return;
-        };
-        tx.send(result).means_peer_left("state sync requester");
-    }
-
     pub(crate) fn handle_state_replication_ack(
         &self,
         node_id: &ClusterNodeName,
@@ -2596,39 +2582,23 @@ impl Runtime {
         let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
             return Err("remote dispatcher unavailable".to_string());
         };
-        let correlation_id = self
-            .inner
-            .next_state_sync_correlation_id
-            .fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.inner.pending_state_syncs.insert(correlation_id, tx);
-        let result = dispatcher
-            .dispatch(
+        let response = dispatcher
+            .request_with_timeout(
                 target_node_id,
-                Envelope::Control(nervix_interconnect::ControlEnvelope::StateSyncRequest(
-                    nervix_interconnect::StateSyncRequest {
-                        correlation_id,
-                        placement: placement.to_remote(),
-                        after_lsm,
-                    },
-                )),
+                nervix_interconnect::StateSyncRequest {
+                    placement: placement.to_remote(),
+                    after_lsm,
+                },
+                response_timeout,
             )
-            .await;
-        if let Err(error) = result {
-            self.inner.pending_state_syncs.remove(&correlation_id);
-            return Err(error);
-        }
-        match tokio::time::timeout(response_timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => {
-                self.inner.pending_state_syncs.remove(&correlation_id);
-                Err("state sync response channel closed".to_string())
-            }
-            Err(_) => {
-                self.inner.pending_state_syncs.remove(&correlation_id);
-                Err("timed out waiting for state sync response".to_string())
-            }
-        }
+            .await?;
+        response.result.map(|snapshot| {
+            snapshot.map(|snapshot| PersistedRuntimeStateEntry {
+                lsm: snapshot.lsm,
+                schema_fingerprint: snapshot.schema_fingerprint,
+                payload: snapshot.payload,
+            })
+        })
     }
 
     pub(in crate::runtime) async fn wait_for_kafka_offset_replica_quorum(

@@ -1,7 +1,6 @@
 Feature: Internal TLS
-  Scenario Outline: Resources replicate over HTTPS cluster api
+  Scenario Outline: Resources replicate over the authenticated interconnect
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And cluster internal transports are configured with cluster api mode "https" and interconnect mode "http"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "secure"
     And node "node-1" has resource directory "resource_dir" containing
@@ -33,12 +32,31 @@ Feature: Internal TLS
       | 1            |
       | 3            |
 
-  Scenario: Interconnect peers connect over TLS
-    Given cluster internal transports are configured with cluster api mode "http" and interconnect mode "https"
-    And a 3 node nervix cluster is started
+  Scenario: Interconnect peers connect with certificate identities
+    Given a 3 node nervix cluster is started
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
+
+  Scenario Outline: Invalid interconnect peer credentials are rejected
+    Given a 1 node nervix cluster is started
+    When an interconnect peer with "<fault>" credentials attempts to connect to node "node-1"
+    Then the interconnect peer is rejected
+
+    Examples:
+      | fault                  |
+      | untrusted client       |
+      | wrong cluster identity |
+      | wrong node identity    |
+      | mismatched endpoint    |
+      | expired certificate    |
+
+  Scenario: Interconnect certificate authority rotates without restarting the cluster
+    Given a 3 node nervix cluster is started
+    When interconnect certificates are rotated to a new certificate authority
+    And node "node-4" is added to the cluster
+    Then node "node-1" eventually reports interconnect to "node-4" as "connected"
+    And node "node-4" eventually reports interconnect to "node-2" as "connected"
 
   Scenario Outline: Clients execute NSPL over HTTPS gRPC
     Given client grpc transport is configured with mode "https"

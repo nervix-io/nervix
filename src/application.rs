@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** The session service, transaction lifecycle, domain lifecycle commands, users and
 //!   authentication, resource upload and replication, subscription management, the domain clock,
-//!   leader-side coordination, and the listeners for HTTP endpoints, the cluster API, metrics and
-//!   the console.
+//!   leader-side coordination, and the listeners for HTTP endpoints, the authenticated
+//!   interconnect, metrics and the console.
 //! - **Depends on.** The registry for decisions, the runtime for execution, consensus and the
 //!   interconnect for cluster state, the proto wire types, and the language layer: this module is
 //!   the session adapter and the one place in the server that may name the parser.
@@ -47,7 +47,6 @@ use blake3::Hasher;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use dashmap::DashMap;
-use ed25519_dalek::VerifyingKey;
 use error_stack::{Report, ResultExt};
 use fjall::Database;
 use futures_util::{
@@ -76,15 +75,11 @@ use nervix_client_core::{
     TlsRequirement as ClientTlsRequirement,
 };
 use nervix_consensus::{
-    Administrator, AppendEntriesRequest as RaftAppendEntriesRequest, Consensus, ConsensusError,
-    ConsensusRuntimeState, ConsensusSettings, ConsensusTransactionError, Observer, Proposer,
-    ProtocolReceiver, RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR, RAFT_INSTALL_SNAPSHOT_PATH,
-    RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, ReplicatedTransaction,
-    SnapshotRelayHeader as RaftSnapshotRelayHeader, TransactionCommandResult,
+    Administrator, Consensus, ConsensusError, ConsensusRuntimeState, ConsensusSettings,
+    ConsensusTransactionError, Observer, Proposer, ReplicatedTransaction, TransactionCommandResult,
     TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits,
     TransactionState, TransactionStatement, TransactionStepEffect, TransactionStepResult,
-    TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
-    VoteRequest as RaftVoteRequest,
+    UserCredentials,
 };
 use nervix_dataflow_graph::{DataflowGraph, DataflowNodeHealth, DataflowNodeStatus};
 use nervix_execution::MemoryClass;
@@ -113,15 +108,16 @@ use nervix_interconnect::{
     EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
-    Envelope, IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
+    Envelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
     LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
-    OwnershipHandoffFailure, PeerTarget, PeerVerifier,
+    OwnershipHandoffFailure, PeerTarget,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest, RelayPayload,
-    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncResponse as RemoteStateSyncResponse,
+    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncRequest as RemoteStateSyncRequest,
+    StateSyncResponse as RemoteStateSyncResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
-    TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
+    TlsConfigBundle, Transport,
 };
 use nervix_models::{
     AlterDomain, BranchSelection, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
@@ -171,7 +167,6 @@ use ort::{
 use parking_lot::{Mutex as ParkingMutex, RwLock};
 use prost::Message as ProstMessage;
 use rdkafka::{config::ClientConfig, consumer::StreamConsumer};
-use reqwest::Client as HttpClient;
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -186,7 +181,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot, watch},
+    sync::{Mutex as AsyncMutex, broadcast, mpsc, watch},
     task::{JoinHandle, JoinSet},
     time::{Duration, interval, sleep},
 };
@@ -201,9 +196,15 @@ use tokio_tungstenite::{
     },
 };
 
-use crate::registry::{
-    ActiveGraph, PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan,
-    PlacementRulePlan, Registry, RegistryError, RegistryMutation,
+use crate::{
+    registry::{
+        ActiveGraph, PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan,
+        PlacementRulePlan, Registry, RegistryError, RegistryMutation,
+    },
+    resource_interconnect::{
+        FetchResourceArchiveChunk, PublishResourceReplica,
+        ResourceArchiveChunk as InterconnectResourceArchiveChunk, ResourceInterconnectError,
+    },
 };
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -214,6 +215,7 @@ const RUNTIME_REVISION_READINESS_POLL_INTERVAL: Duration = Duration::from_millis
 const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
+const INTERCONNECT_TLS_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
 const OBSERVABILITY_METRICS_PATH: &str = "/metrics";
@@ -1346,23 +1348,6 @@ fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
         )
 }
 
-fn try_take_length_delimited_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if buffer.len() < 4 {
-        return None;
-    }
-
-    let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]).arch_into();
-    if buffer.len() < 4 + len {
-        return None;
-    }
-    let payload = buffer[4..4 + len].to_vec();
-    buffer.drain(..4 + len);
-    Some(payload)
-}
-
-const RESOURCE_ARCHIVE_PATH_PREFIX: &str = "/resources/";
-const RESOURCE_REPLICA_PATH: &str = "/resources/replicas";
-
 fn header_contains_token(value: &hyper::header::HeaderValue, expected: &str) -> bool {
     value.to_str().ok().is_some_and(|raw| {
         raw.split(',')
@@ -1715,239 +1700,6 @@ async fn serve_https(
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
     Ok(())
-}
-
-async fn read_cbor_request_body<T: serde::de::DeserializeOwned>(
-    request: &mut HyperRequest<HyperIncoming>,
-    context: &str,
-) -> Result<T, Box<HyperResponse<Full<Bytes>>>> {
-    let body = request
-        .body_mut()
-        .collect()
-        .await
-        .map_err(|error| {
-            warn!(error = %error, context, "failed to read cluster api request body");
-            Box::new(text_response(
-                StatusCode::BAD_REQUEST,
-                format!("failed to read request body: {error}"),
-            ))
-        })?
-        .to_bytes();
-
-    decode_cbor(body.as_ref()).map_err(|error| {
-        Box::new(text_response(
-            StatusCode::BAD_REQUEST,
-            format!("invalid {context} payload: {error}"),
-        ))
-    })
-}
-
-/// The resource an archive request addresses, or `None` when `path` addresses something else.
-///
-/// This is route matching: a path whose segments are not a domain, a resource name and a version
-/// is simply not this route, which is why every failed parse below reads as no match rather than
-/// as a rejected request.
-fn parse_resource_archive_request_path(path: &str) -> Option<ResourceId> {
-    let suffix = path.strip_prefix(RESOURCE_ARCHIVE_PATH_PREFIX)?;
-    let mut parts = suffix.split('/');
-    let domain = DomainName::parse(parts.next()?).ok()?;
-    let identifier = ResourceName::parse(parts.next()?).ok()?;
-    let version = parts.next()?.parse::<u64>().ok()?;
-    if parts.next()? != "archive" || parts.next().is_some() {
-        return None;
-    }
-    Some(ResourceId::new(domain, identifier, version))
-}
-
-async fn handle_cluster_api_request(
-    consensus: Proposer,
-    protocol: ProtocolReceiver,
-    resource_store: Arc<ResourceStore>,
-    mut request: HyperRequest<HyperIncoming>,
-) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
-    let response = match (request.method(), request.uri().path()) {
-        (&Method::GET, path) if parse_resource_archive_request_path(path).is_some() => {
-            let id = parse_resource_archive_request_path(path)
-                .verified("the match guard above accepted this same path");
-            match resource_store.read_archive_bytes(&id) {
-                Ok(bytes) => response_with_bytes(StatusCode::OK, bytes, "application/x-tar"),
-                Err(_) => text_response(StatusCode::NOT_FOUND, "resource archive not found"),
-            }
-        }
-        (&Method::POST, RESOURCE_REPLICA_PATH) => {
-            match read_cbor_request_body::<ResourceNodeStatus>(&mut request, "resource_replica")
-                .await
-            {
-                Ok(replica) => match consensus.put_resource_replica(replica).await {
-                    Ok(()) => response_with_bytes(
-                        StatusCode::OK,
-                        Vec::<u8>::new(),
-                        RAFT_CONTENT_TYPE_CBOR,
-                    ),
-                    Err(error) => text_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("put_resource_replica failed: {error}"),
-                    ),
-                },
-                Err(response) => *response,
-            }
-        }
-        (&Method::POST, RAFT_APPEND_ENTRIES_PATH) => {
-            match read_cbor_request_body::<RaftAppendEntriesRequest<TypeConfig>>(
-                &mut request,
-                "append_entries",
-            )
-            .await
-            {
-                Ok(req) => match protocol.append_entries(req).await {
-                    Ok(response) => match encode_cbor(&response) {
-                        Ok(body) => {
-                            response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
-                        }
-                        Err(error) => text_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("append_entries encode failed: {error}"),
-                        ),
-                    },
-                    Err(error) => text_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("append_entries failed: {error}"),
-                    ),
-                },
-                Err(response) => *response,
-            }
-        }
-        (&Method::POST, RAFT_VOTE_PATH) => {
-            match read_cbor_request_body::<RaftVoteRequest<TypeConfig>>(&mut request, "vote").await
-            {
-                Ok(req) => match protocol.vote(req).await {
-                    Ok(response) => match encode_cbor(&response) {
-                        Ok(body) => {
-                            response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
-                        }
-                        Err(error) => text_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("vote encode failed: {error}"),
-                        ),
-                    },
-                    Err(error) => text_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("vote failed: {error}"),
-                    ),
-                },
-                Err(response) => *response,
-            }
-        }
-        (&Method::POST, RAFT_TRANSFER_LEADER_PATH) => {
-            match read_cbor_request_body::<RaftTransferLeaderRequest<TypeConfig>>(
-                &mut request,
-                "transfer_leader",
-            )
-            .await
-            {
-                Ok(req) => match protocol.transfer_leader(req).await {
-                    Ok(response) => match encode_cbor(&response) {
-                        Ok(body) => {
-                            response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
-                        }
-                        Err(error) => text_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("transfer_leader encode failed: {error}"),
-                        ),
-                    },
-                    Err(error) => text_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("transfer_leader failed: {error}"),
-                    ),
-                },
-                Err(response) => *response,
-            }
-        }
-        (&Method::POST, RAFT_INSTALL_SNAPSHOT_PATH) => {
-            let mut snapshot = Vec::new();
-            let mut buffer = Vec::new();
-            let mut header = None;
-            let mut body = request.into_body();
-
-            let mut error_response = None;
-            while let Some(frame_result) = body.frame().await {
-                let frame = match frame_result {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        error_response = Some(text_response(
-                            StatusCode::BAD_REQUEST,
-                            format!("failed to read snapshot relay: {error}"),
-                        ));
-                        break;
-                    }
-                };
-                let Ok(data) = frame.into_data() else {
-                    continue;
-                };
-                if header.is_some() {
-                    snapshot.extend_from_slice(&data);
-                    continue;
-                }
-
-                buffer.extend_from_slice(&data);
-                if let Some(payload) = try_take_length_delimited_frame(&mut buffer) {
-                    match decode_cbor::<RaftSnapshotRelayHeader>(&payload) {
-                        Ok(decoded) => {
-                            header = Some(decoded);
-                            snapshot.append(&mut buffer);
-                        }
-                        Err(error) => {
-                            error_response = Some(text_response(
-                                StatusCode::BAD_REQUEST,
-                                format!("invalid snapshot relay header: {error}"),
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if let Some(response) = error_response {
-                response
-            } else {
-                let Some(header) = header else {
-                    return Ok(text_response(
-                        StatusCode::BAD_REQUEST,
-                        if buffer.is_empty() {
-                            "snapshot relay was empty"
-                        } else {
-                            "snapshot relay ended with a partial header"
-                        },
-                    ));
-                };
-                match protocol
-                    .install_full_snapshot(header.vote, header.meta, snapshot)
-                    .await
-                {
-                    Ok(response) => match encode_cbor(&response) {
-                        Ok(body) => {
-                            response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
-                        }
-                        Err(error) => text_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("snapshot encode failed: {error}"),
-                        ),
-                    },
-                    Err(error) => text_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("install_snapshot failed: {error}"),
-                    ),
-                }
-            }
-        }
-        (&Method::GET, "/raft/ping") => {
-            response_with_bytes(StatusCode::OK, Vec::<u8>::new(), RAFT_CONTENT_TYPE_CBOR)
-        }
-        (&Method::GET, _) | (&Method::POST, _) => text_response(StatusCode::NOT_FOUND, "not found"),
-        _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
-    };
-
-    Ok(response)
 }
 
 async fn handle_observability_request(
@@ -2776,117 +2528,6 @@ async fn serve_web_console_https(
     Ok(())
 }
 
-async fn serve_cluster_api_http(
-    consensus: Proposer,
-    protocol: ProtocolReceiver,
-    resource_store: Arc<ResourceStore>,
-    listener: TcpListener,
-    shutdown: CancellationToken,
-) -> Result<(), Report<AppError>> {
-    let mut connection_tasks = JoinSet::new();
-
-    loop {
-        tokio::task::consume_budget().await;
-        let accepted = tokio::select! {
-            _ = shutdown.cancelled() => {
-                break;
-            }
-            accepted = listener.accept() => {
-                accepted.change_context(AppError::ServeClusterApi)
-            }
-        };
-        let (stream, _) = accepted?;
-        stream
-            .set_nodelay(true)
-            .change_context(AppError::ServeClusterApi)?;
-        let consensus = consensus.clone();
-        let protocol = protocol.clone();
-        let resource_store = resource_store.clone();
-        connection_tasks.spawn(async move {
-            let io = TokioIo::new(stream);
-            if let Err(error) = http1::Builder::new()
-                .serve_connection(
-                    io,
-                    service_fn(move |request| {
-                        handle_cluster_api_request(
-                            consensus.clone(),
-                            protocol.clone(),
-                            resource_store.clone(),
-                            request,
-                        )
-                    }),
-                )
-                .await
-            {
-                warn!(error = %error, "cluster api connection failed");
-            }
-        });
-    }
-    connection_tasks.abort_all();
-    while connection_tasks.join_next().await.is_some() {}
-    Ok(())
-}
-
-async fn serve_cluster_api_https(
-    consensus: Proposer,
-    protocol: ProtocolReceiver,
-    resource_store: Arc<ResourceStore>,
-    cluster_api_tls_server_config: StdArc<ServerConfig>,
-    listener: TcpListener,
-    shutdown: CancellationToken,
-) -> Result<(), Report<AppError>> {
-    let mut connection_tasks = JoinSet::new();
-
-    loop {
-        tokio::task::consume_budget().await;
-        let accepted = tokio::select! {
-            _ = shutdown.cancelled() => {
-                break;
-            }
-            accepted = listener.accept() => {
-                accepted.change_context(AppError::ServeClusterApi)
-            }
-        };
-        let (stream, _) = accepted?;
-        stream
-            .set_nodelay(true)
-            .change_context(AppError::ServeClusterApi)?;
-        let consensus = consensus.clone();
-        let protocol = protocol.clone();
-        let resource_store = resource_store.clone();
-        let acceptor = TlsAcceptor::from(cluster_api_tls_server_config.clone());
-        connection_tasks.spawn(async move {
-            match acceptor.accept(stream).await {
-                Ok(tls_stream) => {
-                    let io = TokioIo::new(tls_stream);
-                    if let Err(error) = http1::Builder::new()
-                        .serve_connection(
-                            io,
-                            service_fn(move |request| {
-                                handle_cluster_api_request(
-                                    consensus.clone(),
-                                    protocol.clone(),
-                                    resource_store.clone(),
-                                    request,
-                                )
-                            }),
-                        )
-                        .await
-                    {
-                        warn!(error = %error, "cluster api https connection failed");
-                    }
-                }
-                Err(error) => {
-                    warn!(error = %error, "cluster api tls accept failed");
-                }
-            }
-        });
-    }
-    connection_tasks.abort_all();
-    while connection_tasks.join_next().await.is_some() {}
-    Ok(())
-}
-
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -2932,30 +2573,16 @@ pub struct Args {
     pub node_id: ClusterNodeName,
     #[arg(long, env = "NERVIX_GRPC_ADVERTISE_ADDR")]
     pub grpc_advertise_addr: Option<String>,
-    #[arg(long, env = "NERVIX_CLUSTER_LISTEN_ADDR")]
-    pub cluster_listen_addr: Option<String>,
-    #[arg(long, env = "NERVIX_CLUSTER_ADVERTISE_ADDR")]
-    pub cluster_advertise_addr: Option<String>,
-    #[arg(long, env = "NERVIX_CLUSTER_API_LISTEN_ADDR")]
-    pub cluster_api_listen_addr: String,
-    #[arg(long, env = "NERVIX_CLUSTER_API_ADVERTISE_ADDR")]
-    pub cluster_api_advertise_addr: String,
-    #[arg(long, env = "NERVIX_CLUSTER_API_MODE", value_enum, default_value_t = InternalTransportMode::Http)]
-    pub cluster_api_mode: InternalTransportMode,
-    #[arg(long, env = "NERVIX_CLUSTER_API_HTTPS_LISTEN_ADDR")]
-    pub cluster_api_https_listen_addr: Option<String>,
-    #[arg(long, env = "NERVIX_CLUSTER_API_HTTPS_ADVERTISE_ADDR")]
-    pub cluster_api_https_advertise_addr: Option<String>,
     #[arg(long, env = "NERVIX_INTERCONNECT_LISTEN_ADDR")]
     pub interconnect_listen_addr: Option<String>,
     #[arg(long, env = "NERVIX_INTERCONNECT_ADVERTISE_ADDR")]
     pub interconnect_advertise_addr: Option<String>,
-    #[arg(long, env = "NERVIX_INTERCONNECT_MODE", value_enum, default_value_t = InternalTransportMode::Http)]
-    pub interconnect_mode: InternalTransportMode,
-    #[arg(long, env = "NERVIX_INTERCONNECT_HTTPS_LISTEN_ADDR")]
-    pub interconnect_https_listen_addr: Option<String>,
-    #[arg(long, env = "NERVIX_INTERCONNECT_HTTPS_ADVERTISE_ADDR")]
-    pub interconnect_https_advertise_addr: Option<String>,
+    #[arg(long, env = "NERVIX_INTERCONNECT_TLS_CA")]
+    pub interconnect_tls_ca: PathBuf,
+    #[arg(long, env = "NERVIX_INTERCONNECT_TLS_CERT")]
+    pub interconnect_tls_cert: PathBuf,
+    #[arg(long, env = "NERVIX_INTERCONNECT_TLS_KEY")]
+    pub interconnect_tls_key: PathBuf,
     #[arg(long, env = "NERVIX_ALLOW_BOOTSTRAP", default_value_t = false)]
     pub allow_bootstrap: bool,
     #[arg(long, env = "NERVIX_DEFAULT_USER", default_value = DEFAULT_USER)]
@@ -3126,23 +2753,6 @@ pub enum Command {
     },
 }
 
-type PendingClusterCommands = DashMap<u64, PendingClusterCommand, RandomState>;
-
-enum PendingClusterCommand {
-    DescribeRelay(oneshot::Sender<Result<bool, String>>),
-    DataflowNodeStatus(oneshot::Sender<Result<DataflowNodeStatusEnvelope, String>>),
-    DomainDrainStatus(oneshot::Sender<Result<DomainDrainStatusEnvelope, String>>),
-    EntityGate(oneshot::Sender<Result<(), String>>),
-    EntityDrainStatus(oneshot::Sender<Result<EntityDrainStatusEnvelope, String>>),
-    EntityGateRelease(oneshot::Sender<Result<(), String>>),
-    DescribeMetrics(oneshot::Sender<Result<RemoteDescribeMetricsEnvelope, String>>),
-    DescribeLookup(oneshot::Sender<Result<LookupDescribeEnvelope, String>>),
-    /// The remote lookup's encoded Arrow body. The waiting caller decodes it, because
-    /// decoding is admitted work and the interconnect reader must not perform it.
-    LookupQuery(oneshot::Sender<Result<Option<Vec<u8>>, String>>),
-    SubscriptionInterestVisibility(oneshot::Sender<bool>),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct KafkaPartitionWatcherKey {
     domain: DomainName,
@@ -3220,6 +2830,119 @@ impl BackgroundTask {
     async fn stop(self) {
         self.request_stop();
         self.join().await;
+    }
+}
+
+#[derive(Clone)]
+struct InterconnectTlsPaths {
+    ca: PathBuf,
+    certificate: PathBuf,
+    private_key: PathBuf,
+}
+
+struct InterconnectTlsMaterial {
+    ca: Vec<u8>,
+    certificate: Vec<u8>,
+    private_key: Vec<u8>,
+}
+
+impl InterconnectTlsPaths {
+    async fn read(&self) -> io::Result<InterconnectTlsMaterial> {
+        let ca = tokio::fs::read(&self.ca).await?;
+        let certificate = tokio::fs::read(&self.certificate).await?;
+        let private_key = tokio::fs::read(&self.private_key).await?;
+        Ok(InterconnectTlsMaterial {
+            ca,
+            certificate,
+            private_key,
+        })
+    }
+}
+
+impl InterconnectTlsMaterial {
+    fn fingerprint(&self) -> blake3::Hash {
+        let mut hasher = Hasher::new();
+        hasher.update(b"interconnect-ca\0");
+        hasher.update(&self.ca);
+        hasher.update(b"interconnect-certificate\0");
+        hasher.update(&self.certificate);
+        hasher.update(b"interconnect-private-key\0");
+        hasher.update(&self.private_key);
+        hasher.finalize()
+    }
+
+    fn tls_bundle(&self) -> Result<TlsConfigBundle, Report<nervix_interconnect::TlsConfigError>> {
+        TlsConfigBundle::from_pem(&self.ca, &self.certificate, &self.private_key)
+    }
+}
+
+async fn reload_interconnect_tls(
+    transport: Transport,
+    paths: InterconnectTlsPaths,
+    initial_fingerprint: blake3::Hash,
+    shutdown: CancellationToken,
+) {
+    let mut applied_fingerprint = initial_fingerprint;
+    let mut pending_fingerprint = None;
+    let mut reported_failure = None;
+    let mut ticker = interval(INTERCONNECT_TLS_RELOAD_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::task::consume_budget().await;
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
+
+        let material = match paths.read().await {
+            Ok(material) => material,
+            Err(error) => {
+                let failure = error.to_string();
+                if reported_failure.as_ref() != Some(&failure) {
+                    warn!(error = %error, "failed to read replacement interconnect TLS files");
+                    reported_failure = Some(failure);
+                }
+                pending_fingerprint = None;
+                continue;
+            }
+        };
+        let fingerprint = material.fingerprint();
+        if fingerprint == applied_fingerprint {
+            pending_fingerprint = None;
+            reported_failure = None;
+            continue;
+        }
+        if pending_fingerprint != Some(fingerprint) {
+            pending_fingerprint = Some(fingerprint);
+            reported_failure = None;
+            continue;
+        }
+
+        let replacement = match material.tls_bundle() {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                let failure = error.to_string();
+                if reported_failure.as_ref() != Some(&failure) {
+                    warn!(error = %error, "replacement interconnect TLS files are invalid");
+                    reported_failure = Some(failure);
+                }
+                continue;
+            }
+        };
+        if let Err(error) = transport.replace_tls(replacement).await {
+            let failure = error.to_string();
+            if reported_failure.as_ref() != Some(&failure) {
+                warn!(error = %error, "failed to replace interconnect TLS credentials");
+                reported_failure = Some(failure);
+            }
+            continue;
+        }
+
+        applied_fingerprint = fingerprint;
+        pending_fingerprint = None;
+        reported_failure = None;
+        info!("reloaded interconnect TLS credentials");
     }
 }
 
@@ -3598,10 +3321,8 @@ struct SessionServiceInner {
     consensus_administrator: Administrator,
     /// Also held by the application and by the registry reconciliation tasks it spawns.
     registry: Arc<Registry>,
-    /// Also held by the application startup that opened it and by the cluster API server.
+    /// Also held by the application startup that opened it.
     resource_store: Arc<ResourceStore>,
-    /// Built by the application and shared with the cluster API server.
-    cluster_api_clients: Arc<ClusterApiClients>,
     /// Also held by the HTTPS server, which reads the current certificate on every accept.
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     runtime: Runtime,
@@ -3610,8 +3331,7 @@ struct SessionServiceInner {
     events: SessionEvents,
     subscription_interest_counts: DashMap<SubscriptionInterestKey, usize, RandomState>,
     interconnect: Transport,
-    next_cluster_command_correlation_id: AtomicU64,
-    pending_cluster_commands: PendingClusterCommands,
+    next_entity_gate_operation_id: AtomicU64,
     service_tasks: TaskTracker,
     configured_basic_auth: Option<BasicAuthCredentials>,
     auth_rate_limiter: AuthRateLimiter,
@@ -3849,29 +3569,6 @@ struct DownloadedResourceArchive {
     root_checksum: String,
 }
 
-#[derive(Clone)]
-struct ClusterApiClients {
-    http: HttpClient,
-    https: HttpClient,
-}
-
-impl ClusterApiClients {
-    fn build() -> Result<Self, Report<AppError>> {
-        Ok(Self {
-            http: build_cluster_api_http_client(InternalTransportMode::Http)?,
-            https: build_cluster_api_http_client(InternalTransportMode::Https)?,
-        })
-    }
-
-    fn for_url(&self, url: &str) -> &HttpClient {
-        if url.starts_with("https://") {
-            &self.https
-        } else {
-            &self.http
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lower")]
 pub enum InternalTransportMode {
@@ -3889,13 +3586,6 @@ impl InternalTransportMode {
 
     fn is_tls(self) -> bool {
         matches!(self, Self::Https)
-    }
-
-    fn interconnect_transport_mode(self) -> InterconnectTransportMode {
-        match self {
-            Self::Http => InterconnectTransportMode::Plain,
-            Self::Https => InterconnectTransportMode::Tls,
-        }
     }
 }
 
@@ -3940,46 +3630,16 @@ pub enum AppError {
     ParseGrpcHttpsListenAddress,
     #[error("failed to parse gRPC https advertise address")]
     ParseGrpcHttpsAdvertiseAddress,
-    #[error("failed to parse cluster listen address")]
-    ParseClusterListenAddress,
-    #[error("failed to parse cluster advertise address")]
-    ParseClusterAddress,
-    #[error("failed to parse cluster api listen address")]
-    ParseClusterApiListenAddress,
-    #[error("failed to bind cluster api listen address")]
-    BindClusterApiListenAddress,
-    #[error("failed to parse cluster api advertise address")]
-    ParseClusterApiAdvertiseAddress,
-    #[error("failed to parse cluster api https listen address")]
-    ParseClusterApiHttpsListenAddress,
-    #[error("failed to bind cluster api https listen address")]
-    BindClusterApiHttpsListenAddress,
-    #[error("failed to parse cluster api https advertise address")]
-    ParseClusterApiHttpsAdvertiseAddress,
     #[error("failed to parse interconnect listen address")]
     ParseInterconnectListenAddress,
     #[error("failed to parse interconnect advertise address")]
     ParseInterconnectAdvertiseAddress,
-    #[error("failed to parse interconnect https listen address")]
-    ParseInterconnectHttpsListenAddress,
-    #[error("failed to parse interconnect https advertise address")]
-    ParseInterconnectHttpsAdvertiseAddress,
-    #[error("failed to derive cluster address from server address")]
-    DeriveClusterAddress,
-    #[error("failed to derive interconnect address from cluster api address")]
+    #[error("failed to derive interconnect address from gRPC address")]
     DeriveInterconnectAddress,
-    #[error("cluster api https mode requires an https listen address")]
-    MissingClusterApiHttpsListenAddress,
-    #[error("cluster api https mode requires an https advertise address")]
-    MissingClusterApiHttpsAdvertiseAddress,
     #[error("gRPC https mode requires an https listen address")]
     MissingGrpcHttpsListenAddress,
     #[error("gRPC https mode requires an https advertise address")]
     MissingGrpcHttpsAdvertiseAddress,
-    #[error("interconnect https mode requires an https listen address")]
-    MissingInterconnectHttpsListenAddress,
-    #[error("interconnect https mode requires an https advertise address")]
-    MissingInterconnectHttpsAdvertiseAddress,
     #[error("web console https listener requires a TLS certificate")]
     MissingWebConsoleTlsCertificate,
     #[error("web console https listener requires a TLS private key")]
@@ -4000,8 +3660,6 @@ pub enum AppError {
     OpenRuntimeState,
     #[error("failed to load interconnect tls configuration")]
     LoadInterconnectTls,
-    #[error("failed to load cluster api tls configuration")]
-    LoadClusterApiTls,
     #[error("failed to load gRPC tls configuration")]
     LoadGrpcTls,
     #[error("failed to load web console tls configuration")]
@@ -4024,8 +3682,6 @@ pub enum AppError {
     InitMemoryPressureMonitor,
     #[error("gRPC server failed")]
     Serve,
-    #[error("cluster api server failed")]
-    ServeClusterApi,
     #[error("HTTP server failed")]
     ServeHttp,
     #[error("HTTPS server failed")]
@@ -4063,24 +3719,11 @@ pub struct Application {
     pub cluster_id: String,
     pub node_id: ClusterNodeName,
     pub grpc_advertise_addr: cluster::HostPort,
-    pub cluster_listen_addr: SocketAddr,
-    pub cluster_advertise_addr: cluster::HostPort,
-    #[builder(default = InternalTransportMode::Http)]
-    pub cluster_api_mode: InternalTransportMode,
-    pub cluster_api_listen_addr: SocketAddr,
-    pub cluster_api_advertise_addr: cluster::HostPort,
-    #[builder(default)]
-    pub cluster_api_https_listen_addr: Option<SocketAddr>,
-    #[builder(default)]
-    pub cluster_api_https_advertise_addr: Option<cluster::HostPort>,
-    #[builder(default = InternalTransportMode::Http)]
-    pub interconnect_mode: InternalTransportMode,
     pub interconnect_listen_addr: SocketAddr,
     pub interconnect_advertise_addr: cluster::HostPort,
-    #[builder(default)]
-    pub interconnect_https_listen_addr: Option<SocketAddr>,
-    #[builder(default)]
-    pub interconnect_https_advertise_addr: Option<cluster::HostPort>,
+    pub interconnect_tls_ca: PathBuf,
+    pub interconnect_tls_cert: PathBuf,
+    pub interconnect_tls_key: PathBuf,
     pub allow_bootstrap: bool,
     #[builder(default = DEFAULT_USER.to_string())]
     pub default_user: String,
@@ -4176,47 +3819,6 @@ impl TryFrom<Args> for Application {
                 })
             })
             .transpose()?;
-        let cluster_listen_addr = match args.cluster_listen_addr.as_deref() {
-            Some(addr) => addr
-                .parse::<SocketAddr>()
-                .change_context(AppError::ParseClusterListenAddress)?,
-            None => cluster::derive_peer_addr(addr)
-                .ok_or_else(|| Report::new(AppError::DeriveClusterAddress))?,
-        };
-        let cluster_advertise_addr = match args.cluster_advertise_addr.as_deref() {
-            Some(addr) => addr.parse::<cluster::HostPort>().map_err(|error| {
-                Report::new(AppError::ParseClusterAddress).attach_printable(error)
-            })?,
-            None => cluster_listen_addr.into(),
-        };
-        let cluster_api_listen_addr = args
-            .cluster_api_listen_addr
-            .parse::<SocketAddr>()
-            .change_context(AppError::ParseClusterApiListenAddress)?;
-        let cluster_api_advertise_addr = args
-            .cluster_api_advertise_addr
-            .parse::<cluster::HostPort>()
-            .map_err(|error| {
-                Report::new(AppError::ParseClusterApiAdvertiseAddress).attach_printable(error)
-            })?;
-        let cluster_api_https_listen_addr = args
-            .cluster_api_https_listen_addr
-            .as_deref()
-            .map(|addr| {
-                addr.parse::<SocketAddr>()
-                    .change_context(AppError::ParseClusterApiHttpsListenAddress)
-            })
-            .transpose()?;
-        let cluster_api_https_advertise_addr = args
-            .cluster_api_https_advertise_addr
-            .as_deref()
-            .map(|addr| {
-                addr.parse::<cluster::HostPort>().map_err(|error| {
-                    Report::new(AppError::ParseClusterApiHttpsAdvertiseAddress)
-                        .attach_printable(error)
-                })
-            })
-            .transpose()?;
         let http_listen_addr = args
             .http_listen_addr
             .parse::<SocketAddr>()
@@ -4254,43 +3856,21 @@ impl TryFrom<Args> for Application {
             Some(addr) => addr
                 .parse::<SocketAddr>()
                 .change_context(AppError::ParseInterconnectListenAddress)?,
-            None => cluster::derive_interconnect_addr(cluster_api_listen_addr)
+            None => cluster::derive_peer_addr(addr)
                 .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?,
         };
         let interconnect_advertise_addr = match args.interconnect_advertise_addr.as_deref() {
             Some(addr) => addr.parse::<cluster::HostPort>().map_err(|error| {
                 Report::new(AppError::ParseInterconnectAdvertiseAddress).attach_printable(error)
             })?,
-            None => cluster::derive_interconnect_host_port(&cluster_api_advertise_addr)
-                .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?,
+            None => {
+                let port = grpc_advertise_addr
+                    .port()
+                    .checked_add(1)
+                    .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?;
+                grpc_advertise_addr.with_port(port)
+            }
         };
-        let interconnect_https_listen_addr = match args.interconnect_https_listen_addr.as_deref() {
-            Some(addr) => Some(
-                addr.parse::<SocketAddr>()
-                    .change_context(AppError::ParseInterconnectHttpsListenAddress)?,
-            ),
-            None => match cluster_api_https_listen_addr {
-                Some(addr) => Some(
-                    cluster::derive_interconnect_addr(addr)
-                        .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?,
-                ),
-                None => None,
-            },
-        };
-        let interconnect_https_advertise_addr =
-            match args.interconnect_https_advertise_addr.as_deref() {
-                Some(addr) => Some(addr.parse::<cluster::HostPort>().map_err(|error| {
-                    Report::new(AppError::ParseInterconnectHttpsAdvertiseAddress)
-                        .attach_printable(error)
-                })?),
-                None => match cluster_api_https_advertise_addr {
-                    Some(ref addr) => Some(
-                        cluster::derive_interconnect_host_port(addr)
-                            .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?,
-                    ),
-                    None => None,
-                },
-            };
         let memory_pressure = match (args.memory_high_watermark, args.memory_low_watermark) {
             (Some(high_watermark), Some(low_watermark)) => {
                 let config = MemoryPressureConfig::builder()
@@ -4328,18 +3908,11 @@ impl TryFrom<Args> for Application {
             .cluster_id(args.cluster_id)
             .node_id(args.node_id)
             .grpc_advertise_addr(grpc_advertise_addr)
-            .cluster_listen_addr(cluster_listen_addr)
-            .cluster_advertise_addr(cluster_advertise_addr)
-            .cluster_api_mode(args.cluster_api_mode)
-            .cluster_api_listen_addr(cluster_api_listen_addr)
-            .cluster_api_advertise_addr(cluster_api_advertise_addr)
-            .cluster_api_https_listen_addr(cluster_api_https_listen_addr)
-            .cluster_api_https_advertise_addr(cluster_api_https_advertise_addr)
-            .interconnect_mode(args.interconnect_mode)
             .interconnect_listen_addr(interconnect_listen_addr)
             .interconnect_advertise_addr(interconnect_advertise_addr)
-            .interconnect_https_listen_addr(interconnect_https_listen_addr)
-            .interconnect_https_advertise_addr(interconnect_https_advertise_addr)
+            .interconnect_tls_ca(args.interconnect_tls_ca)
+            .interconnect_tls_cert(args.interconnect_tls_cert)
+            .interconnect_tls_key(args.interconnect_tls_key)
             .allow_bootstrap(args.allow_bootstrap)
             .default_user(args.default_user)
             .init_default_user_password(args.init_default_user_password)
@@ -4812,9 +4385,9 @@ impl SessionServiceImpl {
         verified.then_some(user_name)
     }
 
-    fn next_cluster_command_correlation_id(&self) -> u64 {
+    fn next_entity_gate_operation_id(&self) -> u64 {
         self.inner
-            .next_cluster_command_correlation_id
+            .next_entity_gate_operation_id
             .fetch_add(1, Ordering::Relaxed)
     }
 
@@ -5206,24 +4779,12 @@ impl SessionServiceImpl {
                 .map_err(|error| format!("failed to publish resource replica: {error}"));
         }
 
-        let gossip = self.inner.cluster.gossip_state().await;
-        let Some(leader_node) = gossip
-            .live_nodes
-            .into_iter()
-            .find(|node| node.node_id == leader_id)
-        else {
-            return Err(format!(
-                "failed to publish resource replica: leader node '{}' is not available",
-                leader_id
-            ));
-        };
-
-        post_resource_replica(
-            self.inner.cluster_api_clients.as_ref(),
-            &leader_node.cluster_api_advertise_addr,
-            &replica,
-        )
-        .await
+        self.inner
+            .interconnect
+            .request(&leader_id, PublishResourceReplica { replica })
+            .await
+            .map_err(|error| format!("failed to publish resource replica: {error}"))?
+            .map_err(|error| format!("failed to publish resource replica: {error}"))
     }
 
     async fn reconcile_resources_once(&self) {
@@ -5285,8 +4846,8 @@ impl SessionServiceImpl {
                 };
 
             let archive = match fetch_resource_archive(
-                self.inner.cluster_api_clients.as_ref(),
-                &source_node.cluster_api_advertise_addr,
+                &self.inner.interconnect,
+                &source_node.node_id,
                 &resource.id,
             )
             .await
@@ -5471,58 +5032,21 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<bool, String> {
-        let correlation_id = self.next_cluster_command_correlation_id();
-        let (tx, rx) = oneshot::channel();
-        self.inner.pending_cluster_commands.insert(
-            correlation_id,
-            PendingClusterCommand::SubscriptionInterestVisibility(tx),
-        );
-        if let Err(error) = self
-            .dispatch_interconnect_control(
+        let response = self
+            .inner
+            .interconnect
+            .request_with_timeout(
                 target_node_id,
-                ControlEnvelope::SubscriptionInterestVisibilityRequest(
-                    RemoteSubscriptionInterestVisibilityRequest {
-                        correlation_id,
-                        subscriber_node_id: subscriber_node_id.clone(),
-                        domain: domain.clone(),
-                        relay: relay.clone(),
-                    },
-                ),
+                RemoteSubscriptionInterestVisibilityRequest {
+                    subscriber_node_id: subscriber_node_id.clone(),
+                    domain: domain.clone(),
+                    relay: relay.clone(),
+                },
+                SUBSCRIPTION_INTEREST_CHECK_TIMEOUT,
             )
             .await
-        {
-            self.inner.pending_cluster_commands.remove(&correlation_id);
-            return Err(error);
-        }
-        match tokio::time::timeout(SUBSCRIPTION_INTEREST_CHECK_TIMEOUT, rx).await {
-            Ok(Ok(visible)) => Ok(visible),
-            Ok(Err(_)) => Err(format!(
-                "subscription interest visibility response channel from '{}' closed",
-                target_node_id
-            )),
-            Err(_) => {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                Err(format!(
-                    "timed out checking subscription interest visibility on '{}'",
-                    target_node_id
-                ))
-            }
-        }
-    }
-
-    fn handle_subscription_interest_visibility_response(
-        &self,
-        response: RemoteSubscriptionInterestVisibilityResponse,
-    ) {
-        if let Some((_, PendingClusterCommand::SubscriptionInterestVisibility(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.visible)
-                .means_peer_left("subscription interest visibility requester");
-        }
+            .map_err(|error| error.to_string())?;
+        response.result
     }
 
     async fn unregister_subscription_interest(&self, domain: &DomainName, relay: &RelayName) {
@@ -5568,34 +5092,9 @@ impl SessionServiceImpl {
         loop {
             tokio::task::consume_budget().await;
             let result = async {
-                let target = self
-                    .inner
-                    .cluster
-                    .gossip_state()
-                    .await
-                    .live_nodes
-                    .into_iter()
-                    .find(|node| node.node_id == node_id.clone())
-                    .ok_or_else(|| format!("node '{node_id}' is not live"))?;
-                let addr = target
-                    .interconnect_advertise_addr
-                    .parse::<SocketAddr>()
-                    .map_err(|error| {
-                        format!("invalid interconnect address for '{node_id}': {error}")
-                    })?;
-                let mode = match target.interconnect_mode.as_str() {
-                    "https" => InterconnectTransportMode::Tls,
-                    _ => InterconnectTransportMode::Plain,
-                };
-                let connection = self
-                    .inner
+                self.inner
                     .interconnect
-                    .connection_for(node_id, addr, "localhost", mode)
-                    .map_err(|error| {
-                        format!("failed to connect interconnect for '{node_id}': {error}")
-                    })?;
-                connection
-                    .send(Envelope::Control(envelope.clone()))
+                    .send(node_id, Envelope::Control(envelope.clone()))
                     .await
                     .map_err(|error| {
                         format!("failed to send interconnect control to '{node_id}': {error}")
@@ -5861,39 +5360,26 @@ impl SessionServiceImpl {
             if owner == local_node_id {
                 continue;
             }
-            let correlation_id = self.next_cluster_command_correlation_id();
-            let (tx, rx) = oneshot::channel();
-            self.inner
-                .pending_cluster_commands
-                .insert(correlation_id, PendingClusterCommand::DescribeRelay(tx));
-            if let Err(message) = self
-                .dispatch_interconnect_control(
+            let response = self
+                .inner
+                .interconnect
+                .request_with_timeout(
                     &owner,
-                    ControlEnvelope::DescribeRelayRequest(RemoteDescribeRelayRequest {
-                        correlation_id,
+                    RemoteDescribeRelayRequest {
                         domain: domain.clone(),
                         relay: describe.relay.clone(),
                         bindings: describe.bindings.clone(),
-                    }),
+                    },
+                    REMOTE_DESCRIBE_RELAY_TIMEOUT,
                 )
-                .await
-            {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                return CommandResult {
-                    success: false,
-                    diagnostics: vec![Diagnostic {
-                        message: message.clone(),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    message,
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
-            }
-            match tokio::time::timeout(REMOTE_DESCRIBE_RELAY_TIMEOUT, rx).await {
-                Ok(Ok(Ok(remote_exists))) => exists |= remote_exists,
-                Ok(Ok(Err(message))) => {
+                .await;
+            match response {
+                Ok(RemoteDescribeRelayResponse {
+                    result: Ok(remote_exists),
+                }) => exists |= remote_exists,
+                Ok(RemoteDescribeRelayResponse {
+                    result: Err(message),
+                }) => {
                     return CommandResult {
                         success: false,
                         diagnostics: vec![Diagnostic {
@@ -5906,21 +5392,12 @@ impl SessionServiceImpl {
                         ..Default::default()
                     };
                 }
-                Ok(Err(_)) => {
+                Err(error) => {
                     warn!(
                         %owner,
                         domain = domain.as_str(),
                         relay = describe.relay.as_str(),
-                        "remote DESCRIBE RELAY response channel closed"
-                    );
-                    continue;
-                }
-                Err(_) => {
-                    self.inner.pending_cluster_commands.remove(&correlation_id);
-                    warn!(
-                        %owner,
-                        domain = domain.as_str(),
-                        relay = describe.relay.as_str(),
+                        error = %error,
                         "timed out waiting for remote DESCRIBE RELAY response"
                     );
                     continue;
@@ -5995,18 +5472,6 @@ impl SessionServiceImpl {
             Ok(exists) => Ok(exists),
             Err(crate::runtime::RuntimeError::RelayNotInstantiated { .. }) => Ok(false),
             Err(error) => Err(error.to_string()),
-        }
-    }
-
-    fn handle_describe_stream_response(&self, response: RemoteDescribeRelayResponse) {
-        if let Some((_, PendingClusterCommand::DescribeRelay(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("describe relay requester");
         }
     }
 
@@ -6370,34 +5835,22 @@ impl SessionServiceImpl {
         let Some(owner) = node.execution_node() else {
             return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         };
-        let correlation_id = self.next_cluster_command_correlation_id();
-        let (tx, rx) = oneshot::channel();
-        self.inner.pending_cluster_commands.insert(
-            correlation_id,
-            PendingClusterCommand::DataflowNodeStatus(tx),
-        );
-        if self
-            .dispatch_interconnect_control(
+        let response = self
+            .inner
+            .interconnect
+            .request_with_timeout(
                 owner,
-                ControlEnvelope::DataflowNodeStatusRequest(RemoteDataflowNodeStatusRequest {
-                    correlation_id,
+                RemoteDataflowNodeStatusRequest {
                     domain: domain.clone(),
                     kind: model_kind,
                     name: identifier.clone(),
-                }),
+                },
+                Duration::from_secs(2),
             )
-            .await
-            .is_err()
-        {
-            self.inner.pending_cluster_commands.remove(&correlation_id);
-            return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
-        }
-        match tokio::time::timeout(Duration::from_secs(2), rx).await {
-            Ok(Ok(Ok(status))) => status,
-            _ => {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                self.local_dataflow_node_status_envelope(domain, kind, identifier)
-            }
+            .await;
+        match response {
+            Ok(RemoteDataflowNodeStatusResponse { result: Ok(status) }) => status,
+            _ => self.local_dataflow_node_status_envelope(domain, kind, identifier),
         }
     }
 
@@ -6454,18 +5907,6 @@ impl SessionServiceImpl {
         ))
     }
 
-    fn handle_dataflow_node_status_response(&self, response: RemoteDataflowNodeStatusResponse) {
-        if let Some((_, PendingClusterCommand::DataflowNodeStatus(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("dataflow node status requester");
-        }
-    }
-
     fn local_domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatusEnvelope {
         let status = self.inner.runtime.domain_drain_status(domain);
         let emitter_publishing = status
@@ -6491,50 +5932,18 @@ impl SessionServiceImpl {
             self.inner.runtime.force_flush_domain_if_idle(domain);
             return Ok(self.local_domain_drain_status(domain));
         }
-        let correlation_id = self.next_cluster_command_correlation_id();
-        let (tx, rx) = oneshot::channel();
         self.inner
-            .pending_cluster_commands
-            .insert(correlation_id, PendingClusterCommand::DomainDrainStatus(tx));
-        if let Err(error) = self
-            .dispatch_interconnect_control(
+            .interconnect
+            .request_with_timeout(
                 node_id,
-                ControlEnvelope::DomainDrainStatusRequest(RemoteDomainDrainStatusRequest {
-                    correlation_id,
+                RemoteDomainDrainStatusRequest {
                     domain: domain.clone(),
-                }),
+                },
+                Duration::from_secs(2),
             )
             .await
-        {
-            self.inner.pending_cluster_commands.remove(&correlation_id);
-            return Err(error);
-        }
-        match tokio::time::timeout(Duration::from_secs(2), rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!(
-                "node '{}' closed the domain drain status request",
-                node_id
-            )),
-            Err(_) => {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                Err(format!(
-                    "node '{}' timed out reporting domain drain status",
-                    node_id
-                ))
-            }
-        }
-    }
-
-    fn handle_domain_drain_status_response(&self, response: RemoteDomainDrainStatusResponse) {
-        if let Some((_, PendingClusterCommand::DomainDrainStatus(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("domain drain status requester");
-        }
+            .map_err(|error| error.to_string())?
+            .result
     }
 
     fn local_entity_drain_status(
@@ -6589,18 +5998,13 @@ impl SessionServiceImpl {
                 )
                 .await;
         }
-        let correlation_id = self.next_cluster_command_correlation_id();
-        let (tx, rx) = oneshot::channel();
-        self.inner
-            .pending_cluster_commands
-            .insert(correlation_id, PendingClusterCommand::EntityGate(tx));
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
-        if let Err(error) = self
-            .dispatch_interconnect_control(
+        self.inner
+            .interconnect
+            .request_with_timeout(
                 node_id,
-                ControlEnvelope::EntityGateRequest(RemoteEntityGateRequest {
-                    correlation_id,
+                RemoteEntityGateRequest {
                     operation_id,
                     domain: domain.clone(),
                     relays: relays.to_vec(),
@@ -6608,21 +6012,12 @@ impl SessionServiceImpl {
                     purpose,
                     deadline_millis,
                     reason: reason.to_string(),
-                }),
+                },
+                remaining.min(Duration::from_secs(2)),
             )
             .await
-        {
-            self.inner.pending_cluster_commands.remove(&correlation_id);
-            return Err(error);
-        }
-        match tokio::time::timeout(remaining.min(Duration::from_secs(2)), rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!("node '{node_id}' closed the entity gate request")),
-            Err(_) => {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                Err(format!("node '{node_id}' timed out engaging entity gates"))
-            }
-        }
+            .map_err(|error| error.to_string())?
+            .result
     }
 
     async fn entity_drain_status_on_node(
@@ -6644,40 +6039,22 @@ impl SessionServiceImpl {
             }
             return Ok(status);
         }
-        let correlation_id = self.next_cluster_command_correlation_id();
-        let (tx, rx) = oneshot::channel();
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         self.inner
-            .pending_cluster_commands
-            .insert(correlation_id, PendingClusterCommand::EntityDrainStatus(tx));
-        if let Err(error) = self
-            .dispatch_interconnect_control(
+            .interconnect
+            .request_with_timeout(
                 node_id,
-                ControlEnvelope::EntityDrainStatusRequest(RemoteEntityDrainStatusRequest {
-                    correlation_id,
+                RemoteEntityDrainStatusRequest {
                     domain: domain.clone(),
                     relays: relays.to_vec(),
                     affected_entities: affected_entities.to_vec(),
                     purpose,
-                }),
+                },
+                remaining.min(Duration::from_secs(2)),
             )
             .await
-        {
-            self.inner.pending_cluster_commands.remove(&correlation_id);
-            return Err(error);
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match tokio::time::timeout(remaining.min(Duration::from_secs(2)), rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!(
-                "node '{node_id}' closed the entity drain status request"
-            )),
-            Err(_) => {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                Err(format!(
-                    "node '{node_id}' timed out reporting entity drain status"
-                ))
-            }
-        }
+            .map_err(|error| error.to_string())?
+            .result
     }
 
     async fn release_entity_gate_on_node(
@@ -6693,71 +6070,18 @@ impl SessionServiceImpl {
                 .release_entity_gate_operation(operation_id, domain)
                 .await;
         }
-        let correlation_id = self.next_cluster_command_correlation_id();
-        let (tx, rx) = oneshot::channel();
         self.inner
-            .pending_cluster_commands
-            .insert(correlation_id, PendingClusterCommand::EntityGateRelease(tx));
-        if let Err(error) = self
-            .dispatch_interconnect_control(
+            .interconnect
+            .request(
                 node_id,
-                ControlEnvelope::EntityGateReleaseRequest(RemoteEntityGateReleaseRequest {
-                    correlation_id,
+                RemoteEntityGateReleaseRequest {
                     operation_id,
                     domain: domain.clone(),
-                }),
+                },
             )
             .await
-        {
-            self.inner.pending_cluster_commands.remove(&correlation_id);
-            return Err(error);
-        }
-        match tokio::time::timeout(Duration::from_secs(2), rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!(
-                "node '{node_id}' closed the entity gate release request"
-            )),
-            Err(_) => {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                Err(format!("node '{node_id}' timed out releasing entity gates"))
-            }
-        }
-    }
-
-    fn handle_entity_gate_response(&self, response: RemoteEntityGateResponse) {
-        if let Some((_, PendingClusterCommand::EntityGate(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("entity gate requester");
-        }
-    }
-
-    fn handle_entity_drain_status_response(&self, response: RemoteEntityDrainStatusResponse) {
-        if let Some((_, PendingClusterCommand::EntityDrainStatus(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("entity drain status requester");
-        }
-    }
-
-    fn handle_entity_gate_release_response(&self, response: RemoteEntityGateReleaseResponse) {
-        if let Some((_, PendingClusterCommand::EntityGateRelease(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("entity gate release requester");
-        }
+            .map_err(|error| error.to_string())?
+            .result
     }
 
     fn schedule_cluster_entity_gate_release(&self, release: PendingClusterEntityGateRelease) {
@@ -6911,7 +6235,7 @@ impl SessionServiceImpl {
         }
         nodes.sort();
         nodes.dedup();
-        let operation_id = self.next_cluster_command_correlation_id();
+        let operation_id = self.next_entity_gate_operation_id();
         let mut gate = ClusterEntityGate::new(self, operation_id, domain);
         let reason = match purpose {
             EntityGatePurpose::ModelAlteration => "leader-orchestrated entity alteration",
@@ -8079,38 +7403,19 @@ impl SessionServiceImpl {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
 
-        let correlation_id = self.next_cluster_command_correlation_id();
-        let (tx, rx) = oneshot::channel();
         self.inner
-            .pending_cluster_commands
-            .insert(correlation_id, PendingClusterCommand::DescribeMetrics(tx));
-        if let Err(message) = self
-            .dispatch_interconnect_control(
+            .interconnect
+            .request(
                 owner,
-                ControlEnvelope::DescribeMetricsRequest(RemoteDescribeMetricsRequest {
-                    correlation_id,
+                RemoteDescribeMetricsRequest {
                     domain: domain.clone(),
                     kind,
                     name: identifier.clone(),
-                }),
+                },
             )
             .await
-        {
-            self.inner.pending_cluster_commands.remove(&correlation_id);
-            return Err(message);
-        }
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("describe metrics response channel closed".to_string()),
-            Err(_) => {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                Err(format!(
-                    "timed out waiting for DESCRIBE {} metrics response from '{}'",
-                    kind.as_str(),
-                    owner
-                ))
-            }
-        }
+            .map_err(|error| error.to_string())?
+            .result
     }
 
     fn local_runtime_describe(
@@ -8145,18 +7450,6 @@ impl SessionServiceImpl {
             .await?;
         let metric_kind = request.kind.as_str().to_ascii_uppercase();
         Ok(self.local_runtime_describe(&request.domain, request.kind, &request.name, &metric_kind))
-    }
-
-    fn handle_describe_metrics_response(&self, response: RemoteDescribeMetricsResponse) {
-        if let Some((_, PendingClusterCommand::DescribeMetrics(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("describe metrics requester");
-        }
     }
 
     async fn describe_lookup(
@@ -8202,35 +7495,20 @@ impl SessionServiceImpl {
                 Err(message) => Err(message),
             }
         } else if let Some(owner) = lookup_node.execution_node() {
-            let correlation_id = self.next_cluster_command_correlation_id();
-            let (tx, rx) = oneshot::channel();
-            self.inner
-                .pending_cluster_commands
-                .insert(correlation_id, PendingClusterCommand::DescribeLookup(tx));
-            if let Err(message) = self
-                .dispatch_interconnect_control(
+            match self
+                .inner
+                .interconnect
+                .request(
                     owner,
-                    ControlEnvelope::DescribeLookupRequest(RemoteDescribeLookupRequest {
-                        correlation_id,
+                    RemoteDescribeLookupRequest {
                         domain: domain.clone(),
                         name: describe.name.clone(),
-                    }),
+                    },
                 )
                 .await
             {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                return command_error(message);
-            }
-            match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err("describe lookup response channel closed".to_string()),
-                Err(_) => {
-                    self.inner.pending_cluster_commands.remove(&correlation_id);
-                    Err(format!(
-                        "timed out waiting for DESCRIBE HASH MAP response from '{}'",
-                        owner
-                    ))
-                }
+                Ok(response) => response.result,
+                Err(error) => Err(error.to_string()),
             }
         } else {
             Err(format!(
@@ -8281,18 +7559,6 @@ impl SessionServiceImpl {
             key_field: description.model.key_field,
             entry_count: description.entry_count.arch_into(),
         })
-    }
-
-    fn handle_describe_lookup_response(&self, response: RemoteDescribeLookupResponse) {
-        if let Some((_, PendingClusterCommand::DescribeLookup(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("describe lookup requester");
-        }
     }
 
     async fn describe_deduplicator(
@@ -8963,41 +8229,25 @@ impl SessionServiceImpl {
         let name = name.into();
         let mut errors = Vec::new();
         for target in targets {
-            let correlation_id = self.next_cluster_command_correlation_id();
-            let (tx, rx) = oneshot::channel();
-            self.inner
-                .pending_cluster_commands
-                .insert(correlation_id, PendingClusterCommand::LookupQuery(tx));
-            if let Err(message) = self
-                .dispatch_interconnect_control(
+            let response = self
+                .inner
+                .interconnect
+                .request(
                     &target,
-                    ControlEnvelope::LookupRequest(RemoteLookupRequest {
-                        correlation_id,
+                    RemoteLookupRequest {
                         domain: domain.clone(),
                         name: LookupName::from(&name),
                         key: key.to_string(),
-                    }),
+                    },
                 )
-                .await
-            {
-                self.inner.pending_cluster_commands.remove(&correlation_id);
-                errors.push(message);
-                continue;
-            }
-            match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                Ok(Ok(result)) => match result {
+                .await;
+            match response {
+                Ok(RemoteLookupResponse { result }) => match result {
                     Ok(None) => return Ok(None),
                     Ok(Some(bytes)) => return self.decode_lookup_record(bytes).await.map(Some),
                     Err(message) => errors.push(message),
                 },
-                Ok(Err(_)) => errors.push("lookup response channel closed".to_string()),
-                Err(_) => {
-                    self.inner.pending_cluster_commands.remove(&correlation_id);
-                    errors.push(format!(
-                        "timed out waiting for LOOKUP response from '{}'",
-                        target
-                    ));
-                }
+                Err(error) => errors.push(error.to_string()),
             }
         }
         Err(errors
@@ -9015,18 +8265,6 @@ impl SessionServiceImpl {
         self.inner
             .runtime
             .query_local_lookup(&request.domain, &request.name, &request.key)
-    }
-
-    fn handle_lookup_response(&self, response: RemoteLookupResponse) {
-        if let Some((_, PendingClusterCommand::LookupQuery(sender))) = self
-            .inner
-            .pending_cluster_commands
-            .remove(&response.correlation_id)
-        {
-            sender
-                .send(response.result)
-                .means_peer_left("lookup query requester");
-        }
     }
 
     /// Decode one remote lookup answer through the node's admission, so a large answer is charged
@@ -17436,28 +16674,10 @@ fn transaction_statement_label(statement: &Statement) -> &'static str {
 }
 
 async fn fetch_resource_archive(
-    cluster_api_clients: &ClusterApiClients,
-    cluster_api_advertise_addr: &str,
+    interconnect: &Transport,
+    source_node: &ClusterNodeName,
     id: &ResourceId,
 ) -> Result<DownloadedResourceArchive, String> {
-    let path = format!(
-        "{RESOURCE_ARCHIVE_PATH_PREFIX}{}/{}/{}/archive",
-        id.domain.as_str(),
-        id.identifier.as_str(),
-        id.version
-    );
-    let response = cluster_api_clients
-        .for_url(cluster_api_advertise_addr)
-        .get(format!("{cluster_api_advertise_addr}{path}"))
-        .send()
-        .await
-        .map_err(|error| format!("resource fetch failed: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "resource fetch returned status {}",
-            response.status()
-        ));
-    }
     let temp_archive = tempfile::NamedTempFile::new()
         .map_err(|error| format!("failed to create temporary resource archive: {error}"))?;
     let temp_path = temp_archive.into_temp_path();
@@ -17465,14 +16685,35 @@ async fn fetch_resource_archive(
         .await
         .map_err(|error| format!("failed to open temporary resource archive: {error}"))?;
     let mut hasher = Hasher::new();
-    let mut relay = response.bytes_stream();
-    while let Some(chunk_result) = relay.next().await {
-        let chunk = chunk_result
-            .map_err(|error| format!("failed to read resource archive body: {error}"))?;
-        hasher.update(&chunk);
-        file.write_all(&chunk)
+    let mut offset = 0_u64;
+    loop {
+        tokio::task::consume_budget().await;
+        let chunk = interconnect
+            .request(
+                source_node,
+                FetchResourceArchiveChunk {
+                    id: id.clone(),
+                    offset,
+                },
+            )
+            .await
+            .map_err(|error| format!("resource fetch request failed: {error}"))?
+            .map_err(|error| format!("resource fetch failed: {error}"))?;
+        if chunk.bytes.is_empty() && !chunk.eof {
+            return Err("resource fetch made no progress".to_string());
+        }
+        hasher.update(&chunk.bytes);
+        file.write_all(&chunk.bytes)
             .await
             .map_err(|error| format!("failed to write temporary resource archive: {error}"))?;
+        let chunk_bytes = u64::try_from(chunk.bytes.len())
+            .map_err(|error| format!("resource chunk length is invalid: {error}"))?;
+        offset = offset
+            .checked_add(chunk_bytes)
+            .ok_or_else(|| "resource archive offset overflowed".to_string())?;
+        if chunk.eof {
+            break;
+        }
     }
     file.flush()
         .await
@@ -17483,32 +16724,6 @@ async fn fetch_resource_archive(
         path: temp_path,
         root_checksum: encode_hex(hash.as_bytes()),
     })
-}
-
-async fn post_resource_replica(
-    cluster_api_clients: &ClusterApiClients,
-    cluster_api_advertise_addr: &str,
-    replica: &ResourceNodeStatus,
-) -> Result<(), String> {
-    let body = encode_cbor(replica)
-        .map_err(|error| format!("failed to encode resource replica payload: {error}"))?;
-    let response = cluster_api_clients
-        .for_url(cluster_api_advertise_addr)
-        .post(format!(
-            "{cluster_api_advertise_addr}{RESOURCE_REPLICA_PATH}"
-        ))
-        .header(reqwest::header::CONTENT_TYPE, RAFT_CONTENT_TYPE_CBOR)
-        .body(body)
-        .send()
-        .await
-        .map_err(|error| format!("resource replica publish failed: {error}"))?;
-    if response.status().is_success() {
-        return Ok(());
-    }
-    Err(format!(
-        "resource replica publish returned status {}",
-        response.status()
-    ))
 }
 
 fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult {
@@ -17988,10 +17203,6 @@ struct VhostTlsMaterials {
     certified_key: CertifiedKey,
 }
 
-fn cluster_api_base_url(mode: InternalTransportMode, advertise_addr: &cluster::HostPort) -> String {
-    format!("{}://{}", mode.scheme(), advertise_addr.url_authority())
-}
-
 fn grpc_base_url(mode: InternalTransportMode, advertise_addr: &cluster::HostPort) -> String {
     format!("{}://{}", mode.scheme(), advertise_addr.url_authority())
 }
@@ -18001,42 +17212,6 @@ fn internal_tls_path(file_name: &str) -> PathBuf {
         .join("tls")
         .join("dev")
         .join(file_name)
-}
-
-fn build_cluster_api_http_client(
-    mode: InternalTransportMode,
-) -> Result<HttpClient, Report<AppError>> {
-    let builder = HttpClient::builder().tcp_nodelay(true);
-    if !mode.is_tls() {
-        return builder.build().map_err(|error| {
-            Report::new(AppError::LoadClusterApiTls).attach_printable(error.to_string())
-        });
-    }
-
-    builder
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .map_err(|error| {
-            Report::new(AppError::LoadClusterApiTls).attach_printable(error.to_string())
-        })
-}
-
-fn load_cluster_api_tls_server_config() -> Result<StdArc<ServerConfig>, Report<AppError>> {
-    nervix_interconnect::install_rustls_crypto_provider();
-    let cert_path = internal_tls_path(INTERNAL_TLS_CERT_FILE);
-    let key_path = internal_tls_path(INTERNAL_TLS_KEY_FILE);
-    let cert_chain = load_certificates_from_pem_file(cert_path.as_path())
-        .map_err(|error| Report::new(AppError::LoadClusterApiTls).attach_printable(error))?;
-    let private_key = load_private_key_from_pem_file(key_path.as_path())
-        .map_err(|error| Report::new(AppError::LoadClusterApiTls).attach_printable(error))?;
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, private_key)
-        .map_err(|error| {
-            Report::new(AppError::LoadClusterApiTls).attach_printable(error.to_string())
-        })?;
-    Ok(StdArc::new(config))
 }
 
 fn load_web_console_tls_server_config(
@@ -18245,17 +17420,6 @@ fn word_start(input: &str, cursor: usize) -> usize {
     }
 }
 
-fn encode_cbor<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, std::io::Error> {
-    let mut out = Vec::new();
-    ciborium::into_writer(value, &mut out).map_err(|err| std::io::Error::other(err.to_string()))?;
-    Ok(out)
-}
-
-fn decode_cbor<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, std::io::Error> {
-    ciborium::from_reader(std::io::Cursor::new(bytes))
-        .map_err(|err| std::io::Error::other(err.to_string()))
-}
-
 fn parse_human_duration(input: &str) -> Result<Duration, String> {
     humantime::parse_duration(input).map_err(|err| err.to_string())
 }
@@ -18284,42 +17448,6 @@ fn encode_hex(bytes: &[u8]) -> String {
         write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
     }
     out
-}
-
-fn decode_hex(input: &str) -> Option<Vec<u8>> {
-    if !input.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(input.len() / 2);
-    let bytes = input.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let high = char::from(bytes[index]).to_digit(16)?;
-        let low = char::from(bytes[index + 1]).to_digit(16)?;
-        out.push(
-            u8::try_from((high << 4) | low)
-                .verified("both nibbles are hex digits, so the packed byte stays below 256"),
-        );
-        index += 2;
-    }
-    Some(out)
-}
-
-/// The public key `input` encodes, or `None` when it does not encode one.
-///
-/// The input is a peer-supplied hex string, so text of the wrong length, the wrong alphabet, or the
-/// wrong curve point all mean the same thing: this peer offered no key the node can verify with.
-fn decode_verifying_key(input: &str) -> Option<VerifyingKey> {
-    let bytes = decode_hex(input)?;
-    let array: [u8; 32] = bytes.try_into().ok()?;
-    VerifyingKey::from_bytes(&array).ok()
-}
-
-fn should_initiate_interconnect(
-    local_node_id: &ClusterNodeName,
-    peer_node_id: &ClusterNodeName,
-) -> bool {
-    local_node_id < peer_node_id
 }
 
 async fn render_cluster_status(cluster: &cluster::ClusterHandle, consensus: &Observer) -> String {
@@ -18879,37 +18007,12 @@ impl Application {
                 .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
         };
         let grpc_advertise_url = grpc_base_url(grpc_mode, &grpc_advertise_addr);
-        let cluster_listen_addr = self.cluster_listen_addr;
-        let cluster_advertise_addr = self.cluster_advertise_addr;
-        let cluster_api_mode = self.cluster_api_mode;
-        let cluster_api_listen_addr = match cluster_api_mode {
-            InternalTransportMode::Http => self.cluster_api_listen_addr,
-            InternalTransportMode::Https => self
-                .cluster_api_https_listen_addr
-                .ok_or_else(|| Report::new(AppError::MissingClusterApiHttpsListenAddress))?,
-        };
-        let cluster_api_advertise_addr = match cluster_api_mode {
-            InternalTransportMode::Http => self.cluster_api_advertise_addr.clone(),
-            InternalTransportMode::Https => self
-                .cluster_api_https_advertise_addr
-                .clone()
-                .ok_or_else(|| Report::new(AppError::MissingClusterApiHttpsAdvertiseAddress))?,
-        };
-        let cluster_api_advertise_url =
-            cluster_api_base_url(cluster_api_mode, &cluster_api_advertise_addr);
-        let interconnect_mode = self.interconnect_mode;
-        let interconnect_listen_addr = match interconnect_mode {
-            InternalTransportMode::Http => self.interconnect_listen_addr,
-            InternalTransportMode::Https => self
-                .interconnect_https_listen_addr
-                .ok_or_else(|| Report::new(AppError::MissingInterconnectHttpsListenAddress))?,
-        };
-        let interconnect_advertise_addr = match interconnect_mode {
-            InternalTransportMode::Http => self.interconnect_advertise_addr.clone(),
-            InternalTransportMode::Https => self
-                .interconnect_https_advertise_addr
-                .clone()
-                .ok_or_else(|| Report::new(AppError::MissingInterconnectHttpsAdvertiseAddress))?,
+        let interconnect_listen_addr = self.interconnect_listen_addr;
+        let interconnect_advertise_addr = self.interconnect_advertise_addr.clone();
+        let interconnect_tls_paths = InterconnectTlsPaths {
+            ca: self.interconnect_tls_ca.clone(),
+            certificate: self.interconnect_tls_cert.clone(),
+            private_key: self.interconnect_tls_key.clone(),
         };
         let allow_bootstrap = self.allow_bootstrap;
         let cluster_bootstrap_host = self.cluster_bootstrap_host.clone();
@@ -18945,26 +18048,9 @@ impl Application {
         let temp_dir = self.temp_dir.clone();
         let shutdown = self.shutdown.clone();
         let fault_injection = self.fault_injection.clone();
-        let interconnect_identity = LocalIdentity::generate(node_id.clone());
-        let interconnect_public_key = encode_hex(&interconnect_identity.public_key().to_bytes());
-        let cluster_api_clients = Arc::new(ClusterApiClients::build().map_err(|error| {
-            error!(?error, "failed to build cluster api http clients");
-            error
-        })?);
-        let cluster_api_http_client = cluster_api_clients
-            .for_url(&cluster_api_advertise_url)
-            .clone();
         let grpc_tls_server_config = if grpc_mode.is_tls() {
             Some(load_grpc_tls_server_config().await.map_err(|error| {
                 error!(?error, "failed to build grpc tls server config");
-                error
-            })?)
-        } else {
-            None
-        };
-        let cluster_api_tls_server_config = if cluster_api_mode.is_tls() {
-            Some(load_cluster_api_tls_server_config().map_err(|error| {
-                error!(?error, "failed to build cluster api tls server config");
                 error
             })?)
         } else {
@@ -19024,24 +18110,14 @@ impl Application {
             ),
             _ => None,
         };
-        let cluster_api_listener = TcpListener::bind(cluster_api_listen_addr)
+        let interconnect_tls_material = interconnect_tls_paths
+            .read()
             .await
-            .change_context(if cluster_api_mode.is_tls() {
-                AppError::BindClusterApiHttpsListenAddress
-            } else {
-                AppError::BindClusterApiListenAddress
-            })?;
-        let interconnect_tls = if interconnect_mode.is_tls() {
-            let ca_path = internal_tls_path(INTERNAL_TLS_CA_FILE);
-            let cert_path = internal_tls_path(INTERNAL_TLS_CERT_FILE);
-            let key_path = internal_tls_path(INTERNAL_TLS_KEY_FILE);
-            Some(
-                TlsConfigBundle::from_pem_files(ca_path, cert_path, key_path)
-                    .change_context(AppError::LoadInterconnectTls)?,
-            )
-        } else {
-            None
-        };
+            .change_context(AppError::LoadInterconnectTls)?;
+        let interconnect_tls_fingerprint = interconnect_tls_material.fingerprint();
+        let interconnect_tls = interconnect_tls_material
+            .tls_bundle()
+            .change_context(AppError::LoadInterconnectTls)?;
 
         info!(
             grpc_mode = grpc_mode.scheme(),
@@ -19051,12 +18127,6 @@ impl Application {
             https_listen_addr = %https_listen_addr,
             observability_listen_addr = %observability_listen_addr,
             web_console_listen_addr = %web_console_listen_addr,
-            cluster_listen_addr = %cluster_listen_addr,
-            cluster_advertise_addr = %cluster_advertise_addr,
-            cluster_api_mode = cluster_api_mode.scheme(),
-            cluster_api_listen_addr = %cluster_api_listen_addr,
-            cluster_api_advertise_addr = %cluster_api_advertise_url,
-            interconnect_mode = interconnect_mode.scheme(),
             interconnect_listen_addr = %interconnect_listen_addr,
             interconnect_advertise_addr = %interconnect_advertise_addr,
             allow_bootstrap,
@@ -19138,13 +18208,33 @@ impl Application {
                 return Err(error);
             }
         }
+        let interconnect_result = Transport::bind(
+            interconnect_listen_addr,
+            interconnect_advertise_addr.host(),
+            cluster_id.clone(),
+            node_id.clone(),
+            interconnect_tls,
+            Default::default(),
+            startup.runtime.executor().clone(),
+        )
+        .await
+        .change_context(AppError::StartInterconnect);
+        let (interconnect, interconnect_rx) = match interconnect_result {
+            Ok(interconnect) => interconnect,
+            Err(error) => {
+                startup.terminate().await;
+                return Err(error);
+            }
+        };
+        startup.interconnect = Some(interconnect.clone());
+
         let consensus_result = Consensus::from_database(
             startup.db.clone(),
             ConsensusSettings {
                 cluster_name: cluster_id.clone(),
                 node_id: node_id.clone(),
-                cluster_api_advertise_url: cluster_api_advertise_url.clone(),
-                cluster_api_http_client: cluster_api_http_client.clone(),
+                interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
+                interconnect: interconnect.clone(),
                 node_unavailability_timeout,
                 raft_heartbeat_interval,
                 raft_election_timeout_min,
@@ -19178,66 +18268,17 @@ impl Application {
             consensus.observer().current_resources().await,
         );
 
-        let peer_keys = Arc::new(RwLock::new(HashMap::new()));
-        {
-            peer_keys
-                .write()
-                .insert(node_id.clone(), interconnect_identity.public_key());
-        }
-        let peer_verifier = {
-            let peer_keys = peer_keys.clone();
-            PeerVerifier::new(move |node_id| peer_keys.read().get(node_id).copied())
-        };
-        let interconnect_result = Transport::bind(
-            interconnect_listen_addr,
-            interconnect_mode.interconnect_transport_mode(),
-            interconnect_tls,
-            interconnect_identity,
-            peer_verifier,
-            Default::default(),
-            startup.runtime.executor().clone(),
-        )
-        .await
-        .change_context(AppError::StartInterconnect);
-        let (interconnect, interconnect_rx) = match interconnect_result {
-            Ok(interconnect) => interconnect,
-            Err(error) => {
-                startup.terminate().await;
-                return Err(error);
-            }
-        };
-        startup.interconnect = Some(interconnect);
-
-        let cluster_transport = match cluster::bind_gossip_transport(cluster_listen_addr)
-            .await
-            .change_context(AppError::StartCluster)
-        {
-            Ok(cluster_transport) => cluster_transport,
-            Err(error) => {
-                startup.terminate().await;
-                return Err(error);
-            }
-        };
-        let cluster_result = cluster::start_cluster_with_transport(
-            cluster::ClusterSettings {
-                cluster_id,
-                node_id: node_id.clone(),
-                cluster_listen_addr,
-                cluster_advertise_addr,
-                grpc_listen_addr,
-                grpc_advertise_addr: grpc_advertise_url.clone(),
-                web_console_advertise_addr: web_console_advertise_url.clone(),
-                cluster_api_listen_addr,
-                cluster_api_advertise_addr: cluster_api_advertise_url.clone(),
-                interconnect_listen_addr,
-                interconnect_advertise_addr,
-                interconnect_mode: interconnect_mode.scheme().to_string(),
-                interconnect_public_key,
-                bootstrap_host: cluster_bootstrap_host.clone(),
-                node_unavailability_timeout,
-            },
-            &cluster_transport,
-        )
+        let cluster_result = cluster::start_cluster(cluster::ClusterSettings {
+            cluster_id,
+            node_id: node_id.clone(),
+            grpc_listen_addr,
+            grpc_advertise_addr: grpc_advertise_url.clone(),
+            web_console_advertise_addr: web_console_advertise_url.clone(),
+            interconnect_advertise_addr,
+            bootstrap_host: cluster_bootstrap_host.clone(),
+            interconnect: interconnect.clone(),
+            node_unavailability_timeout,
+        })
         .await
         .change_context(AppError::StartCluster);
         let cluster = match cluster_result {
@@ -19275,6 +18316,17 @@ impl Application {
         let local_node_for_reconcile = node_id.clone();
         let reconcile_shutdown = shutdown.clone();
         let mut background_tasks = Vec::new();
+        let interconnect_tls_transport = interconnect.clone();
+        let interconnect_tls_shutdown = shutdown.clone();
+        background_tasks.push(tokio::spawn(async move {
+            reload_interconnect_tls(
+                interconnect_tls_transport,
+                interconnect_tls_paths,
+                interconnect_tls_fingerprint,
+                interconnect_tls_shutdown,
+            )
+            .await;
+        }));
         if let Some(controller) = memory_pressure_controller {
             let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
@@ -19624,8 +18676,8 @@ impl Application {
         }));
         let interconnect_for_membership = interconnect.clone();
         let cluster_for_interconnect = cluster.clone();
-        let peer_keys_for_interconnect = peer_keys.clone();
         let local_node_id = node_id;
+        let mut awaiting_initial_bootstrap_peer = cluster_bootstrap_host.is_some();
         let interconnect_membership_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;
@@ -19640,24 +18692,9 @@ impl Application {
                     .iter()
                     .map(|node| node.node_id.clone())
                     .collect::<std::collections::BTreeSet<_>>();
-                interconnect_for_membership.replace_live_nodes(&live_node_ids);
-                {
-                    let mut keys = peer_keys_for_interconnect.write();
-                    keys.retain(|node_id, _| {
-                        live_node_ids.contains(node_id) || node_id == &local_node_id
-                    });
-                    for node in &gossip.live_nodes {
-                        if let Some(key) = decode_verifying_key(&node.interconnect_public_key) {
-                            keys.insert(node.node_id.clone(), key);
-                        }
-                    }
-                }
-                cluster_for_interconnect.retain_interconnect_live_set(&live_node_ids);
                 struct PeerConnectionPlan {
                     node_id: ClusterNodeName,
                     target_label: String,
-                    targets: BTreeSet<PeerTarget>,
-                    initiate: bool,
                 }
 
                 let mut plans = Vec::new();
@@ -19666,10 +18703,6 @@ impl Application {
                     if node.node_id == local_node_id {
                         continue;
                     }
-                    let peer_interconnect_mode = match node.interconnect_mode.as_str() {
-                        "https" => InterconnectTransportMode::Tls,
-                        _ => InterconnectTransportMode::Plain,
-                    };
                     let Ok(target_addr) = node
                         .interconnect_advertise_addr
                         .parse::<cluster::HostPort>()
@@ -19678,18 +18711,10 @@ impl Application {
                         continue;
                     };
                     let target_label = target_addr.to_string();
-                    if peer_interconnect_mode == InterconnectTransportMode::Tls
-                        && node.interconnect_public_key.is_empty()
-                    {
-                        cluster_for_interconnect
-                            .record_interconnect_failure(&node.node_id, Some(target_label.clone()));
-                        continue;
-                    }
-                    let initiate = should_initiate_interconnect(&local_node_id, &node.node_id);
                     let targets = match target_addr.resolve_all().await {
                         Ok(addrs) => addrs
                             .into_iter()
-                            .map(|addr| PeerTarget::new(addr, "localhost", peer_interconnect_mode))
+                            .map(|addr| PeerTarget::new(addr, target_addr.host()))
                             .collect::<BTreeSet<_>>(),
                         Err(_err) => {
                             cluster_for_interconnect.record_interconnect_failure(
@@ -19703,43 +18728,20 @@ impl Application {
                     plans.push(PeerConnectionPlan {
                         node_id: node.node_id,
                         target_label,
-                        targets,
-                        initiate,
                     });
                 }
-                interconnect_for_membership.replace_outbound_targets(&outbound_targets);
+                if !outbound_targets.is_empty() {
+                    awaiting_initial_bootstrap_peer = false;
+                }
+                if !awaiting_initial_bootstrap_peer {
+                    interconnect_for_membership.replace_live_nodes(&live_node_ids);
+                    cluster_for_interconnect.retain_interconnect_live_set(&live_node_ids);
+                    interconnect_for_membership.replace_outbound_targets(&outbound_targets);
+                }
 
                 for plan in plans {
                     tokio::task::consume_budget().await;
-                    if !plan.initiate {
-                        if interconnect_for_membership.is_connected_to(&plan.node_id) {
-                            cluster_for_interconnect
-                                .record_interconnect_connected(&plan.node_id, plan.target_label);
-                        } else {
-                            cluster_for_interconnect.record_interconnect_failure(
-                                &plan.node_id,
-                                Some(plan.target_label),
-                            );
-                        }
-                        continue;
-                    }
-                    let mut connected = false;
-                    for target in plan.targets {
-                        if interconnect_for_membership
-                            .connection_for(
-                                &plan.node_id,
-                                target.addr,
-                                &target.server_name,
-                                target.mode,
-                            )
-                            .is_ok()
-                            && interconnect_for_membership.is_connected_to(&plan.node_id)
-                        {
-                            connected = true;
-                            break;
-                        }
-                    }
-                    if connected {
+                    if interconnect_for_membership.is_connected_to(&plan.node_id) {
                         cluster_for_interconnect
                             .record_interconnect_connected(&plan.node_id, plan.target_label);
                     } else {
@@ -19842,7 +18844,6 @@ impl Application {
                 consensus_administrator: consensus.administrator(),
                 registry,
                 resource_store,
-                cluster_api_clients: cluster_api_clients.clone(),
                 http_tls_server_config: Arc::new(RwLock::new(None)),
                 runtime: runtime.clone(),
                 replica_count,
@@ -19850,8 +18851,7 @@ impl Application {
                 events: events.clone(),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect: interconnect.clone(),
-                next_cluster_command_correlation_id: AtomicU64::new(1),
-                pending_cluster_commands: DashMap::default(),
+                next_entity_gate_operation_id: AtomicU64::new(1),
                 service_tasks: TaskTracker::new(),
                 configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
@@ -19866,6 +18866,44 @@ impl Application {
                 transaction_commit_execution: AsyncMutex::new(()),
             }),
         };
+        let resource_archive_service = service.clone();
+        interconnect
+            .register_handler::<FetchResourceArchiveChunk, _, _>(move |_context, request| {
+                let service = resource_archive_service.clone();
+                async move {
+                    service
+                        .inner
+                        .resource_store
+                        .read_archive_chunk(&request.id, request.offset)
+                        .await
+                        .map(|chunk| InterconnectResourceArchiveChunk {
+                            bytes: chunk.bytes,
+                            eof: chunk.eof,
+                        })
+                        .map_err(ResourceInterconnectError::archive_read)
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let resource_replica_service = service.clone();
+        interconnect
+            .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
+                let service = resource_replica_service.clone();
+                async move {
+                    if &request.replica.key.node_id != context.peer_node_id() {
+                        return Err(ResourceInterconnectError::ReplicaOrigin {
+                            authenticated: context.peer_node_id().clone(),
+                            declared: request.replica.key.node_id.clone(),
+                        });
+                    }
+                    service
+                        .inner
+                        .consensus
+                        .put_resource_replica(request.replica)
+                        .await
+                        .map_err(ResourceInterconnectError::replica_publish)
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let describe_ingestor_service = service.clone();
         interconnect
             .register_handler::<RemoteDescribeIngestorRequest, _, _>(move |_context, request| {
@@ -19890,6 +18928,241 @@ impl Application {
                     Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
                 }
             })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let state_sync_service = service.clone();
+        interconnect
+            .register_handler::<RemoteStateSyncRequest, _, _>(move |_context, request| {
+                let service = state_sync_service.clone();
+                async move {
+                    let result =
+                        match crate::runtime::RuntimeStatePlacement::from_remote(request.placement)
+                        {
+                            Ok(placement) => {
+                                if !service
+                                    .inner
+                                    .runtime
+                                    .runtime_state_placement_is_assigned_locally(&placement)
+                                {
+                                    return RemoteStateSyncResponse {
+                                        result: Err(format!(
+                                            "this node is not currently assigned {:?} state for \
+                                             {} '{}'",
+                                            placement.state,
+                                            placement.kind.as_str(),
+                                            placement.identifier.as_str()
+                                        )),
+                                    };
+                                }
+                                service
+                                    .inner
+                                    .runtime
+                                    .handle_state_sync_request(&placement, request.after_lsm)
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                    RemoteStateSyncResponse {
+                        result: result.map(|snapshot| {
+                            snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
+                                lsm: snapshot.lsm,
+                                schema_fingerprint: snapshot.schema_fingerprint,
+                                payload: snapshot.payload,
+                            })
+                        }),
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let describe_relay_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDescribeRelayRequest, _, _>(move |_context, request| {
+                let service = describe_relay_service.clone();
+                async move {
+                    RemoteDescribeRelayResponse {
+                        result: service.handle_describe_stream_request(request).await,
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let dataflow_status_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDataflowNodeStatusRequest, _, _>(move |_context, request| {
+                let service = dataflow_status_service.clone();
+                async move {
+                    RemoteDataflowNodeStatusResponse {
+                        result: service.handle_dataflow_node_status_request(request).await,
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let domain_drain_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDomainDrainStatusRequest, _, _>(move |_context, request| {
+                let service = domain_drain_service.clone();
+                async move {
+                    let result = service
+                        .apply_current_cluster_state()
+                        .await
+                        .map_err(|error| error.to_string())
+                        .map(|()| {
+                            service
+                                .inner
+                                .runtime
+                                .force_flush_domain_if_idle(&request.domain);
+                            service.local_domain_drain_status(&request.domain)
+                        });
+                    RemoteDomainDrainStatusResponse { result }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let entity_gate_service = service.clone();
+        interconnect
+            .register_handler::<RemoteEntityGateRequest, _, _>(move |_context, request| {
+                let service = entity_gate_service.clone();
+                async move {
+                    let deadline = tokio::time::Instant::now()
+                        .checked_add(Duration::from_millis(request.deadline_millis));
+                    let result = match deadline {
+                        Some(deadline) => {
+                            service
+                                .inner
+                                .runtime
+                                .engage_entity_gate_operation(
+                                    request.operation_id,
+                                    &request.domain,
+                                    &request.relays,
+                                    &request.affected_entities,
+                                    request.purpose,
+                                    EntityGateLease {
+                                        deadline,
+                                        reason: &request.reason,
+                                    },
+                                )
+                                .await
+                        }
+                        None => Err("entity gate deadline exceeds the monotonic clock".to_string()),
+                    };
+                    RemoteEntityGateResponse { result }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let entity_drain_service = service.clone();
+        interconnect
+            .register_handler::<RemoteEntityDrainStatusRequest, _, _>(move |_context, request| {
+                let service = entity_drain_service.clone();
+                async move {
+                    let status = service.local_entity_drain_status(
+                        &request.domain,
+                        &request.relays,
+                        &request.affected_entities,
+                        request.purpose,
+                    );
+                    if status.buffered_relay_batches != 0
+                        || status.node_work_items != 0
+                        || status.outstanding_acks != 0
+                    {
+                        service
+                            .inner
+                            .runtime
+                            .force_flush_domain_if_idle(&request.domain);
+                    }
+                    RemoteEntityDrainStatusResponse { result: Ok(status) }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let entity_gate_release_service = service.clone();
+        interconnect
+            .register_handler::<RemoteEntityGateReleaseRequest, _, _>(move |_context, request| {
+                let service = entity_gate_release_service.clone();
+                async move {
+                    RemoteEntityGateReleaseResponse {
+                        result: service
+                            .inner
+                            .runtime
+                            .release_entity_gate_operation(request.operation_id, &request.domain)
+                            .await,
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let describe_metrics_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDescribeMetricsRequest, _, _>(move |_context, request| {
+                let service = describe_metrics_service.clone();
+                async move {
+                    RemoteDescribeMetricsResponse {
+                        result: service.handle_describe_metrics_request(request).await,
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let describe_lookup_service = service.clone();
+        interconnect
+            .register_handler::<RemoteDescribeLookupRequest, _, _>(move |_context, request| {
+                let service = describe_lookup_service.clone();
+                async move {
+                    RemoteDescribeLookupResponse {
+                        result: service.handle_describe_lookup_request(request).await,
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let lookup_service = service.clone();
+        interconnect
+            .register_handler::<RemoteLookupRequest, _, _>(move |_context, request| {
+                let service = lookup_service.clone();
+                async move {
+                    let result = match service.handle_lookup_request(request).await {
+                        Ok(Some(record)) => record
+                            .encode_arrow_ipc(service.inner.runtime.executor())
+                            .await
+                            .map(|body| Some(body.to_vec()))
+                            .map_err(|error| error.to_string()),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(error),
+                    };
+                    RemoteLookupResponse { result }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let subscription_visibility_service = service.clone();
+        interconnect
+            .register_handler::<RemoteSubscriptionInterestVisibilityRequest, _, _>(
+                move |context, request| {
+                    let service = subscription_visibility_service.clone();
+                    async move {
+                        let result = if &request.subscriber_node_id != context.peer_node_id() {
+                            Err(format!(
+                                "authenticated node '{}' cannot query interest for '{}'",
+                                context.peer_node_id(),
+                                request.subscriber_node_id,
+                            ))
+                        } else {
+                            Ok(service
+                                .inner
+                                .cluster
+                                .nodes_with_subscription_interest(
+                                    request.domain.as_str(),
+                                    request.relay.as_str(),
+                                )
+                                .await
+                                .contains(&request.subscriber_node_id))
+                        };
+                        RemoteSubscriptionInterestVisibilityResponse { result }
+                    }
+                },
+            )
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let capture_handoff_service = service.clone();
@@ -20477,70 +19750,6 @@ impl Application {
                                     progress,
                                 );
                             }
-                            Envelope::Control(ControlEnvelope::StateSyncRequest(request)) => {
-                                let result = match crate::runtime::RuntimeStatePlacement::from_remote(
-                                    request.placement,
-                                ) {
-                                    Ok(placement) => {
-                                        if service_for_interconnect
-                                            .inner
-                                            .runtime
-                                            .runtime_state_placement_is_assigned_locally(
-                                                &placement,
-                                            )
-                                        {
-                                            service_for_interconnect
-                                                .inner
-                                                .runtime
-                                                .handle_state_sync_request(
-                                                    &placement,
-                                                    request.after_lsm,
-                                                )
-                                                .await
-                                        } else {
-                                            Err(format!(
-                                                "this node is not currently assigned {:?} state for {} '{}'",
-                                                placement.state,
-                                                placement.kind.as_str(),
-                                                placement.identifier.as_str()
-                                            ))
-                                        }
-                                    }
-                                    Err(error) => Err(error),
-                                };
-                                // The request proves this authenticated connection is live. Reply
-                                // on it so state sync cannot wait for a separate reverse route.
-                                if let Err(error) = message
-                                    .reply
-                                    .send(Envelope::Control(ControlEnvelope::StateSyncResponse(
-                                        RemoteStateSyncResponse {
-                                            correlation_id: request.correlation_id,
-                                            result: result.map(|snapshot| {
-                                                snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
-                                                    lsm: snapshot.lsm,
-                                                    schema_fingerprint: snapshot.schema_fingerprint,
-                                                    payload: snapshot.payload,
-                                                })
-                                            }),
-                                        },
-                                    )))
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send state sync response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::StateSyncResponse(response)) => {
-                                service_for_interconnect.inner.runtime.handle_state_sync_response(
-                                    response.correlation_id,
-                                    response.result.map(|snapshot| {
-                                        snapshot.map(|snapshot| crate::runtime::PersistedRuntimeStateEntry {
-                                            lsm: snapshot.lsm,
-                                            schema_fingerprint: snapshot.schema_fingerprint,
-                                            payload: snapshot.payload,
-                                        })
-                                    }),
-                                );
-                            }
                             Envelope::Control(ControlEnvelope::StateReplicationAck(ack)) => {
                                 let placement = match crate::runtime::RuntimeStatePlacement::from_remote(
                                     ack.placement,
@@ -20569,287 +19778,6 @@ impl Application {
                                         &message.peer_node_id,
                                         checkpoint,
                                     );
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeRelayRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .handle_describe_stream_request(request.clone())
-                                    .await;
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::DescribeRelayResponse(
-                                            RemoteDescribeRelayResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send DESCRIBE RELAY response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeRelayResponse(response)) => {
-                                service_for_interconnect.handle_describe_stream_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::DataflowNodeStatusRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .handle_dataflow_node_status_request(request.clone())
-                                    .await;
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::DataflowNodeStatusResponse(
-                                            RemoteDataflowNodeStatusResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send dataflow node status response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::DataflowNodeStatusResponse(response)) => {
-                                service_for_interconnect.handle_dataflow_node_status_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::DomainDrainStatusRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .apply_current_cluster_state()
-                                    .await
-                                    .map_err(|error| error.to_string())
-                                    .map(|()| {
-                                        service_for_interconnect
-                                            .inner.runtime
-                                            .force_flush_domain_if_idle(&request.domain);
-                                        service_for_interconnect
-                                            .local_domain_drain_status(&request.domain)
-                                    });
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::DomainDrainStatusResponse(
-                                            RemoteDomainDrainStatusResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send domain drain status response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::DomainDrainStatusResponse(response)) => {
-                                service_for_interconnect.handle_domain_drain_status_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::EntityGateRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .inner.runtime
-                                    .engage_entity_gate_operation(
-                                        request.operation_id,
-                                        &request.domain,
-                                        &request.relays,
-                                        &request.affected_entities,
-                                        request.purpose,
-                                        EntityGateLease {
-                                            deadline: tokio::time::Instant::now()
-                                                + Duration::from_millis(request.deadline_millis),
-                                            reason: &request.reason,
-                                        },
-                                    )
-                                    .await;
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::EntityGateResponse(
-                                            RemoteEntityGateResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send entity gate response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::EntityGateResponse(response)) => {
-                                service_for_interconnect.handle_entity_gate_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::EntityDrainStatusRequest(request)) => {
-                                let status = service_for_interconnect.local_entity_drain_status(
-                                        &request.domain,
-                                        &request.relays,
-                                        &request.affected_entities,
-                                        request.purpose,
-                                    );
-                                if status.buffered_relay_batches != 0
-                                    || status.node_work_items != 0
-                                    || status.outstanding_acks != 0
-                                {
-                                    service_for_interconnect
-                                        .inner.runtime
-                                        .force_flush_domain_if_idle(&request.domain);
-                                }
-                                let result: Result<EntityDrainStatusEnvelope, String> = Ok(status);
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::EntityDrainStatusResponse(
-                                            RemoteEntityDrainStatusResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send entity drain status response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::EntityDrainStatusResponse(response)) => {
-                                service_for_interconnect.handle_entity_drain_status_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::EntityGateReleaseRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .inner.runtime
-                                    .release_entity_gate_operation(
-                                        request.operation_id,
-                                        &request.domain,
-                                    )
-                                    .await;
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::EntityGateReleaseResponse(
-                                            RemoteEntityGateReleaseResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send entity gate release response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::EntityGateReleaseResponse(response)) => {
-                                service_for_interconnect.handle_entity_gate_release_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeMetricsRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .handle_describe_metrics_request(request.clone())
-                                    .await;
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::DescribeMetricsResponse(
-                                            RemoteDescribeMetricsResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send DESCRIBE metrics response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeMetricsResponse(response)) => {
-                                service_for_interconnect.handle_describe_metrics_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeLookupRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .handle_describe_lookup_request(request.clone())
-                                    .await;
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::DescribeLookupResponse(
-                                            RemoteDescribeLookupResponse {
-                                                correlation_id: request.correlation_id,
-                                                result,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send DESCRIBE LOOKUP response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::DescribeLookupResponse(response)) => {
-                                service_for_interconnect.handle_describe_lookup_response(response);
-                            }
-                            Envelope::Control(ControlEnvelope::LookupRequest(request)) => {
-                                let result =
-                                    service_for_interconnect.handle_lookup_request(request.clone()).await;
-                                let result = match result {
-                                    Ok(Some(record)) => {
-                                        match record
-                                            .encode_arrow_ipc(
-                                                service_for_interconnect.inner.runtime.executor(),
-                                            )
-                                            .await
-                                        {
-                                            Ok(body) => Ok(Some(body.to_vec())),
-                                            Err(error) => Err(error.to_string()),
-                                        }
-                                    }
-                                    Ok(None) => Ok(None),
-                                    Err(error) => Err(error),
-                                };
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::LookupResponse(RemoteLookupResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        }),
-                                    )
-                                    .await
-                                {
-                                    warn!(error = %error, "failed to send LOOKUP response");
-                                }
-                            }
-                            Envelope::Control(ControlEnvelope::LookupResponse(response)) => {
-                                service_for_interconnect.handle_lookup_response(response);
-                            }
-                            Envelope::Control(
-                                ControlEnvelope::SubscriptionInterestVisibilityRequest(request),
-                            ) => {
-                                let visible = service_for_interconnect
-                                    .inner.cluster
-                                    .nodes_with_subscription_interest(
-                                        request.domain.as_str(),
-                                        request.relay.as_str(),
-                                    )
-                                    .await
-                                    .contains(&request.subscriber_node_id);
-                                if let Err(error) = service_for_interconnect
-                                    .dispatch_interconnect_control(
-                                        &message.peer_node_id,
-                                        ControlEnvelope::SubscriptionInterestVisibilityResponse(
-                                            RemoteSubscriptionInterestVisibilityResponse {
-                                                correlation_id: request.correlation_id,
-                                                visible,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        error = %error,
-                                        "failed to send subscription interest visibility response"
-                                    );
-                                }
-                            }
-                            Envelope::Control(
-                                ControlEnvelope::SubscriptionInterestVisibilityResponse(response),
-                            ) => {
-                                service_for_interconnect
-                                    .handle_subscription_interest_visibility_response(response);
                             }
                             Envelope::Control(ControlEnvelope::RuntimeErrorEvent(event)) => {
                                 service_for_interconnect.broadcast_error(event.message);
@@ -20897,7 +19825,6 @@ impl Application {
         }));
 
         info!(mode = grpc_mode.scheme(), addr = %grpc_listen_addr, "nervix gRPC server listening");
-        info!(mode = cluster_api_mode.scheme(), addr = %cluster_api_listen_addr, "nervix cluster api server listening");
         info!(addr = %http_listen_addr, "nervix HTTP server listening");
         info!(addr = %https_listen_addr, "nervix HTTPS server listening");
         info!(addr = %observability_listen_addr, "nervix observability server listening");
@@ -20906,7 +19833,6 @@ impl Application {
             info!(addr = %addr, "nervix web console TLS server listening");
         }
 
-        let cluster_api_resource_store = service.inner.resource_store.clone();
         let grpc_service = service.clone();
         let grpc_shutdown = shutdown.clone();
         let api_server = async move {
@@ -20934,33 +19860,6 @@ impl Application {
                 .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
                 .await
                 .map_err(|e| Report::new(e).change_context(AppError::Serve))
-        };
-        let cluster_api_consensus = consensus.proposer();
-        let cluster_api_protocol = consensus.protocol_receiver();
-        let cluster_api_shutdown = shutdown.clone();
-        let cluster_api_server = async move {
-            if cluster_api_mode.is_tls() {
-                serve_cluster_api_https(
-                    cluster_api_consensus.clone(),
-                    cluster_api_protocol.clone(),
-                    cluster_api_resource_store,
-                    cluster_api_tls_server_config
-                        .clone()
-                        .ok_or_else(|| Report::new(AppError::LoadClusterApiTls))?,
-                    cluster_api_listener,
-                    cluster_api_shutdown.clone(),
-                )
-                .await
-            } else {
-                serve_cluster_api_http(
-                    cluster_api_consensus.clone(),
-                    cluster_api_protocol.clone(),
-                    cluster_api_resource_store,
-                    cluster_api_listener,
-                    cluster_api_shutdown.clone(),
-                )
-                .await
-            }
         };
         let http_server = serve_http(
             runtime.clone(),
@@ -21005,7 +19904,6 @@ impl Application {
         let server_shutdown = self.shutdown.clone();
         let (
             api_result,
-            cluster_api_result,
             http_result,
             https_result,
             observability_result,
@@ -21013,7 +19911,6 @@ impl Application {
             web_console_https_result,
         ) = tokio::join!(
             cancel_shutdown_on_completion(api_server, server_shutdown.clone()),
-            cancel_shutdown_on_completion(cluster_api_server, server_shutdown.clone()),
             cancel_shutdown_on_completion(http_server, server_shutdown.clone()),
             cancel_shutdown_on_completion(https_server, server_shutdown.clone()),
             cancel_shutdown_on_completion(observability_server, server_shutdown.clone()),
@@ -21021,7 +19918,6 @@ impl Application {
             cancel_shutdown_on_completion(web_console_https_server, server_shutdown.clone()),
         );
         let result = api_result
-            .and(cluster_api_result)
             .and(http_result)
             .and(https_result)
             .and(observability_result)
@@ -21124,7 +20020,6 @@ fn print_completions(shell: Shell) {
 mod tests {
     use std::{
         path::PathBuf,
-        process::Command,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -21135,25 +20030,69 @@ mod tests {
         ResourceVersionStatus, ScheduledNode, SubscriptionLiteral,
     };
     use nonzero_ext::nonzero;
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose, SanType,
+    };
     use sorted_vec::SortedVec;
 
     use super::*;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
-    fn ensure_dev_tls_assets() {
-        static DEV_TLS_READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        DEV_TLS_READY.get_or_init(|| {
-            let status = Command::new("bash")
-                .arg("scripts/generate_dev_tls.sh")
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .status()
-                .expect("dev tls generation command should run");
-            assert!(
-                status.success(),
-                "dev tls generation should succeed: {status}"
-            );
-        });
+    struct TestTlsFiles {
+        _directory: tempfile::TempDir,
+        ca: PathBuf,
+        certificate: PathBuf,
+        private_key: PathBuf,
+    }
+
+    fn test_tls_files(cluster_id: &str, node_id: &ClusterNodeName) -> TestTlsFiles {
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let ca_key = KeyPair::generate().expect("test CA key should generate");
+        let ca = ca_params
+            .self_signed(&ca_key)
+            .expect("test CA should self-sign");
+
+        let mut node_params =
+            CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+                .expect("test endpoint SANs should be valid");
+        node_params.subject_alt_names.push(SanType::URI(
+            format!("nervix://cluster/{cluster_id}/node/{node_id}")
+                .try_into()
+                .expect("test identity URI should be IA5"),
+        ));
+        node_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        node_params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let node_key = KeyPair::generate().expect("test node key should generate");
+        let certificate = node_params
+            .signed_by(&node_key, &ca, &ca_key)
+            .expect("test node certificate should sign");
+
+        let directory = tempfile::tempdir().expect("test TLS directory should be created");
+        let ca_path = directory.path().join("ca.pem");
+        let certificate_path = directory.path().join("node.pem");
+        let private_key_path = directory.path().join("node-key.pem");
+        std::fs::write(&ca_path, ca.pem()).expect("test CA should be written");
+        std::fs::write(&certificate_path, certificate.pem())
+            .expect("test certificate should be written");
+        std::fs::write(&private_key_path, node_key.serialize_pem())
+            .expect("test private key should be written");
+        TestTlsFiles {
+            _directory: directory,
+            ca: ca_path,
+            certificate: certificate_path,
+            private_key: private_key_path,
+        }
     }
 
     fn test_db_path() -> PathBuf {
@@ -21165,6 +20104,38 @@ mod tests {
         format!("127.0.0.1:{base_port}")
             .parse()
             .expect("valid socket addr")
+    }
+
+    fn test_args(extra: &[&str]) -> Args {
+        let mut args = vec![
+            "nervix-server",
+            "--node-id",
+            "node-1",
+            "--interconnect-tls-ca",
+            "ca.pem",
+            "--interconnect-tls-cert",
+            "node.pem",
+            "--interconnect-tls-key",
+            "node-key.pem",
+        ];
+        args.extend_from_slice(extra);
+        Args::parse_from(args)
+    }
+
+    fn try_test_args(extra: &[&str]) -> Result<Args, clap::Error> {
+        let mut args = vec![
+            "nervix-server",
+            "--node-id",
+            "node-1",
+            "--interconnect-tls-ca",
+            "ca.pem",
+            "--interconnect-tls-cert",
+            "node.pem",
+            "--interconnect-tls-key",
+            "node-key.pem",
+        ];
+        args.extend_from_slice(extra);
+        Args::try_parse_from(args)
     }
 
     fn named<N>(raw: &str) -> N
@@ -21180,32 +20151,6 @@ mod tests {
             .transaction
             .as_ref()
             .and_then(|status| ApiTransactionState::try_from(status.state).ok())
-    }
-
-    #[test]
-    fn snapshot_relay_header_framing_leaves_raw_snapshot_payload() {
-        let header = RaftSnapshotRelayHeader {
-            vote: nervix_consensus::VoteOf::new(
-                7,
-                ClusterNodeName::parse("node-1").expect("valid name"),
-            ),
-            meta: Default::default(),
-        };
-        let encoded = encode_cbor(&header).expect("snapshot relay header should encode");
-        let mut wire = Vec::new();
-        let encoded_len = u32::try_from(encoded.len())
-            .assured("the test snapshot header is smaller than u32::MAX bytes");
-        wire.extend_from_slice(&encoded_len.to_be_bytes());
-        wire.extend_from_slice(&encoded);
-        wire.extend_from_slice(b"snapshot-data");
-
-        let payload = try_take_length_delimited_frame(&mut wire)
-            .expect("length-delimited snapshot relay header should be complete");
-        let decoded: RaftSnapshotRelayHeader =
-            decode_cbor(&payload).expect("snapshot relay header should decode");
-
-        assert_eq!(decoded, header);
-        assert_eq!(wire, b"snapshot-data");
     }
 
     fn string_branch_key(field: &str, value: &str) -> Option<crate::runtime::BranchKey> {
@@ -21246,6 +20191,8 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary root should be created");
         let db_path = root.path().join("db");
         let listen_addr = test_addr(0);
+        let node_id = ClusterNodeName::parse("node-1").expect("valid name");
+        let tls_files = test_tls_files("startup-failure-test", &node_id);
         let application = Application::builder()
             .addr(listen_addr)
             .http_listen_addr(listen_addr)
@@ -21253,20 +20200,19 @@ mod tests {
             .observability_listen_addr(listen_addr)
             .web_console_listen_addr(listen_addr)
             .cluster_id("startup-failure-test".to_string())
-            .node_id(ClusterNodeName::parse("node-1").expect("valid name"))
+            .node_id(node_id)
             .grpc_advertise_addr(listen_addr.into())
-            .cluster_listen_addr(listen_addr)
-            .cluster_advertise_addr(cluster::HostPort::new("invalid host name", 1))
-            .cluster_api_listen_addr(listen_addr)
-            .cluster_api_advertise_addr(listen_addr.into())
             .interconnect_listen_addr(listen_addr)
             .interconnect_advertise_addr(listen_addr.into())
+            .interconnect_tls_ca(tls_files.ca.clone())
+            .interconnect_tls_cert(tls_files.certificate.clone())
+            .interconnect_tls_key(tls_files.private_key.clone())
             .allow_bootstrap(true)
             .node_unavailability_timeout(Duration::from_secs(1))
             .raft_heartbeat_interval(Duration::from_millis(100))
             .raft_election_timeout_min(Duration::from_millis(300))
             .raft_election_timeout_max(Duration::from_millis(600))
-            .cluster_bootstrap_host(None)
+            .cluster_bootstrap_host(Some("invalid host name:1".to_string()))
             .db_path(db_path.clone())
             .graceful_shutdown_drain(false)
             .build();
@@ -21321,48 +20267,21 @@ mod tests {
 
     #[test]
     fn args_parse_observability_listen_addr() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47393",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47393",
-            "--observability-listen-addr",
-            "127.0.0.1:19090",
-        ]);
+        let args = test_args(&["--observability-listen-addr", "127.0.0.1:19090"]);
         let app = Application::try_from(args).expect("args should parse");
         assert_eq!(app.observability_listen_addr, test_addr(19090));
     }
 
     #[test]
     fn args_parse_temp_dir() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47393",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47393",
-            "--temp-dir",
-            "/tmp/nervix-temp",
-        ]);
+        let args = test_args(&["--temp-dir", "/tmp/nervix-temp"]);
         let app = Application::try_from(args).expect("args should parse");
         assert_eq!(app.temp_dir, PathBuf::from("/tmp/nervix-temp"));
     }
 
     #[test]
     fn args_parse_web_console_listen_addr() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47393",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47393",
+        let args = test_args(&[
             "--web-console-listen-addr",
             "127.0.0.1:17420",
             "--web-console-https-listen-addr",
@@ -21427,9 +20346,6 @@ mod tests {
                 consensus_administrator: consensus.administrator(),
                 registry,
                 resource_store,
-                cluster_api_clients: Arc::new(
-                    ClusterApiClients::build().expect("test cluster api clients should build"),
-                ),
                 http_tls_server_config: Arc::new(RwLock::new(None)),
                 runtime: Runtime::new(),
                 replica_count: 0,
@@ -21437,8 +20353,7 @@ mod tests {
                 events: SessionEvents::new(16),
                 subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
                 interconnect,
-                next_cluster_command_correlation_id: AtomicU64::new(1),
-                pending_cluster_commands: DashMap::default(),
+                next_entity_gate_operation_id: AtomicU64::new(1),
                 service_tasks: TaskTracker::new(),
                 configured_basic_auth: None,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
@@ -21455,25 +20370,20 @@ mod tests {
         }
     }
 
-    async fn test_interconnect(node_id: &ClusterNodeName) -> Transport {
-        ensure_dev_tls_assets();
-        let tls = TlsConfigBundle::from_pem_files(
-            "tls/dev/ca.pem",
-            "tls/dev/node.pem",
-            "tls/dev/node-key.pem",
-        )
-        .expect("tls bundle should load");
-        let identity = LocalIdentity::generate(node_id.clone());
-        let verifier = PeerVerifier::new(|_| None);
+    async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeName) -> Transport {
+        let files = test_tls_files(cluster_id, node_id);
+        let tls =
+            TlsConfigBundle::from_pem_files(&files.ca, &files.certificate, &files.private_key)
+                .expect("test TLS bundle should load");
         let addr = "127.0.0.1:0"
             .parse()
             .expect("ephemeral interconnect address must parse");
         let (transport, _rx) = Transport::bind(
             addr,
-            InterconnectTransportMode::Tls,
-            Some(tls),
-            identity,
-            verifier,
+            "127.0.0.1",
+            cluster_id,
+            node_id.clone(),
+            tls,
             Default::default(),
             nervix_execution::Executor::default(),
         )
@@ -21644,29 +20554,15 @@ mod tests {
                 .checked_add(id)
                 .assured("the test id fits inside the port block this suite reserves"),
         );
-        let cluster_listen_addr = test_addr(
-            65000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let raft_addr = test_addr(
-            49500u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let interconnect_addr =
-            cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
+        let expected_leader = test_node_name(id);
+        let interconnect = test_interconnect("test", &expected_leader).await;
         let consensus = Consensus::from_database(
             db,
             ConsensusSettings {
                 cluster_name: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_api_advertise_url: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                cluster_api_http_client: build_cluster_api_http_client(InternalTransportMode::Http)
-                    .expect("test cluster api client should build"),
+                node_id: expected_leader.clone(),
+                interconnect_advertise_addr: interconnect.local_addr().to_string(),
+                interconnect: interconnect.clone(),
                 node_unavailability_timeout: Duration::from_secs(10),
                 raft_heartbeat_interval: Duration::from_millis(50),
                 raft_election_timeout_min: Duration::from_millis(150),
@@ -21683,33 +20579,23 @@ mod tests {
         if create_default_domain_flag {
             create_test_domain(&consensus.proposer(), "default").await;
         }
-        let expected_leader = test_node_name(id);
         for _ in 0..50 {
             if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let interconnect = test_interconnect(&expected_leader).await;
+        let interconnect_addr = interconnect.local_addr();
         let cluster = Arc::new(
             cluster::start_cluster(cluster::ClusterSettings {
                 cluster_id: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_listen_addr,
-                cluster_advertise_addr: cluster_listen_addr.into(),
+                node_id: expected_leader,
                 grpc_listen_addr: grpc_addr,
                 grpc_advertise_addr: grpc_addr.to_string(),
                 web_console_advertise_addr: format!("http://{}", grpc_addr),
-                cluster_api_listen_addr: raft_addr,
-                cluster_api_advertise_addr: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                interconnect_listen_addr: interconnect_addr,
                 interconnect_advertise_addr: interconnect_addr.into(),
-                interconnect_mode: "https".to_string(),
-                interconnect_public_key: "00".repeat(32),
                 bootstrap_host: None,
+                interconnect: interconnect.clone(),
                 node_unavailability_timeout: Duration::from_secs(10),
             })
             .await
@@ -22899,22 +21785,6 @@ mod tests {
     }
 
     #[test]
-    fn interconnect_initiation_uses_strict_node_id_order() {
-        assert!(should_initiate_interconnect(
-            &named::<ClusterNodeName>("node-1"),
-            &named::<ClusterNodeName>("node-2")
-        ));
-        assert!(!should_initiate_interconnect(
-            &named::<ClusterNodeName>("node-2"),
-            &named::<ClusterNodeName>("node-1")
-        ));
-        assert!(!should_initiate_interconnect(
-            &named::<ClusterNodeName>("node-2"),
-            &named::<ClusterNodeName>("node-2")
-        ));
-    }
-
-    #[test]
     fn request_domain_helpers_cover_current_state_and_validation() {
         assert_eq!(parse_request_domain(""), Err(RequestDomainError::Missing));
         assert_eq!(
@@ -22928,7 +21798,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_and_encoding_helpers_roundtrip() {
+    fn parse_and_text_encoding_helpers_roundtrip() {
         assert_eq!(current_word_prefix("CREATE SCHE", 11), "sche");
         assert_eq!(word_start("CREATE SCHE", 11), 7);
         assert_eq!(
@@ -22945,26 +21815,14 @@ mod tests {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
         let hex = encode_hex(&bytes);
         assert_eq!(hex, "deadbeef");
-        assert_eq!(decode_hex(&hex), Some(bytes));
-        assert_eq!(decode_hex("abc"), None);
 
-        let encoded = encode_cbor(&vec!["a".to_string(), "b".to_string()]).expect("encode");
-        let decoded: Vec<String> = decode_cbor(&encoded).expect("decode");
-        assert_eq!(decoded, vec!["a", "b"]);
         assert!(parse_human_duration("oops").is_err());
         assert!(parse_human_bytes("oops").is_err());
     }
 
     #[test]
     fn server_args_parse_memory_pressure_options() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47392",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47392",
+        let args = test_args(&[
             "--memory-high-watermark",
             "2MiB",
             "--memory-low-watermark",
@@ -22985,17 +21843,7 @@ mod tests {
 
     #[test]
     fn server_args_reject_incomplete_memory_pressure_watermarks() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47392",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47392",
-            "--memory-high-watermark",
-            "2MiB",
-        ]);
+        let args = test_args(&["--memory-high-watermark", "2MiB"]);
 
         let error = Application::try_from(args).expect_err("low watermark is required");
         assert!(format!("{error:?}").contains("memory high watermark requires"));
@@ -23003,14 +21851,7 @@ mod tests {
 
     #[test]
     fn server_args_parse_opentelemetry_options() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47392",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47392",
+        let args = test_args(&[
             "--otel-enabled",
             "--otel-otlp-endpoint",
             "http://collector:4317",
@@ -23028,15 +21869,7 @@ mod tests {
 
     #[test]
     fn server_args_do_not_require_opentelemetry_options() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47392",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47392",
-        ]);
+        let args = test_args(&[]);
 
         assert!(!args.otel_enabled);
         assert_eq!(args.otel_otlp_endpoint, "http://127.0.0.1:4317");
@@ -23046,16 +21879,7 @@ mod tests {
 
     #[test]
     fn server_args_only_require_opentelemetry_enable_flag_to_enable_export() {
-        let args = Args::parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47392",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47392",
-            "--otel-enabled",
-        ]);
+        let args = test_args(&["--otel-enabled"]);
 
         assert!(args.otel_enabled);
         assert_eq!(args.otel_otlp_endpoint, "http://127.0.0.1:4317");
@@ -23065,17 +21889,7 @@ mod tests {
 
     #[test]
     fn server_args_reject_invalid_opentelemetry_sample_ratio() {
-        let result = Args::try_parse_from([
-            "nervix-server",
-            "--node-id",
-            "node-1",
-            "--cluster-api-listen-addr",
-            "127.0.0.1:47392",
-            "--cluster-api-advertise-addr",
-            "127.0.0.1:47392",
-            "--otel-trace-sample-ratio",
-            "2.0",
-        ]);
+        let result = try_test_args(&["--otel-trace-sample-ratio", "2.0"]);
 
         assert!(result.is_err());
     }
@@ -23124,18 +21938,6 @@ mod tests {
             infer_kind_from_error_target(&missing_target, &identifier),
             None
         );
-    }
-
-    #[test]
-    fn decode_verifying_key_accepts_valid_hex_key() {
-        use ed25519_dalek::SigningKey;
-
-        let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let verifying = signing_key.verifying_key();
-        let hex = encode_hex(verifying.as_bytes());
-        let decoded = decode_verifying_key(&hex).expect("must decode verifying key");
-        assert_eq!(decoded, verifying);
-        assert_eq!(decode_verifying_key("zz"), None);
     }
 
     #[test]
@@ -24575,108 +23377,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
-        let path = test_db_path();
-        let db = Database::builder(&path)
-            .open()
-            .expect("database should open");
-        let registry = Arc::new(
-            Registry::from_database(db.clone(), Some(path.as_path()))
-                .expect("registry should open"),
-        );
-        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
-            .verified("this suite reserves far fewer than u16::MAX test identifiers");
-        let grpc_addr = test_addr(
-            51000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let cluster_listen_addr = test_addr(
-            52000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let raft_addr = test_addr(
-            53000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let interconnect_addr =
-            cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let consensus = Consensus::from_database(
-            db,
-            ConsensusSettings {
-                cluster_name: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_api_advertise_url: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                cluster_api_http_client: build_cluster_api_http_client(InternalTransportMode::Http)
-                    .expect("test cluster api client should build"),
-                node_unavailability_timeout: Duration::from_secs(10),
-                raft_heartbeat_interval: Duration::from_millis(50),
-                raft_election_timeout_min: Duration::from_millis(150),
-                raft_election_timeout_max: Duration::from_millis(300),
-            },
-        )
-        .await
-        .expect("consensus should open");
-        consensus
-            .administrator()
-            .maybe_initialize()
-            .await
-            .expect("single-node consensus should initialize");
-        let expected_leader = test_node_name(id);
-        for _ in 0..50 {
-            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert_eq!(
-            consensus.observer().current_leader().await.as_ref(),
-            Some(&expected_leader),
-            "single-node consensus must report itself as leader before command processing",
-        );
-        create_test_domain(&consensus.proposer(), "default").await;
-        let interconnect = test_interconnect(&expected_leader).await;
-        let cluster = Arc::new(
-            cluster::start_cluster(cluster::ClusterSettings {
-                cluster_id: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_listen_addr,
-                cluster_advertise_addr: cluster_listen_addr.into(),
-                grpc_listen_addr: grpc_addr,
-                grpc_advertise_addr: grpc_addr.to_string(),
-                web_console_advertise_addr: format!("http://{}", grpc_addr),
-                cluster_api_listen_addr: raft_addr,
-                cluster_api_advertise_addr: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                interconnect_listen_addr: interconnect_addr,
-                interconnect_advertise_addr: interconnect_addr.into(),
-                interconnect_mode: "https".to_string(),
-                interconnect_public_key: "00".repeat(32),
-                bootstrap_host: None,
-                node_unavailability_timeout: Duration::from_secs(10),
-            })
-            .await
-            .expect("cluster should start"),
-        );
-        let service = test_session_service(
-            cluster,
-            &consensus,
-            registry.clone(),
-            Arc::new(
-                ResourceStore::open(
-                    path.join("resources"),
-                    nervix_execution::Executor::default(),
-                )
-                .expect("resource store should open"),
-            ),
-            interconnect,
-        );
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let commands = [
@@ -24744,105 +23449,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_creates_junction_model() {
-        let path = test_db_path();
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("test db directory should exist");
-        let db = Database::builder(&path)
-            .open()
-            .expect("database should open");
-        let registry = Arc::new(
-            Registry::from_database(db.clone(), Some(path.as_path()))
-                .expect("registry should open"),
-        );
-        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
-            .verified("this suite reserves far fewer than u16::MAX test identifiers");
-        let grpc_addr = test_addr(
-            61000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let cluster_listen_addr = test_addr(
-            62000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let raft_addr = test_addr(
-            63000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let interconnect_addr =
-            cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let consensus = Consensus::from_database(
-            db,
-            ConsensusSettings {
-                cluster_name: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_api_advertise_url: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                cluster_api_http_client: build_cluster_api_http_client(InternalTransportMode::Http)
-                    .expect("test cluster api client should build"),
-                node_unavailability_timeout: Duration::from_secs(10),
-                raft_heartbeat_interval: Duration::from_millis(50),
-                raft_election_timeout_min: Duration::from_millis(150),
-                raft_election_timeout_max: Duration::from_millis(300),
-            },
-        )
-        .await
-        .expect("consensus should open");
-        consensus
-            .administrator()
-            .maybe_initialize()
-            .await
-            .expect("single-node consensus should initialize");
-        create_test_domain(&consensus.proposer(), "default").await;
-        let expected_leader = test_node_name(id);
-        for _ in 0..50 {
-            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let interconnect = test_interconnect(&expected_leader).await;
-        let cluster = Arc::new(
-            cluster::start_cluster(cluster::ClusterSettings {
-                cluster_id: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_listen_addr,
-                cluster_advertise_addr: cluster_listen_addr.into(),
-                grpc_listen_addr: grpc_addr,
-                grpc_advertise_addr: grpc_addr.to_string(),
-                web_console_advertise_addr: format!("http://{}", grpc_addr),
-                cluster_api_listen_addr: raft_addr,
-                cluster_api_advertise_addr: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                interconnect_listen_addr: interconnect_addr,
-                interconnect_advertise_addr: interconnect_addr.into(),
-                interconnect_mode: "https".to_string(),
-                interconnect_public_key: "00".repeat(32),
-                bootstrap_host: None,
-                node_unavailability_timeout: Duration::from_secs(10),
-            })
-            .await
-            .expect("cluster should start"),
-        );
-        let service = test_session_service(
-            cluster,
-            &consensus,
-            registry.clone(),
-            Arc::new(
-                ResourceStore::open(
-                    path.join("resources"),
-                    nervix_execution::Executor::default(),
-                )
-                .expect("resource store should open"),
-            ),
-            interconnect,
-        );
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
@@ -24908,105 +23519,11 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_creates_deduplicator_model() {
-        let path = test_db_path();
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("test db directory should exist");
-        let db = Database::builder(&path)
-            .open()
-            .expect("database should open");
-        let registry = Arc::new(
-            Registry::from_database(db.clone(), Some(path.as_path()))
-                .expect("registry should open"),
-        );
-        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
-            .verified("this suite reserves far fewer than u16::MAX test identifiers");
-        let grpc_addr = test_addr(
-            61000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let cluster_listen_addr = test_addr(
-            62000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let raft_addr = test_addr(
-            63000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let interconnect_addr =
-            cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let consensus = Consensus::from_database(
-            db,
-            ConsensusSettings {
-                cluster_name: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_api_advertise_url: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                cluster_api_http_client: build_cluster_api_http_client(InternalTransportMode::Http)
-                    .expect("test cluster api client should build"),
-                node_unavailability_timeout: Duration::from_secs(10),
-                raft_heartbeat_interval: Duration::from_millis(50),
-                raft_election_timeout_min: Duration::from_millis(150),
-                raft_election_timeout_max: Duration::from_millis(300),
-            },
-        )
-        .await
-        .expect("consensus should open");
-        consensus
-            .administrator()
-            .maybe_initialize()
-            .await
-            .expect("single-node consensus should initialize");
-        create_test_domain(&consensus.proposer(), "default").await;
-        let expected_leader = test_node_name(id);
-        for _ in 0..50 {
-            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let interconnect = test_interconnect(&expected_leader).await;
-        let cluster = Arc::new(
-            cluster::start_cluster(cluster::ClusterSettings {
-                cluster_id: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_listen_addr,
-                cluster_advertise_addr: cluster_listen_addr.into(),
-                grpc_listen_addr: grpc_addr,
-                grpc_advertise_addr: grpc_addr.to_string(),
-                web_console_advertise_addr: format!("http://{}", grpc_addr),
-                cluster_api_listen_addr: raft_addr,
-                cluster_api_advertise_addr: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                interconnect_listen_addr: interconnect_addr,
-                interconnect_advertise_addr: interconnect_addr.into(),
-                interconnect_mode: "https".to_string(),
-                interconnect_public_key: "00".repeat(32),
-                bootstrap_host: None,
-                node_unavailability_timeout: Duration::from_secs(10),
-            })
-            .await
-            .expect("cluster should start"),
-        );
-        let service = test_session_service(
-            cluster,
-            &consensus,
-            registry.clone(),
-            Arc::new(
-                ResourceStore::open(
-                    path.join("resources"),
-                    nervix_execution::Executor::default(),
-                )
-                .expect("resource store should open"),
-            ),
-            interconnect,
-        );
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
@@ -25081,67 +23598,14 @@ mod tests {
 
     #[tokio::test]
     async fn process_command_describes_resource_metadata() {
-        let path = test_db_path();
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("test db directory should exist");
-        let db = Database::builder(&path)
-            .open()
-            .expect("database should open");
-        let registry = Arc::new(
-            Registry::from_database(db.clone(), Some(path.as_path()))
-                .expect("registry should open"),
-        );
-        let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
-            .verified("this suite reserves far fewer than u16::MAX test identifiers");
-        let expected_leader = test_node_name(id);
-        let grpc_addr = test_addr(
-            61000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let cluster_listen_addr = test_addr(
-            62000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let raft_addr = test_addr(
-            63000u16
-                .checked_add(id)
-                .assured("the test id fits inside the port block this suite reserves"),
-        );
-        let interconnect_addr =
-            cluster::derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let consensus = Consensus::from_database(
-            db,
-            ConsensusSettings {
-                cluster_name: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_api_advertise_url: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                cluster_api_http_client: build_cluster_api_http_client(InternalTransportMode::Http)
-                    .expect("test cluster api client should build"),
-                node_unavailability_timeout: Duration::from_secs(10),
-                raft_heartbeat_interval: Duration::from_millis(50),
-                raft_election_timeout_min: Duration::from_millis(150),
-                raft_election_timeout_max: Duration::from_millis(300),
-            },
-        )
-        .await
-        .expect("consensus should open");
-        consensus
-            .administrator()
-            .maybe_initialize()
-            .await
-            .expect("single-node consensus should initialize");
-        let resource_store = Arc::new(
-            ResourceStore::open(
-                path.join("resources"),
-                nervix_execution::Executor::default(),
-            )
-            .expect("resource store should open"),
-        );
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let expected_leader = service.inner.consensus.local_node_id().clone();
+        let resource_store = service.inner.resource_store.clone();
+        let proposer = service.inner.consensus.clone();
         let source_v1 = path.join("resource-source-v1");
         std::fs::create_dir_all(source_v1.join("nested"))
             .expect("test resource directory should exist");
@@ -25172,23 +23636,19 @@ mod tests {
             )
             .await
             .expect("resource version should install");
-        consensus
-            .proposer()
+        proposer
             .create_resource_catalog(&resource_domain, &named("fraud_model"))
             .await
             .expect("resource catalog should persist");
-        consensus
-            .proposer()
+        proposer
             .put_resource_version(manifest_v1.resource.clone())
             .await
             .expect("resource version should persist");
-        consensus
-            .proposer()
+        proposer
             .put_resource_version(manifest_v2.resource.clone())
             .await
             .expect("resource version should persist");
-        consensus
-            .proposer()
+        proposer
             .put_resource_replica(nervix_models::ResourceNodeStatus {
                 key: nervix_models::ResourceReplicaKey::new(
                     resource_domain.clone(),
@@ -25204,8 +23664,7 @@ mod tests {
             })
             .await
             .expect("resource replica should persist");
-        consensus
-            .proposer()
+        proposer
             .put_domain(DomainState {
                 id: DomainName::parse("default").expect("valid domain"),
                 config: DomainConfig {
@@ -25221,39 +23680,6 @@ mod tests {
             })
             .await
             .expect("domain should persist");
-        for _ in 0..50 {
-            if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let interconnect = test_interconnect(&expected_leader).await;
-        let cluster = Arc::new(
-            cluster::start_cluster(cluster::ClusterSettings {
-                cluster_id: "test".to_string(),
-                node_id: test_node_name(id),
-                cluster_listen_addr,
-                cluster_advertise_addr: cluster_listen_addr.into(),
-                grpc_listen_addr: grpc_addr,
-                grpc_advertise_addr: grpc_addr.to_string(),
-                web_console_advertise_addr: format!("http://{}", grpc_addr),
-                cluster_api_listen_addr: raft_addr,
-                cluster_api_advertise_addr: cluster_api_base_url(
-                    InternalTransportMode::Http,
-                    &cluster::HostPort::from(raft_addr),
-                ),
-                interconnect_listen_addr: interconnect_addr,
-                interconnect_advertise_addr: interconnect_addr.into(),
-                interconnect_mode: "https".to_string(),
-                interconnect_public_key: "00".repeat(32),
-                bootstrap_host: None,
-                node_unavailability_timeout: Duration::from_secs(10),
-            })
-            .await
-            .expect("cluster should start"),
-        );
-        let service =
-            test_session_service(cluster, &consensus, registry, resource_store, interconnect);
         let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
@@ -25357,14 +23783,5 @@ mod tests {
         });
         assert!(requires_existing_domain(&statement));
         assert!(!requires_runtime_reconcile(&statement));
-    }
-
-    #[test]
-    fn internal_cluster_api_tls_configs_load() {
-        ensure_dev_tls_assets();
-        let _client = build_cluster_api_http_client(InternalTransportMode::Https)
-            .expect("https cluster api client should build");
-        let _server = load_cluster_api_tls_server_config()
-            .expect("https cluster api server config should build");
     }
 }

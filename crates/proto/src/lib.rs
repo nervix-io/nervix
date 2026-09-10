@@ -1,4 +1,4 @@
-//! The generated wire contract of the Nervix session and cluster APIs.
+//! The generated wire contract of the Nervix session API.
 //!
 //! Layer: edges.
 //!

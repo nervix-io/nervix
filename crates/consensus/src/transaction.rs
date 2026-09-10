@@ -4,11 +4,14 @@ use nervix_models::{
     ClusterNodeIdentity, DomainClockState, DomainName, DomainSchedule, DomainStartPoint,
     DomainState, QuiesceLevel, ResourceName, Statement, Timestamp, UserName,
 };
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionStatement {
     pub source: String,
     pub statement: Statement,
@@ -22,20 +25,35 @@ impl TransactionStatement {
 
 /// The replicated admission limits a queued statement is checked against. They travel together
 /// because every admission check applies both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct TransactionQueueLimits {
     pub max_statements: usize,
     pub max_source_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionDiagnostic {
     pub message: String,
     pub span_start: u32,
     pub span_end: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionCommandResult {
     pub success: bool,
     pub message: String,
@@ -43,7 +61,9 @@ pub struct TransactionCommandResult {
     pub already_existed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionStepResult {
     pub first_statement: usize,
     pub statement_count: usize,
@@ -63,13 +83,26 @@ pub struct TransactionCommitAdvance {
     pub completion: Option<TransactionOutcome>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionCommitProgress {
     pub next_statement: usize,
     pub results: Vec<TransactionStepResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, IntoStaticStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    IntoStaticStr,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionOutcome {
     Committed,
@@ -84,14 +117,18 @@ impl TransactionOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct FinishedTransaction {
     pub outcome: TransactionOutcome,
     pub finished_at: Timestamp,
     pub results: Vec<TransactionStepResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum TransactionState {
     Open,
     Committing(TransactionCommitProgress),
@@ -115,7 +152,9 @@ impl TransactionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ReplicatedTransaction {
     pub id: String,
     pub domain: DomainName,
@@ -418,7 +457,9 @@ impl ReplicatedTransaction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum TransactionStepEffect {
     ReplaceDomainSchedule {
         domain: DomainName,
@@ -447,12 +488,25 @@ pub enum TransactionStepEffect {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionMutationResponse {
     pub result: Result<ReplicatedTransaction, TransactionMutationError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Error,
+)]
 pub enum TransactionMutationError {
     #[error("transaction '{id}' already exists")]
     AlreadyExists { id: String },

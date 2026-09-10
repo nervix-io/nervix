@@ -2704,12 +2704,13 @@ fn GraphPanel(
                         .assured("a console session cannot render 2^64 topologies");
                 });
             }
+            current_graph_state.set(next_graph);
         } else {
+            // `Show` removes the graph branch reactively. Keep its last values alive until that
+            // unmount finishes so outgoing child computations cannot observe an impossible gap.
             topology_key_state.set(None);
-            topology_graph_state.set(None);
         }
         snapshot_observed_at.set(js_sys::Date::now());
-        current_graph_state.set(next_graph);
     });
     let freshness_interval = set_interval_with_handle(
         move || freshness_now.set(js_sys::Date::now()),
@@ -2735,12 +2736,14 @@ fn GraphPanel(
         }
     };
     let current_graph = move || {
-        visible_graph()
-            .verified("the panel only renders while the visible graph signal holds a value")
+        current_graph_state.get().verified(
+            "the mounted graph branch retains its last graph until reactive unmount completes",
+        )
     };
     let current_topology_graph = move || {
-        visible_topology_graph()
-            .verified("the panel only renders while the visible graph signal holds a value")
+        topology_graph_state.get().verified(
+            "the mounted graph branch retains its last topology until reactive unmount completes",
+        )
     };
     let active_graph_search = move || {
         let query = graph_search.get().trim().to_ascii_lowercase();

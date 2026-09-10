@@ -31,6 +31,7 @@ pub mod memory_pressure;
 pub mod metrics;
 pub(crate) mod registry;
 pub mod resource;
+pub(crate) mod resource_interconnect;
 pub mod runtime;
 pub mod runtime_ack;
 pub mod runtime_schema;

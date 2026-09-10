@@ -70,7 +70,9 @@ impl DomainClockAuthorityRevision {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum DomainClockAuthority {
     Unassigned {
         revision: DomainClockAuthorityRevision,

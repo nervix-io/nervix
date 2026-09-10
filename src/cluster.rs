@@ -2,10 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Gossip membership: the node's advertised addresses, the peer set, liveness, and the
-//!   UDP socket bound before gossip starts so the port is claimed once.
-//! - **Depends on.** `chitchat`, the vocabulary's node names, and the gossip view types
-//!   consensus reconciles membership from.
+//! - **Owns.** Gossip membership: the node's advertised addresses, peer set, liveness, and the
+//!   adapter that carries Chitchat exchanges on the interconnect management pool.
+//! - **Depends on.** `chitchat`, authenticated HTTP/2 interconnect requests, the vocabulary's node
+//!   names, and the gossip view types consensus reconciles membership from.
 //! - **Must not know.** Domains, graphs, schedules or the runtime. Membership is the whole answer
 //!   it gives.
 
@@ -20,36 +20,44 @@ use std::{
 
 use async_trait::async_trait;
 use chitchat::{
-    Chitchat, ChitchatHandle, ChitchatId, NodeState, spawn_chitchat,
-    transport::{Socket, Transport, UdpSocket},
+    Chitchat, ChitchatHandle, ChitchatId, ChitchatMessage, Deserializable as _, NodeState,
+    Serializable as _, spawn_chitchat,
+    transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
+use dashmap::DashMap;
 use meticulous::ResultExt as _;
 use nervix_consensus::{GossipNode, GossipState};
+use nervix_interconnect::{
+    InterconnectRequest, PeerTarget, PoolClass, RequestContext, RequestSubquota,
+    Transport as InterconnectTransport,
+};
 use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};
 use nervix_recovery::Discarded as _;
 use parking_lot::{Mutex, RwLock};
-use tokio::{net::lookup_host, sync::broadcast, task::JoinHandle};
+use rkyv::{Archive, Deserialize, Serialize};
+use tokio::{
+    net::lookup_host,
+    sync::{broadcast, mpsc},
+    task::JoinHandle,
+};
 use tokio_stream::StreamExt;
 use tracing::{error, info};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
-const KEY_CLUSTER_LISTEN_ADDR: &str = "cluster_listen_addr";
-const KEY_CLUSTER_ADVERTISE_ADDR: &str = "cluster_advertise_addr";
 const KEY_GRPC_LISTEN_ADDR: &str = "grpc_listen_addr";
 const KEY_GRPC_ADVERTISE_ADDR: &str = "grpc_advertise_addr";
 const KEY_WEB_CONSOLE_ADVERTISE_ADDR: &str = "web_console_advertise_addr";
-const KEY_CLUSTER_API_LISTEN_ADDR: &str = "cluster_api_listen_addr";
-const KEY_CLUSTER_API_ADVERTISE_ADDR: &str = "cluster_api_advertise_addr";
 const KEY_INTERCONNECT_LISTEN_ADDR: &str = "interconnect_listen_addr";
 const KEY_INTERCONNECT_ADVERTISE_ADDR: &str = "interconnect_advertise_addr";
-const KEY_INTERCONNECT_MODE: &str = "interconnect_mode";
-const KEY_INTERCONNECT_PUBLIC_KEY: &str = "interconnect_public_key";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
+const GOSSIP_QUEUE_CAPACITY: usize = 1024;
+/// Leaves room for the typed request fields inside the 64-KiB management-event limit.
+const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
@@ -119,6 +127,10 @@ impl HostPort {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     pub fn with_port(&self, port: u16) -> Self {
@@ -192,66 +204,256 @@ impl FromStr for HostPort {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClusterSettings {
     pub cluster_id: String,
     pub node_id: ClusterNodeName,
-    pub cluster_listen_addr: SocketAddr,
-    pub cluster_advertise_addr: HostPort,
     pub grpc_listen_addr: SocketAddr,
     pub grpc_advertise_addr: String,
     pub web_console_advertise_addr: String,
-    pub cluster_api_listen_addr: SocketAddr,
-    pub cluster_api_advertise_addr: String,
-    pub interconnect_listen_addr: SocketAddr,
     pub interconnect_advertise_addr: HostPort,
-    pub interconnect_mode: String,
-    pub interconnect_public_key: String,
     pub bootstrap_host: Option<String>,
+    pub interconnect: InterconnectTransport,
     pub node_unavailability_timeout: Duration,
 }
 
-pub async fn bind_gossip_transport(listen_addr: SocketAddr) -> io::Result<PreboundUdpTransport> {
-    let socket = UdpSocket::open(listen_addr)
-        .await
-        .map_err(io::Error::other)?;
-    Ok(PreboundUdpTransport {
-        listen_addr,
-        socket: Mutex::new(Some(socket)),
-    })
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+struct GossipExchange {
+    from: SocketAddr,
+    payload: Vec<u8>,
 }
 
-pub struct PreboundUdpTransport {
+impl InterconnectRequest for GossipExchange {
+    type Response = Result<(), String>;
+
+    const NAME: &'static str = "gossip_exchange";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
+    const TIMEOUT: Duration = Duration::from_secs(1);
+    const REQUIRES_LIVE_TARGET: bool = false;
+}
+
+#[derive(Clone)]
+struct InterconnectGossipTransport {
+    inner: Arc<InterconnectGossipTransportInner>,
+}
+
+struct InterconnectGossipTransportInner {
     listen_addr: SocketAddr,
-    socket: Mutex<Option<UdpSocket>>,
+    advertise_addr: SocketAddr,
+    interconnect: InterconnectTransport,
+    routes: DashMap<SocketAddr, GossipRoute>,
+    incoming_tx: mpsc::Sender<GossipDatagram>,
+    incoming_rx: Mutex<Option<mpsc::Receiver<GossipDatagram>>>,
+}
+
+struct GossipDatagram {
+    from: SocketAddr,
+    payload: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct GossipRoute {
+    node_id: Option<ClusterNodeName>,
+    target: PeerTarget,
+}
+
+impl InterconnectGossipTransport {
+    fn build(
+        interconnect: InterconnectTransport,
+        advertise_addr: SocketAddr,
+        seed_targets: Vec<(SocketAddr, PeerTarget)>,
+    ) -> io::Result<Self> {
+        let (incoming_tx, incoming_rx) = mpsc::channel(GOSSIP_QUEUE_CAPACITY);
+        let routes = DashMap::new();
+        for (addr, target) in seed_targets {
+            routes.insert(
+                addr,
+                GossipRoute {
+                    node_id: None,
+                    target,
+                },
+            );
+        }
+        let transport = Self {
+            inner: Arc::new(InterconnectGossipTransportInner {
+                listen_addr: interconnect.local_addr(),
+                advertise_addr,
+                interconnect: interconnect.clone(),
+                routes,
+                incoming_tx,
+                incoming_rx: Mutex::new(Some(incoming_rx)),
+            }),
+        };
+        let handler_transport = transport.clone();
+        interconnect
+            .register_handler::<GossipExchange, _, _>(move |context, request| {
+                let transport = handler_transport.clone();
+                async move { transport.receive(context, request).await }
+            })
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(transport)
+    }
+
+    async fn receive(
+        &self,
+        context: RequestContext,
+        request: GossipExchange,
+    ) -> Result<(), String> {
+        if request.payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
+            return Err(format!(
+                "gossip message exceeds {MAX_GOSSIP_MESSAGE_BYTES} bytes"
+            ));
+        }
+        let target = PeerTarget::new(request.from, context.peer_advertised_host().to_string());
+        self.inner
+            .interconnect
+            .register_outbound_target(context.peer_node_id().clone(), target.clone())
+            .map_err(|error| error.to_string())?;
+        self.inner.routes.insert(
+            request.from,
+            GossipRoute {
+                node_id: Some(context.peer_node_id().clone()),
+                target,
+            },
+        );
+        self.inner
+            .incoming_tx
+            .send(GossipDatagram {
+                from: request.from,
+                payload: request.payload,
+            })
+            .await
+            .map_err(|_| "gossip receiver has shut down".to_string())
+    }
+
+    fn refresh_routes(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
+        for (id, state) in nodes {
+            let Ok(node_id) = ClusterNodeName::parse(&id.node_id) else {
+                continue;
+            };
+            if &node_id == self.inner.interconnect.node_id() {
+                continue;
+            }
+            let Some(endpoint) = state.get(KEY_INTERCONNECT_ADVERTISE_ADDR) else {
+                continue;
+            };
+            let Ok(endpoint) = endpoint.parse::<HostPort>() else {
+                continue;
+            };
+            if endpoint.port() != id.gossip_advertise_addr.port() {
+                continue;
+            }
+            let target = PeerTarget::new(id.gossip_advertise_addr, endpoint.host().to_string());
+            if self
+                .inner
+                .interconnect
+                .register_outbound_target(node_id.clone(), target.clone())
+                .is_ok()
+            {
+                self.inner.routes.insert(
+                    id.gossip_advertise_addr,
+                    GossipRoute {
+                        node_id: Some(node_id),
+                        target,
+                    },
+                );
+            }
+        }
+    }
+}
+
+struct InterconnectGossipSocket {
+    transport: InterconnectGossipTransport,
+    incoming: mpsc::Receiver<GossipDatagram>,
 }
 
 #[async_trait]
-impl Transport for PreboundUdpTransport {
-    async fn open(&self, listen_addr: SocketAddr) -> anyhow::Result<Box<dyn Socket>> {
-        if listen_addr != self.listen_addr {
+impl GossipTransport for InterconnectGossipTransport {
+    async fn open(&self, listen_addr: SocketAddr) -> anyhow::Result<Box<dyn GossipSocket>> {
+        if listen_addr != self.inner.listen_addr {
             anyhow::bail!(
-                "prebound UDP transport was opened for {listen_addr}, expected {}",
-                self.listen_addr
+                "interconnect gossip transport was opened for {listen_addr}, expected {}",
+                self.inner.listen_addr
             );
         }
-        let socket = match self.socket.lock().take() {
-            Some(socket) => socket,
-            None => anyhow::bail!("prebound UDP transport for {listen_addr} was already opened"),
+        let incoming =
+            self.inner.incoming_rx.lock().take().ok_or_else(|| {
+                anyhow::anyhow!("interconnect gossip transport was already opened")
+            })?;
+        Ok(Box::new(InterconnectGossipSocket {
+            transport: self.clone(),
+            incoming,
+        }))
+    }
+}
+
+#[async_trait]
+impl GossipSocket for InterconnectGossipSocket {
+    async fn send(&mut self, to: SocketAddr, message: ChitchatMessage) -> anyhow::Result<()> {
+        let payload = message.serialize_to_vec();
+        if payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
+            anyhow::bail!("gossip message exceeds {MAX_GOSSIP_MESSAGE_BYTES} bytes");
+        }
+        let route = match self.transport.inner.routes.get(&to) {
+            Some(route) => route.clone(),
+            None => GossipRoute {
+                node_id: None,
+                target: PeerTarget::new(to, to.ip().to_string()),
+            },
         };
-        Ok(Box::new(socket))
+        let node_id = match route.node_id {
+            Some(node_id) => node_id,
+            None => {
+                let node_id = self
+                    .transport
+                    .inner
+                    .interconnect
+                    .bootstrap_target(route.target.clone())
+                    .await?;
+                self.transport.inner.routes.insert(
+                    to,
+                    GossipRoute {
+                        node_id: Some(node_id.clone()),
+                        target: route.target,
+                    },
+                );
+                node_id
+            }
+        };
+        let response = self
+            .transport
+            .inner
+            .interconnect
+            .request(
+                &node_id,
+                GossipExchange {
+                    from: self.transport.inner.advertise_addr,
+                    payload,
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        response.map_err(anyhow::Error::msg)?;
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> anyhow::Result<(SocketAddr, ChitchatMessage)> {
+        let GossipDatagram { from, payload } = self
+            .incoming
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("interconnect gossip receiver shut down"))?;
+        let mut remaining = payload.as_slice();
+        let message = ChitchatMessage::deserialize(&mut remaining)?;
+        if !remaining.is_empty() {
+            anyhow::bail!("gossip message has trailing bytes");
+        }
+        Ok((from, message))
     }
 }
 
 pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandle> {
-    let transport = bind_gossip_transport(settings.cluster_listen_addr).await?;
-    start_cluster_with_transport(settings, &transport).await
-}
-
-pub async fn start_cluster_with_transport(
-    settings: ClusterSettings,
-    transport: &dyn Transport,
-) -> io::Result<ClusterHandle> {
     let node_id = settings.node_id.clone();
     // Gossip tells one run of a node from the next by this generation, and a peer ignores any
     // key-value whose version is below what it already holds for the same generation. A restart
@@ -266,22 +468,26 @@ pub async fn start_cluster_with_transport(
             .as_nanos(),
     )
     .assured("nanoseconds since the epoch stay within a u64 until the year 2554");
-    let gossip_advertise_addr = settings.cluster_advertise_addr.resolve_one().await?;
+    let gossip_advertise_addr = settings.interconnect_advertise_addr.resolve_one().await?;
+    let mut seed_targets = Vec::new();
     let seed_nodes = match settings.bootstrap_host.as_deref() {
-        Some(seed) => match seed.parse::<HostPort>() {
-            Ok(seed) => seed
-                .resolve_all()
-                .await?
-                .into_iter()
-                .map(|addr| addr.to_string())
-                .collect(),
-            // A seed the address grammar does not accept is handed to gossip verbatim: the
-            // operator configured it, gossip is the component that resolves it, and rejecting it
-            // here would drop the only seed the node was given.
-            Err(_) => vec![seed.to_string()],
-        },
+        Some(seed) => {
+            let seed = seed
+                .parse::<HostPort>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let addresses = seed.resolve_all().await?;
+            for addr in &addresses {
+                seed_targets.push((*addr, PeerTarget::new(*addr, seed.host().to_string())));
+            }
+            addresses.into_iter().map(|addr| addr.to_string()).collect()
+        }
         None => Vec::new(),
     };
+    let transport = InterconnectGossipTransport::build(
+        settings.interconnect.clone(),
+        gossip_advertise_addr,
+        seed_targets,
+    )?;
     let chitchat_id = ChitchatId {
         node_id: node_id.to_string(),
         generation_id,
@@ -292,7 +498,7 @@ pub async fn start_cluster_with_transport(
         chitchat_id,
         cluster_id: settings.cluster_id.clone(),
         gossip_interval: Duration::from_millis(500),
-        listen_addr: settings.cluster_listen_addr,
+        listen_addr: settings.interconnect.local_addr(),
         seed_nodes,
         failure_detector_config: chitchat::FailureDetectorConfig::default(),
         marked_for_deletion_grace_period: Duration::from_secs(60),
@@ -303,14 +509,6 @@ pub async fn start_cluster_with_transport(
     let initial_key_values = vec![
         (KEY_CLUSTER_ID.to_string(), settings.cluster_id.clone()),
         (KEY_NODE_ID.to_string(), node_id.to_string()),
-        (
-            KEY_CLUSTER_LISTEN_ADDR.to_string(),
-            settings.cluster_listen_addr.to_string(),
-        ),
-        (
-            KEY_CLUSTER_ADVERTISE_ADDR.to_string(),
-            settings.cluster_advertise_addr.to_string(),
-        ),
         (
             KEY_GRPC_LISTEN_ADDR.to_string(),
             settings.grpc_listen_addr.to_string(),
@@ -324,28 +522,12 @@ pub async fn start_cluster_with_transport(
             settings.web_console_advertise_addr.clone(),
         ),
         (
-            KEY_CLUSTER_API_LISTEN_ADDR.to_string(),
-            settings.cluster_api_listen_addr.to_string(),
-        ),
-        (
-            KEY_CLUSTER_API_ADVERTISE_ADDR.to_string(),
-            settings.cluster_api_advertise_addr.clone(),
-        ),
-        (
             KEY_INTERCONNECT_LISTEN_ADDR.to_string(),
-            settings.interconnect_listen_addr.to_string(),
+            settings.interconnect.local_addr().to_string(),
         ),
         (
             KEY_INTERCONNECT_ADVERTISE_ADDR.to_string(),
             settings.interconnect_advertise_addr.to_string(),
-        ),
-        (
-            KEY_INTERCONNECT_MODE.to_string(),
-            settings.interconnect_mode.clone(),
-        ),
-        (
-            KEY_INTERCONNECT_PUBLIC_KEY.to_string(),
-            settings.interconnect_public_key.clone(),
         ),
         (
             KEY_BOOTSTRAP_HOST.to_string(),
@@ -353,7 +535,7 @@ pub async fn start_cluster_with_transport(
         ),
     ];
 
-    let chitchat = spawn_chitchat(config, initial_key_values, transport)
+    let chitchat = spawn_chitchat(config, initial_key_values, &transport)
         .await
         .map_err(|err| io::Error::other(format!("failed to start chitchat: {err}")))?;
 
@@ -361,9 +543,11 @@ pub async fn start_cluster_with_transport(
     let chitchat_state = chitchat.chitchat();
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
     let event_tx = events.clone();
+    let route_transport = transport.clone();
     let membership_task = tokio::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
             tokio::task::consume_budget().await;
+            route_transport.refresh_routes(&nodes);
             let report = membership_report(&nodes);
             info!(members = ?report, "cluster membership updated");
             event_tx.offer(format!("cluster membership updated: {}", report.join(", ")));
@@ -744,15 +928,7 @@ fn join_or_none(items: &[String]) -> String {
 fn render_node_state_lines(node_id: &ChitchatId, state: &NodeState) -> Vec<String> {
     vec![
         format!("- node_id: {}", node_id.node_id),
-        format!("  cluster_addr: {}", node_id.gossip_advertise_addr),
-        format!(
-            "  cluster_listen_addr: {}",
-            state.get(KEY_CLUSTER_LISTEN_ADDR).unwrap_or("<unknown>")
-        ),
-        format!(
-            "  cluster_advertise_addr: {}",
-            state.get(KEY_CLUSTER_ADVERTISE_ADDR).unwrap_or("<unknown>")
-        ),
+        format!("  gossip_addr: {}", node_id.gossip_advertise_addr),
         format!(
             "  grpc_listen_addr: {}",
             state.get(KEY_GRPC_LISTEN_ADDR).unwrap_or("<unknown>")
@@ -768,18 +944,6 @@ fn render_node_state_lines(node_id: &ChitchatId, state: &NodeState) -> Vec<Strin
                 .unwrap_or("<unknown>")
         ),
         format!(
-            "  cluster_api_listen_addr: {}",
-            state
-                .get(KEY_CLUSTER_API_LISTEN_ADDR)
-                .unwrap_or("<unknown>")
-        ),
-        format!(
-            "  cluster_api_advertise_addr: {}",
-            state
-                .get(KEY_CLUSTER_API_ADVERTISE_ADDR)
-                .unwrap_or("<unknown>")
-        ),
-        format!(
             "  interconnect_listen_addr: {}",
             state
                 .get(KEY_INTERCONNECT_LISTEN_ADDR)
@@ -789,16 +953,6 @@ fn render_node_state_lines(node_id: &ChitchatId, state: &NodeState) -> Vec<Strin
             "  interconnect_advertise_addr: {}",
             state
                 .get(KEY_INTERCONNECT_ADVERTISE_ADDR)
-                .unwrap_or("<unknown>")
-        ),
-        format!(
-            "  interconnect_mode: {}",
-            state.get(KEY_INTERCONNECT_MODE).unwrap_or("<unknown>")
-        ),
-        format!(
-            "  interconnect_public_key: {}",
-            state
-                .get(KEY_INTERCONNECT_PUBLIC_KEY)
                 .unwrap_or("<unknown>")
         ),
         format!(
@@ -828,7 +982,6 @@ fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
 /// round rather than one to report.
 fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode> {
     let identity = cluster_node_identity(node_id)?;
-    let cluster_api_advertise_addr = state.get(KEY_CLUSTER_API_ADVERTISE_ADDR)?.to_string();
     let grpc_advertise_addr = state.get(KEY_GRPC_ADVERTISE_ADDR).unwrap_or("").to_string();
     let web_console_advertise_addr = state
         .get(KEY_WEB_CONSOLE_ADVERTISE_ADDR)
@@ -838,39 +991,18 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
         .get(KEY_INTERCONNECT_ADVERTISE_ADDR)
         .unwrap_or("")
         .to_string();
-    let interconnect_mode = state
-        .get(KEY_INTERCONNECT_MODE)
-        .unwrap_or("http")
-        .to_string();
-    let interconnect_public_key = state
-        .get(KEY_INTERCONNECT_PUBLIC_KEY)
-        .unwrap_or("")
-        .to_string();
     Some(GossipNode {
         node_id: identity.node_id().clone(),
         incarnation: identity.incarnation(),
-        cluster_api_advertise_addr,
         grpc_advertise_addr,
         web_console_advertise_addr,
         interconnect_advertise_addr,
-        interconnect_mode,
-        interconnect_public_key,
     })
 }
 
 pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
     let port = grpc_addr.port().checked_add(1)?;
     Some(SocketAddr::new(grpc_addr.ip(), port))
-}
-
-pub fn derive_interconnect_host_port(cluster_api_addr: &HostPort) -> Option<HostPort> {
-    let port = cluster_api_addr.port().checked_add(1)?;
-    Some(cluster_api_addr.with_port(port))
-}
-
-pub fn derive_interconnect_addr(cluster_api_addr: SocketAddr) -> Option<SocketAddr> {
-    let port = cluster_api_addr.port().checked_add(1)?;
-    Some(SocketAddr::new(cluster_api_addr.ip(), port))
 }
 
 #[cfg(test)]
@@ -892,15 +1024,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_interconnect_addr_increments_raft_port() {
-        let raft_addr: SocketAddr = "127.0.0.1:47393".parse().expect("valid socket addr");
-        let interconnect_addr =
-            derive_interconnect_addr(raft_addr).expect("must derive interconnect addr");
-        let expected: SocketAddr = "127.0.0.1:47394".parse().unwrap();
-        assert_eq!(interconnect_addr, expected);
-    }
-
-    #[test]
     fn host_port_parses_hostname() {
         let parsed = "nervix-0.nervix-headless:47392"
             .parse::<HostPort>()
@@ -915,14 +1038,5 @@ mod tests {
             .expect("IPv6 socket address should parse");
         assert_eq!(parsed.to_string(), "[::1]:47392");
         assert_eq!(parsed.url_authority(), "[::1]:47392");
-    }
-
-    #[test]
-    fn derive_interconnect_host_port_preserves_host() {
-        let host_port = "nervix-0.nervix-headless:47393"
-            .parse::<HostPort>()
-            .expect("host:port should parse");
-        let derived = derive_interconnect_host_port(&host_port).expect("must derive");
-        assert_eq!(derived.to_string(), "nervix-0.nervix-headless:47394");
     }
 }

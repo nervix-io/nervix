@@ -15,11 +15,12 @@ error-stack = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }
+nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
 openraft = { workspace = true }
 parking_lot = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+rkyv = { workspace = true }
 serde = { workspace = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }

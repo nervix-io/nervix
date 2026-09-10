@@ -1,10 +1,24 @@
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedVec;
 use strum::{AsRefStr, EnumString, IntoStaticStr};
 
 use crate::{ClusterNodeName, DomainName, ResourceName, Timestamp};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct ResourceId {
     pub domain: DomainName,
     pub identifier: ResourceName,
@@ -21,7 +35,19 @@ impl ResourceId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct ResourceVersion {
     pub id: ResourceId,
     pub root_checksum: String,
@@ -32,7 +58,20 @@ pub struct ResourceVersion {
     pub created_by_node: ClusterNodeName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct ResourceVersionKey {
     pub domain: DomainName,
     pub identifier: ResourceName,
@@ -64,6 +103,9 @@ impl ResourceVersionKey {
     Hash,
     Serialize,
     Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
     AsRefStr,
     EnumString,
     IntoStaticStr,
@@ -75,7 +117,20 @@ pub enum ResourceNodeState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct ResourceReplicaKey {
     pub domain: DomainName,
     pub identifier: ResourceName,
@@ -103,7 +158,19 @@ impl ResourceReplicaKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct ResourceNodeStatus {
     pub key: ResourceReplicaKey,
     pub state: ResourceNodeState,

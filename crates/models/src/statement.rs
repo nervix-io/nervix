@@ -24,7 +24,9 @@ use crate::{
     UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum Statement {
     CreateDomain(CreateStatement<CreateDomain>),
     AlterDomain(AlterDomain),
@@ -137,7 +139,9 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateStatement<T> {
     #[serde(default)]
     pub if_not_exists: bool,
@@ -307,66 +311,103 @@ impl ModelKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowCreate {
     pub kind: ModelKind,
     pub name: ModelName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowClusterStatus;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowTransactions;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowUdfs;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowPlacements;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ShowRelayMaterializedState {
     pub relay: RelayName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateDomain {
     pub id: DomainName,
     pub config: DomainConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterDomain {
     pub policy: PlacementPolicy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateUser {
     pub name: UserName,
     pub password: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateResource {
     pub identifier: ResourceName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct UploadResource {
     pub identifier: ResourceName,
     pub source_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct StartDomain {
     pub start: DomainStartPoint,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct StopDomain;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DomainConfig {
     pub pace: DomainPace,
     pub period: String,
@@ -403,7 +444,19 @@ pub enum PlacementPolicy {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+    EnumString,
+    IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum DomainPace {
@@ -411,7 +464,18 @@ pub enum DomainPace {
     Unpaced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum DomainStartPoint {
     #[default]
     Resume,
@@ -438,7 +502,18 @@ impl DomainStartPoint {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumString,
+    IntoStaticStr,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum DomainStatus {
@@ -457,7 +532,9 @@ pub struct DomainTick {
     pub period: crate::DomainClockPeriod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DomainState {
     pub id: DomainName,
     pub config: DomainConfig,
@@ -467,34 +544,55 @@ pub struct DomainState {
     pub clock: Option<DomainClockState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DropModel {
     pub kind: ModelKind,
     pub name: ModelName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DropNode {
     pub node_id: ClusterNodeName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CordonNode {
     pub node_id: ClusterNodeName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct UncordonNode {
     pub node_id: ClusterNodeName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DrainNode {
     pub node_id: ClusterNodeName,
 }
 
 /// One kind-qualified runtime node named by a relocation selection or `FOR` override.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct RelocationMember {
     pub kind: ModelKind,
     pub name: ModelName,
@@ -512,7 +610,9 @@ impl RelocationMember {
 }
 
 /// How a relocation selects the runtime nodes it moves.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum RelocationSelection {
     /// The listed runtime nodes, which need not be connected.
     List(Vec<RelocationMember>),
@@ -546,7 +646,19 @@ impl RelocationSelection {
 
 /// Whether a hard group's soft preferences shape the relocation plan.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, AsRefStr, EnumProperty,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumProperty,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum RelocationPreferenceStrategy {
@@ -570,14 +682,18 @@ impl RelocationPreferenceStrategy {
 
 /// A `FOR <kind> <name> FOLLOW|IGNORE PREFERENCES` clause, which sets the strategy of the named
 /// runtime node's whole hard group.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct RelocationPreferenceOverride {
     pub member: RelocationMember,
     pub strategy: RelocationPreferenceStrategy,
 }
 
 /// The relocation both `RELOCATE` and `DESCRIBE RELOCATION` describe.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct Relocation {
     pub selection: RelocationSelection,
     pub destination: ClusterNodeName,
@@ -644,87 +760,130 @@ pub struct DeleteSubscription {
     pub name: SubscriptionName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeRelay {
     pub relay: RelayName,
     pub bindings: Vec<SubscriptionBinding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct DescribeDomain;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeIngestor {
     pub ingestor: IngestorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeResource {
     pub identifier: ResourceName,
     pub version: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeLookup {
     pub name: LookupName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeJunction {
     pub name: JunctionName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeDeduplicator {
     pub name: DeduplicatorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeReingestor {
     pub name: ReingestorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeCorrelator {
     pub name: CorrelatorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeEndpoint {
     pub name: EndpointName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeReorderer {
     pub name: ReordererName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeEmitter {
     pub name: EmitterName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeWindowProcessor {
     pub name: WindowProcessorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeWasmProcessor {
     pub name: WasmProcessorName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribeUdf {
     pub name: UdfName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DescribePlacement {
     pub name: PlacementName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct LookupQuery {
     pub name: LookupName,
     pub key: SubscriptionLiteral,
@@ -758,13 +917,17 @@ pub struct CreatePlacement {
     pub rank: Option<NonZeroU64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterPlacement {
     pub placement: PlacementName,
     pub operations: Vec<AlterPlacementOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterPlacementOperation {
     SetPolicy {
         policy: PlacementPolicy,
@@ -1477,13 +1640,17 @@ impl CreateEmitter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterEmitter {
     pub emitter: EmitterName,
     pub operations: Vec<AlterEmitterOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterEmitterOperation {
     AddFrom {
         relay: RelayName,
@@ -1563,13 +1730,17 @@ pub struct CreateGenerator {
     pub output_routes: ProcessorOutputs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterGenerator {
     pub generator: GeneratorName,
     pub operations: Vec<AlterGeneratorOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterGeneratorOperation {
     SetMaterializedState { relay: RelayName },
     SetEach { each: String },
@@ -2465,13 +2636,17 @@ impl CreateIngestor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterIngestor {
     pub ingestor: IngestorName,
     pub operations: Vec<AlterIngestorOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterIngestorOperation {
     SetSource { source: IngestSource },
     SetQuiesce { quiesce: IngestQuiesceMode },
@@ -2701,7 +2876,9 @@ pub struct CreateReingestor {
     pub filter_where: Option<crate::Expression>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterReingestor {
     pub reingestor: ReingestorName,
     pub operations: Vec<AlterProcessorOperation>,
@@ -3819,13 +3996,17 @@ impl CreateRelay {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterRelay {
     pub relay: RelayName,
     pub operations: Vec<AlterRelayOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterRelayOperation {
     SetCapacity { capacity: NonZeroUsize },
     SetSchema { schema: SchemaName },
@@ -3914,7 +4095,9 @@ impl FromIterator<DomainSchedule> for ClusterSchedule {
 /// identity so callers resolve a node by kind and identifier without scanning the sequence.
 pub type ScheduledNodes = IndexMap<NodeRef, ScheduledNode>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct DomainSchedule {
     pub domain: DomainName,
     pub nodes: ScheduledNodes,
@@ -3974,13 +4157,17 @@ pub struct ScheduledModel<'a, M> {
     pub node: &'a ScheduledNode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct PlacementGroupSchedule {
     pub members: Vec<NodeRef>,
     pub primary_node: Option<ClusterNodeName>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct KafkaPartitionSchedule {
     pub observed_partitions: Vec<i32>,
     pub rebalance_epoch: u64,
@@ -4063,7 +4250,9 @@ pub struct OwnershipStateReset {
     pub cause: OwnershipStateResetCause,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct OwnershipTransition {
     pub id: String,
     pub source: ClusterNodeName,
@@ -4097,7 +4286,9 @@ impl KafkaPartitionSchedule {
 /// The kind and the identifier are read from the configuration when the entry is built, so an
 /// entry can never describe itself as a node its configuration is not. That is why every reader
 /// resolving an entry by kind receives the shape that kind names, with nothing left to reject.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 #[non_exhaustive]
 pub struct ScheduledNode {
     pub identifier: ModelName,
@@ -4313,7 +4504,9 @@ pub struct CreateJunction {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterJunction {
     pub junction: JunctionName,
     pub operations: Vec<AlterProcessorOperation>,
@@ -4376,13 +4569,17 @@ pub struct CreateDeduplicator {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterDeduplicator {
     pub deduplicator: DeduplicatorName,
     pub operations: Vec<AlterDeduplicatorOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterDeduplicatorOperation {
     Processor(Box<AlterProcessorOperation>),
     SetDeduplicateOn { expressions: Vec<crate::Expression> },
@@ -4513,13 +4710,17 @@ pub struct CreateReorderer {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct AlterReorderer {
     pub reorderer: ReordererName,
     pub operations: Vec<AlterReordererOperation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterReordererOperation {
     Processor(Box<AlterProcessorOperation>),
     SetOrderBy { expressions: Vec<crate::Expression> },
@@ -4576,7 +4777,9 @@ impl CreateReorderer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum AlterProcessorOperation {
     AddFrom {
         relay: RelayName,

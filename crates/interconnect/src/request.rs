@@ -1,7 +1,11 @@
-//! Typed request and response exchange over authenticated interconnect connections.
+//! Typed request and response exchange over authenticated interconnect streams.
 //!
-//! This module owns correlation, deadlines, handler dispatch, response matching, and cancellation
-//! when the transport shuts down or the target leaves the live cluster membership.
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Deadlines, handler dispatch, response validation, and membership cancellation for
+//!   typed internal requests.
+//! - **Depends on.** The authenticated HTTP/2 transport and rkyv payload vocabulary.
+//! - **Must not know.** The runtime meaning of a request or response.
 
 use std::{
     collections::BTreeSet,
@@ -9,46 +13,54 @@ use std::{
     hash::RandomState,
     marker::PhantomData,
     pin::Pin,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
+use meticulous::ResultExt as _;
+use nervix_execution::{BudgetedBuffer, Executor, Reservation};
 use nervix_models::ClusterNodeName;
-use nervix_recovery::NoReceiver as _;
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{
+    Archive, Deserialize, Serialize,
+    api::high::{HighDeserializer, HighSerializer},
+    rancor::Error as RkyvError,
+    ser::{allocator::ArenaHandle, writer::IoWriter},
+};
 use thiserror::Error;
 use tokio::{
-    sync::{Notify, oneshot},
-    time::{Instant, sleep_until},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore},
+    time::timeout,
 };
-use tracing::debug;
 use triomphe::Arc;
 
 use super::{
     ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
-    ConfirmOwnershipHandoffStateRequest, ConnectionHandle, ControlEnvelope,
-    DescribeIngestorRequest, DiscardOwnershipHandoffStateRequest,
-    ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, OwnershipHandoffCheckpoint,
-    OwnershipHandoffResponse, PrepareForcedOwnershipRecoveryRequest,
-    PrepareOwnershipHandoffStateRequest, Transport, TransportInner, unregister_connected_peer,
+    ConfirmOwnershipHandoffStateRequest, ControlEnvelope, DescribeIngestorRequest,
+    DiscardOwnershipHandoffStateRequest, ForcedOwnershipRecoveryPreparation,
+    IngestorDescribeEnvelope, OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
+    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest, Transport,
+    TransportError, wire,
 };
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestEnvelope {
-    correlation_id: u64,
-    request: String,
-    payload: Vec<u8>,
+    pub(crate) class: PoolClass,
+    pub(crate) request: String,
+    pub(crate) payload: Vec<u8>,
 }
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseEnvelope {
-    correlation_id: u64,
-    request: String,
-    result: Result<Vec<u8>, RemoteRequestFailure>,
+    pub(crate) class: PoolClass,
+    pub(crate) request: String,
+    pub(crate) result: Result<Vec<u8>, RemoteRequestFailure>,
 }
 
 #[doc(hidden)]
@@ -60,47 +72,123 @@ pub enum RemoteRequestFailure {
     InvalidPayload(String),
     #[error("response payload could not be encoded: {0}")]
     ResponseEncode(String),
+    #[error("request used {actual:?} but its registered handler requires {expected:?}")]
+    WrongPoolClass {
+        expected: PoolClass,
+        actual: PoolClass,
+    },
+    #[error("request payload contains {actual} bytes, exceeding the {limit}-byte class limit")]
+    PayloadTooLarge { actual: u64, limit: u64 },
+    #[error("the {subquota:?} request subquota is full")]
+    AdmissionFull { subquota: RequestSubquota },
 }
 
 /// The authenticated peer that submitted a request to a registered handler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestContext {
     peer_node_id: ClusterNodeName,
+    peer_advertised_host: String,
 }
 
 impl RequestContext {
     pub fn peer_node_id(&self) -> &ClusterNodeName {
         &self.peer_node_id
     }
+
+    /// The certificate-validated host named by the peer's connection hello.
+    pub fn peer_advertised_host(&self) -> &str {
+        &self.peer_advertised_host
+    }
+}
+
+/// A value that the transport can validate and encode as bounded rkyv.
+#[doc(hidden)]
+pub trait RkyvMessage: Archive + Sized + Send + 'static {
+    fn encode_rkyv(
+        self,
+        executor: Executor,
+        class: PoolClass,
+        limit: u64,
+    ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
+
+    fn decode_rkyv(
+        executor: Executor,
+        class: PoolClass,
+        payload: Vec<u8>,
+    ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
+}
+
+impl<T> RkyvMessage for T
+where
+    T: Archive
+        + Sized
+        + Send
+        + 'static
+        + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + Deserialize<T, HighDeserializer<RkyvError>>,
+{
+    async fn encode_rkyv(
+        self,
+        executor: Executor,
+        class: PoolClass,
+        limit: u64,
+    ) -> Result<(Vec<u8>, Reservation), Report<TransportError>> {
+        wire::encode_rkyv_payload(
+            &executor,
+            class.memory_class(),
+            class.cpu_class(),
+            limit,
+            self,
+        )
+        .await
+        .map(wire::EncodedPayload::into_parts)
+        .map_err(Report::new)
+    }
+
+    async fn decode_rkyv(
+        executor: Executor,
+        class: PoolClass,
+        payload: Vec<u8>,
+    ) -> Result<(Self, Reservation), Report<TransportError>> {
+        wire::decode_rkyv_payload::<Self>(
+            &executor,
+            class.memory_class(),
+            class.cpu_class(),
+            payload,
+        )
+        .await
+        .map(wire::Decoded::into_parts)
+        .map_err(Report::new)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RequestSubquota {
+    Shared,
+    Discovery,
 }
 
 /// One typed request message and the response type its handler produces.
-pub trait InterconnectRequest: Sized + Send + 'static {
-    type Response: Send + 'static;
+pub trait InterconnectRequest: RkyvMessage {
+    type Response: RkyvMessage;
 
     const NAME: &'static str;
+    const CLASS: PoolClass = PoolClass::Commands;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
     const TIMEOUT: Duration;
 
-    #[doc(hidden)]
-    fn encode_request(&self) -> Result<Vec<u8>, Report<RequestError>>;
-
-    #[doc(hidden)]
-    fn decode_request(payload: &[u8]) -> Result<Self, Report<RequestError>>;
-
-    #[doc(hidden)]
-    fn encode_response(response: &Self::Response) -> Result<Vec<u8>, Report<RequestError>>;
-
-    #[doc(hidden)]
-    fn decode_response(payload: &[u8]) -> Result<Self::Response, Report<RequestError>>;
+    /// Discovery requests are permitted before the first live-membership view exists.
+    const REQUIRES_LIVE_TARGET: bool = true;
 }
 
-/// Why a typed interconnect request did not produce its declared response.
 #[derive(Debug, Error)]
 pub enum RequestError {
-    #[error("interconnect request correlation id space is exhausted")]
-    CorrelationIdExhausted,
-    #[error("interconnect request '{request}' has a deadline outside the supported time range")]
-    DeadlineOverflow { request: &'static str },
+    #[error("the {subquota:?} request subquota is full for '{request}'")]
+    AdmissionFull {
+        request: &'static str,
+        subquota: RequestSubquota,
+    },
     #[error("failed to encode interconnect request '{request}'")]
     Encode { request: &'static str },
     #[error("failed to decode the response for interconnect request '{request}'")]
@@ -127,8 +215,14 @@ pub enum RequestError {
         request: &'static str,
         failure: RemoteRequestFailure,
     },
-    #[error("response channel for request '{request}' on node '{node}' closed")]
-    ResponseChannelClosed {
+    #[error("transport failed request '{request}' to node '{node}': {reason}")]
+    Transport {
+        node: ClusterNodeName,
+        request: &'static str,
+        reason: String,
+    },
+    #[error("node '{node}' returned the wrong response for request '{request}'")]
+    ResponseMismatch {
         node: ClusterNodeName,
         request: &'static str,
     },
@@ -138,51 +232,101 @@ pub enum RequestError {
 pub enum HandlerRegistrationError {
     #[error("a handler for interconnect request '{request}' is already registered")]
     AlreadyRegistered { request: &'static str },
+    #[error("discovery request '{request}' must use the management pool")]
+    DiscoveryRequiresManagement { request: &'static str },
 }
 
-pub(super) struct RequestState {
-    next_correlation_id: AtomicU64,
-    pending: DashMap<u64, PendingRequest, RandomState>,
-    handlers: DashMap<&'static str, Arc<Box<dyn ErasedRequestHandler>>, RandomState>,
-    live_nodes: DashMap<ClusterNodeName, (), RandomState>,
-    live_nodes_observed: AtomicBool,
-    connection_changed: Notify,
+pub(crate) struct HandledResponse {
+    envelope: ResponseEnvelope,
+    payload_reservation: Option<Reservation>,
 }
 
-impl Default for RequestState {
-    fn default() -> Self {
-        Self {
-            next_correlation_id: AtomicU64::new(1),
-            pending: DashMap::default(),
-            handlers: DashMap::default(),
-            live_nodes: DashMap::default(),
-            live_nodes_observed: AtomicBool::new(false),
-            connection_changed: Notify::new(),
-        }
+impl HandledResponse {
+    pub(crate) fn into_parts(self) -> (ResponseEnvelope, Option<Reservation>) {
+        (self.envelope, self.payload_reservation)
     }
 }
 
-struct PendingRequest {
-    node: ClusterNodeName,
-    request: &'static str,
-    response: oneshot::Sender<PendingResponse>,
+pub(crate) struct RequestState {
+    handlers: DashMap<&'static str, Arc<Box<dyn ErasedRequestHandler>>, RandomState>,
+    live_nodes: DashMap<ClusterNodeName, (), RandomState>,
+    live_nodes_observed: AtomicBool,
+    membership_changed: Notify,
+    outbound_requests: StdArc<Semaphore>,
+    outbound_discovery: StdArc<Semaphore>,
+    inbound_requests: StdArc<Semaphore>,
+    inbound_discovery: StdArc<Semaphore>,
 }
 
-enum PendingResponse {
-    Response(Result<Vec<u8>, RemoteRequestFailure>),
-    ShuttingDown,
-    TargetLeft,
+struct RequestAdmission {
+    _request: Option<OwnedSemaphorePermit>,
+    _subquota: Option<OwnedSemaphorePermit>,
 }
 
-type HandlerFuture =
-    Pin<Box<dyn Future<Output = Result<Vec<u8>, RemoteRequestFailure>> + Send + 'static>>;
+impl RequestState {
+    pub(crate) fn new(capacity: usize) -> Self {
+        let discovery_capacity = capacity.clamp(1, 8);
+        Self {
+            handlers: DashMap::default(),
+            live_nodes: DashMap::default(),
+            live_nodes_observed: AtomicBool::new(false),
+            membership_changed: Notify::new(),
+            outbound_requests: StdArc::new(Semaphore::new(capacity)),
+            outbound_discovery: StdArc::new(Semaphore::new(discovery_capacity)),
+            inbound_requests: StdArc::new(Semaphore::new(capacity)),
+            inbound_discovery: StdArc::new(Semaphore::new(discovery_capacity)),
+        }
+    }
+
+    fn try_admit(
+        requests: &StdArc<Semaphore>,
+        discovery: &StdArc<Semaphore>,
+        subquota: RequestSubquota,
+    ) -> Option<RequestAdmission> {
+        let (request, subquota_permit) = match subquota {
+            RequestSubquota::Shared => {
+                let permit = StdArc::clone(requests).try_acquire_owned().ok()?;
+                (Some(permit), None)
+            }
+            RequestSubquota::Discovery => {
+                let permit = StdArc::clone(discovery).try_acquire_owned().ok()?;
+                (None, Some(permit))
+            }
+        };
+        Some(RequestAdmission {
+            _request: request,
+            _subquota: subquota_permit,
+        })
+    }
+
+    fn try_admit_outbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
+        Self::try_admit(&self.outbound_requests, &self.outbound_discovery, subquota)
+    }
+
+    fn try_admit_inbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
+        Self::try_admit(&self.inbound_requests, &self.inbound_discovery, subquota)
+    }
+}
+
+type HandlerFuture = Pin<
+    Box<dyn Future<Output = Result<(Vec<u8>, Reservation), RemoteRequestFailure>> + Send + 'static>,
+>;
 
 trait ErasedRequestHandler: Send + Sync {
-    fn handle(&self, context: RequestContext, payload: Vec<u8>) -> HandlerFuture;
+    fn class(&self) -> PoolClass;
+    fn subquota(&self) -> RequestSubquota;
+
+    fn handle(
+        &self,
+        executor: Executor,
+        payload_limit: u64,
+        context: RequestContext,
+        payload: Vec<u8>,
+    ) -> HandlerFuture;
 }
 
 struct TypedRequestHandler<M, H> {
-    handler: H,
+    handler: Arc<H>,
     request: PhantomData<fn(M)>,
 }
 
@@ -192,169 +336,131 @@ where
     H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
     F: Future<Output = M::Response> + Send + 'static,
 {
-    fn handle(&self, context: RequestContext, payload: Vec<u8>) -> HandlerFuture {
-        let request = match M::decode_request(&payload) {
-            Ok(request) => request,
-            Err(error) => {
-                return Box::pin(async move {
-                    Err(RemoteRequestFailure::InvalidPayload(error.to_string()))
-                });
-            }
-        };
-        let response = (self.handler)(context, request);
+    fn class(&self) -> PoolClass {
+        M::CLASS
+    }
+
+    fn subquota(&self) -> RequestSubquota {
+        M::SUBQUOTA
+    }
+
+    fn handle(
+        &self,
+        executor: Executor,
+        payload_limit: u64,
+        context: RequestContext,
+        payload: Vec<u8>,
+    ) -> HandlerFuture {
+        let handler = self.handler.clone();
         Box::pin(async move {
-            let response = response.await;
-            M::encode_response(&response)
+            let (request, _request_reservation) =
+                M::decode_rkyv(executor.clone(), M::CLASS, payload)
+                    .await
+                    .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+            let response = (handler)(context, request).await;
+            response
+                .encode_rkyv(executor, M::CLASS, payload_limit)
+                .await
                 .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))
         })
     }
 }
 
-struct PendingRequestGuard<'transport> {
-    state: &'transport RequestState,
-    correlation_id: u64,
-}
-
-impl Drop for PendingRequestGuard<'_> {
-    fn drop(&mut self) {
-        self.state.pending.remove(&self.correlation_id);
-    }
-}
-
 impl RequestState {
-    pub(super) fn connection_changed(&self) {
-        self.connection_changed.notify_waiters();
-    }
-
-    pub(super) fn shutdown(&self) {
-        self.handlers.clear();
-        let pending_requests = self
-            .pending
-            .iter()
-            .map(|pending| *pending.key())
-            .collect::<Vec<_>>();
-        for correlation_id in pending_requests {
-            if let Some((_, pending)) = self.pending.remove(&correlation_id) {
-                pending
-                    .response
-                    .send(PendingResponse::ShuttingDown)
-                    .means_peer_left("interconnect request awaiting a shutting-down transport");
-            }
-        }
-        self.connection_changed.notify_waiters();
-    }
-
-    pub(super) fn route_control(
+    pub(crate) fn register<M, H, F>(
         &self,
-        inner: &Arc<TransportInner>,
-        peer_node_id: &ClusterNodeName,
-        reply: &ConnectionHandle,
-        envelope: ControlEnvelope,
-    ) -> Option<ControlEnvelope> {
-        match envelope {
-            ControlEnvelope::Request(request) => {
-                self.dispatch_request(inner, peer_node_id, reply, request);
-                None
+        handler: H,
+    ) -> Result<(), Report<HandlerRegistrationError>>
+    where
+        M: InterconnectRequest,
+        H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
+        F: Future<Output = M::Response> + Send + 'static,
+    {
+        if M::SUBQUOTA == RequestSubquota::Discovery && M::CLASS != PoolClass::Management {
+            return Err(Report::new(
+                HandlerRegistrationError::DiscoveryRequiresManagement { request: M::NAME },
+            ));
+        }
+        let erased: Box<dyn ErasedRequestHandler> = Box::new(TypedRequestHandler::<M, H> {
+            handler: Arc::new(handler),
+            request: PhantomData,
+        });
+        match self.handlers.entry(M::NAME) {
+            Entry::Occupied(_) => Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
+                request: M::NAME,
+            })),
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(erased));
+                Ok(())
             }
-            ControlEnvelope::Response(response) => {
-                self.resolve_response(peer_node_id, response);
-                None
-            }
-            envelope => Some(envelope),
         }
     }
 
-    fn dispatch_request(
+    pub(crate) async fn handle(
         &self,
-        inner: &Arc<TransportInner>,
-        peer_node_id: &ClusterNodeName,
-        reply: &ConnectionHandle,
+        executor: &Executor,
+        peer_node_id: ClusterNodeName,
+        peer_advertised_host: String,
         request: RequestEnvelope,
-    ) {
-        if inner.admission_closed.is_cancelled() {
-            return;
-        }
+    ) -> HandledResponse {
         let handler = self
             .handlers
             .get(request.request.as_str())
             .map(|handler| handler.value().clone());
-        let peer_node_id = peer_node_id.clone();
-        let reply = reply.clone();
-        let force_close = inner.force_close.clone();
-        let tasks = inner.tasks.clone();
-        tasks.spawn(async move {
-            let result = if let Some(handler) = handler {
-                tokio::select! {
-                    _ = force_close.cancelled() => return,
-                    result = handler.handle(
-                        RequestContext {
-                            peer_node_id: peer_node_id.clone(),
-                        },
-                        request.payload,
-                    ) => result,
-                }
-            } else {
-                Err(RemoteRequestFailure::HandlerNotRegistered)
-            };
-            let response = ControlEnvelope::Response(ResponseEnvelope {
-                correlation_id: request.correlation_id,
-                request: request.request,
-                result,
-            });
-            tokio::select! {
-                _ = force_close.cancelled() => {}
-                result = reply.send(super::Envelope::Control(response)) => {
-                    if let Err(error) = result {
-                        debug!(%error, %peer_node_id, "failed to return interconnect response");
+        let payload_limit = request.class.payload_limit(executor);
+        let payload_bytes = u64::try_from(request.payload.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        let result = match handler {
+            Some(_) if payload_bytes > payload_limit => {
+                Err(RemoteRequestFailure::PayloadTooLarge {
+                    actual: payload_bytes,
+                    limit: payload_limit,
+                })
+            }
+            Some(handler) if handler.class() == request.class => {
+                let subquota = handler.subquota();
+                match self.try_admit_inbound(subquota) {
+                    Some(_admission) => {
+                        handler
+                            .handle(
+                                executor.clone(),
+                                payload_limit,
+                                RequestContext {
+                                    peer_node_id,
+                                    peer_advertised_host,
+                                },
+                                request.payload,
+                            )
+                            .await
                     }
+                    None => Err(RemoteRequestFailure::AdmissionFull { subquota }),
                 }
             }
-        });
-    }
-
-    fn resolve_response(&self, peer_node_id: &ClusterNodeName, response: ResponseEnvelope) {
-        let Some(pending) = self.pending.get(&response.correlation_id) else {
-            debug!(
-                correlation_id = response.correlation_id,
-                %peer_node_id,
-                request = response.request,
-                "ignored an interconnect response without a pending request"
-            );
-            return;
+            Some(handler) => Err(RemoteRequestFailure::WrongPoolClass {
+                expected: handler.class(),
+                actual: request.class,
+            }),
+            None => Err(RemoteRequestFailure::HandlerNotRegistered),
         };
-        if &pending.node != peer_node_id || pending.request != response.request {
-            debug!(
-                correlation_id = response.correlation_id,
-                %peer_node_id,
-                request = response.request,
-                expected_node = %pending.node,
-                expected_request = pending.request,
-                "ignored an interconnect response that did not match its pending request"
-            );
-            return;
-        }
-        drop(pending);
-        if let Some((_, pending)) = self.pending.remove(&response.correlation_id) {
-            pending
-                .response
-                .send(PendingResponse::Response(response.result))
-                .means_peer_left("interconnect request awaiting this response");
+        let (result, payload_reservation) = match result {
+            Ok((payload, reservation)) => (Ok(payload), Some(reservation)),
+            Err(error) => (Err(error), None),
+        };
+        HandledResponse {
+            envelope: ResponseEnvelope {
+                class: request.class,
+                request: request.request,
+                result,
+            },
+            payload_reservation,
         }
     }
 
-    fn next_correlation_id(&self) -> Result<u64, Report<RequestError>> {
-        self.next_correlation_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| Report::new(RequestError::CorrelationIdExhausted))
-    }
-
-    fn target_is_live(&self, node: &ClusterNodeName) -> bool {
+    pub(crate) fn target_is_live(&self, node: &ClusterNodeName) -> bool {
         !self.live_nodes_observed.load(Ordering::Acquire) || self.live_nodes.contains_key(node)
     }
 
-    fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
+    pub(crate) fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
         for node in live_nodes {
             self.live_nodes.insert(node.clone(), ());
         }
@@ -368,27 +474,29 @@ impl RequestState {
             self.live_nodes.remove(&node);
         }
         self.live_nodes_observed.store(true, Ordering::Release);
+        self.membership_changed.notify_waiters();
+    }
 
-        let departed_requests = self
-            .pending
-            .iter()
-            .filter(|pending| !live_nodes.contains(&pending.node))
-            .map(|pending| *pending.key())
-            .collect::<Vec<_>>();
-        for correlation_id in departed_requests {
-            if let Some((_, pending)) = self.pending.remove(&correlation_id) {
-                pending
-                    .response
-                    .send(PendingResponse::TargetLeft)
-                    .means_peer_left("interconnect request awaiting a departed node");
+    async fn target_left(&self, node: &ClusterNodeName) {
+        loop {
+            tokio::task::consume_budget().await;
+            let changed = self.membership_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.target_is_live(node) {
+                return;
             }
+            changed.await;
         }
-        self.connection_changed.notify_waiters();
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.handlers.clear();
+        self.membership_changed.notify_waiters();
     }
 }
 
 impl Transport {
-    /// Registers the only handler for `M` on this transport.
     pub fn register_handler<M, H, F>(
         &self,
         handler: H,
@@ -398,28 +506,14 @@ impl Transport {
         H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
         F: Future<Output = M::Response> + Send + 'static,
     {
-        let erased: Box<dyn ErasedRequestHandler> = Box::new(TypedRequestHandler::<M, H> {
-            handler,
-            request: PhantomData,
-        });
-        match self.inner.requests.handlers.entry(M::NAME) {
-            Entry::Occupied(_) => Err(Report::new(HandlerRegistrationError::AlreadyRegistered {
-                request: M::NAME,
-            })),
-            Entry::Vacant(entry) => {
-                entry.insert(Arc::new(erased));
-                Ok(())
-            }
-        }
+        self.inner.requests().register::<M, H, F>(handler)
     }
 
-    /// Replaces the membership snapshot used to cancel requests whose target has left.
     pub fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
-        self.inner.requests.replace_live_nodes(live_nodes);
-        self.retire_departed_connections(live_nodes);
+        self.inner.requests().replace_live_nodes(live_nodes);
+        self.inner.retire_departed_connections(live_nodes);
     }
 
-    /// Sends `message` to an authenticated cluster node and waits for its associated response.
     pub async fn request<M>(
         &self,
         node: &ClusterNodeName,
@@ -428,156 +522,133 @@ impl Transport {
     where
         M: InterconnectRequest,
     {
-        if self.inner.admission_closed.is_cancelled() {
+        self.request_with_timeout(node, message, M::TIMEOUT).await
+    }
+
+    /// Send one typed request with a caller-owned end-to-end deadline.
+    pub async fn request_with_timeout<M>(
+        &self,
+        node: &ClusterNodeName,
+        message: M,
+        timeout_duration: Duration,
+    ) -> Result<M::Response, Report<RequestError>>
+    where
+        M: InterconnectRequest,
+    {
+        if self.inner.is_shutting_down() {
             return Err(Report::new(RequestError::ShuttingDown {
                 node: node.clone(),
                 request: M::NAME,
             }));
         }
-        let deadline = Instant::now()
-            .checked_add(M::TIMEOUT)
-            .ok_or_else(|| Report::new(RequestError::DeadlineOverflow { request: M::NAME }))?;
-        let payload = message.encode_request()?;
-        let correlation_id = self.inner.requests.next_correlation_id()?;
-        let envelope = super::Envelope::Control(ControlEnvelope::Request(RequestEnvelope {
-            correlation_id,
-            request: M::NAME.to_string(),
-            payload,
-        }));
-        let (response, mut response_rx) = oneshot::channel();
-        self.inner.requests.pending.insert(
-            correlation_id,
-            PendingRequest {
+        if M::REQUIRES_LIVE_TARGET && !self.inner.requests().target_is_live(node) {
+            return Err(Report::new(RequestError::TargetLeft {
                 node: node.clone(),
                 request: M::NAME,
-                response,
-            },
-        );
-        let _pending = PendingRequestGuard {
-            state: &self.inner.requests,
-            correlation_id,
-        };
-
-        loop {
-            tokio::task::consume_budget().await;
-            if self.inner.admission_closed.is_cancelled() {
-                return Err(Report::new(RequestError::ShuttingDown {
-                    node: node.clone(),
-                    request: M::NAME,
-                }));
-            }
-            if !self.inner.requests.target_is_live(node) {
-                return Err(Report::new(RequestError::TargetLeft {
-                    node: node.clone(),
-                    request: M::NAME,
-                }));
-            }
-
-            let connection_changed = self.inner.requests.connection_changed.notified();
-            let connection = self
-                .inner
-                .connected_peers
-                .get(node)
-                .and_then(|connections| connections.values().next().cloned());
-            let Some(connection) = connection else {
-                tokio::select! {
-                    _ = self.inner.admission_closed.cancelled() => {
-                        return Err(Report::new(RequestError::ShuttingDown {
-                            node: node.clone(),
-                            request: M::NAME,
-                        }));
-                    }
-                    _ = sleep_until(deadline) => {
-                        return Err(Report::new(RequestError::Timeout {
-                            node: node.clone(),
-                            request: M::NAME,
-                            timeout: M::TIMEOUT,
-                        }));
-                    }
-                    outcome = &mut response_rx => {
-                        return Self::finish_request::<M>(node, outcome);
-                    }
-                    _ = connection_changed => {}
-                }
-                continue;
-            };
-
-            let send_result = tokio::select! {
-                _ = self.inner.admission_closed.cancelled() => {
-                    return Err(Report::new(RequestError::ShuttingDown {
-                        node: node.clone(),
-                        request: M::NAME,
-                    }));
-                }
-                _ = sleep_until(deadline) => {
-                    return Err(Report::new(RequestError::Timeout {
-                        node: node.clone(),
-                        request: M::NAME,
-                        timeout: M::TIMEOUT,
-                    }));
-                }
-                outcome = &mut response_rx => {
-                    return Self::finish_request::<M>(node, outcome);
-                }
-                _ = connection_changed => None,
-                result = connection.send(envelope.clone()) => Some(result),
-            };
-            match send_result {
-                Some(Ok(())) => break,
-                Some(Err(super::TransportError::Closed(_))) => {
-                    unregister_connected_peer(&self.inner, node, &connection);
-                }
-                Some(Err(_)) | None => {}
-            }
+            }));
         }
-
-        let outcome = tokio::select! {
-            _ = self.inner.admission_closed.cancelled() => {
-                return Err(Report::new(RequestError::ShuttingDown {
+        let operation = async {
+            let _admission = self
+                .inner
+                .requests()
+                .try_admit_outbound(M::SUBQUOTA)
+                .ok_or_else(|| {
+                    Report::new(RequestError::AdmissionFull {
+                        request: M::NAME,
+                        subquota: M::SUBQUOTA,
+                    })
+                })?;
+            let (payload, _payload_reservation) = message
+                .encode_rkyv(
+                    self.inner.executor().clone(),
+                    M::CLASS,
+                    M::CLASS.payload_limit(self.inner.executor()),
+                )
+                .await
+                .map_err(|error| {
+                    Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
+                })?;
+            let request = ControlEnvelope::Request(RequestEnvelope {
+                class: M::CLASS,
+                request: M::NAME.to_string(),
+                payload,
+            });
+            let response = self
+                .inner
+                .round_trip_control(node, request, timeout_duration)
+                .await
+                .map_err(|error| match error {
+                    super::TransportError::ShuttingDown => {
+                        Report::new(RequestError::ShuttingDown {
+                            node: node.clone(),
+                            request: M::NAME,
+                        })
+                    }
+                    super::TransportError::RequestTimeout { .. }
+                    | super::TransportError::ProgressTimeout { .. } => {
+                        Report::new(RequestError::Timeout {
+                            node: node.clone(),
+                            request: M::NAME,
+                            timeout: timeout_duration,
+                        })
+                    }
+                    error => Report::new(RequestError::Transport {
+                        node: node.clone(),
+                        request: M::NAME,
+                        reason: error.to_string(),
+                    }),
+                })?;
+            let (response, _response_reservation) = response.into_parts();
+            let ControlEnvelope::Response(response) = response else {
+                return Err(Report::new(RequestError::ResponseMismatch {
+                    node: node.clone(),
+                    request: M::NAME,
+                }));
+            };
+            if response.class != M::CLASS || response.request != M::NAME {
+                return Err(Report::new(RequestError::ResponseMismatch {
                     node: node.clone(),
                     request: M::NAME,
                 }));
             }
-            _ = sleep_until(deadline) => {
-                return Err(Report::new(RequestError::Timeout {
-                    node: node.clone(),
-                    request: M::NAME,
-                    timeout: M::TIMEOUT,
-                }));
-            }
-            outcome = &mut response_rx => outcome,
-        };
-        Self::finish_request::<M>(node, outcome)
-    }
-
-    fn finish_request<M>(
-        node: &ClusterNodeName,
-        outcome: Result<PendingResponse, oneshot::error::RecvError>,
-    ) -> Result<M::Response, Report<RequestError>>
-    where
-        M: InterconnectRequest,
-    {
-        match outcome {
-            Ok(PendingResponse::Response(Ok(payload))) => M::decode_response(&payload),
-            Ok(PendingResponse::Response(Err(failure))) => {
-                Err(Report::new(RequestError::RemoteRejected {
+            match response.result {
+                Ok(payload) => {
+                    M::Response::decode_rkyv(self.inner.executor().clone(), M::CLASS, payload)
+                        .await
+                        .map(|(response, _response_payload_reservation)| response)
+                        .map_err(|error| {
+                            Report::new(RequestError::Decode { request: M::NAME })
+                                .attach_printable(error)
+                        })
+                }
+                Err(failure) => Err(Report::new(RequestError::RemoteRejected {
                     node: node.clone(),
                     request: M::NAME,
                     failure,
+                })),
+            }
+        };
+        let shutdown = self.inner.shutdown_token();
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => Err(Report::new(RequestError::ShuttingDown {
+                node: node.clone(),
+                request: M::NAME,
+            })),
+            _ = self.inner.requests().target_left(node), if M::REQUIRES_LIVE_TARGET => {
+                Err(Report::new(RequestError::TargetLeft {
+                    node: node.clone(),
+                    request: M::NAME,
                 }))
             }
-            Ok(PendingResponse::TargetLeft) => Err(Report::new(RequestError::TargetLeft {
-                node: node.clone(),
-                request: M::NAME,
-            })),
-            Ok(PendingResponse::ShuttingDown) => Err(Report::new(RequestError::ShuttingDown {
-                node: node.clone(),
-                request: M::NAME,
-            })),
-            Err(_) => Err(Report::new(RequestError::ResponseChannelClosed {
-                node: node.clone(),
-                request: M::NAME,
-            })),
+            result = timeout(timeout_duration, operation) => match result {
+                Ok(result) => result,
+                Err(_) => Err(Report::new(RequestError::Timeout {
+                    node: node.clone(),
+                    request: M::NAME,
+                    timeout: timeout_duration,
+                })),
+            },
         }
     }
 }
@@ -587,135 +658,52 @@ impl InterconnectRequest for DescribeIngestorRequest {
 
     const NAME: &'static str = "describe_ingestor";
     const TIMEOUT: Duration = Duration::from_secs(10);
-
-    fn encode_request(&self) -> Result<Vec<u8>, Report<RequestError>> {
-        rkyv::to_bytes::<rkyv::rancor::Error>(self)
-            .map(|bytes| bytes.to_vec())
-            .map_err(|error| {
-                Report::new(RequestError::Encode {
-                    request: Self::NAME,
-                })
-                .attach_printable(error.to_string())
-            })
-    }
-
-    fn decode_request(payload: &[u8]) -> Result<Self, Report<RequestError>> {
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-        aligned.extend_from_slice(payload);
-        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned).map_err(|error| {
-            Report::new(RequestError::Decode {
-                request: Self::NAME,
-            })
-            .attach_printable(error.to_string())
-        })
-    }
-
-    fn encode_response(response: &Self::Response) -> Result<Vec<u8>, Report<RequestError>> {
-        rkyv::to_bytes::<rkyv::rancor::Error>(response)
-            .map(|bytes| bytes.to_vec())
-            .map_err(|error| {
-                Report::new(RequestError::Encode {
-                    request: Self::NAME,
-                })
-                .attach_printable(error.to_string())
-            })
-    }
-
-    fn decode_response(payload: &[u8]) -> Result<Self::Response, Report<RequestError>> {
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-        aligned.extend_from_slice(payload);
-        rkyv::from_bytes::<Result<IngestorDescribeEnvelope, String>, rkyv::rancor::Error>(&aligned)
-            .map_err(|error| {
-                Report::new(RequestError::Decode {
-                    request: Self::NAME,
-                })
-                .attach_printable(error.to_string())
-            })
-    }
 }
 
-macro_rules! impl_rkyv_request {
-    ($request:ty, $response:ty, $name:literal) => {
-        impl InterconnectRequest for $request {
-            type Response = $response;
+impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<Vec<OwnershipHandoffCheckpoint>>;
 
-            const NAME: &'static str = $name;
-            const TIMEOUT: Duration = Duration::from_secs(60);
-
-            fn encode_request(&self) -> Result<Vec<u8>, Report<RequestError>> {
-                rkyv::to_bytes::<rkyv::rancor::Error>(self)
-                    .map(|bytes| bytes.to_vec())
-                    .map_err(|error| {
-                        Report::new(RequestError::Encode {
-                            request: Self::NAME,
-                        })
-                        .attach_printable(error.to_string())
-                    })
-            }
-
-            fn decode_request(payload: &[u8]) -> Result<Self, Report<RequestError>> {
-                let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-                aligned.extend_from_slice(payload);
-                rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned).map_err(|error| {
-                    Report::new(RequestError::Decode {
-                        request: Self::NAME,
-                    })
-                    .attach_printable(error.to_string())
-                })
-            }
-
-            fn encode_response(response: &Self::Response) -> Result<Vec<u8>, Report<RequestError>> {
-                rkyv::to_bytes::<rkyv::rancor::Error>(response)
-                    .map(|bytes| bytes.to_vec())
-                    .map_err(|error| {
-                        Report::new(RequestError::Encode {
-                            request: Self::NAME,
-                        })
-                        .attach_printable(error.to_string())
-                    })
-            }
-
-            fn decode_response(payload: &[u8]) -> Result<Self::Response, Report<RequestError>> {
-                let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-                aligned.extend_from_slice(payload);
-                rkyv::from_bytes::<Self::Response, rkyv::rancor::Error>(&aligned).map_err(|error| {
-                    Report::new(RequestError::Decode {
-                        request: Self::NAME,
-                    })
-                    .attach_printable(error.to_string())
-                })
-            }
-        }
-    };
+    const NAME: &'static str = "capture_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
 }
 
-impl_rkyv_request!(
-    CaptureOwnershipHandoffStateRequest,
-    OwnershipHandoffResponse<Vec<OwnershipHandoffCheckpoint>>,
-    "capture_ownership_handoff_state"
-);
-impl_rkyv_request!(
-    PrepareOwnershipHandoffStateRequest,
-    OwnershipHandoffResponse<()>,
-    "prepare_ownership_handoff_state"
-);
-impl_rkyv_request!(
-    ConfirmOwnershipHandoffStateRequest,
-    OwnershipHandoffResponse<()>,
-    "confirm_ownership_handoff_state"
-);
-impl_rkyv_request!(
-    PrepareForcedOwnershipRecoveryRequest,
-    OwnershipHandoffResponse<ForcedOwnershipRecoveryPreparation>,
-    "prepare_forced_ownership_recovery"
-);
-impl_rkyv_request!(
-    ActivateOwnershipHandoffStateRequest,
-    OwnershipHandoffResponse<()>,
-    "activate_ownership_handoff_state"
-);
-impl_rkyv_request!(
-    DiscardOwnershipHandoffStateRequest,
-    OwnershipHandoffResponse<()>,
-    "discard_ownership_handoff_state"
-);
+impl InterconnectRequest for PrepareOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "prepare_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for ConfirmOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "confirm_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for PrepareForcedOwnershipRecoveryRequest {
+    type Response = OwnershipHandoffResponse<ForcedOwnershipRecoveryPreparation>;
+
+    const NAME: &'static str = "prepare_forced_ownership_recovery";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for ActivateOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "activate_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "discard_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}

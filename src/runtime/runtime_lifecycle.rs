@@ -126,8 +126,6 @@ impl Runtime {
                     pending_acks: DashMap::default(),
                     pending_relay_admissions: DashMap::default(),
                 }),
-                next_state_sync_correlation_id: AtomicU64::new(1),
-                pending_state_syncs: DashMap::default(),
                 state_checkpoint_notifications: DashMap::default(),
                 pending_state_replica_syncs: DashMap::default(),
                 pending_state_checkpoint_announcements: DashMap::default(),

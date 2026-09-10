@@ -94,8 +94,8 @@ not pay for a window's state, and a window width does not bound a correlator.
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
   at boundaries that work per batch; see the [flush tuning guidance](nspl-overview.md) for which
   sinks those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
-- Cluster interconnect carries each relay batch as one Arrow IPC frame with a fixed 8 MiB limit.
-  Keep `MAX BATCH SIZE` well below 8 MiB on any route whose consumer may be scheduled on another
+- Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
+  Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
   node.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
