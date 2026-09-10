@@ -1,3 +1,13 @@
+//! Ingestor branch lifecycle and concrete branch execution lanes.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** Route batching, concrete branch instantiation, branch-local FIFO dispatch, and
+//!   branch TTL and capacity eviction.
+//! - **Depends on.** Validated branch templates, relay boundaries, processors, execution
+//!   admission, and runtime state persistence.
+//! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
+
 use super::*;
 
 pub(super) const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -120,6 +130,60 @@ pub(super) struct BranchExecutionDispatchContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) template: &'a BranchInstanceTemplate,
     pub(super) now: Timestamp,
+}
+
+struct BranchDispatchCompletion {
+    key: Option<BranchKey>,
+    acks: Vec<AckSet>,
+    result: Result<Option<Timestamp>, tokio::task::JoinError>,
+}
+
+type PendingBranchDispatch = BoxFuture<'static, BranchDispatchCompletion>;
+
+struct QueuedBranchDispatch {
+    received_at: Timestamp,
+    batch: BranchedEntrypointInput,
+}
+
+#[derive(Default)]
+struct BranchDispatchLanes {
+    active: HashSet<Option<BranchKey>>,
+    queued: HashMap<Option<BranchKey>, VecDeque<QueuedBranchDispatch>>,
+    pending: FuturesUnordered<PendingBranchDispatch>,
+}
+
+impl BranchDispatchLanes {
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    fn queue(&mut self, key: Option<BranchKey>, received_at: Timestamp, batch: RelayRecordBatch) {
+        self.queued
+            .entry(key)
+            .or_default()
+            .push_back(QueuedBranchDispatch { received_at, batch });
+    }
+
+    fn take_next(&mut self, key: &Option<BranchKey>) -> Option<QueuedBranchDispatch> {
+        let queue = self.queued.get_mut(key)?;
+        let next = queue.pop_front();
+        let empty = queue.is_empty();
+        if empty {
+            self.queued.remove(key);
+        }
+        next
+    }
+
+    fn reject_queued(&mut self, key: &Option<BranchKey>, reason: &str) {
+        let Some(queued) = self.queued.remove(key) else {
+            return;
+        };
+        for dispatch in queued {
+            for ack in dispatch.batch.acks.iter() {
+                ack.no_ack(reason.to_string());
+            }
+        }
+    }
 }
 
 impl BranchRuntime {
@@ -1050,11 +1114,12 @@ impl IngestorRouteRuntime {
 }
 
 impl BranchExecutionRuntime {
-    pub(super) async fn dispatch_prepared_inputs(
+    async fn enqueue_prepared_inputs(
         context: BranchExecutionDispatchContext<'_>,
         instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
         inputs: Vec<BranchedEntrypointInput>,
-    ) -> Option<Timestamp> {
+        lanes: &mut BranchDispatchLanes,
+    ) {
         let BranchExecutionDispatchContext {
             runtime_handle,
             domain,
@@ -1064,11 +1129,9 @@ impl BranchExecutionRuntime {
             now,
         } = context;
         if inputs.is_empty() {
-            return None;
+            return;
         }
 
-        let mut dispatches = FuturesUnordered::new();
-        let mut next_deadline = None;
         for message in inputs {
             tokio::task::consume_budget().await;
             let key = message.key.clone();
@@ -1118,7 +1181,7 @@ impl BranchExecutionRuntime {
                 );
             }
             if let Some(max_instances) = template.branch_max_instances {
-                evict_branch_instance_instances_to_capacity(
+                let evicted = evict_branch_instance_instances_to_capacity(
                     runtime_handle,
                     domain,
                     ingestor,
@@ -1127,41 +1190,164 @@ impl BranchExecutionRuntime {
                     instances,
                 )
                 .await;
+                for evicted_key in evicted {
+                    lanes.reject_queued(
+                        &evicted_key,
+                        "branch generation was evicted before queued dispatch",
+                    );
+                }
+            }
+            if !lanes.active.insert(key.clone()) {
+                lanes.queue(key, now, message);
+                continue;
             }
             let state = instance.state.clone();
             let graph = graph.clone();
             let dispatch_key = key.clone();
             let dispatch_acks = message.acks.clone();
-            dispatches.push(async move {
-                let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                    let mut branch = state.lock().await;
-                    branch.dispatch(&graph, message).await;
-                    branch.next_deadline()
-                }));
-                (dispatch_key, dispatch_acks, handle.await)
-            });
+            let (started, started_rx) = oneshot::channel();
+            let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+                let mut branch = state.lock().await;
+                started
+                    .send(())
+                    .means_shutdown("branch lifecycle dispatch scheduler");
+                branch.dispatch(&graph, message).await;
+                branch.next_deadline()
+            }));
+            started_rx
+                .await
+                .assured("the spawned dispatch signals after acquiring its infallible branch lock");
+            lanes.pending.push(Box::pin(async move {
+                BranchDispatchCompletion {
+                    key: dispatch_key,
+                    acks: dispatch_acks,
+                    result: handle.await,
+                }
+            }));
         }
-        while let Some((key, acks, result)) = futures_util::StreamExt::next(&mut dispatches).await {
-            tokio::task::consume_budget().await;
-            match result {
-                Ok(deadline) => {
-                    record_next_branch_instance_branch_deadline(&mut next_deadline, deadline);
-                }
-                Err(error) => {
-                    runtime_handle.handle_internal_processor_error_for_acks(
-                        domain,
-                        template.source_kind,
-                        ingestor,
-                        &template.error_policies,
-                        acks.iter(),
-                        format!(
-                            "branch '{}' dispatch task failed: {}",
-                            branch_key_display(&key),
-                            error
-                        ),
-                    );
-                }
+    }
+
+    async fn finish_dispatch(
+        context: BranchExecutionDispatchContext<'_>,
+        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+        lanes: &mut BranchDispatchLanes,
+        next_deadline: &mut Option<Timestamp>,
+        completion: BranchDispatchCompletion,
+    ) {
+        let BranchExecutionDispatchContext {
+            runtime_handle,
+            domain,
+            ingestor,
+            graph,
+            template,
+            ..
+        } = context;
+        let key = completion.key.clone();
+        Self::handle_dispatch_completion(
+            runtime_handle,
+            domain,
+            ingestor,
+            template,
+            next_deadline,
+            completion,
+        );
+        let was_active = lanes.active.remove(&key);
+        debug_assert!(was_active, "completed branch dispatch must own its lane");
+        let Some(next) = lanes.take_next(&key) else {
+            return;
+        };
+        Self::enqueue_prepared_inputs(
+            BranchExecutionDispatchContext {
+                runtime_handle,
+                domain,
+                ingestor,
+                graph,
+                template,
+                now: next.received_at,
+            },
+            instances,
+            vec![next.batch],
+            lanes,
+        )
+        .await;
+    }
+
+    fn handle_dispatch_completion(
+        runtime_handle: &Runtime,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        template: &BranchInstanceTemplate,
+        next_deadline: &mut Option<Timestamp>,
+        completion: BranchDispatchCompletion,
+    ) {
+        match completion.result {
+            Ok(deadline) => {
+                record_next_branch_instance_branch_deadline(next_deadline, deadline);
             }
+            Err(error) => {
+                runtime_handle.handle_internal_processor_error_for_acks(
+                    domain,
+                    template.source_kind,
+                    ingestor,
+                    &template.error_policies,
+                    completion.acks.iter(),
+                    format!(
+                        "branch '{}' dispatch task failed: {}",
+                        branch_key_display(&completion.key),
+                        error
+                    ),
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn dispatch_prepared_inputs(
+        context: BranchExecutionDispatchContext<'_>,
+        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+        inputs: Vec<BranchedEntrypointInput>,
+    ) -> Option<Timestamp> {
+        let BranchExecutionDispatchContext {
+            runtime_handle,
+            domain,
+            ingestor,
+            graph,
+            template,
+            now,
+        } = context;
+        let mut lanes = BranchDispatchLanes::default();
+        Self::enqueue_prepared_inputs(
+            BranchExecutionDispatchContext {
+                runtime_handle,
+                domain,
+                ingestor,
+                graph,
+                template,
+                now,
+            },
+            instances,
+            inputs,
+            &mut lanes,
+        )
+        .await;
+        let mut next_deadline = None;
+        while let Some(completion) = lanes.pending.next().await {
+            tokio::task::consume_budget().await;
+            Self::finish_dispatch(
+                BranchExecutionDispatchContext {
+                    runtime_handle,
+                    domain,
+                    ingestor,
+                    graph,
+                    template,
+                    now,
+                },
+                instances,
+                &mut lanes,
+                &mut next_deadline,
+                completion,
+            )
+            .await;
         }
         next_deadline
     }
@@ -1221,15 +1407,17 @@ impl BranchExecutionRuntime {
                 }
             };
             if let Some(max_instances) = template.branch_max_instances {
-                evict_branch_instance_instances_to_capacity(
-                    &runtime_handle,
-                    &domain,
-                    &ingestor,
-                    template.branch.as_ref(),
-                    max_instances,
-                    &mut instances,
-                )
-                .await;
+                drop(
+                    evict_branch_instance_instances_to_capacity(
+                        &runtime_handle,
+                        &domain,
+                        &ingestor,
+                        template.branch.as_ref(),
+                        max_instances,
+                        &mut instances,
+                    )
+                    .await,
+                );
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
@@ -1252,6 +1440,7 @@ impl BranchExecutionRuntime {
                 ModelName::from(&template.source),
             );
             let mut checkpoint_requests_open = true;
+            let mut lanes = BranchDispatchLanes::default();
 
             loop {
                 tokio::task::consume_budget().await;
@@ -1272,7 +1461,7 @@ impl BranchExecutionRuntime {
                 let mut did_scheduled_work = false;
                 if !ownership_frozen && Instant::now() >= next_expiration_scan {
                     if let Some(branch_ttl) = template.branch_ttl {
-                        expire_branch_instance_instances(
+                        let expired = expire_branch_instance_instances(
                             &runtime_handle,
                             &domain,
                             &ingestor,
@@ -1282,6 +1471,12 @@ impl BranchExecutionRuntime {
                             &mut instances,
                         )
                         .await;
+                        for expired_key in expired {
+                            lanes.reject_queued(
+                                &expired_key,
+                                "branch generation expired before queued dispatch",
+                            );
+                        }
                     }
                     next_expiration_scan = Instant::now() + expiration_scan_interval;
                     did_scheduled_work = true;
@@ -1304,7 +1499,9 @@ impl BranchExecutionRuntime {
                     next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
                     did_scheduled_work = true;
                 }
-                if !ownership_frozen && next_branch_deadline.is_some_and(|deadline| deadline <= now)
+                if lanes.is_empty()
+                    && !ownership_frozen
+                    && next_branch_deadline.is_some_and(|deadline| deadline <= now)
                 {
                     next_branch_deadline =
                         tick_due_branch_instance_branches(&graph, now, &instances).await;
@@ -1354,7 +1551,7 @@ impl BranchExecutionRuntime {
                 };
                 tokio::select! {
                     biased;
-                    checkpoint = checkpoint_requests.recv(), if checkpoint_requests_open => {
+                    checkpoint = checkpoint_requests.recv(), if checkpoint_requests_open && lanes.is_empty() => {
                         let Some(checkpoint) = checkpoint else {
                             checkpoint_requests_open = false;
                             continue;
@@ -1386,48 +1583,133 @@ impl BranchExecutionRuntime {
                             .send(result)
                             .means_peer_left("branch lifecycle checkpoint requester");
                     }
+                    completion = lanes.pending.next(), if !lanes.is_empty() => {
+                        let Some(completion) = completion else {
+                            continue;
+                        };
+                        Self::finish_dispatch(
+                            BranchExecutionDispatchContext {
+                                runtime_handle: &runtime_handle,
+                                domain: &domain,
+                                ingestor: &ingestor,
+                                graph: &graph,
+                                template: &template,
+                                now,
+                            },
+                            &mut instances,
+                            &mut lanes,
+                            &mut next_branch_deadline,
+                            completion,
+                        )
+                        .await;
+                    }
                     message = input.recv(), if !ownership_frozen => {
                         let Some(message) = message else {
+                            while let Some(completion) = lanes.pending.next().await {
+                                tokio::task::consume_budget().await;
+                                Self::finish_dispatch(
+                                    BranchExecutionDispatchContext {
+                                        runtime_handle: &runtime_handle,
+                                        domain: &domain,
+                                        ingestor: &ingestor,
+                                        graph: &graph,
+                                        template: &template,
+                                        now,
+                                    },
+                                    &mut instances,
+                                    &mut lanes,
+                                    &mut next_branch_deadline,
+                                    completion,
+                                )
+                                .await;
+                            }
                             break;
                         };
-                        record_next_branch_instance_branch_deadline(
-                            &mut next_branch_deadline,
-                            Self::dispatch_prepared_inputs(
-                                BranchExecutionDispatchContext {
-                                    runtime_handle: &runtime_handle,
-                                    domain: &domain,
-                                    ingestor: &ingestor,
-                                    graph: &graph,
-                                    template: &template,
-                                    now,
-                                },
-                                &mut instances,
-                                vec![message],
-                            )
-                            .await,
-                        );
+                        Self::enqueue_prepared_inputs(
+                            BranchExecutionDispatchContext {
+                                runtime_handle: &runtime_handle,
+                                domain: &domain,
+                                ingestor: &ingestor,
+                                graph: &graph,
+                                template: &template,
+                                now,
+                            },
+                            &mut instances,
+                            vec![message],
+                            &mut lanes,
+                        )
+                        .await;
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             input.close();
                             while let Some(message) = input.recv().await {
                                 tokio::task::consume_budget().await;
-                                record_next_branch_instance_branch_deadline(
+                                let drain_now = match runtime_handle
+                                    .current_stream_expiration_time(&domain)
+                                {
+                                    Ok(now) => now,
+                                    Err(error) => {
+                                        let reason = format!(
+                                            "branch runtime for ingestor '{}' in domain '{}' lost \
+                                             its clock while draining: {error}",
+                                            ingestor.as_str(),
+                                            domain.as_str(),
+                                        );
+                                        if template.source_kind == ModelKind::Ingestor {
+                                            runtime_handle.handle_general_error_for_acks(
+                                                &domain,
+                                                template.source_kind,
+                                                &ingestor,
+                                                &template.error_policies,
+                                                message.acks.iter(),
+                                                reason,
+                                            );
+                                        } else {
+                                            runtime_handle.handle_internal_processor_error_for_acks(
+                                                &domain,
+                                                template.source_kind,
+                                                &ingestor,
+                                                &template.error_policies,
+                                                message.acks.iter(),
+                                                reason,
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                };
+                                Self::enqueue_prepared_inputs(
+                                    BranchExecutionDispatchContext {
+                                        runtime_handle: &runtime_handle,
+                                        domain: &domain,
+                                        ingestor: &ingestor,
+                                        graph: &graph,
+                                        template: &template,
+                                        now: drain_now,
+                                    },
+                                    &mut instances,
+                                    vec![message],
+                                    &mut lanes,
+                                )
+                                .await;
+                            }
+                            while let Some(completion) = lanes.pending.next().await {
+                                tokio::task::consume_budget().await;
+                                Self::finish_dispatch(
+                                    BranchExecutionDispatchContext {
+                                        runtime_handle: &runtime_handle,
+                                        domain: &domain,
+                                        ingestor: &ingestor,
+                                        graph: &graph,
+                                        template: &template,
+                                        now,
+                                    },
+                                    &mut instances,
+                                    &mut lanes,
                                     &mut next_branch_deadline,
-                                    Self::dispatch_prepared_inputs(
-                                        BranchExecutionDispatchContext {
-                                            runtime_handle: &runtime_handle,
-                                            domain: &domain,
-                                            ingestor: &ingestor,
-                                            graph: &graph,
-                                            template: &template,
-                                            now,
-                                        },
-                                        &mut instances,
-                                        vec![message],
-                                    )
-                                    .await,
-                                );
+                                    completion,
+                                )
+                                .await;
                             }
                             break;
                         }
@@ -1543,7 +1825,8 @@ pub(super) async fn expire_branch_instance_instances(
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
-) {
+) -> Vec<Option<BranchKey>> {
+    let mut expired_keys = Vec::new();
     for (key, state) in instances.expire(now, expiration_after) {
         runtime.observe_branch_instance_removed(
             domain,
@@ -1551,6 +1834,7 @@ pub(super) async fn expire_branch_instance_instances(
             &key,
             Some(BranchEvictionReason::Ttl),
         );
+        runtime.invalidate_branch_relay_generation(domain, &key);
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
@@ -1559,7 +1843,9 @@ pub(super) async fn expire_branch_instance_instances(
             key = branch_key_display(&key),
             "expired branched processor root"
         );
+        expired_keys.push(key);
     }
+    expired_keys
 }
 
 pub(super) async fn evict_branch_instance_instances_to_capacity(
@@ -1569,7 +1855,8 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
     branch: Option<&BranchName>,
     max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
-) {
+) -> Vec<Option<BranchKey>> {
+    let mut evicted_keys = Vec::new();
     for (key, state) in instances.evict_lru_to_capacity(max_instances) {
         runtime.observe_branch_instance_removed(
             domain,
@@ -1577,6 +1864,7 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
             &key,
             Some(BranchEvictionReason::Lru),
         );
+        runtime.invalidate_branch_relay_generation(domain, &key);
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
@@ -1586,7 +1874,9 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
             max_instances,
             "evicted branch runtime by lru"
         );
+        evicted_keys.push(key);
     }
+    evicted_keys
 }
 
 pub(super) async fn shutdown_all_branch_instance_instances(

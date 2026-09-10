@@ -19,7 +19,7 @@
 //! inherits the contract above.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     convert::Infallible,
     fs::OpenOptions,
     future::Future,
@@ -112,9 +112,9 @@ use nervix_interconnect::{
     LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
     OwnershipHandoffFailure, PeerTarget,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
-    PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest, RelayPayload,
-    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncRequest as RemoteStateSyncRequest,
-    StateSyncResponse as RemoteStateSyncResponse,
+    PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest,
+    RelayAdmission, RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
+    StateSyncRequest as RemoteStateSyncRequest, StateSyncResponse as RemoteStateSyncResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     TlsConfigBundle, Transport,
@@ -425,27 +425,146 @@ struct PlannedOwnershipHandoff {
     activation_deadline: tokio::time::Instant,
 }
 
+#[derive(Debug)]
+struct InterconnectRelayPayload {
+    peer_node_id: ClusterNodeName,
+    payload: RelayPayload,
+    admission: RelayAdmission,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum InterconnectRelayBranch {
+    Valid(Option<crate::runtime::BranchKey>),
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InterconnectRelayChannel {
+    peer_node_id: ClusterNodeName,
+    kind: nervix_interconnect::RelayPayloadKind,
+    domain: DomainName,
+    relay: RelayName,
+    branch: InterconnectRelayBranch,
+}
+
+impl InterconnectRelayChannel {
+    fn from_message(message: &InterconnectRelayPayload) -> Self {
+        let branch = match crate::runtime::BranchKey::from_remote_key(message.payload.key.clone()) {
+            Ok(branch) => InterconnectRelayBranch::Valid(branch),
+            Err(_) => InterconnectRelayBranch::Invalid,
+        };
+        Self {
+            peer_node_id: message.peer_node_id.clone(),
+            kind: message.payload.kind,
+            domain: message.payload.domain.clone(),
+            relay: message.payload.relay.clone(),
+            branch,
+        }
+    }
+}
+
 struct InterconnectRelayPayloadLane {
-    sender: mpsc::UnboundedSender<RelayPayload>,
+    sender: mpsc::UnboundedSender<InterconnectRelayPayload>,
 }
 
 impl InterconnectRelayPayloadLane {
-    fn new() -> (Self, mpsc::UnboundedReceiver<RelayPayload>) {
+    fn new() -> (Self, mpsc::UnboundedReceiver<InterconnectRelayPayload>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         (Self { sender }, receiver)
     }
 
     /// Moves relay payload work off the ordered control lane without awaiting it. The dedicated
-    /// receiver still processes payloads in arrival order, while gate release and status controls
-    /// remain runnable when one payload is waiting for a relay gate.
-    fn route(&self, envelope: Envelope) -> Option<Envelope> {
+    /// receiver preserves arrival order within each authenticated logical channel and runs
+    /// different channels concurrently, while gate release and status controls remain runnable.
+    fn route(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        envelope: Envelope,
+        relay_admission: Option<RelayAdmission>,
+    ) -> Option<Envelope> {
         let Envelope::RelayPayload(payload) = envelope else {
             return Some(envelope);
         };
-        if self.sender.send(payload).is_err() {
+        let Some(admission) = relay_admission else {
+            warn!("interconnect relay payload is missing its transport admission");
+            return None;
+        };
+        if self
+            .sender
+            .send(InterconnectRelayPayload {
+                peer_node_id: peer_node_id.clone(),
+                payload,
+                admission,
+            })
+            .is_err()
+        {
             warn!("interconnect relay payload lane is unavailable");
         }
         None
+    }
+
+    async fn handle(
+        runtime: Runtime,
+        channel: InterconnectRelayChannel,
+        message: InterconnectRelayPayload,
+    ) -> (
+        InterconnectRelayChannel,
+        Result<(), Report<crate::runtime::RuntimeError>>,
+    ) {
+        let result = runtime
+            .handle_remote_stream(message.payload, message.admission)
+            .await;
+        (channel, result)
+    }
+
+    async fn run(
+        mut receiver: mpsc::UnboundedReceiver<InterconnectRelayPayload>,
+        runtime: Runtime,
+        shutdown: CancellationToken,
+    ) {
+        let mut queued =
+            HashMap::<InterconnectRelayChannel, VecDeque<InterconnectRelayPayload>>::default();
+        let mut active = FuturesUnordered::new();
+        let mut receiving = true;
+
+        loop {
+            tokio::task::consume_budget().await;
+            if !receiving && active.is_empty() {
+                break;
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                message = receiver.recv(), if receiving => {
+                    let Some(message) = message else {
+                        receiving = false;
+                        continue;
+                    };
+                    let channel = InterconnectRelayChannel::from_message(&message);
+                    if let Some(channel_queue) = queued.get_mut(&channel) {
+                        channel_queue.push_back(message);
+                        continue;
+                    }
+                    queued.insert(channel.clone(), VecDeque::new());
+                    active.push(Self::handle(runtime.clone(), channel, message));
+                }
+                completed = active.next(), if !active.is_empty() => {
+                    let Some((channel, result)) = completed else {
+                        continue;
+                    };
+                    if let Err(error) = result {
+                        warn!(error = %error, "failed to process remote relay payload");
+                    }
+                    let next = queued
+                        .get_mut(&channel)
+                        .and_then(VecDeque::pop_front);
+                    if let Some(payload) = next {
+                        active.push(Self::handle(runtime.clone(), channel, payload));
+                    } else {
+                        queued.remove(&channel);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -19716,30 +19835,17 @@ impl Application {
             }
         }));
 
-        let (interconnect_relay_payload_lane, mut interconnect_relay_payload_rx) =
+        let (interconnect_relay_payload_lane, interconnect_relay_payload_rx) =
             InterconnectRelayPayloadLane::new();
         let relay_payload_shutdown = shutdown.clone();
         let runtime_for_relay_payloads = runtime.clone();
         background_tasks.push(tokio::spawn(async move {
-            loop {
-                tokio::task::consume_budget().await;
-                let payload = tokio::select! {
-                    _ = relay_payload_shutdown.cancelled() => break,
-                    payload = interconnect_relay_payload_rx.recv() => {
-                        let Some(payload) = payload else {
-                            break;
-                        };
-                        payload
-                    }
-                };
-                let result = tokio::select! {
-                    _ = relay_payload_shutdown.cancelled() => break,
-                    result = runtime_for_relay_payloads.handle_remote_stream(payload) => result,
-                };
-                if let Err(error) = result {
-                    warn!(error = %error, "failed to process remote relay payload");
-                }
-            }
+            InterconnectRelayPayloadLane::run(
+                interconnect_relay_payload_rx,
+                runtime_for_relay_payloads,
+                relay_payload_shutdown,
+            )
+            .await;
         }));
 
         let interconnect_shutdown = shutdown.clone();
@@ -19760,7 +19866,11 @@ impl Application {
                             "received interconnect envelope"
                         );
                         let Some(envelope) = interconnect_relay_payload_lane
-                            .route(message.envelope)
+                            .route(
+                                &message.peer_node_id,
+                                message.envelope,
+                                message.relay_admission,
+                            )
                         else {
                             continue;
                         };
@@ -20196,9 +20306,14 @@ mod tests {
     }
 
     #[test]
-    fn interconnect_control_lane_never_waits_for_relay_payload_processing() {
+    fn interconnect_control_lane_rejects_a_relay_without_transport_admission() {
         let (lane, mut payloads) = InterconnectRelayPayloadLane::new();
+        let peer_node_id = ClusterNodeName::parse("node-2").expect("valid node name");
         let routed = RelayPayload {
+            delivery: nervix_interconnect::RelayDelivery {
+                channel_incarnation: [1; 16],
+                sequence: 0,
+            },
             kind: nervix_interconnect::RelayPayloadKind::Routed,
             domain: DomainName::parse("default").expect("valid domain"),
             relay: named("incoming"),
@@ -20211,10 +20326,17 @@ mod tests {
             admission: None,
         };
 
-        assert!(lane.route(Envelope::RelayPayload(routed)).is_none());
-        assert!(payloads.try_recv().is_ok());
+        assert!(
+            lane.route(&peer_node_id, Envelope::RelayPayload(routed), None)
+                .is_none()
+        );
+        assert!(payloads.try_recv().is_err());
         assert!(matches!(
-            lane.route(Envelope::Control(ControlEnvelope::Terminate)),
+            lane.route(
+                &peer_node_id,
+                Envelope::Control(ControlEnvelope::Terminate),
+                None,
+            ),
             Some(Envelope::Control(ControlEnvelope::Terminate))
         ));
     }

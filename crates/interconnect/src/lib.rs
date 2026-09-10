@@ -3,7 +3,7 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Mutual TLS, class-isolated HTTP/2 pools, bounded rkyv messages, flow control,
-//!   deadlines, cancellation, and relay transfer grants.
+//!   deadlines, relay transfer admission, reconciliation, and cancellation.
 //! - **Depends on.** Execution admission and the vocabulary carried by internal operations.
 //! - **Must not know.** Runtime graphs, schedules, or the semantic outcome of an operation.
 
@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
@@ -35,6 +36,7 @@ mod identity;
 mod request;
 mod wire;
 
+pub use connection::{RelayAdmission, RelayCancellationGuard};
 pub use identity::TlsConfigBundle;
 pub use request::{
     HandlerRegistrationError, InterconnectRequest, RemoteRequestFailure, RequestContext,
@@ -292,6 +294,7 @@ pub enum Envelope {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelayPayload {
+    pub delivery: RelayDelivery,
     pub kind: RelayPayloadKind,
     pub domain: DomainName,
     pub relay: RelayName,
@@ -303,6 +306,40 @@ pub struct RelayPayload {
     pub metadata: Vec<RemoteRuntimeRecordMetadata>,
     pub acks: Vec<Option<RemoteAckRegistration>>,
     pub admission: Option<RemoteAckRegistration>,
+}
+
+/// The stable position of one relay batch in its sender-owned logical channel.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct RelayDelivery {
+    pub channel_incarnation: [u8; 16],
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RelayAdmissionStatus {
+    Reserved,
+    BodyReceived,
+    Admitted,
+    Rejected(String),
+    Cancelled,
+    Retired,
+    Unknown,
+    Indeterminate,
+}
+
+impl RelayAdmissionStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Admitted | Self::Rejected(_) | Self::Cancelled | Self::Retired
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayAdmissionDecision {
+    Admitted,
+    Cancelled,
 }
 
 #[derive(
@@ -751,6 +788,8 @@ impl InterconnectRequest for DataflowNodeStatusRequest {
     type Response = DataflowNodeStatusResponse;
 
     const NAME: &'static str = "dataflow_node_status";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
@@ -758,6 +797,8 @@ impl InterconnectRequest for DomainDrainStatusRequest {
     type Response = DomainDrainStatusResponse;
 
     const NAME: &'static str = "domain_drain_status";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
@@ -765,6 +806,8 @@ impl InterconnectRequest for EntityGateRequest {
     type Response = EntityGateResponse;
 
     const NAME: &'static str = "entity_gate";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
@@ -772,6 +815,8 @@ impl InterconnectRequest for EntityDrainStatusRequest {
     type Response = EntityDrainStatusResponse;
 
     const NAME: &'static str = "entity_drain_status";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
@@ -779,6 +824,8 @@ impl InterconnectRequest for EntityGateReleaseRequest {
     type Response = EntityGateReleaseResponse;
 
     const NAME: &'static str = "entity_gate_release";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
@@ -815,6 +862,7 @@ impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
 
     const NAME: &'static str = "subscription_interest_visibility";
     const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_millis(250);
 }
 
@@ -823,6 +871,7 @@ pub struct ReceivedEnvelope {
     pub peer_addr: SocketAddr,
     pub peer_node_id: ClusterNodeName,
     pub envelope: Envelope,
+    pub relay_admission: Option<RelayAdmission>,
     _decoded: Option<Reservation>,
 }
 
@@ -837,7 +886,23 @@ impl ReceivedEnvelope {
             peer_addr,
             peer_node_id,
             envelope,
+            relay_admission: None,
             _decoded: decoded,
+        }
+    }
+
+    pub(crate) fn new_relay(
+        peer_addr: SocketAddr,
+        peer_node_id: ClusterNodeName,
+        payload: RelayPayload,
+        relay_admission: RelayAdmission,
+    ) -> Self {
+        Self {
+            peer_addr,
+            peer_node_id,
+            envelope: Envelope::RelayPayload(payload),
+            relay_admission: Some(relay_admission),
+            _decoded: None,
         }
     }
 }
@@ -885,6 +950,32 @@ impl Transport {
         envelope: Envelope,
     ) -> Result<(), TransportError> {
         self.inner.send(peer_node_id, envelope).await
+    }
+
+    pub async fn cancel_relay(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        delivery: RelayDelivery,
+    ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
+        self.inner.cancel_relay(peer_node_id, delivery).await
+    }
+
+    pub async fn relay_admission_status(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        delivery: RelayDelivery,
+    ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
+        self.inner
+            .relay_admission_status(peer_node_id, delivery)
+            .await
+    }
+
+    pub fn relay_cancellation_guard(
+        &self,
+        peer_node_id: ClusterNodeName,
+        delivery: RelayDelivery,
+    ) -> RelayCancellationGuard {
+        RelayCancellationGuard::new(self.inner.clone(), peer_node_id, delivery)
     }
 
     pub fn replace_outbound_targets(
@@ -935,7 +1026,7 @@ impl Envelope {
     pub(crate) fn pool_class(&self) -> PoolClass {
         match self {
             Self::RelayPayload(_) => PoolClass::Relay,
-            Self::Ack(_) => PoolClass::Relay,
+            Self::Ack(_) => PoolClass::Management,
             Self::Control(control) => control.pool_class(),
         }
     }
@@ -1004,6 +1095,12 @@ pub enum TransportError {
     IncomingQueueFull,
     #[error("relay transfer grant was refused: {0}")]
     RelayGrant(String),
+    #[error("relay delivery was cancelled before runtime admission")]
+    RelayCancelled,
+    #[error("relay delivery outcome is indeterminate after a peer process epoch change")]
+    RelayIndeterminate,
+    #[error("relay delivery was rejected before runtime admission: {0}")]
+    RelayRejected(String),
 }
 
 #[derive(Debug, Error)]
@@ -1060,9 +1157,13 @@ mod tests {
     use std::{
         path::PathBuf,
         process::Command,
-        sync::{Arc as StdArc, OnceLock},
+        sync::{
+            Arc as StdArc, OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
+    use meticulous::ResultExt as _;
     use nervix_execution::{CpuClass, MemoryClass};
     use nervix_models::RemoteAckOutcome;
     use rcgen::{
@@ -1070,7 +1171,10 @@ mod tests {
         KeyUsagePurpose, SanType,
     };
     use tempfile::{TempDir, tempdir};
-    use tokio::{sync::Notify, time::timeout};
+    use tokio::{
+        sync::{Notify, watch},
+        time::timeout,
+    };
 
     use super::*;
 
@@ -1225,6 +1329,35 @@ mod tests {
     }
 
     #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BlockingManagementRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct BlockingManagementResponse;
+
+    impl InterconnectRequest for BlockingManagementRequest {
+        type Response = BlockingManagementResponse;
+
+        const NAME: &'static str = "test_blocking_management";
+        const CLASS: PoolClass = PoolClass::Management;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct CancellationRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct CancellationResponse;
+
+    impl InterconnectRequest for CancellationRequest {
+        type Response = CancellationResponse;
+
+        const NAME: &'static str = "test_cancellation";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
     struct BlockingDiscoveryRequest;
 
     #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -1236,6 +1369,36 @@ mod tests {
         const NAME: &'static str = "test_blocking_discovery";
         const CLASS: PoolClass = PoolClass::Management;
         const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BlockingProgressRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct BlockingProgressResponse;
+
+    impl InterconnectRequest for BlockingProgressRequest {
+        type Response = BlockingProgressResponse;
+
+        const NAME: &'static str = "test_blocking_progress";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct LivenessRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct LivenessResponse;
+
+    impl InterconnectRequest for LivenessRequest {
+        type Response = LivenessResponse;
+
+        const NAME: &'static str = "test_liveness";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
         const TIMEOUT: Duration = Duration::from_secs(2);
     }
 
@@ -1339,13 +1502,13 @@ mod tests {
     }
 
     #[test]
-    fn relay_acknowledgements_use_the_relay_pool() {
+    fn relay_acknowledgements_use_the_management_pool() {
         let envelope = Envelope::Ack(RemoteAckResolution {
             ack_id: 1,
             outcome: RemoteAckOutcome::Ack,
         });
 
-        assert_eq!(envelope.pool_class(), PoolClass::Relay);
+        assert_eq!(envelope.pool_class(), PoolClass::Management);
     }
 
     #[tokio::test]
@@ -1593,6 +1756,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_management_work_cannot_consume_cancellation_streams() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(AtomicUsize::new(0));
+        let (release, release_rx) = watch::channel(false);
+        transport_b
+            .register_handler::<BlockingManagementRequest, _, _>({
+                let started = StdArc::clone(&started);
+                let release_rx = release_rx.clone();
+                move |_context, _request| {
+                    let started = StdArc::clone(&started);
+                    let mut release_rx = release_rx.clone();
+                    async move {
+                        started.fetch_add(1, Ordering::AcqRel);
+                        release_rx
+                            .wait_for(|released| *released)
+                            .await
+                            .expect("test release sender should remain open");
+                        BlockingManagementResponse
+                    }
+                }
+            })
+            .expect("blocking management handler should register");
+        transport_b
+            .register_handler::<CancellationRequest, _, _>(|_context, _request| async move {
+                CancellationResponse
+            })
+            .expect("cancellation handler should register");
+
+        let mut blocked = Vec::new();
+        for _ in 0..connection::MANAGEMENT_SHARED_STREAMS {
+            let requester = transport_a.clone();
+            let target = node_b.clone();
+            blocked.push(tokio::spawn(async move {
+                requester.request(&target, BlockingManagementRequest).await
+            }));
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if started.load(Ordering::Acquire) == connection::MANAGEMENT_SHARED_STREAMS {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all shared management streams should become occupied");
+
+        assert_eq!(
+            timeout(
+                Duration::from_secs(2),
+                transport_a.request(&node_b, CancellationRequest),
+            )
+            .await
+            .expect("cancellation must retain a physical management stream")
+            .expect("cancellation request should succeed"),
+            CancellationResponse
+        );
+
+        release.send_replace(true);
+        for request in blocked {
+            request
+                .await
+                .expect("blocking management request should join")
+                .expect("blocking management request should finish after release");
+        }
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn progress_work_cannot_consume_liveness_streams() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(AtomicUsize::new(0));
+        let (release, release_rx) = watch::channel(false);
+        transport_b
+            .register_handler::<BlockingProgressRequest, _, _>({
+                let started = StdArc::clone(&started);
+                let release_rx = release_rx.clone();
+                move |_context, _request| {
+                    let started = StdArc::clone(&started);
+                    let mut release_rx = release_rx.clone();
+                    async move {
+                        started.fetch_add(1, Ordering::AcqRel);
+                        release_rx.wait_for(|released| *released).await.assured(
+                            "the test retains its release sender until every request joins",
+                        );
+                        BlockingProgressResponse
+                    }
+                }
+            })
+            .assured("the fresh test transport has no progress handler with this name");
+        transport_b
+            .register_handler::<LivenessRequest, _, _>(|_context, _request| async move {
+                LivenessResponse
+            })
+            .assured("the fresh test transport has no liveness handler with this name");
+
+        let mut blocked = Vec::new();
+        for _ in 0..connection::MANAGEMENT_PROGRESS_STREAMS {
+            let requester = transport_a.clone();
+            let target = node_b.clone();
+            blocked.push(tokio::spawn(async move {
+                requester.request(&target, BlockingProgressRequest).await
+            }));
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if started.load(Ordering::Acquire) == connection::MANAGEMENT_PROGRESS_STREAMS {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("the test requests start before their two-second request deadlines");
+
+        let liveness = timeout(
+            Duration::from_millis(250),
+            transport_a.request(&node_b, LivenessRequest),
+        )
+        .await;
+
+        release.send_replace(true);
+        for request in blocked {
+            let response = request
+                .await
+                .assured("the progress request task contains no panic path");
+            assert!(
+                response.is_ok(),
+                "blocking progress request should finish after release: {response:?}"
+            );
+        }
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+
+        assert!(
+            liveness.is_ok(),
+            "liveness must retain a physical management stream: {liveness:?}"
+        );
+        let liveness =
+            liveness.verified("the liveness timeout result was checked by the assertion above");
+        assert!(
+            liveness.is_ok(),
+            "liveness request should succeed: {liveness:?}"
+        );
+        assert_eq!(
+            liveness.verified("the liveness response was checked by the assertion above"),
+            LivenessResponse
+        );
+    }
+
+    #[tokio::test]
     async fn discovery_subquota_cannot_crowd_out_management_requests() {
         let options = TransportOptions {
             incoming_queue_capacity: 1,
@@ -1728,7 +2055,11 @@ mod tests {
                 PeerTarget::new(transport_a.local_addr(), "localhost"),
             )
             .expect("the response target should register");
-        let payload = |ack_id, reply_node_id| RelayPayload {
+        let payload = |ack_id, sequence, reply_node_id| RelayPayload {
+            delivery: RelayDelivery {
+                channel_incarnation: [1; 16],
+                sequence,
+            },
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("test").expect("test domain should be valid"),
             relay: RelayName::parse("relay").expect("test relay should be valid"),
@@ -1745,7 +2076,10 @@ mod tests {
         };
 
         let error = transport_a
-            .send(&node_b, Envelope::RelayPayload(payload(0, node_b.clone())))
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(0, 0, node_b.clone())),
+            )
             .await
             .expect_err("the authenticated sender must own the declared admission reply");
         assert!(matches!(
@@ -1753,7 +2087,10 @@ mod tests {
             TransportError::RemoteRejected { status: 403, .. }
         ));
         transport_a
-            .send(&node_b, Envelope::RelayPayload(payload(1, node_a.clone())))
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(1, 0, node_a.clone())),
+            )
             .await
             .expect("the first relay should consume the sole terminal slot");
         let first = timeout(Duration::from_secs(2), incoming_b.recv())
@@ -1762,7 +2099,10 @@ mod tests {
             .expect("the application queue should remain open");
 
         let error = transport_a
-            .send(&node_b, Envelope::RelayPayload(payload(2, node_a.clone())))
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(2, 1, node_a.clone())),
+            )
             .await
             .expect_err("a second grant must wait until the first terminal outcome is sent");
         assert!(matches!(
@@ -1786,7 +2126,10 @@ mod tests {
             .expect("the terminal outcome should enter the sender application queue")
             .expect("the sender application queue should remain open");
         transport_a
-            .send(&node_b, Envelope::RelayPayload(payload(2, node_a.clone())))
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(2, 1, node_a.clone())),
+            )
             .await
             .expect("the next relay grant should fit after the terminal outcome");
 
@@ -1796,6 +2139,553 @@ mod tests {
         })
         .await
         .expect("redeemed grant expiry work should not delay transport shutdown");
+    }
+
+    #[tokio::test]
+    async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
+        let options = TransportOptions {
+            incoming_queue_capacity: 1,
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: mut incoming_a,
+            mut incoming_b,
+            ..
+        } = connected_transports_with_options(options).await;
+        transport_b
+            .register_outbound_target(
+                node_a.clone(),
+                PeerTarget::new(transport_a.local_addr(), "localhost"),
+            )
+            .expect("the response target should register");
+        transport_b
+            .send(&node_a, Envelope::Control(ControlEnvelope::Terminate))
+            .await
+            .expect("the general message should fill the sender application queue");
+
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery: RelayDelivery {
+                        channel_incarnation: [11; 16],
+                        sequence: 0,
+                    },
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 52,
+                        reply_node_id: node_a.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the receiver application queue")
+            .expect("the receiver application queue should remain open");
+        assert_eq!(
+            received
+                .relay_admission
+                .expect("a relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Admitted
+        );
+
+        let outcome_sender = transport_b.clone();
+        let outcome_target = node_a.clone();
+        let mut outcome_task = tokio::spawn(async move {
+            outcome_sender
+                .send(
+                    &outcome_target,
+                    Envelope::Ack(RemoteAckResolution {
+                        ack_id: 52,
+                        outcome: RemoteAckOutcome::Ack,
+                    }),
+                )
+                .await
+        });
+        assert!(
+            timeout(Duration::from_millis(100), &mut outcome_task)
+                .await
+                .is_err(),
+            "a terminal outcome should wait while the general application queue is full"
+        );
+        let queued = incoming_a
+            .recv()
+            .await
+            .expect("the sender application queue should contain the general message");
+        assert!(matches!(
+            queued.envelope,
+            Envelope::Control(ControlEnvelope::Terminate)
+        ));
+        outcome_task
+            .await
+            .expect("the terminal outcome task should join")
+            .expect("the terminal outcome should send after capacity becomes available");
+        let outcome = incoming_a
+            .recv()
+            .await
+            .expect("the terminal outcome must remain queued for the application");
+        assert!(matches!(
+            outcome.envelope,
+            Envelope::Ack(RemoteAckResolution {
+                ack_id: 52,
+                outcome: RemoteAckOutcome::Ack,
+            })
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: _,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [6; 16],
+            sequence: 0,
+        };
+
+        assert_eq!(
+            transport_a
+                .cancel_relay(&node_b, delivery)
+                .await
+                .expect("relay cancellation should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+
+        let error = transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery,
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 40,
+                        reply_node_id: node_a,
+                    }),
+                }),
+            )
+            .await
+            .expect_err("a confirmed cancellation must fence a later grant");
+        assert!(matches!(error, TransportError::RelayCancelled));
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "a delivery cancelled before its grant must never enter the application queue"
+        );
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_relay_admission_can_never_reach_runtime() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: _,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [7; 16],
+            sequence: 0,
+        };
+        let payload = RelayPayload {
+            delivery,
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 41,
+                reply_node_id: node_a.clone(),
+            }),
+        };
+
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload.clone()))
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the application queue")
+            .expect("the application queue should remain open");
+
+        assert_eq!(
+            transport_a
+                .relay_admission_status(&node_b, delivery)
+                .await
+                .expect("relay status should be answered"),
+            RelayAdmissionStatus::BodyReceived
+        );
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload.clone()))
+            .await
+            .expect("a same-epoch retry should reconcile the received body");
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "reconciliation must not enqueue the same delivery twice"
+        );
+
+        assert_eq!(
+            transport_a
+                .cancel_relay(&node_b, delivery)
+                .await
+                .expect("relay cancellation should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+        assert_eq!(
+            received
+                .relay_admission
+                .expect("a relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Cancelled
+        );
+        assert_eq!(
+            transport_a
+                .relay_admission_status(&node_b, delivery)
+                .await
+                .expect("relay status should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+
+        let error = transport_a
+            .send(&node_b, Envelope::RelayPayload(payload))
+            .await
+            .expect_err("a cancelled delivery identity must remain fenced");
+        assert!(matches!(error, TransportError::RelayCancelled));
+        let next_delivery = RelayDelivery {
+            channel_incarnation: [7; 16],
+            sequence: 1,
+        };
+        let next_payload = RelayPayload {
+            delivery: next_delivery,
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 42,
+                reply_node_id: node_a.clone(),
+            }),
+        };
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(next_payload))
+            .await
+            .expect("the next channel sequence should reach the receiver");
+        let next_received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the next relay body should enter the application queue")
+            .expect("the application queue should remain open");
+        assert_eq!(
+            transport_a
+                .cancel_relay(&node_b, next_delivery)
+                .await
+                .expect("the next relay cancellation should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+        assert_eq!(
+            next_received
+                .relay_admission
+                .expect("the next relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Cancelled
+        );
+
+        let retired_payload = RelayPayload {
+            delivery: RelayDelivery {
+                channel_incarnation: [7; 16],
+                sequence: 0,
+            },
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 43,
+                reply_node_id: node_a.clone(),
+            }),
+        };
+        let error = transport_a
+            .send(&node_b, Envelope::RelayPayload(retired_payload.clone()))
+            .await
+            .expect_err("a delivery below the reconciled watermark is indeterminate");
+        assert!(matches!(error, TransportError::RelayIndeterminate));
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "a cancelled relay delivery must not enter the application queue again"
+        );
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: mut incoming_a,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [10; 16],
+            sequence: 0,
+        };
+        let payload = RelayPayload {
+            delivery,
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 44,
+                reply_node_id: node_a,
+            }),
+        };
+
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload.clone()))
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the application queue")
+            .expect("the application queue should remain open");
+        assert_eq!(
+            received
+                .relay_admission
+                .expect("a relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Admitted
+        );
+
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload))
+            .await
+            .expect("a same-epoch retry should reconcile the admitted delivery");
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "an admitted relay retry must not enter the application queue twice"
+        );
+        let outcome = timeout(Duration::from_secs(2), incoming_a.recv())
+            .await
+            .expect("the reconciled admission should return its terminal outcome")
+            .expect("the sender application queue should remain open");
+        assert!(matches!(
+            outcome.envelope,
+            Envelope::Ack(RemoteAckResolution {
+                ack_id: 44,
+                outcome: RemoteAckOutcome::Ack,
+            })
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
+        let ConnectedTransports {
+            _authority: authority,
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: _,
+            mut incoming_b,
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [8; 16],
+            sequence: 0,
+        };
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery,
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 45,
+                        reply_node_id: node_a.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the unresolved relay should reach the receiver process");
+        let unresolved = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the unresolved relay should enter the application queue")
+            .expect("the application queue should remain open");
+
+        transport_b.shutdown().await;
+        drop(unresolved);
+        let (replacement_b, _replacement_incoming) = Transport::bind(
+            "127.0.0.1:0".parse().expect("test address should be valid"),
+            "localhost",
+            "test-cluster",
+            node_b.clone(),
+            authority.issue("test-cluster", &node_b),
+            TransportOptions::default(),
+            Executor::default(),
+        )
+        .await
+        .expect("the replacement receiver process should bind");
+        replacement_b.replace_live_nodes(&BTreeSet::from([node_a, node_b.clone()]));
+        transport_a
+            .register_outbound_target(
+                node_b.clone(),
+                PeerTarget::new(replacement_b.local_addr(), "localhost"),
+            )
+            .expect("the replacement receiver target should register");
+
+        assert_eq!(
+            timeout(
+                Duration::from_secs(5),
+                transport_a.relay_admission_status(&node_b, delivery),
+            )
+            .await
+            .expect("the sender should reconnect to the replacement process")
+            .expect("the replacement process should answer relay status"),
+            RelayAdmissionStatus::Indeterminate
+        );
+
+        transport_a.shutdown().await;
+        replacement_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_relay_work_reports_progress_before_runtime_admission() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: mut incoming_a,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        transport_b
+            .register_outbound_target(
+                node_a.clone(),
+                PeerTarget::new(transport_a.local_addr(), "localhost"),
+            )
+            .expect("the progress response target should register");
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery: RelayDelivery {
+                        channel_incarnation: [9; 16],
+                        sequence: 0,
+                    },
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 51,
+                        reply_node_id: node_a.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let _reserved = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the application queue")
+            .expect("the application queue should remain open");
+
+        let progress = timeout(Duration::from_secs(1), incoming_a.recv())
+            .await
+            .expect("reserved relay work should report queue-time progress")
+            .expect("the sender application queue should remain open");
+        assert!(matches!(
+            progress.envelope,
+            Envelope::Ack(RemoteAckResolution {
+                ack_id: 51,
+                outcome: RemoteAckOutcome::Alive,
+            })
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
     }
 
     #[tokio::test]

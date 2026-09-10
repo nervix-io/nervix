@@ -1552,6 +1552,24 @@ impl Cluster {
         publish_http(&handle.spec, host, path, payload).await
     }
 
+    pub(crate) fn spawn_http_publish(
+        &self,
+        node_id: &str,
+        host: String,
+        path: String,
+        payload: String,
+    ) -> tokio::task::JoinHandle<io::Result<()>> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let uri = handle.spec.http_uri(&path);
+        tokio::spawn(async move {
+            publish_http_uri_with_headers(uri, &host, payload.as_bytes(), "application/json", &[])
+                .await
+        })
+    }
+
     pub(crate) async fn publish_http_with_headers(
         &self,
         node_id: &str,
@@ -2655,9 +2673,19 @@ async fn publish_http_bytes_with_headers(
     content_type: &str,
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
+    publish_http_uri_with_headers(spec.http_uri(path), host, payload, content_type, headers).await
+}
+
+async fn publish_http_uri_with_headers(
+    uri: String,
+    host: &str,
+    payload: &[u8],
+    content_type: &str,
+    headers: &[(&str, &str)],
+) -> io::Result<()> {
     let client = reqwest::Client::new();
     let mut request = client
-        .post(spec.http_uri(path))
+        .post(uri)
         .header("Host", host)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .body(payload.to_vec());

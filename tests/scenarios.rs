@@ -170,6 +170,7 @@ struct ScenarioWorld {
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
         Option<AbortOnDropHandle<std::io::Result<nervix_proto::CommandResult>>>,
+    background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
@@ -3399,6 +3400,86 @@ async fn given_transaction_commit_pause(
 async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.pause_entity_gate(domain);
+}
+
+#[given(expr = "remote relay admission for domain {string} is paused")]
+async fn given_remote_relay_admission_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_remote_relay_admission(domain);
+}
+
+#[given(expr = "remote relay admission for branch {string} in domain {string} is paused")]
+async fn given_remote_relay_branch_admission_pause(
+    world: &mut ScenarioWorld,
+    branch: String,
+    domain: String,
+) {
+    let branch = expand_placeholders(world, &branch);
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .pause_remote_relay_admission_for_branch(domain, Some(branch));
+}
+
+#[then(expr = "the remote relay admission pause for domain {string} is reached")]
+async fn then_remote_relay_admission_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_remote_relay_admission_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("remote relay admission pause for domain '{domain}' was not reached: {error}")
+    });
+}
+
+#[then(expr = "the remote relay admission pause for branch {string} in domain {string} is reached")]
+async fn then_remote_relay_branch_admission_pause_is_reached(
+    world: &mut ScenarioWorld,
+    branch: String,
+    domain: String,
+) {
+    let branch = expand_placeholders(world, &branch);
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_remote_relay_admission_pause_for_branch(&domain, Some(&branch)),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "remote relay admission pause for domain '{domain}' and branch '{branch}' was not \
+             reached: {error}"
+        )
+    });
+}
+
+#[when(expr = "the remote relay admission pause for domain {string} is released")]
+async fn when_remote_relay_admission_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_remote_relay_admission_pause(&domain);
+}
+
+#[when(
+    expr = "the remote relay admission pause for branch {string} in domain {string} is released"
+)]
+async fn when_remote_relay_branch_admission_pause_is_released(
+    world: &mut ScenarioWorld,
+    branch: String,
+    domain: String,
+) {
+    let branch = expand_placeholders(world, &branch);
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_remote_relay_admission_pause_for_branch(&domain, Some(&branch));
 }
 
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
@@ -11765,6 +11846,44 @@ async fn when_http_payload_is_posted_to_node(
         .publish_http(&node_id, &host, &path, &payload)
         .await
         .expect("failed to post http payload");
+}
+
+#[when(
+    expr = "http payload begins posting in the background to node {string} with host {string} \
+            path {string}"
+)]
+async fn when_http_payload_begins_posting_in_the_background(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_http_publish.is_none(),
+        "a background http publish is already active"
+    );
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let task = world
+        .cluster()
+        .spawn_http_publish(&node_id, host, path, payload);
+    world.background_http_publish = Some(AbortOnDropHandle::new(task));
+}
+
+#[then("the background http publish succeeds")]
+async fn then_the_background_http_publish_succeeds(world: &mut ScenarioWorld) {
+    let task = world
+        .background_http_publish
+        .take()
+        .expect("a background http publish must be active");
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("background http publish did not finish")
+        .expect("background http publish task failed")
+        .expect("background http publish failed");
 }
 
 #[when(

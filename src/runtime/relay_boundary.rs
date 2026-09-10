@@ -1,6 +1,17 @@
+//! Per-relay execution boundaries and branch-local runtime ownership.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** Relay fan-out, branch-local ingress and outbound ordering, concrete branch
+//!   retention, owner tasks, and materialized relay state.
+//! - **Depends on.** Validated execution graphs, compiled schemas, execution admission, and the
+//!   interconnect dispatcher.
+//! - **Must not know.** NSPL text, transactions, consensus operations, or connector internals.
+
 use super::*;
 
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
+const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
 
 /// A count NSPL configures, narrowed to the width this node addresses memory with.
 ///
@@ -90,8 +101,89 @@ pub(super) struct RelayBoundaryServices {
     pub(super) remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     pub(super) remote_dispatcher: Option<Arc<RemoteDispatcher>>,
     pub(super) owner_node: RwLock<Option<ClusterNodeName>>,
-    pub(super) ingress_slot: Mutex<()>,
-    pub(super) outbound_slots: DashMap<String, Arc<Mutex<()>>, RandomState>,
+    pub(super) ingress_slots: DashMap<Option<BranchKey>, Arc<RelayOutboundSlot>, RandomState>,
+    pub(super) outbound_slots: DashMap<RelayOutboundChannel, Arc<RelayOutboundSlot>, RandomState>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(super) struct RelayOutboundChannel {
+    node_id: ClusterNodeName,
+    relay: RelayName,
+    kind: RelayPayloadKind,
+    branch: Option<BranchKey>,
+}
+
+#[derive(Debug)]
+pub(super) struct RelayOutboundSlot {
+    pub(super) gate: Mutex<()>,
+    sequence: parking_lot::Mutex<RelayOutboundSequence>,
+    cancellation: CancellationToken,
+}
+
+#[derive(Debug)]
+struct RelayOutboundSequence {
+    channel_incarnation: [u8; 16],
+    next_sequence: u64,
+    last_delivery_at: Option<Instant>,
+}
+
+impl RelayOutboundSequence {
+    fn reopen(&mut self) {
+        self.channel_incarnation = uuid::Uuid::now_v7().into_bytes();
+        self.next_sequence = 0;
+        self.last_delivery_at = None;
+    }
+}
+
+impl RelayOutboundSlot {
+    fn new() -> Self {
+        Self {
+            gate: Mutex::new(()),
+            sequence: parking_lot::Mutex::new(RelayOutboundSequence {
+                channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
+                next_sequence: 0,
+                last_delivery_at: None,
+            }),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    pub(super) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub(super) fn reopen_delivery_channel(&self) {
+        self.sequence.lock().reopen();
+    }
+
+    pub(super) fn next_delivery(&self) -> RelayDelivery {
+        self.next_delivery_at(Instant::now())
+    }
+
+    fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
+        let mut channel = self.sequence.lock();
+        if let Some(last_delivery_at) = channel.last_delivery_at
+            && now
+                .checked_duration_since(last_delivery_at)
+                .assured("a relay channel's monotonic delivery time does not move backwards")
+                >= RELAY_CHANNEL_IDLE_ROTATION
+        {
+            channel.reopen();
+        }
+        let sequence = channel.next_sequence;
+        channel.next_sequence = sequence
+            .checked_add(1)
+            .assured("a process cannot deliver u64::MAX batches before a channel rotates");
+        channel.last_delivery_at = Some(now);
+        RelayDelivery {
+            channel_incarnation: channel.channel_incarnation,
+            sequence,
+        }
+    }
 }
 
 impl std::fmt::Debug for ConcreteRelayRuntime {
@@ -180,6 +272,7 @@ pub(super) enum RelayBoundaryFanout {
 /// and every destination carries a handle to that one allocation. Only the target relay and the
 /// acknowledgement obligations differ between destinations.
 pub(super) struct RoutedDelivery<'a> {
+    pub(super) delivery: RelayDelivery,
     pub(super) domain: &'a DomainName,
     pub(super) consumer: &'a RemoteRuntimeConsumer,
     pub(super) batch: &'a RelayRecordBatch,
@@ -189,6 +282,7 @@ pub(super) struct RoutedDelivery<'a> {
 
 pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
     RelayPayload {
+        delivery: delivery.delivery,
         kind: RelayPayloadKind::Routed,
         domain: delivery.domain.clone(),
         relay: delivery.consumer.relay.clone(),
@@ -797,7 +891,7 @@ impl RelayBoundaryServices {
             remote_runtime_consumers: ArcSwap::from_pointee(remote_runtime_consumers),
             remote_dispatcher,
             owner_node: RwLock::new(None),
-            ingress_slot: Mutex::new(()),
+            ingress_slots: DashMap::default(),
             outbound_slots: DashMap::default(),
         }
     }
@@ -825,11 +919,43 @@ impl RelayBoundaryServices {
         self.fanout.deactivate_owner_buffer();
     }
 
-    pub(super) fn outbound_slot(&self, node_id: &ClusterNodeName) -> Arc<Mutex<()>> {
-        self.outbound_slots
-            .entry(node_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
+    pub(super) fn ingress_slot(&self, branch: &Option<BranchKey>) -> Arc<RelayOutboundSlot> {
+        self.ingress_slots
+            .entry(branch.clone())
+            .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
             .clone()
+    }
+
+    pub(super) fn outbound_slot(
+        &self,
+        node_id: &ClusterNodeName,
+        relay: &RelayName,
+        kind: RelayPayloadKind,
+        branch: &Option<BranchKey>,
+    ) -> Arc<RelayOutboundSlot> {
+        self.outbound_slots
+            .entry(RelayOutboundChannel {
+                node_id: node_id.clone(),
+                relay: relay.clone(),
+                kind,
+                branch: branch.clone(),
+            })
+            .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
+            .clone()
+    }
+
+    pub(super) fn remove_branch_slots(&self, branch: &Option<BranchKey>) {
+        if let Some((_, slot)) = self.ingress_slots.remove(branch) {
+            slot.cancel();
+        }
+        self.outbound_slots.retain(|channel, slot| {
+            if &channel.branch == branch {
+                slot.cancel();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     pub(super) async fn enqueue_owner_batch(
@@ -896,7 +1022,8 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let _slot = self.ingress_slot.lock().await;
+        let ingress_slot = self.ingress_slot(&batch.key);
+        let _slot = ingress_slot.gate.lock().await;
         let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -906,6 +1033,7 @@ impl RelayBoundaryServices {
                 return Err(Box::new(batch.clone()));
             }
         };
+        let delivery = ingress_slot.next_delivery();
         let mut registered_ack_ids = Vec::new();
         let remote_acks = batch
             .acks
@@ -927,6 +1055,7 @@ impl RelayBoundaryServices {
             .dispatch_admitted_relay_payload(
                 &owner_node,
                 RelayPayload {
+                    delivery,
                     kind: RelayPayloadKind::Ingress,
                     domain: domain.clone(),
                     relay: relay.clone(),
@@ -940,6 +1069,7 @@ impl RelayBoundaryServices {
                     acks: remote_acks,
                     admission: None,
                 },
+                &ingress_slot,
             )
             .await;
         if let Err(reason) = admission_result {
@@ -1047,8 +1177,13 @@ impl RelayBoundaryServices {
         let mut encoded_body: Option<ChargedBytes> = None;
         for consumer in remote_runtime_consumers.iter() {
             tokio::task::consume_budget().await;
-            let outbound_slot = self.outbound_slot(&consumer.node_id);
-            let _slot = outbound_slot.lock().await;
+            let outbound_slot = self.outbound_slot(
+                &consumer.node_id,
+                &consumer.relay,
+                RelayPayloadKind::Routed,
+                &batch.key,
+            );
+            let _slot = outbound_slot.gate.lock().await;
             let batch_ipc = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1100,16 +1235,19 @@ impl RelayBoundaryServices {
             } else {
                 vec![None; remote_batch.acks.len()]
             };
+            let delivery = outbound_slot.next_delivery();
             let result = dispatcher
                 .dispatch_admitted_relay_payload(
                     &consumer.node_id,
                     routed_payload(RoutedDelivery {
+                        delivery,
                         domain,
                         consumer,
                         batch: &remote_batch,
                         batch_ipc: batch_ipc.clone(),
                         acks: remote_acks.clone(),
                     }),
+                    &outbound_slot,
                 )
                 .await;
 
@@ -1312,6 +1450,19 @@ impl Runtime {
         }
     }
 
+    pub(in crate::runtime) fn invalidate_branch_relay_generation(
+        &self,
+        domain: &DomainName,
+        key: &Option<BranchKey>,
+    ) {
+        let Some(execution) = self.inner.executions.get(domain) else {
+            return;
+        };
+        for services in execution.relay_services.values() {
+            services.remove_branch_slots(key);
+        }
+    }
+
     pub(super) async fn fanout_relay_owner_batch(
         &self,
         domain: &DomainName,
@@ -1348,6 +1499,7 @@ impl Runtime {
             for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
                 branches.registry.remove(&evicted_key);
                 self.remove_stream_key_presence(domain, relay, &evicted_key);
+                self.invalidate_branch_relay_generation(domain, &evicted_key);
             }
         }
         self.inner.metrics.observe_global_stream_received(
@@ -1539,6 +1691,7 @@ impl Runtime {
                         ) {
                             branches.registry.remove(&expired_key);
                             runtime.remove_stream_key_presence(&domain, &relay, &expired_key);
+                            runtime.invalidate_branch_relay_generation(&domain, &expired_key);
                         }
                         next_expiration_scan = Instant::now() + expiration_scan_interval;
                     }
@@ -1645,6 +1798,7 @@ impl Runtime {
                     };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         tokio::task::consume_budget().await;
+                        runtime.invalidate_branch_relay_generation(&domain, &key);
                         if let Err(error) = runtime.delete_materialized_stream_key(&state, &key) {
                             warn!(
                                 domain = domain.as_str(),
@@ -1737,6 +1891,7 @@ impl Runtime {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
                         tokio::task::consume_budget().await;
+                        runtime.invalidate_branch_relay_generation(&domain, &evicted_key);
                         if let Err(error) =
                             runtime.delete_materialized_stream_key(&state, &evicted_key)
                         {
@@ -1787,4 +1942,5 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[path = "relay_boundary_tests.rs"]
 mod tests;
