@@ -99,6 +99,12 @@ impl StateAssignmentBinding {
             capability,
         })
     }
+
+    /// The ownership fence this binding acts under. A capture records it so a snapshot sealed
+    /// under a superseded assignment is refused instead of installed.
+    pub(crate) fn fence(self) -> u64 {
+        self.generation
+    }
 }
 
 #[derive(Debug)]
@@ -160,8 +166,22 @@ impl StateAssignmentAuthority {
     }
 
     pub(crate) fn serialize<T>(&self, action: impl FnOnce() -> T) -> T {
-        let _assignment = self.assignment.lock();
-        action()
+        self.serialize_with(|_| action())
+    }
+
+    /// Run `action` under the barrier with the assignment in force while it runs.
+    ///
+    /// A capture that must record which assignment it observed reads the fence in the same
+    /// critical section as the contents, so the two cannot describe different moments.
+    pub(crate) fn serialize_with<T>(
+        &self,
+        action: impl FnOnce(StateAssignmentBinding) -> T,
+    ) -> T {
+        let assignment = self.assignment.lock();
+        action(StateAssignmentBinding {
+            generation: assignment.generation,
+            capability: assignment.local_capability,
+        })
     }
 
     pub(crate) fn authorize<T>(
@@ -1289,8 +1309,8 @@ mod tests {
             schema_fingerprint: [7; 32],
             branch_key: None,
         };
-        let payload = crate::runtime::encode_materialized_stream_snapshot_entries(&[])
-            .expect("empty materialized state should encode");
+        let payload = crate::runtime::empty_sealed_container(placement.schema_fingerprint)
+            .expect("an empty materialized generation should seal");
         let prepared = PersistedRuntimeStateEntry {
             lsm: 5,
             schema_fingerprint: placement.schema_fingerprint,

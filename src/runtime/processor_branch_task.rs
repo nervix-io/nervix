@@ -1175,7 +1175,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: [(
                 named("dedup_users"),
                 RelayProcessorTemplate {

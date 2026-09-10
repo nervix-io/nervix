@@ -12228,6 +12228,7 @@ impl SessionServiceImpl {
             .inner
             .runtime
             .local_materialized_stream_state(domain, &show.relay)
+            .await
         {
             Ok(entries) if !entries.is_empty() => entries,
             Ok(_) if !relay_node.executes_on(self.inner.consensus.local_node_id()) => {
@@ -12254,18 +12255,17 @@ impl SessionServiceImpl {
         } else {
             let entry_lines = entries
                 .into_iter()
-                .map(|(key, record)| {
-                    let metadata = &record.metadata;
+                .map(|record| {
                     format!(
                         "key={} payload={} low={} high={}",
-                        if key.is_empty() {
+                        if record.branch.is_empty() {
                             "(root)"
                         } else {
-                            key.as_str()
+                            record.branch.as_str()
                         },
-                        runtime_schema::remote_runtime_record_to_json_string(&record),
-                        metadata.ingested_at_low_watermark,
-                        metadata.ingested_at_high_watermark
+                        record.payload,
+                        record.ingested_at_low_watermark,
+                        record.ingested_at_high_watermark
                     )
                 })
                 .collect::<Vec<_>>();

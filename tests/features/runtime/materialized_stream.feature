@@ -317,3 +317,92 @@ Feature: Materialized relay state
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: Concurrent branch updates recover from one consistent columnar snapshot
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And a repeated text placeholder "bulk_blob" of 1500000 bytes is prepared
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        user_id I64,
+        source STRING,
+        zblob STRING
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        tenant string,
+        user_id integer,
+        source string,
+        zblob string
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_tenant_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE RELAY tenant_state
+        SCHEMA notification
+        BRANCHED BY by_tenant_notifications
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT state_ingress
+        ON edge
+        PATH '/state'
+        TYPE HTTP;
+        CREATE INGESTOR state_notifications
+        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING notification_codec
+        TO tenant_state
+        INHERIT ALL
+        BRANCHED BY by_tenant_notifications
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        START;
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"acme","user_id":1,"source":"acme-first","zblob":"x"}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"globex","user_id":2,"source":"globex-first","zblob":"x"}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"acme","user_id":3,"source":"acme-second","zblob":"{{bulk_blob}}"}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"
+      """
+      {"tenant":"globex","user_id":4,"source":"globex-second","zblob":"y"}
+      """
+    Then within "10s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
+      """
+      key={"tenant":"acme"} payload={"source":"acme-second","tenant":"acme","user_id":3,"zblob":"aaaaaaaaaa
+      """
+    And within "10s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
+      """
+      key={"tenant":"globex"} payload={"source":"globex-second","tenant":"globex","user_id":4,"zblob":"y"}
+      """
+    When the cluster is restarted
+    Then within "30s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
+      """
+      key={"tenant":"acme"} payload={"source":"acme-second","tenant":"acme","user_id":3,"zblob":"aaaaaaaaaa
+      """
+    And within "30s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
+      """
+      key={"tenant":"globex"} payload={"source":"globex-second","tenant":"globex","user_id":4,"zblob":"y"}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+      | 3            | 1             |

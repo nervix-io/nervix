@@ -143,6 +143,7 @@ impl Runtime {
                 replicated_deduplicator_states: DashMap::default(),
                 replicated_kafka_offset_states: DashMap::default(),
                 replicated_materialized_stream_states: DashMap::default(),
+                restored_materialized_stream_states: DashMap::default(),
                 relay_state_epochs: DashMap::default(),
                 materialized_state_changed: Notify::new(),
                 replicated_window_processor_states: DashMap::default(),
@@ -432,6 +433,7 @@ impl Runtime {
         self.inner.replicated_deduplicator_states.clear();
         self.inner.replicated_kafka_offset_states.clear();
         self.inner.replicated_materialized_stream_states.clear();
+        self.inner.restored_materialized_stream_states.clear();
         self.inner.replicated_window_processor_states.clear();
         self.inner.replicated_branch_aggregated_states.clear();
     }

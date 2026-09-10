@@ -28,27 +28,6 @@ impl BranchKey {
         Ok(Self { fields, json })
     }
 
-    pub(super) fn from_remote_record<'a>(
-        record: &nervix_models::RemoteRuntimeRecord,
-        field_names: impl IntoIterator<Item = &'a FieldName>,
-    ) -> Result<Option<Self>, String> {
-        let mut fields = BTreeMap::new();
-        for field_name in field_names {
-            let Some(field) = record
-                .fields
-                .iter()
-                .find(|field| field.name == field_name.as_str())
-            else {
-                return Ok(None);
-            };
-            fields.insert(
-                field_name.clone(),
-                RuntimeValue::from_remote(field.value.clone()),
-            );
-        }
-        Self::from_fields(fields).map(Some)
-    }
-
     pub(crate) fn from_remote_key(
         fields: Option<Vec<RemoteRuntimeField>>,
     ) -> Result<Option<Self>, String> {

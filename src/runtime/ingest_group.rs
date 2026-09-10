@@ -1874,7 +1874,6 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
-                materialized_streams: HashSet::default(),
                 processors: HashMap::default(),
             },
             Duration::from_secs(30),
@@ -1984,7 +1983,6 @@ mod tests {
                         )]
                         .into_iter()
                         .collect(),
-                        materialized_streams: HashSet::default(),
                         processors: HashMap::default(),
                     },
                     ack_boundary,

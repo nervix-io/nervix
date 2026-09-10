@@ -1344,7 +1344,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: HashMap::default(),
         };
         let inputs = [
@@ -1503,7 +1502,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: HashMap::default(),
         };
         let graph = StdArc::new(ArcSwapOption::from(None));
@@ -1651,7 +1649,6 @@ mod tests {
                     )]
                     .into_iter()
                     .collect(),
-                    materialized_streams: HashSet::default(),
                     processors: HashMap::default(),
                 },
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),

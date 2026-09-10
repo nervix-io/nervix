@@ -417,6 +417,23 @@ impl Runtime {
             } else {
                 None
             };
+            if let Some(relay) = materialized_relay.as_ref()
+                && let Some(schema) = materialized_schema.as_ref()
+            {
+                let state_placement = self.state_placement(
+                    domain,
+                    RuntimeStateKind::MaterializedRelay,
+                    ModelKind::Relay,
+                    relay,
+                    None,
+                );
+                self.prepare_materialized_stream_restore(&state_placement, schema)
+                    .await
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
+            }
             if executes_locally
                 && !was_local
                 && let Some(relay) = materialized_relay.as_ref()
@@ -459,16 +476,30 @@ impl Runtime {
                                         relay.as_str()
                                     ),
                                 })?;
-                        installer
-                            .install_snapshot(snapshot.lsm, &snapshot.payload)
-                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                        let restored = self
+                            .open_replicated_materialized_snapshot(
+                                installer.read(),
+                                snapshot.payload,
+                            )
+                            .await
+                            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "failed to open ownership handoff snapshot for materialized \
+                                     relay '{}': {reason}",
+                                    relay.as_str()
+                                ),
+                            })?;
+                        installer.install(restored).map_err(|error| {
+                            RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: format!(
                                     "failed to install ownership handoff snapshot for \
                                      materialized relay '{}': {error}",
                                     relay.as_str()
                                 ),
-                            })?;
+                            }
+                        })?;
                         self.inner.materialized_state_changed.notify_waiters();
                     }
                 }

@@ -194,6 +194,7 @@ mod kafka_offset_state;
 mod lookup_hash_map;
 mod lsm_sequence;
 mod materialized_read;
+mod materialized_snapshot;
 mod materialized_state;
 mod message_error;
 mod message_error_delivery;
@@ -250,12 +251,16 @@ use kafka_offset_state::{
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
     ReplicatedKafkaOffsetState,
 };
+use materialized_snapshot::{
+    MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedMaterializedSnapshot,
+    empty_sealed_container, inspect_sealed_container,
+};
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
     MaterializedRelayStateRead, ReplicatedMaterializedRelayState,
-    decode_materialized_stream_snapshot, encode_materialized_stream_snapshot_entries,
 };
+pub use materialized_state::MaterializedRecordReport;
 
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
 /// operations are absent from each capability.
@@ -787,6 +792,11 @@ struct RuntimeInner {
         DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>,
     replicated_materialized_stream_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>,
+    /// Sealed materialized snapshots that have been opened and are waiting for the state they
+    /// belong to to be built. Opening one is bulk work, so it happens on a path that can wait and
+    /// the synchronous construction consumes the result.
+    restored_materialized_stream_states:
+        DashMap<RuntimeStatePlacement, RestoredMaterializedSnapshot, RandomState>,
     relay_state_epochs: DashMap<DomainName, Arc<AtomicU64>, RandomState>,
     materialized_state_changed: Notify,
     replicated_window_processor_states:

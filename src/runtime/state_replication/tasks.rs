@@ -126,36 +126,44 @@ impl Runtime {
         let snapshot_interval = self.inner.state_snapshot_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let executor = self.inner.executor.clone();
         Some(tokio::spawn(async move {
-            let flush_latest_snapshot =
-                |state: &MaterializedRelayStatePersistence, store: &RuntimeStateStore| {
-                    if !state.take_dirty() {
-                        return Ok(None);
-                    }
-                    let result = (|| {
-                        let snapshot = state.read().latest_snapshot()?;
-                        if snapshot.lsm <= state.last_persisted_lsm() {
-                            return Ok(None);
+            let flush_latest_snapshot = async |state: &MaterializedRelayStatePersistence,
+                                               store: &RuntimeStateStore| {
+                if !state.take_dirty() {
+                    return Ok(None);
+                }
+                let last_persisted = state.last_persisted_lsm();
+                let result = async {
+                    let sealed = state.read().seal_after(&executor, Some(last_persisted)).await;
+                    let sealed = match sealed {
+                        Ok(Some(sealed)) => sealed,
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            return Err(RuntimePersistenceError::EncodeState(error.to_string()));
                         }
-                        store.persist_latest_snapshot(
-                            state.read().placement(),
-                            snapshot.lsm,
-                            &snapshot.payload,
-                        )?;
-                        state.record_persisted(snapshot.lsm);
-                        Ok::<Option<u64>, RuntimePersistenceError>(Some(snapshot.lsm))
-                    })();
-                    if result.is_err() {
-                        state.restore_dirty();
-                    }
-                    result
-                };
+                    };
+                    let revision = sealed.descriptor.revision;
+                    store.persist_latest_snapshot(
+                        state.read().placement(),
+                        revision,
+                        sealed.bytes.as_ref(),
+                    )?;
+                    state.record_persisted(revision);
+                    Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
+                }
+                .await;
+                if result.is_err() {
+                    state.restore_dirty();
+                }
+                result
+            };
             loop {
                 tokio::task::consume_budget().await;
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            match flush_latest_snapshot(&state, &store) {
+                            match flush_latest_snapshot(&state, &store).await {
                                 Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
                                     state.read().placement(), lsm,
                                 ),
@@ -166,7 +174,7 @@ impl Runtime {
                         }
                     }
                     _ = sleep(snapshot_interval) => {
-                        match flush_latest_snapshot(&state, &store) {
+                        match flush_latest_snapshot(&state, &store).await {
                             Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
                                 state.read().placement(), lsm,
                             ),
@@ -546,8 +554,17 @@ impl Runtime {
                     .await
                 {
                     Ok(Some(snapshot)) => {
-                        if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
-                        {
+                        let restored = runtime
+                            .open_replicated_materialized_snapshot(state.read(), snapshot.payload)
+                            .await;
+                        let restored = match restored {
+                            Ok(restored) => restored,
+                            Err(error) => {
+                                warn!(error = %error, "failed to open replicated materialized relay snapshot");
+                                break;
+                            }
+                        };
+                        if let Err(error) = state.install(restored) {
                             warn!(error = %error, "failed to apply replicated materialized relay snapshot");
                             break;
                         }

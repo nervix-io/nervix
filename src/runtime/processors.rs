@@ -224,7 +224,6 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) branch_max_instances: Option<NonZeroUsize>,
     pub(super) error_policies: ErrorPolicies,
     pub(super) relays: HashMap<RelayName, RelayProcessorRelayTemplate>,
-    pub(super) materialized_streams: HashSet<RelayName>,
     pub(super) processors: HashMap<ModelName, RelayProcessorTemplate>,
 }
 
