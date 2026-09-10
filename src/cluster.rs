@@ -967,10 +967,7 @@ impl ClusterHandle {
             recorded_target_addr = match target_addr.as_ref() {
                 Some(target_addr) => Some(target_addr.clone()),
                 None => match previous_state.as_ref() {
-                    Some(previous) => match previous.target_addr() {
-                        Some(target_addr) => Some(target_addr.to_owned()),
-                        None => None,
-                    },
+                    Some(previous) => previous.target_addr().map(str::to_owned),
                     None => None,
                 },
             };

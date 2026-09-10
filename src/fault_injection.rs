@@ -490,9 +490,7 @@ impl FaultInjection {
         &self,
         domain: &DomainName,
     ) -> Option<Duration> {
-        let Some((_, elapsed)) = self.inner.domain_clock_initial_elapsed.remove(domain) else {
-            return None;
-        };
+        let (_, elapsed) = self.inner.domain_clock_initial_elapsed.remove(domain)?;
         Some(elapsed)
     }
 
