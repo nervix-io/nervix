@@ -864,7 +864,10 @@ impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
     const NAME: &'static str = "subscription_interest_visibility";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    // This request spans gossip convergence during membership changes. Target departure and node
+    // shutdown cancel it independently, so the deadline is only the bound for a live but
+    // non-converging cluster.
+    const TIMEOUT: Duration = Duration::from_secs(60);
 }
 
 #[derive(Debug)]
