@@ -12,6 +12,9 @@ cd nervix
 
 ## Prerequisites
 
+Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
+ONNX Runtime build for the host and stop on any other.
+
 Install:
 
 - Rust via `rustup`
