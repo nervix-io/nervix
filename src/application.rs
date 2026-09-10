@@ -2961,10 +2961,6 @@ impl BackgroundTask {
         self.cancel.cancel();
     }
 
-    fn is_finished(&self) -> bool {
-        self.handle.is_finished()
-    }
-
     async fn join(self) {
         self.handle.join_after_shutdown("background task").await;
     }
@@ -3647,7 +3643,6 @@ struct DomainClockTaskSpec {
     generation: u64,
     authority_revision: nervix_models::DomainClockAuthorityRevision,
     authority: ClusterNodeIdentity,
-    targets: BTreeSet<ClusterNodeIdentity>,
 }
 
 struct DomainClockTask {
@@ -3662,38 +3657,50 @@ struct DomainClockTask {
 /// successor for the same domain starts only after every retiring local task has finished.
 #[derive(Default)]
 struct DomainClockRetirements {
-    tasks: HashMap<DomainName, Vec<BackgroundTask>>,
+    tasks: HashMap<DomainName, Vec<DomainClockTask>>,
 }
 
 impl DomainClockRetirements {
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
     fn contains(&self, domain: &DomainName) -> bool {
         self.tasks.contains_key(domain)
     }
 
-    fn retire(&mut self, domain: DomainName, task: BackgroundTask) {
-        task.request_stop();
+    fn retire(&mut self, domain: DomainName, task: DomainClockTask) {
+        task.task.request_stop();
         self.tasks.entry(domain).or_default().push(task);
     }
 
-    async fn reap(&mut self) {
-        let domains = self.tasks.keys().cloned().collect::<Vec<_>>();
-        for domain in domains {
-            tokio::task::consume_budget().await;
-            let Some(tasks) = self.tasks.remove(&domain) else {
-                continue;
-            };
-            let mut pending = Vec::new();
-            for task in tasks {
-                tokio::task::consume_budget().await;
-                if task.is_finished() {
-                    task.join().await;
-                } else {
-                    pending.push(task);
-                }
-            }
-            if !pending.is_empty() {
-                self.tasks.insert(domain, pending);
-            }
+    async fn join_next(&mut self) {
+        let mut completions = self
+            .tasks
+            .iter_mut()
+            .flat_map(|(domain, tasks)| {
+                tasks.iter_mut().enumerate().map(move |(index, task)| {
+                    let domain = domain.clone();
+                    async move {
+                        (&mut task.task.handle)
+                            .join_after_shutdown("retiring domain clock")
+                            .await;
+                        (domain, index)
+                    }
+                })
+            })
+            .collect::<FuturesUnordered<_>>();
+        let completed = completions
+            .next()
+            .await
+            .assured("join_next is called only while a clock task is retiring");
+        drop(completions);
+        let Some(tasks) = self.tasks.get_mut(&completed.0) else {
+            return;
+        };
+        tasks.swap_remove(completed.1);
+        if tasks.is_empty() {
+            self.tasks.remove(&completed.0);
         }
     }
 
@@ -3702,7 +3709,7 @@ impl DomainClockRetirements {
             tokio::task::consume_budget().await;
             for task in tasks {
                 tokio::task::consume_budget().await;
-                task.stop().await;
+                task.task.stop().await;
             }
         }
     }
@@ -7012,6 +7019,115 @@ impl SessionServiceImpl {
         self.release_cluster_entity_gates(handoff.gate).await;
     }
 
+    async fn activate_local_ownership_handoff_state(
+        &self,
+        request: &RemoteActivateOwnershipHandoffStateRequest,
+    ) -> OwnershipHandoffResult<()> {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(request.activation_budget)
+            .ok_or_else(|| {
+                OwnershipHandoffError::deadline(
+                    "ownership handoff activation deadline exceeds the runtime instant range",
+                )
+            })?;
+        let activation = async {
+            if request.destination != *self.inner.consensus.local_node_id() {
+                return Err(OwnershipHandoffError::participant(format!(
+                    "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str(),
+                    request.destination,
+                    self.inner.consensus.local_node_id()
+                )));
+            }
+            let current_incarnations = self.live_node_incarnations().await;
+            Self::verify_ownership_handoff_node_incarnation(
+                &current_incarnations,
+                &request.source,
+                request.source_incarnation,
+                "source",
+            )?;
+            Self::verify_ownership_handoff_node_incarnation(
+                &current_incarnations,
+                &request.destination,
+                request.destination_incarnation,
+                "destination",
+            )?;
+
+            let mut schedule_rx = self.inner.consensus.subscribe_schedule();
+            let target_schedule = loop {
+                tokio::task::consume_budget().await;
+                let schedule = self.inner.consensus.current_schedule().await;
+                let current = schedule.domain(&request.domain).ok_or_else(|| {
+                    OwnershipHandoffError::schedule(format!(
+                        "domain '{}' has no committed schedule while activating ownership handoff",
+                        request.domain.as_str()
+                    ))
+                })?;
+                let fingerprint = Runtime::ownership_handoff_schedule_fingerprint(current)?;
+                if fingerprint == request.target_schedule_fingerprint {
+                    let node = current.nodes.get(&request.entity).ok_or_else(|| {
+                        OwnershipHandoffError::schedule(format!(
+                            "{} '{}' is absent from the ownership handoff target schedule",
+                            request.entity.kind.as_str(),
+                            request.entity.identifier.as_str()
+                        ))
+                    })?;
+                    if !node.is_primary_on(&request.destination) {
+                        return Err(OwnershipHandoffError::participant(format!(
+                            "{} '{}' is not owned by destination node '{}' in the committed \
+                             target schedule",
+                            request.entity.kind.as_str(),
+                            request.entity.identifier.as_str(),
+                            request.destination
+                        )));
+                    }
+                    break current.clone();
+                }
+                if fingerprint != request.base_schedule_fingerprint {
+                    return Err(OwnershipHandoffError::schedule(format!(
+                        "domain '{}' advanced to a different schedule before ownership handoff \
+                         activation",
+                        request.domain.as_str()
+                    )));
+                }
+                schedule_rx.changed().await.assured(
+                    "the consensus observer retains its schedule sender for the server lifetime",
+                );
+            };
+
+            let activation_needed = self
+                .inner
+                .runtime
+                .authorize_persisted_ownership_handoff_activation(request)?;
+            if activation_needed {
+                self.inner
+                    .runtime
+                    .rebuild_ownership_handoff_target(
+                        self.inner.consensus.local_node_id(),
+                        &request.domain,
+                        target_schedule,
+                    )
+                    .await
+                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
+            }
+            self.inner
+                .runtime
+                .verify_ownership_handoff_activation(request)
+        };
+
+        tokio::time::timeout_at(deadline, activation)
+            .await
+            .map_err(|_| {
+                OwnershipHandoffError::deadline(format!(
+                    "timed out waiting for {} '{}' to activate on node '{}'",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str(),
+                    request.destination
+                ))
+            })?
+    }
+
     async fn activate_planned_ownership_handoff(
         &self,
         domain: &DomainName,
@@ -7029,6 +7145,17 @@ impl SessionServiceImpl {
                 .node_incarnations
                 .get(&moved.destination)
                 .verified("every planned destination has a bound incarnation");
+            let remaining = handoff
+                .activation_deadline
+                .saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(OwnershipHandoffError::deadline(format!(
+                    "timed out waiting for {} '{}' to activate on node '{}'",
+                    moved.entity.kind.as_str(),
+                    moved.entity.identifier.as_str(),
+                    moved.destination
+                )));
+            }
             let request = RemoteActivateOwnershipHandoffStateRequest {
                 operation_id: handoff.operation_id.clone(),
                 source: moved.former_owner.clone(),
@@ -7039,34 +7166,21 @@ impl SessionServiceImpl {
                 entity: moved.entity.clone(),
                 base_schedule_fingerprint: handoff.base_schedule_fingerprint,
                 target_schedule_fingerprint: handoff.target_schedule_fingerprint,
+                activation_budget: remaining,
             };
-            let activation = async {
-                if request.destination == *self.inner.consensus.local_node_id() {
-                    return self
-                        .inner
-                        .runtime
-                        .verify_ownership_handoff_activation(&request);
-                }
+            if request.destination == *self.inner.consensus.local_node_id() {
+                self.activate_local_ownership_handoff_state(&request)
+                    .await?;
+            } else {
                 let destination = request.destination.clone();
                 let response = self
                     .inner
                     .interconnect
-                    .request(&destination, request)
+                    .request_with_timeout(&destination, request, remaining)
                     .await
                     .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
-                response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
-            };
-            match tokio::time::timeout_at(handoff.activation_deadline, activation).await {
-                Ok(Ok(())) => {}
-                Ok(Err(reason)) => return Err(reason),
-                Err(_) => {
-                    return Err(OwnershipHandoffError::deadline(format!(
-                        "timed out waiting for {} '{}' to activate on node '{}'",
-                        moved.entity.kind.as_str(),
-                        moved.entity.identifier.as_str(),
-                        moved.destination
-                    )));
-                }
+                response
+                    .map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))?;
             }
         }
         Ok(())
@@ -7077,24 +7191,9 @@ impl SessionServiceImpl {
         domain: &DomainName,
         handoff: PlannedOwnershipHandoff,
     ) -> OwnershipHandoffResult<()> {
-        let activation = loop {
-            tokio::task::consume_budget().await;
-            match self
-                .activate_planned_ownership_handoff(domain, &handoff)
-                .await
-            {
-                Ok(()) => break Ok(()),
-                Err(error) if tokio::time::Instant::now() < handoff.activation_deadline => {
-                    debug!(
-                        domain = domain.as_str(),
-                        error = %error,
-                        "planned ownership handoff activation will retry"
-                    );
-                    sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL).await;
-                }
-                Err(error) => break Err(error),
-            }
-        };
+        let activation = self
+            .activate_planned_ownership_handoff(domain, &handoff)
+            .await;
         if let Err(error) = activation {
             let hold_duration = handoff.started_at.elapsed();
             for moved in &handoff.moves {
@@ -17731,64 +17830,56 @@ async fn reconcile_domain_clock_tasks(
     tasks: &mut HashMap<DomainName, DomainClockTask>,
     retirements: &mut DomainClockRetirements,
 ) {
-    retirements.reap().await;
     let state = service.inner.consensus.current_runtime_state().await;
     let local_identity = service.inner.cluster.local_node_identity().await;
-    let gossip = service.inner.cluster.gossip_state().await;
-    let targets = gossip.live_identities();
-    let ready_nodes = service
-        .inner
-        .cluster
-        .nodes_ready_for_runtime_revision(state.revision)
-        .await;
-    let all_targets_ready = !targets.is_empty()
-        && targets
-            .iter()
-            .all(|identity| ready_nodes.contains(identity));
 
     let mut desired = HashMap::<DomainName, DomainClockTaskSpec>::new();
-    if all_targets_ready {
-        for (domain_id, domain) in &state.domains {
-            tokio::task::consume_budget().await;
-            if matches!(domain.status, DomainStatus::Stopped)
-                || matches!(domain.config.pace, DomainPace::Unpaced)
-            {
-                continue;
-            }
-            let Some(clock) = domain.clock.clone() else {
-                continue;
-            };
-            let Some(authority) = state.domain_clock_authorities.get(domain_id) else {
-                continue;
-            };
-            let Some(owner) = authority.owner() else {
-                continue;
-            };
-            if owner != &local_identity {
-                continue;
-            }
-            let period = match domain_clock_period(&domain.config) {
-                Ok(period) => period,
-                Err(error) => {
-                    warn!(
-                        domain = domain_id.as_str(),
-                        error, "committed paced domain has an invalid clock period"
-                    );
-                    continue;
-                }
-            };
-            desired.insert(
-                domain_id.clone(),
-                DomainClockTaskSpec {
-                    clock,
-                    period,
-                    generation: domain.start_version,
-                    authority_revision: authority.revision(),
-                    authority: owner.clone(),
-                    targets: targets.clone(),
-                },
-            );
+    for (domain_id, domain) in &state.domains {
+        tokio::task::consume_budget().await;
+        if matches!(domain.status, DomainStatus::Stopped)
+            || matches!(domain.config.pace, DomainPace::Unpaced)
+        {
+            continue;
         }
+        let Some(clock) = domain.clock.clone() else {
+            continue;
+        };
+        let Some(authority) = state.domain_clock_authorities.get(domain_id) else {
+            continue;
+        };
+        if !service.inner.runtime.has_domain_clock_authority(
+            domain_id,
+            domain.start_version,
+            authority,
+        ) {
+            continue;
+        }
+        let Some(owner) = authority.owner() else {
+            continue;
+        };
+        if owner != &local_identity {
+            continue;
+        }
+        let period = match domain_clock_period(&domain.config) {
+            Ok(period) => period,
+            Err(error) => {
+                warn!(
+                    domain = domain_id.as_str(),
+                    error, "committed paced domain has an invalid clock period"
+                );
+                continue;
+            }
+        };
+        desired.insert(
+            domain_id.clone(),
+            DomainClockTaskSpec {
+                clock,
+                period,
+                generation: domain.start_version,
+                authority_revision: authority.revision(),
+                authority: owner.clone(),
+            },
+        );
     }
 
     let existing = tasks.keys().cloned().collect::<Vec<_>>();
@@ -17798,7 +17889,7 @@ async fn reconcile_domain_clock_tasks(
             _ => false,
         };
         if !unchanged && let Some(task) = tasks.remove(&domain_id) {
-            retirements.retire(domain_id, task.task);
+            retirements.retire(domain_id, task);
         }
     }
 
@@ -17939,9 +18030,10 @@ async fn emit_domain_clock_progress(
         authority: spec.authority.clone(),
         tick,
     };
-    for target in &spec.targets {
+    let gossip = service.inner.cluster.gossip_state().await;
+    for target in gossip.live_identities() {
         tokio::task::consume_budget().await;
-        if target == &spec.authority {
+        if target == spec.authority {
             service.handle_domain_clock_progress(
                 spec.authority.node_id(),
                 DomainClockProgressEnvelope {
@@ -19503,116 +19595,9 @@ impl Application {
                 move |_context, request| {
                     let service = activate_handoff_service.clone();
                     async move {
-                        let result: OwnershipHandoffResult<_> = async {
-                            if request.destination != *service.inner.consensus.local_node_id() {
-                                return Err(OwnershipHandoffError::participant(format!(
-                                    "ownership handoff for {} '{}' targets node '{}' but reached \
-                                     '{}'",
-                                    request.entity.kind.as_str(),
-                                    request.entity.identifier.as_str(),
-                                    request.destination,
-                                    service.inner.consensus.local_node_id()
-                                )));
-                            }
-                            let current_incarnations = service.live_node_incarnations().await;
-                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
-                                &current_incarnations,
-                                &request.source,
-                                request.source_incarnation,
-                                "source",
-                            )?;
-                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
-                                &current_incarnations,
-                                &request.destination,
-                                request.destination_incarnation,
-                                "destination",
-                            )?;
-                            let deadline = tokio::time::Instant::now()
-                                + service.inner.runtime.entity_gate_deadline();
-                            let target_schedule = loop {
-                                tokio::task::consume_budget().await;
-                                let schedule = service.inner.consensus.current_schedule().await;
-                                let current =
-                                    schedule.domain(&request.domain).ok_or_else(|| {
-                                        OwnershipHandoffError::schedule(format!(
-                                            "domain '{}' has no committed schedule while \
-                                             activating ownership handoff",
-                                            request.domain.as_str()
-                                        ))
-                                    })?;
-                                let fingerprint =
-                                    Runtime::ownership_handoff_schedule_fingerprint(current)?;
-                                if fingerprint == request.target_schedule_fingerprint {
-                                    let node =
-                                        current.nodes.get(&request.entity).ok_or_else(|| {
-                                            OwnershipHandoffError::schedule(format!(
-                                                "{} '{}' is absent from the ownership handoff \
-                                                 target schedule",
-                                                request.entity.kind.as_str(),
-                                                request.entity.identifier.as_str()
-                                            ))
-                                        })?;
-                                    if !node.is_primary_on(&request.destination) {
-                                        return Err(OwnershipHandoffError::participant(format!(
-                                            "{} '{}' is not owned by destination node '{}' in the \
-                                             committed target schedule",
-                                            request.entity.kind.as_str(),
-                                            request.entity.identifier.as_str(),
-                                            request.destination
-                                        )));
-                                    }
-                                    break current.clone();
-                                }
-                                if fingerprint != request.base_schedule_fingerprint {
-                                    return Err(OwnershipHandoffError::schedule(format!(
-                                        "domain '{}' advanced to a different schedule before \
-                                         ownership handoff activation",
-                                        request.domain.as_str()
-                                    )));
-                                }
-                                if tokio::time::Instant::now() >= deadline {
-                                    return Err(OwnershipHandoffError::deadline(format!(
-                                        "timed out waiting for the committed ownership handoff \
-                                         schedule in domain '{}'",
-                                        request.domain.as_str()
-                                    )));
-                                }
-                                tokio::time::sleep(Duration::from_millis(25)).await;
-                            };
-                            let activation_needed = service
-                                .inner
-                                .runtime
-                                .authorize_persisted_ownership_handoff_activation(&request)?;
-                            service
-                                .apply_current_cluster_state()
-                                .await
-                                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
-                            if activation_needed
-                                && service
-                                    .inner
-                                    .runtime
-                                    .verify_ownership_handoff_activation(&request)
-                                    .is_err()
-                            {
-                                service
-                                    .inner
-                                    .runtime
-                                    .rebuild_ownership_handoff_target(
-                                        service.inner.consensus.local_node_id(),
-                                        &request.domain,
-                                        target_schedule,
-                                    )
-                                    .await
-                                    .map_err(|error| {
-                                        OwnershipHandoffError::state(error.to_string())
-                                    })?;
-                            }
-                            service
-                                .inner
-                                .runtime
-                                .verify_ownership_handoff_activation(&request)
-                        }
-                        .await;
+                        let result = service
+                            .activate_local_ownership_handoff_state(&request)
+                            .await;
                         match result {
                             Ok(()) => Ok(()),
                             Err(error) => Err(OwnershipHandoffFailure::rejected(error.to_string())),
@@ -19763,36 +19748,54 @@ impl Application {
             service.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
 
-        let domain_service = service.clone();
-        let domain_shutdown = shutdown.clone();
+        let domain_apply_service = service.clone();
+        let domain_apply_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
-            let mut domains_rx = domain_service.inner.consensus.subscribe_domains();
-            let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
-            let mut retirements = DomainClockRetirements::default();
-            if let Err(error) = domain_service.apply_current_cluster_state().await {
+            let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
+            if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
 
             loop {
                 tokio::task::consume_budget().await;
+                tokio::select! {
+                    _ = domain_apply_shutdown.cancelled() => break,
+                    changed = domains_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
+                            warn!(error = %error, "failed to apply cluster schedule after domain sync");
+                        }
+                    }
+                }
+            }
+        }));
+
+        let clock_service = service.clone();
+        let clock_shutdown = shutdown.clone();
+        background_tasks.push(tokio::spawn(async move {
+            let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
+            let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
+            let mut retirements = DomainClockRetirements::default();
+
+            loop {
+                tokio::task::consume_budget().await;
                 reconcile_domain_clock_tasks(
-                    &domain_service,
-                    &domain_shutdown,
+                    &clock_service,
+                    &clock_shutdown,
                     &mut tasks,
                     &mut retirements,
                 )
                 .await;
                 tokio::select! {
-                    _ = domain_shutdown.cancelled() => break,
-                    changed = domains_rx.changed() => {
+                    _ = clock_shutdown.cancelled() => break,
+                    changed = domain_state_rx.changed() => {
                         if changed.is_err() {
                             break;
                         }
-                        if let Err(error) = domain_service.apply_current_cluster_state().await {
-                            warn!(error = %error, "failed to apply cluster schedule after domain sync");
-                        }
                     }
-                    _ = sleep(Duration::from_millis(100)) => {}
+                    _ = retirements.join_next(), if !retirements.is_empty() => {}
                 }
             }
 

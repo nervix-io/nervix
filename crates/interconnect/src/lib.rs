@@ -546,6 +546,7 @@ pub struct ActivateOwnershipHandoffStateRequest {
     pub entity: NodeRef,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
+    pub activation_budget: Duration,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

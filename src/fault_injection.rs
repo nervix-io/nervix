@@ -17,11 +17,12 @@ use std::{
 
 use ahash::RandomState;
 use dashmap::DashMap;
+use meticulous::ResultExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{broadcast, watch};
 use triomphe::Arc;
 
 use crate::registry::SchedulerMode;
@@ -51,18 +52,17 @@ struct FaultInjectionState {
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
-    command_pauses: DashMap<CommandPausePoint, Arc<CommandPause>, RandomState>,
+    command_pauses: DashMap<CommandPausePoint, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
-    entity_gate_pauses: DashMap<String, Arc<EntityGatePause>, RandomState>,
+    entity_gate_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     remote_relay_admission_pauses:
-        DashMap<RemoteRelayAdmissionPauseKey, Arc<RemoteRelayAdmissionPause>, RandomState>,
+        DashMap<RemoteRelayAdmissionPauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
-    ownership_handoff_preparation_pauses:
-        DashMap<String, Arc<OwnershipHandoffPreparationPause>, RandomState>,
+    ownership_handoff_preparation_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
-        DashMap<DomainClockProgressPausePoint, Arc<DomainClockProgressPause>, RandomState>,
+        DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
     state_replica_polling_paused: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
@@ -90,52 +90,22 @@ struct NodeBulkExecution {
     holders: Arc<Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
 }
 
-#[derive(Debug, Default)]
-struct CommandPause {
-    reached: AtomicBool,
-    released: AtomicBool,
-    reached_notify: Notify,
-    release_notify: Notify,
+#[derive(Debug, Clone, Copy, Default)]
+struct TestPauseState {
+    reached: bool,
+    released: bool,
+    delivered: bool,
 }
 
-#[derive(Debug, Default)]
-struct EntityGatePause {
-    reached: AtomicBool,
-    released: AtomicBool,
-    reached_notify: Notify,
-    release_notify: Notify,
-}
-
-#[derive(Debug, Default)]
-struct RemoteRelayAdmissionPause {
-    reached: AtomicBool,
-    released: AtomicBool,
-    reached_notify: Notify,
-    release_notify: Notify,
+#[derive(Debug)]
+struct TestPause {
+    state: watch::Sender<TestPauseState>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteRelayAdmissionPauseKey {
     domain: String,
     branch: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct OwnershipHandoffPreparationPause {
-    reached: AtomicBool,
-    released: AtomicBool,
-    reached_notify: Notify,
-    release_notify: Notify,
-}
-
-#[derive(Debug, Default)]
-struct DomainClockProgressPause {
-    reached: AtomicBool,
-    released: AtomicBool,
-    delivered: AtomicBool,
-    reached_notify: Notify,
-    release_notify: Notify,
-    delivered_notify: Notify,
 }
 
 /// The command boundary a test controls without racing an election against a request.
@@ -401,27 +371,19 @@ impl FaultInjection {
     pub fn pause_entity_gate(&self, domain: impl Into<String>) {
         self.inner.entity_gate_pauses.insert(
             domain.into().to_ascii_lowercase(),
-            Arc::new(EntityGatePause::default()),
+            Arc::new(TestPause::default()),
         );
     }
 
     pub async fn wait_for_entity_gate_pause(&self, domain: &str) {
         let key = domain.to_ascii_lowercase();
         let pause = self.entity_gate_pause(&key);
-        while !pause.reached.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.reached_notify.notified();
-            if pause.reached.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.wait_until_reached().await;
     }
 
     pub fn release_entity_gate_pause(&self, domain: &str) {
         let pause = self.entity_gate_pause(&domain.to_ascii_lowercase());
-        pause.released.store(true, Ordering::Release);
-        pause.release_notify.notify_waiters();
+        pause.release();
     }
 
     pub fn pause_remote_relay_admission(&self, domain: impl Into<String>) {
@@ -438,7 +400,7 @@ impl FaultInjection {
                 domain: domain.into().to_ascii_lowercase(),
                 branch,
             },
-            Arc::new(RemoteRelayAdmissionPause::default()),
+            Arc::new(TestPause::default()),
         );
     }
 
@@ -457,14 +419,7 @@ impl FaultInjection {
             branch: branch.map(str::to_string),
         };
         let pause = self.remote_relay_admission_pause(&key);
-        while !pause.reached.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.reached_notify.notified();
-            if pause.reached.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.wait_until_reached().await;
     }
 
     pub fn release_remote_relay_admission_pause(&self, domain: &str) {
@@ -481,34 +436,25 @@ impl FaultInjection {
             branch: branch.map(str::to_string),
         };
         let pause = self.remote_relay_admission_pause(&key);
-        pause.released.store(true, Ordering::Release);
-        pause.release_notify.notify_waiters();
+        pause.release();
     }
 
     pub fn pause_ownership_handoff_after_preparation(&self, domain: impl Into<String>) {
         self.inner.ownership_handoff_preparation_pauses.insert(
             domain.into().to_ascii_lowercase(),
-            Arc::new(OwnershipHandoffPreparationPause::default()),
+            Arc::new(TestPause::default()),
         );
     }
 
     pub async fn wait_for_ownership_handoff_preparation_pause(&self, domain: &str) {
         let key = domain.to_ascii_lowercase();
         let pause = self.ownership_handoff_preparation_pause(&key);
-        while !pause.reached.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.reached_notify.notified();
-            if pause.reached.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.wait_until_reached().await;
     }
 
     pub fn release_ownership_handoff_preparation_pause(&self, domain: &str) {
         let pause = self.ownership_handoff_preparation_pause(&domain.to_ascii_lowercase());
-        pause.released.store(true, Ordering::Release);
-        pause.release_notify.notify_waiters();
+        pause.release();
     }
 
     pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
@@ -517,7 +463,7 @@ impl FaultInjection {
                 domain: domain.into().to_ascii_lowercase(),
                 node: None,
             },
-            Arc::new(DomainClockProgressPause::default()),
+            Arc::new(TestPause::default()),
         );
     }
 
@@ -527,7 +473,7 @@ impl FaultInjection {
                 domain: domain.into().to_ascii_lowercase(),
                 node: Some(node),
             },
-            Arc::new(DomainClockProgressPause::default()),
+            Arc::new(TestPause::default()),
         );
     }
 
@@ -702,16 +648,8 @@ impl FaultInjection {
         else {
             return;
         };
-        pause.reached.store(true, Ordering::Release);
-        pause.reached_notify.notify_waiters();
-        while !pause.released.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.release_notify.notified();
-            if pause.released.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.reach();
+        pause.wait_until_released().await;
         self.inner.entity_gate_pauses.remove(&key);
     }
 
@@ -748,16 +686,8 @@ impl FaultInjection {
         } else {
             return;
         };
-        pause.reached.store(true, Ordering::Release);
-        pause.reached_notify.notify_waiters();
-        while !pause.released.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.release_notify.notified();
-            if pause.released.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.reach();
+        pause.wait_until_released().await;
         self.inner.remote_relay_admission_pauses.remove(&key);
     }
 
@@ -774,16 +704,8 @@ impl FaultInjection {
         else {
             return;
         };
-        pause.reached.store(true, Ordering::Release);
-        pause.reached_notify.notify_waiters();
-        while !pause.released.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.release_notify.notified();
-            if pause.released.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.reach();
+        pause.wait_until_released().await;
         self.inner.ownership_handoff_preparation_pauses.remove(&key);
     }
 
@@ -807,8 +729,7 @@ impl FaultInjection {
         } else {
             return false;
         };
-        pause.reached.store(true, Ordering::Release);
-        pause.reached_notify.notify_waiters();
+        pause.reach();
         pause.wait_until_released().await;
         true
     }
@@ -887,10 +808,10 @@ impl FaultInjection {
     fn arm_command_pause(&self, point: CommandPausePoint) {
         self.inner
             .command_pauses
-            .insert(point, Arc::new(CommandPause::default()));
+            .insert(point, Arc::new(TestPause::default()));
     }
 
-    fn command_pause(&self, point: &CommandPausePoint) -> Arc<CommandPause> {
+    fn command_pause(&self, point: &CommandPausePoint) -> Arc<TestPause> {
         let Some(pause) = self.inner.command_pauses.get(point) else {
             panic!("command pause at {point:?} is not armed");
         };
@@ -899,20 +820,12 @@ impl FaultInjection {
 
     fn release_command_pause(&self, point: &CommandPausePoint) {
         let pause = self.command_pause(point);
-        pause.released.store(true, Ordering::Release);
-        pause.release_notify.notify_waiters();
+        pause.release();
     }
 
     async fn wait_for_command_pause(&self, point: &CommandPausePoint) {
         let pause = self.command_pause(point);
-        while !pause.reached.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.reached_notify.notified();
-            if pause.reached.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.wait_until_reached().await;
     }
 
     async fn pause_command_if_armed(&self, point: CommandPausePoint) {
@@ -924,30 +837,19 @@ impl FaultInjection {
         else {
             return;
         };
-        pause.reached.store(true, Ordering::Release);
-        pause.reached_notify.notify_waiters();
-        while !pause.released.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = pause.release_notify.notified();
-            if pause.released.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        pause.reach();
+        pause.wait_until_released().await;
         self.inner.command_pauses.remove(&point);
     }
 
-    fn entity_gate_pause(&self, key: &str) -> Arc<EntityGatePause> {
+    fn entity_gate_pause(&self, key: &str) -> Arc<TestPause> {
         let Some(pause) = self.inner.entity_gate_pauses.get(key) else {
             panic!("entity gate pause for domain '{key}' is not armed");
         };
         pause.value().clone()
     }
 
-    fn remote_relay_admission_pause(
-        &self,
-        key: &RemoteRelayAdmissionPauseKey,
-    ) -> Arc<RemoteRelayAdmissionPause> {
+    fn remote_relay_admission_pause(&self, key: &RemoteRelayAdmissionPauseKey) -> Arc<TestPause> {
         let Some(pause) = self.inner.remote_relay_admission_pauses.get(key) else {
             panic!(
                 "remote relay admission pause for domain '{}' and branch {:?} is not armed",
@@ -957,20 +859,14 @@ impl FaultInjection {
         pause.value().clone()
     }
 
-    fn ownership_handoff_preparation_pause(
-        &self,
-        key: &str,
-    ) -> Arc<OwnershipHandoffPreparationPause> {
+    fn ownership_handoff_preparation_pause(&self, key: &str) -> Arc<TestPause> {
         let Some(pause) = self.inner.ownership_handoff_preparation_pauses.get(key) else {
             panic!("ownership handoff preparation pause for domain '{key}' is not armed");
         };
         pause.value().clone()
     }
 
-    fn domain_clock_progress_pause(
-        &self,
-        point: &DomainClockProgressPausePoint,
-    ) -> Arc<DomainClockProgressPause> {
+    fn domain_clock_progress_pause(&self, point: &DomainClockProgressPausePoint) -> Arc<TestPause> {
         let Some(pause) = self.inner.domain_clock_progress_pauses.get(point) else {
             panic!("domain clock progress pause for '{point:?}' is not armed");
         };
@@ -978,47 +874,48 @@ impl FaultInjection {
     }
 }
 
-impl DomainClockProgressPause {
-    async fn wait_until_reached(&self) {
-        while !self.reached.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = self.reached_notify.notified();
-            if self.reached.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
+impl Default for TestPause {
+    fn default() -> Self {
+        Self {
+            state: watch::channel(TestPauseState::default()).0,
         }
+    }
+}
+
+impl TestPause {
+    fn reach(&self) {
+        self.state.send_modify(|state| state.reached = true);
+    }
+
+    async fn wait_until_reached(&self) {
+        self.state
+            .subscribe()
+            .wait_for(|state| state.reached)
+            .await
+            .assured("the pause owns its state sender for the full wait");
     }
 
     async fn wait_until_released(&self) {
-        while !self.released.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = self.release_notify.notified();
-            if self.released.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        self.state
+            .subscribe()
+            .wait_for(|state| state.released)
+            .await
+            .assured("the pause owns its state sender for the full wait");
     }
 
     async fn wait_until_delivered(&self) {
-        while !self.delivered.load(Ordering::Acquire) {
-            tokio::task::consume_budget().await;
-            let notified = self.delivered_notify.notified();
-            if self.delivered.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
+        self.state
+            .subscribe()
+            .wait_for(|state| state.delivered)
+            .await
+            .assured("the pause owns its state sender for the full wait");
     }
 
     fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.release_notify.notify_waiters();
+        self.state.send_modify(|state| state.released = true);
     }
 
     fn mark_delivered(&self) {
-        self.delivered.store(true, Ordering::Release);
-        self.delivered_notify.notify_waiters();
+        self.state.send_modify(|state| state.delivered = true);
     }
 }
