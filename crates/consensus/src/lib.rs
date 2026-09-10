@@ -983,6 +983,9 @@ impl Consensus {
                     .unwrap_or(u64::MAX),
                 election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
                     .unwrap_or(u64::MAX),
+                // A single consensus command may use the full interconnect command-byte budget.
+                // Replicate one entry per request so catch-up cannot exceed that bounded payload.
+                max_payload_entries: 1,
                 snapshot_policy: openraft::SnapshotPolicy::Never,
                 ..Default::default()
             }
