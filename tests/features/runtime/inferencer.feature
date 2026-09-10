@@ -466,6 +466,8 @@ Feature: Inferencer resources
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # Each length-one vector row is 24B and the length-two row is 40B under runtime Arrow
+    # payload accounting. Their 24B + 40B + 24B total reaches the 88B boundary only at row 3.
     When these NSPL commands are executed on the leader node
       """
       CREATE RESOURCE inference;
@@ -495,15 +497,17 @@ Feature: Inferencer resources
         UNBRANCHED
         TO scored_sequences
         SET scores = scores
-        FLUSH EACH 500ms MAX BATCH SIZE 16mb
+        FLUSH EACH 1h MAX BATCH SIZE 88B
         ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_sequences_subscription TO scored_sequences;
       START;
+      SHOW CLUSTER STATUS;
       """
-    And http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
+    Then the last cluster status owner for scheduled "inferencer" "score_sequence_batch" is saved as placeholder "dynamic_inferencer_owner"
+    When http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
       """
       {"features":[[1.0,10.0]],"mask":[[100.0,1000.0]]}
       """
@@ -520,6 +524,20 @@ Feature: Inferencer resources
       {"scores":[[103.0,1030.0]]}
       {"scores":[[204.0,2040.0],[408.0,4080.0]]}
       {"scores":[[305.0,3050.0]]}
+      """
+    And node "{{dynamic_inferencer_owner}}" observability metric "nervix_bytes_total" with labels eventually equals 88
+      """
+      target_kind="INFERENCER"
+      target="score_sequence_batch"
+      direction="received"
+      relay="sequences"
+      """
+    And node "{{dynamic_inferencer_owner}}" observability metric "nervix_batches_total" with labels eventually equals 1
+      """
+      target_kind="INFERENCER"
+      target="score_sequence_batch"
+      direction="sent"
+      relay="scored_sequences"
       """
 
     Examples:
@@ -614,6 +632,8 @@ Feature: Inferencer resources
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # Each row has two fixed-size F32 pairs and accounts for 16B. Three rows reach the 48B
+    # boundary exactly, so neither of the first two inputs can start inference early.
     When these NSPL commands are executed on the leader node
       """
       CREATE RESOURCE inference;
@@ -649,15 +669,17 @@ Feature: Inferencer resources
         UNBRANCHED
         TO scored
         SET scores = scores
-        FLUSH EACH 500ms MAX BATCH SIZE 16mb
+        FLUSH EACH 1h MAX BATCH SIZE 48B
         ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
+      SHOW CLUSTER STATUS;
       """
-    And http payload is posted to host "infer-batch-{{test_id}}.example.com" path "/features"
+    Then the last cluster status owner for scheduled "inferencer" "batch_score_messages" is saved as placeholder "batch_inferencer_owner"
+    When http payload is posted to host "infer-batch-{{test_id}}.example.com" path "/features"
       """
       {"features":[1.0,10.0],"mask":[100.0,1000.0]}
       """
@@ -674,6 +696,20 @@ Feature: Inferencer resources
       {"scores":[103.0,1030.0]}
       {"scores":[204.0,2040.0]}
       {"scores":[305.0,3050.0]}
+      """
+    And node "{{batch_inferencer_owner}}" observability metric "nervix_bytes_total" with labels eventually equals 48
+      """
+      target_kind="INFERENCER"
+      target="batch_score_messages"
+      direction="received"
+      relay="features"
+      """
+    And node "{{batch_inferencer_owner}}" observability metric "nervix_batches_total" with labels eventually equals 1
+      """
+      target_kind="INFERENCER"
+      target="batch_score_messages"
+      direction="sent"
+      relay="scored"
       """
 
     Examples:
