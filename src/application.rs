@@ -208,7 +208,7 @@ use crate::{
 };
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
-const RUNTIME_REVISION_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: Duration = Duration::from_secs(30);
 const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -4423,6 +4423,7 @@ async fn apply_cluster_runtime_state(
     state: ConsensusRuntimeState,
 ) -> Result<(), crate::runtime::RuntimeError> {
     let mut live_node_states = cluster.subscribe_live_node_states().await;
+    let mut interconnect_state = cluster.subscribe_interconnect_state();
     let has_running_domain = state
         .domains
         .values()
@@ -4443,9 +4444,33 @@ async fn apply_cluster_runtime_state(
         return Ok(());
     }
 
-    let deadline = tokio::time::Instant::now() + RUNTIME_REVISION_READINESS_TIMEOUT;
+    let node_unavailability_timeout = cluster.node_unavailability_timeout();
+    // Applying a revision gets one start-time operation budget: peer-failure detection followed
+    // by readiness propagation. A peer that disconnects after this starts has only the remaining
+    // portion of that budget.
+    let Some(readiness_timeout) =
+        node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+    else {
+        return Err(
+            crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
+                node_unavailability_timeout,
+                readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+            },
+        );
+    };
+    let Some(deadline) = tokio::time::Instant::now().checked_add(readiness_timeout) else {
+        return Err(
+            crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
+                node_unavailability_timeout,
+                readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+            },
+        );
+    };
+    let mut deadline_elapsed = false;
     loop {
         tokio::task::consume_budget().await;
+        let interconnect_change = interconnect_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(interconnect_change);
         let gossip = cluster.gossip_state().await;
         let expected_nodes = gossip.live_identities();
         let ready_nodes = cluster
@@ -4458,16 +4483,21 @@ async fn apply_cluster_runtime_state(
         if pending_nodes.is_empty() {
             break;
         }
-        match tokio::time::timeout_at(deadline, live_node_states.changed()).await {
-            Ok(changed) => changed.assured(
+        if deadline_elapsed {
+            return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+                revision: state.revision,
+                pending_nodes,
+            });
+        }
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => {
+                deadline_elapsed = true;
+            }
+            changed = live_node_states.changed() => changed.assured(
                 "the cluster handle retains its Chitchat state sender for the server lifetime",
             ),
-            Err(_) => {
-                return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                    revision: state.revision,
-                    pending_nodes,
-                });
-            }
+            _ = &mut interconnect_change => {}
         }
     }
 
@@ -17916,8 +17946,11 @@ async fn run_domain_clock(
     shutdown: CancellationToken,
 ) {
     let mut live_node_states = service.inner.cluster.subscribe_live_node_states().await;
+    let mut interconnect_state = service.inner.cluster.subscribe_interconnect_state();
     loop {
         tokio::task::consume_budget().await;
+        let interconnect_change = interconnect_state.wait_for_change_or_next_unavailability();
+        tokio::pin!(interconnect_change);
         let live_targets = service.inner.cluster.gossip_state().await.live_identities();
         let ready_targets = service
             .inner
@@ -17934,6 +17967,7 @@ async fn run_domain_clock(
                     "the cluster handle retains its Chitchat state sender for the server lifetime",
                 );
             }
+            _ = &mut interconnect_change => {}
         }
     }
 

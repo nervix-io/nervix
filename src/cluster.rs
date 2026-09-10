@@ -25,7 +25,7 @@ use chitchat::{
     transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
 use dashmap::DashMap;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_interconnect::{
     InterconnectRequest, PeerTarget, PoolClass, RequestContext, RequestSubquota,
@@ -33,7 +33,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};
 use nervix_recovery::Discarded as _;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use rkyv::{Archive, Deserialize, Serialize};
 use tokio::{
     net::lookup_host,
@@ -64,7 +64,7 @@ pub struct ClusterHandle {
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
     chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: ClusterEvents,
-    interconnect_state: RwLock<BTreeMap<ClusterNodeName, InterconnectPeerState>>,
+    interconnect_state: watch::Sender<InterconnectStateSnapshot>,
     node_unavailability_timeout: Duration,
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -100,11 +100,83 @@ impl ClusterEvents {
     }
 }
 
-#[derive(Debug, Clone)]
-struct InterconnectPeerState {
-    target_addr: Option<String>,
-    connected: bool,
-    unavailable_since: Option<Instant>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InterconnectPeerState {
+    Connected {
+        target_addr: String,
+    },
+    Disconnected {
+        target_addr: Option<String>,
+        since: Instant,
+    },
+}
+
+impl InterconnectPeerState {
+    fn target_addr(&self) -> Option<&str> {
+        match self {
+            Self::Connected { target_addr } => Some(target_addr),
+            Self::Disconnected { target_addr, .. } => target_addr.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct InterconnectStateSnapshot {
+    peers: BTreeMap<ClusterNodeName, InterconnectPeerState>,
+}
+
+impl InterconnectStateSnapshot {
+    fn next_unavailability_deadline(&self, timeout: Duration, now: Instant) -> Option<Instant> {
+        let mut earliest = None;
+        for peer in self.peers.values() {
+            let InterconnectPeerState::Disconnected { since, .. } = peer else {
+                continue;
+            };
+            let Some(deadline) = since.checked_add(timeout) else {
+                // This configured threshold has no reachable deadline on the platform's
+                // monotonic clock, so it cannot cause a future eligibility transition.
+                continue;
+            };
+            if deadline <= now {
+                continue;
+            }
+            match earliest {
+                Some(current) if current <= deadline => {}
+                _ => earliest = Some(deadline),
+            }
+        }
+        earliest
+    }
+}
+
+pub(crate) struct InterconnectStateWatcher {
+    state: watch::Receiver<InterconnectStateSnapshot>,
+    unavailability_timeout: Duration,
+}
+
+impl InterconnectStateWatcher {
+    pub(crate) fn wait_for_change_or_next_unavailability(
+        &mut self,
+    ) -> impl std::future::Future<Output = ()> + '_ {
+        let next_unavailability = {
+            self.state
+                .borrow_and_update()
+                .next_unavailability_deadline(self.unavailability_timeout, Instant::now())
+        };
+        async move {
+            tokio::select! {
+                changed = self.state.changed() => changed.assured(
+                    "the cluster handle retains its interconnect state sender for its lifetime",
+                ),
+                _ = async {
+                    match next_unavailability {
+                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -559,7 +631,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         chitchat: chitchat_state,
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
-        interconnect_state: RwLock::new(BTreeMap::new()),
+        interconnect_state: watch::channel(InterconnectStateSnapshot::default()).0,
         node_unavailability_timeout: settings.node_unavailability_timeout,
         membership_task: Mutex::new(Some(membership_task)),
     })
@@ -817,30 +889,31 @@ impl ClusterHandle {
     }
 
     pub fn record_interconnect_connected(&self, node_id: &ClusterNodeName, target_addr: String) {
-        let mut peers = self.interconnect_state.write();
-        let entry = peers
-            .entry(node_id.clone())
-            .or_insert_with(|| InterconnectPeerState {
-                target_addr: Some(target_addr.clone()),
-                connected: false,
-                unavailable_since: None,
-            });
-        entry.target_addr = Some(target_addr.clone());
-        let was_connected = entry.connected;
-        let was_unavailable = entry.unavailable_since.is_some();
-        entry.connected = true;
-        entry.unavailable_since = None;
+        let mut previous_state = None;
+        self.interconnect_state.send_if_modified(|snapshot| {
+            let next = InterconnectPeerState::Connected {
+                target_addr: target_addr.clone(),
+            };
+            previous_state = snapshot.peers.get(node_id).cloned();
+            let modified = previous_state.as_ref() != Some(&next);
+            snapshot.peers.insert(node_id.clone(), next);
+            modified
+        });
 
-        if !was_connected {
-            info!(%node_id, target_addr, "interconnect connection established");
-            self.events.offer(format!(
-                "interconnect connection established: {node_id}@{target_addr}"
-            ));
-        } else if was_unavailable {
-            info!(%node_id, target_addr, "interconnect connection restored");
-            self.events.offer(format!(
-                "interconnect connection restored: {node_id}@{target_addr}"
-            ));
+        match previous_state {
+            Some(InterconnectPeerState::Disconnected { .. }) => {
+                info!(%node_id, target_addr, "interconnect connection restored");
+                self.events.offer(format!(
+                    "interconnect connection restored: {node_id}@{target_addr}"
+                ));
+            }
+            None => {
+                info!(%node_id, target_addr, "interconnect connection established");
+                self.events.offer(format!(
+                    "interconnect connection established: {node_id}@{target_addr}"
+                ));
+            }
+            Some(InterconnectPeerState::Connected { .. }) => {}
         }
     }
 
@@ -849,77 +922,99 @@ impl ClusterHandle {
         node_id: &ClusterNodeName,
         target_addr: Option<String>,
     ) {
-        let mut peers = self.interconnect_state.write();
-        let entry = peers
-            .entry(node_id.clone())
-            .or_insert_with(|| InterconnectPeerState {
-                target_addr: target_addr.clone(),
-                connected: false,
-                unavailable_since: None,
-            });
-        if let Some(target_addr) = target_addr {
-            entry.target_addr = Some(target_addr);
-        }
-        let was_connected = entry.connected;
-        let was_unavailable = entry.unavailable_since.is_some();
-        entry.connected = false;
-        if entry.unavailable_since.is_none() {
-            entry.unavailable_since = Some(Instant::now());
-        }
-        if was_connected || !was_unavailable {
-            error!(
-                %node_id,
-                target_addr = entry.target_addr.as_deref().unwrap_or("<unknown>"),
-                "interconnect connection establishment failed"
-            );
+        let now = Instant::now();
+        let mut previous_state = None;
+        let mut recorded_target_addr = None;
+        self.interconnect_state.send_if_modified(|snapshot| {
+            previous_state = snapshot.peers.get(node_id).cloned();
+            recorded_target_addr = match target_addr.as_ref() {
+                Some(target_addr) => Some(target_addr.clone()),
+                None => match previous_state.as_ref() {
+                    Some(previous) => match previous.target_addr() {
+                        Some(target_addr) => Some(target_addr.to_owned()),
+                        None => None,
+                    },
+                    None => None,
+                },
+            };
+            let since = match previous_state.as_ref() {
+                Some(InterconnectPeerState::Disconnected { since, .. }) => *since,
+                Some(InterconnectPeerState::Connected { .. }) | None => now,
+            };
+            let next = InterconnectPeerState::Disconnected {
+                target_addr: recorded_target_addr.clone(),
+                since,
+            };
+            let modified = previous_state.as_ref() != Some(&next);
+            snapshot.peers.insert(node_id.clone(), next);
+            modified
+        });
+        match previous_state {
+            Some(InterconnectPeerState::Disconnected { .. }) => {}
+            Some(InterconnectPeerState::Connected { .. }) | None => {
+                error!(
+                    %node_id,
+                    target_addr = recorded_target_addr.as_deref().unwrap_or("<unknown>"),
+                    "interconnect connection establishment failed"
+                );
+            }
         }
     }
 
     pub fn retain_interconnect_live_set(&self, live_node_ids: &BTreeSet<ClusterNodeName>) {
-        self.interconnect_state
-            .write()
-            .retain(|node_id, _| live_node_ids.contains(node_id));
+        self.interconnect_state.send_if_modified(|snapshot| {
+            let previous_len = snapshot.peers.len();
+            snapshot
+                .peers
+                .retain(|node_id, _| live_node_ids.contains(node_id));
+            snapshot.peers.len() != previous_len
+        });
     }
 
     fn interconnect_status_lines(&self) -> Vec<String> {
-        let peers = self.interconnect_state.read();
-        if peers.is_empty() {
+        let snapshot = self.interconnect_state.borrow();
+        if snapshot.peers.is_empty() {
             return vec!["- (none)".to_string()];
         }
 
         let now = Instant::now();
-        peers
+        snapshot
+            .peers
             .iter()
             .map(|(node_id, state)| {
-                let status = if state.connected {
-                    "connected".to_string()
-                } else if let Some(since) = state.unavailable_since {
-                    let elapsed = now.saturating_duration_since(since);
-                    if elapsed >= self.node_unavailability_timeout {
-                        format!("unavailable for {}", humantime::format_duration(elapsed))
-                    } else {
-                        format!("connecting for {}", humantime::format_duration(elapsed))
+                let status = match state {
+                    InterconnectPeerState::Connected { .. } => "connected".to_string(),
+                    InterconnectPeerState::Disconnected { since, .. } => {
+                        let elapsed = now.checked_duration_since(*since).assured(
+                            "an interconnect failure is recorded before its status is observed",
+                        );
+                        if elapsed >= self.node_unavailability_timeout {
+                            format!("unavailable for {}", humantime::format_duration(elapsed))
+                        } else {
+                            format!("connecting for {}", humantime::format_duration(elapsed))
+                        }
                     }
-                } else {
-                    "connecting".to_string()
                 };
                 format!(
                     "- {node_id}: addr={} status={status}",
-                    state.target_addr.as_deref().unwrap_or("<unknown>")
+                    state.target_addr().unwrap_or("<unknown>")
                 )
             })
             .collect()
     }
 
     fn unavailable_interconnect_nodes(&self) -> BTreeSet<ClusterNodeName> {
-        let peers = self.interconnect_state.read();
+        let snapshot = self.interconnect_state.borrow();
         let now = Instant::now();
         let mut unavailable = BTreeSet::new();
-        for (node_id, state) in peers.iter() {
-            let Some(since) = state.unavailable_since else {
+        for (node_id, state) in &snapshot.peers {
+            let InterconnectPeerState::Disconnected { since, .. } = state else {
                 continue;
             };
-            if now.saturating_duration_since(since) >= self.node_unavailability_timeout {
+            let elapsed = now
+                .checked_duration_since(*since)
+                .assured("an interconnect failure is recorded before its availability is observed");
+            if elapsed >= self.node_unavailability_timeout {
                 unavailable.insert(node_id.clone());
             }
         }
@@ -928,6 +1023,17 @@ impl ClusterHandle {
 
     pub fn is_interconnect_unavailable(&self, node_id: &ClusterNodeName) -> bool {
         self.unavailable_interconnect_nodes().contains(node_id)
+    }
+
+    pub(crate) fn subscribe_interconnect_state(&self) -> InterconnectStateWatcher {
+        InterconnectStateWatcher {
+            state: self.interconnect_state.subscribe(),
+            unavailability_timeout: self.node_unavailability_timeout,
+        }
+    }
+
+    pub(crate) fn node_unavailability_timeout(&self) -> Duration {
+        self.node_unavailability_timeout
     }
 }
 
@@ -1092,5 +1198,104 @@ mod tests {
 
         advance_runtime_revision_readiness(&mut state, 13);
         assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("13"));
+    }
+
+    #[test]
+    fn interconnect_snapshot_reports_earliest_pending_unavailability() {
+        let earlier_failure = Instant::now();
+        let failure_spacing = Duration::from_secs(2);
+        let observation_delay = Duration::from_secs(4);
+        let unavailability_timeout = Duration::from_secs(10);
+        let later_failure = earlier_failure
+            .checked_add(failure_spacing)
+            .assured("the test failure spacing fits in the monotonic clock range");
+        let now = earlier_failure
+            .checked_add(observation_delay)
+            .assured("the test observation delay fits in the monotonic clock range");
+        let expected = earlier_failure
+            .checked_add(unavailability_timeout)
+            .assured("the test timeout fits in the monotonic clock range");
+        let snapshot = InterconnectStateSnapshot {
+            peers: BTreeMap::from([
+                (
+                    ClusterNodeName::parse("node-2").assured("the test node name is valid"),
+                    InterconnectPeerState::Disconnected {
+                        target_addr: None,
+                        since: later_failure,
+                    },
+                ),
+                (
+                    ClusterNodeName::parse("node-3").assured("the test node name is valid"),
+                    InterconnectPeerState::Disconnected {
+                        target_addr: None,
+                        since: earlier_failure,
+                    },
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            snapshot.next_unavailability_deadline(unavailability_timeout, now),
+            Some(expected)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interconnect_watcher_consumes_an_existing_change_before_waiting_for_deadline() {
+        let unavailability_timeout = Duration::from_secs(10);
+        let node = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let (state, receiver) = watch::channel(InterconnectStateSnapshot::default());
+        state.send_modify(|snapshot| {
+            snapshot.peers.insert(
+                node,
+                InterconnectPeerState::Disconnected {
+                    target_addr: None,
+                    since: Instant::now(),
+                },
+            );
+        });
+        let mut watcher = InterconnectStateWatcher {
+            state: receiver,
+            unavailability_timeout,
+        };
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+
+        tokio::select! {
+            biased;
+            _ = &mut waiting => panic!("an existing watch update must not cause a busy wake"),
+            () = tokio::task::yield_now() => {}
+        }
+        tokio::time::advance(unavailability_timeout).await;
+        waiting.await;
+        drop(state);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interconnect_watcher_observes_a_change_after_wait_preparation() {
+        let unavailability_timeout = Duration::from_secs(10);
+        let node = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let (state, receiver) = watch::channel(InterconnectStateSnapshot::default());
+        let mut watcher = InterconnectStateWatcher {
+            state: receiver,
+            unavailability_timeout,
+        };
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+        state.send_modify(|snapshot| {
+            snapshot.peers.insert(
+                node,
+                InterconnectPeerState::Disconnected {
+                    target_addr: None,
+                    since: Instant::now(),
+                },
+            );
+        });
+
+        tokio::select! {
+            biased;
+            _ = &mut waiting => {}
+            () = tokio::task::yield_now() => {
+                panic!("a watch update after wait preparation must wake the waiter")
+            }
+        }
     }
 }

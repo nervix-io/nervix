@@ -630,6 +630,15 @@ pub enum RuntimeError {
         revision: u64,
         pending_nodes: Vec<ClusterNodeName>,
     },
+    #[error(
+        "cannot represent a runtime revision readiness deadline from node-unavailability timeout \
+         {node_unavailability_timeout:?} and readiness propagation bound \
+         {readiness_propagation_bound:?}"
+    )]
+    RuntimeRevisionReadinessDeadlineOverflow {
+        node_unavailability_timeout: Duration,
+        readiness_propagation_bound: Duration,
+    },
     #[error("failed to decode remote relay '{relay}' in domain '{domain}': {reason}")]
     DecodeRemoteRelay {
         domain: String,
