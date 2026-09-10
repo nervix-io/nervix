@@ -365,7 +365,7 @@ build-cli:
 [parallel]
 build-apps: build-cli build-server
 
-build-local-dashboard: build-deps build-apps
+build-all: generate-dev-tls build-deps build-apps
 
 wasm-processor-rust-guest:
     #!/usr/bin/env bash
@@ -476,7 +476,7 @@ reset-local-dashboard-state:
     set -euo pipefail
     rm -rf .nervix-db
 
-cluster-dashboard: generate-dev-tls build-local-dashboard
+cluster-dashboard: build-all
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p .nervix-db/node1 .nervix-db/node2 .nervix-db/node3
