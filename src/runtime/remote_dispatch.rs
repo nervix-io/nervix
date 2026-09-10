@@ -1,3 +1,13 @@
+//! Remote relay dispatch, admission, and acknowledgement coordination.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** Relay wire encoding and decoding, epoch-scoped admission reconciliation,
+//!   cancellation, progress handling, and remote acknowledgement correlation.
+//! - **Depends on.** Branch-local relay boundaries, execution admission, cluster membership, and
+//!   the authenticated interconnect.
+//! - **Must not know.** NSPL text, transactions, scheduling policy, or connector internals.
+
 use super::*;
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
@@ -5,6 +15,30 @@ pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs
 pub(super) const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_millis(25);
 
 pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
+
+pub(super) const REMOTE_RELAY_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+const REMOTE_RELAY_BRANCH_EVICTED: &str = "relay branch generation was evicted before admission";
+
+enum FailedRelayAdmissionResolution {
+    Admitted,
+    Failed(String),
+    Indeterminate(String),
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum RelayAdmissionUpdate {
+    Pending,
+    Alive,
+    Admitted,
+    Rejected(String),
+}
+
+struct RemoteRelayAdmissionContext<'a> {
+    registration: &'a RemoteAckRegistration,
+    transport: &'a RelayAdmission,
+    admitted: &'a mut bool,
+}
 
 /// Node identity and the remote acknowledgement correlation registry. The runtime and the
 /// `RemoteDispatcher` it attaches must observe one instance of this: the dispatcher allocates the
@@ -16,7 +50,7 @@ pub(super) struct RemoteDispatchRegistry {
     pub(super) next_ack_id: AtomicU64,
     pub(super) pending_acks: DashMap<u64, AckSet, RandomState>,
     pub(super) pending_relay_admissions:
-        DashMap<u64, mpsc::UnboundedSender<RemoteAckOutcome>, RandomState>,
+        DashMap<u64, watch::Sender<RelayAdmissionUpdate>, RandomState>,
 }
 
 pub(super) struct RemoteDispatcher {
@@ -69,8 +103,8 @@ impl RemoteDispatcher {
     pub(super) fn register_pending_relay_admission(
         &self,
         admission_id: u64,
-    ) -> mpsc::UnboundedReceiver<RemoteAckOutcome> {
-        let (sender, receiver) = mpsc::unbounded_channel();
+    ) -> watch::Receiver<RelayAdmissionUpdate> {
+        let (sender, receiver) = watch::channel(RelayAdmissionUpdate::Pending);
         self.registry
             .pending_relay_admissions
             .insert(admission_id, sender);
@@ -100,45 +134,189 @@ impl RemoteDispatcher {
         &self,
         node_id: &ClusterNodeName,
         mut payload: RelayPayload,
+        branch_channel: &RelayOutboundSlot,
     ) -> Result<(), String> {
+        if branch_channel.cancellation().is_cancelled() {
+            return Err(REMOTE_RELAY_BRANCH_EVICTED.to_string());
+        }
         let local_node_id = self
             .local_node_id()
             .ok_or_else(|| "local node id is unavailable for relay delivery".to_string())?;
         let admission_id = self.next_ack_id();
+        let delivery = payload.delivery;
+        let mut cancellation_guard = self
+            .interconnect
+            .relay_cancellation_guard(node_id.clone(), delivery);
         payload.admission = Some(RemoteAckRegistration {
             ack_id: admission_id,
             reply_node_id: local_node_id,
         });
         let admission = self.register_pending_relay_admission(admission_id);
-        if let Err(error) = self
-            .dispatch(node_id, Envelope::RelayPayload(payload))
-            .await
-        {
+        let dispatch = self.dispatch(node_id, Envelope::RelayPayload(payload));
+        tokio::pin!(dispatch);
+        let dispatch_result = tokio::select! {
+            biased;
+            result = &mut dispatch => result,
+            () = branch_channel.cancellation().cancelled() => {
+                Err(REMOTE_RELAY_BRANCH_EVICTED.to_string())
+            },
+        };
+        if let Err(error) = dispatch_result {
             self.clear_pending_relay_admission(admission_id);
-            return Err(error);
+            let resolution = self
+                .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
+                .await;
+            return match resolution {
+                FailedRelayAdmissionResolution::Admitted => Ok(()),
+                FailedRelayAdmissionResolution::Failed(error) => Err(error),
+                FailedRelayAdmissionResolution::Indeterminate(error) => {
+                    branch_channel.reopen_delivery_channel();
+                    Err(error)
+                }
+            };
         }
-        let result = Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT).await;
-        if result.is_err() {
+        let admission = Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT);
+        tokio::pin!(admission);
+        let result = tokio::select! {
+            biased;
+            result = &mut admission => result,
+            () = branch_channel.cancellation().cancelled() => {
+                Err(REMOTE_RELAY_BRANCH_EVICTED.to_string())
+            },
+        };
+        if let Err(error) = result {
             self.clear_pending_relay_admission(admission_id);
+            let resolution = self
+                .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
+                .await;
+            return match resolution {
+                FailedRelayAdmissionResolution::Admitted => Ok(()),
+                FailedRelayAdmissionResolution::Failed(error) => Err(error),
+                FailedRelayAdmissionResolution::Indeterminate(error) => {
+                    branch_channel.reopen_delivery_channel();
+                    Err(error)
+                }
+            };
         }
-        result
+        cancellation_guard.disarm();
+        Ok(())
+    }
+
+    async fn resolve_failed_relay_admission(
+        &self,
+        node_id: &ClusterNodeName,
+        delivery: RelayDelivery,
+        original_error: String,
+        cancellation_guard: &mut RelayCancellationGuard,
+    ) -> FailedRelayAdmissionResolution {
+        let deadline = Instant::now()
+            .checked_add(Self::DISPATCH_TIMEOUT)
+            .assured("the fixed relay cancellation deadline fits the monotonic clock");
+        let status = loop {
+            tokio::task::consume_budget().await;
+            let cancellation = tokio::time::timeout_at(
+                deadline,
+                self.interconnect.cancel_relay(node_id, delivery),
+            )
+            .await;
+            match cancellation {
+                Ok(Ok(
+                    status @ (RelayAdmissionStatus::Admitted
+                    | RelayAdmissionStatus::Rejected(_)
+                    | RelayAdmissionStatus::Cancelled
+                    | RelayAdmissionStatus::Retired
+                    | RelayAdmissionStatus::Indeterminate),
+                )) => break status,
+                Ok(Ok(
+                    RelayAdmissionStatus::Reserved
+                    | RelayAdmissionStatus::BodyReceived
+                    | RelayAdmissionStatus::Unknown,
+                )) => {}
+                Ok(Err(error)) => {
+                    return FailedRelayAdmissionResolution::Indeterminate(format!(
+                        "{original_error}; relay admission outcome is indeterminate because \
+                         cancellation failed: {error}"
+                    ));
+                }
+                Err(_) => {
+                    return FailedRelayAdmissionResolution::Indeterminate(format!(
+                        "{original_error}; relay admission outcome is indeterminate because \
+                         cancellation did not resolve within {:?}",
+                        Self::DISPATCH_TIMEOUT
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                return FailedRelayAdmissionResolution::Indeterminate(format!(
+                    "{original_error}; relay admission outcome remained unresolved for {:?}",
+                    Self::DISPATCH_TIMEOUT
+                ));
+            }
+            sleep(Self::DISPATCH_RETRY_INTERVAL).await;
+        };
+        match status {
+            RelayAdmissionStatus::Admitted => {
+                cancellation_guard.disarm();
+                FailedRelayAdmissionResolution::Admitted
+            }
+            RelayAdmissionStatus::Rejected(reason) => {
+                cancellation_guard.disarm();
+                FailedRelayAdmissionResolution::Failed(reason)
+            }
+            RelayAdmissionStatus::Cancelled => {
+                cancellation_guard.disarm();
+                FailedRelayAdmissionResolution::Failed(original_error)
+            }
+            RelayAdmissionStatus::Retired | RelayAdmissionStatus::Indeterminate => {
+                cancellation_guard.disarm();
+                FailedRelayAdmissionResolution::Indeterminate(format!(
+                    "{original_error}; the receiver no longer retains the exact relay admission \
+                     outcome"
+                ))
+            }
+            RelayAdmissionStatus::Reserved
+            | RelayAdmissionStatus::BodyReceived
+            | RelayAdmissionStatus::Unknown => {
+                FailedRelayAdmissionResolution::Indeterminate(format!(
+                    "{original_error}; relay cancellation returned a non-terminal admission state"
+                ))
+            }
+        }
     }
 
     pub(super) async fn await_relay_admission(
         node_id: &ClusterNodeName,
-        mut admission: mpsc::UnboundedReceiver<RemoteAckOutcome>,
+        mut admission: watch::Receiver<RelayAdmissionUpdate>,
         inactivity_timeout: Duration,
     ) -> Result<(), String> {
+        let total_deadline = Instant::now()
+            .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
+            .assured("the fixed relay total timeout fits the monotonic clock");
         loop {
             tokio::task::consume_budget().await;
-            match tokio::time::timeout(inactivity_timeout, admission.recv()).await {
-                Ok(Some(RemoteAckOutcome::Alive)) => {}
-                Ok(Some(RemoteAckOutcome::Ack)) => return Ok(()),
-                Ok(Some(RemoteAckOutcome::NoAck(error))) => return Err(error),
-                Ok(None) => {
+            let inactivity_deadline = Instant::now()
+                .checked_add(inactivity_timeout)
+                .assured("a bounded relay inactivity timeout fits the monotonic clock");
+            let deadline = inactivity_deadline.min(total_deadline);
+            match tokio::time::timeout_at(deadline, admission.changed()).await {
+                Ok(Ok(())) => {
+                    let update = admission.borrow_and_update().clone();
+                    match update {
+                        RelayAdmissionUpdate::Pending | RelayAdmissionUpdate::Alive => {}
+                        RelayAdmissionUpdate::Admitted => return Ok(()),
+                        RelayAdmissionUpdate::Rejected(error) => return Err(error),
+                    }
+                }
+                Ok(Err(_)) => {
                     return Err("relay admission response channel closed".to_string());
                 }
                 Err(_) => {
+                    if Instant::now() >= total_deadline {
+                        return Err(format!(
+                            "timed out after {REMOTE_RELAY_TOTAL_TIMEOUT:?} waiting for cluster \
+                             node '{node_id}' to admit a relay batch"
+                        ));
+                    }
                     return Err(format!(
                         "timed out waiting for cluster node '{node_id}' to admit a relay batch"
                     ));
@@ -172,8 +350,13 @@ impl RemoteDispatcher {
             if node_id == local_node_id || excluded_nodes.contains(&node_id) {
                 continue;
             }
-            let outbound_slot = services.outbound_slot(&node_id);
-            let _slot = outbound_slot.lock().await;
+            let outbound_slot = services.outbound_slot(
+                &node_id,
+                relay,
+                RelayPayloadKind::SubscriptionFanout,
+                &batch.key,
+            );
+            let _slot = outbound_slot.gate.lock().await;
             let batch_ipc = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(self.executor()).await {
@@ -192,10 +375,12 @@ impl RemoteDispatcher {
                     }
                 },
             };
+            let delivery = outbound_slot.next_delivery();
             if let Err(error) = self
                 .dispatch_admitted_relay_payload(
                     &node_id,
                     RelayPayload {
+                        delivery,
                         kind: RelayPayloadKind::SubscriptionFanout,
                         domain: domain.clone(),
                         relay: relay.clone(),
@@ -209,6 +394,7 @@ impl RemoteDispatcher {
                         acks: vec![None; batch.acks.len()],
                         admission: None,
                     },
+                    &outbound_slot,
                 )
                 .await
             {
@@ -315,7 +501,11 @@ impl Runtime {
         services.inject_remote_message(batch).await
     }
 
-    pub async fn handle_remote_stream(&self, payload: RelayPayload) -> Result<(), RuntimeError> {
+    pub async fn handle_remote_stream(
+        &self,
+        payload: RelayPayload,
+        transport_admission: RelayAdmission,
+    ) -> Result<(), Report<RuntimeError>> {
         let admission =
             payload
                 .admission
@@ -325,49 +515,61 @@ impl Runtime {
                     relay: payload.relay.as_str().to_string(),
                     reason: "relay payload is missing its admission registration".to_string(),
                 })?;
-        let handling = async {
-            match payload.kind {
-                RelayPayloadKind::Routed => self.handle_remote_stream_payload(payload).await,
-                RelayPayloadKind::SubscriptionFanout => {
-                    self.handle_remote_subscription_payload(payload).await
-                }
-                RelayPayloadKind::Ingress => {
-                    self.handle_remote_stream_payload_with_owner_ingress(payload, true)
-                        .await
-                }
+        let branch = match BranchKey::from_remote_key(payload.key.clone()) {
+            Ok(Some(branch)) => Some(branch.as_str().to_string()),
+            Ok(None) | Err(_) => None,
+        };
+        self.inner
+            .fault_injection
+            .pause_remote_relay_admission_if_armed(&payload.domain, branch.as_deref())
+            .await;
+        let mut admitted = false;
+        let result = match payload.kind {
+            RelayPayloadKind::Routed => {
+                self.handle_remote_stream_payload_with_admission(
+                    payload,
+                    false,
+                    Some(RemoteRelayAdmissionContext {
+                        registration: &admission,
+                        transport: &transport_admission,
+                        admitted: &mut admitted,
+                    }),
+                )
+                .await
+            }
+            RelayPayloadKind::SubscriptionFanout => {
+                self.handle_remote_subscription_payload_with_admission(
+                    payload,
+                    Some(RemoteRelayAdmissionContext {
+                        registration: &admission,
+                        transport: &transport_admission,
+                        admitted: &mut admitted,
+                    }),
+                )
+                .await
+            }
+            RelayPayloadKind::Ingress => {
+                self.handle_remote_stream_payload_with_admission(
+                    payload,
+                    true,
+                    Some(RemoteRelayAdmissionContext {
+                        registration: &admission,
+                        transport: &transport_admission,
+                        admitted: &mut admitted,
+                    }),
+                )
+                .await
             }
         };
-        let heartbeats = async {
-            loop {
-                tokio::task::consume_budget().await;
-                sleep(REMOTE_ACK_ALIVE_INTERVAL).await;
-                self.send_remote_relay_admission_outcome(&admission, RemoteAckOutcome::Alive)
-                    .await;
-            }
-        };
-        tokio::pin!(handling);
-        tokio::pin!(heartbeats);
-        let result = tokio::select! {
-            biased;
-            result = &mut handling => result,
-            _ = &mut heartbeats => unreachable!("relay admission heartbeat loop cannot complete"),
-        };
-        self.resolve_remote_relay_admission(&admission, &result)
+        if !admitted && let Err(error) = &result {
+            self.send_remote_relay_admission_outcome(
+                &admission,
+                RemoteAckOutcome::NoAck(error.to_string()),
+            )
             .await;
-        result
-    }
-
-    pub(super) async fn resolve_remote_relay_admission(
-        &self,
-        admission: &RemoteAckRegistration,
-        result: &Result<(), RuntimeError>,
-    ) {
-        let outcome = match result {
-            Ok(()) => RemoteAckOutcome::Ack,
-            Err(error) => RemoteAckOutcome::NoAck(error.to_string()),
-        };
-        self.send_remote_relay_admission_outcome(admission, outcome)
-            .await;
+        }
+        result?;
+        Ok(())
     }
 
     pub(super) async fn send_remote_relay_admission_outcome(
@@ -459,18 +661,21 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) async fn handle_remote_stream_payload(
-        &self,
-        remote: RelayPayload,
-    ) -> Result<(), RuntimeError> {
-        self.handle_remote_stream_payload_with_owner_ingress(remote, false)
-            .await
-    }
-
+    #[cfg(test)]
     pub(super) async fn handle_remote_stream_payload_with_owner_ingress(
         &self,
         remote: RelayPayload,
         owner_ingress: bool,
+    ) -> Result<(), RuntimeError> {
+        self.handle_remote_stream_payload_with_admission(remote, owner_ingress, None)
+            .await
+    }
+
+    async fn handle_remote_stream_payload_with_admission(
+        &self,
+        remote: RelayPayload,
+        owner_ingress: bool,
+        admission: Option<RemoteRelayAdmissionContext<'_>>,
     ) -> Result<(), RuntimeError> {
         let RemoteRelayTarget {
             registry,
@@ -553,38 +758,51 @@ impl Runtime {
             relay: remote.relay.as_str().to_string(),
             reason,
         })?;
-        let dispatch = if owner_ingress {
-            self.ingest_stream_boundary_message(
-                &remote.domain,
-                &remote.relay,
-                &registry,
-                &services,
-                &batch,
-            )
-            .await
-        } else {
-            self.inject_remote_stream_boundary_message(&services, &batch)
+        let dispatch = async {
+            let dispatch = if owner_ingress {
+                self.ingest_stream_boundary_message(
+                    &remote.domain,
+                    &remote.relay,
+                    &registry,
+                    &services,
+                    &batch,
+                )
                 .await
-        };
-        if dispatch.is_ok() {
-            for ack in batch.acks.iter() {
-                ack.ack_success();
+            } else {
+                self.inject_remote_stream_boundary_message(&services, &batch)
+                    .await
+            };
+            if dispatch.is_ok() {
+                for ack in batch.acks.iter() {
+                    ack.ack_success();
+                }
+                return Ok(());
             }
-            return Ok(());
+            for ack in batch.acks.iter() {
+                ack.no_ack("failed to dispatch remote relay message through local runtime");
+            }
+            Err(RuntimeError::DecodeRemoteRelay {
+                domain: remote.domain.as_str().to_string(),
+                relay: remote.relay.as_str().to_string(),
+                reason: "local relay boundary rejected the batch".to_string(),
+            })
+        };
+        if let Some(admission) = admission {
+            if admission.transport.admit() == RelayAdmissionDecision::Cancelled {
+                return Ok(());
+            }
+            *admission.admitted = true;
+            self.send_remote_relay_admission_outcome(admission.registration, RemoteAckOutcome::Ack)
+                .await;
+            return dispatch.await;
         }
-        for ack in batch.acks.iter() {
-            ack.no_ack("failed to admit remote relay message into local runtime");
-        }
-        Err(RuntimeError::DecodeRemoteRelay {
-            domain: remote.domain.as_str().to_string(),
-            relay: remote.relay.as_str().to_string(),
-            reason: "local relay boundary rejected the batch".to_string(),
-        })
+        dispatch.await
     }
 
-    pub(in crate::runtime) async fn handle_remote_subscription_payload(
+    async fn handle_remote_subscription_payload_with_admission(
         &self,
         remote: RelayPayload,
+        admission: Option<RemoteRelayAdmissionContext<'_>>,
     ) -> Result<(), RuntimeError> {
         let Some(execution) = self.inner.executions.get(&remote.domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
@@ -666,7 +884,18 @@ impl Runtime {
             relay: remote.relay.as_str().to_string(),
             reason,
         })?;
-        services.fanout_local_subscriptions(&batch).await;
+        let dispatch = services.fanout_local_subscriptions(&batch);
+        if let Some(admission) = admission {
+            if admission.transport.admit() == RelayAdmissionDecision::Cancelled {
+                return Ok(());
+            }
+            *admission.admitted = true;
+            self.send_remote_relay_admission_outcome(admission.registration, RemoteAckOutcome::Ack)
+                .await;
+            dispatch.await;
+            return Ok(());
+        }
+        dispatch.await;
         Ok(())
     }
 
@@ -678,12 +907,22 @@ impl Runtime {
                 .pending_relay_admissions
                 .get(&ack.ack_id)
             {
-                if admission.send(RemoteAckOutcome::Alive).is_err() {
+                if admission.is_closed() {
                     drop(admission);
                     self.inner
                         .remote_dispatch
                         .pending_relay_admissions
                         .remove(&ack.ack_id);
+                } else {
+                    admission.send_if_modified(|update| {
+                        if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) =
+                            update
+                        {
+                            return false;
+                        }
+                        *update = RelayAdmissionUpdate::Alive;
+                        true
+                    });
                 }
                 return;
             }
@@ -705,9 +944,18 @@ impl Runtime {
             .pending_relay_admissions
             .remove(&ack.ack_id)
         {
-            admission
-                .send(ack.outcome)
-                .means_peer_left("relay admission requester");
+            let terminal_update = match ack.outcome {
+                RemoteAckOutcome::Ack => RelayAdmissionUpdate::Admitted,
+                RemoteAckOutcome::NoAck(error) => RelayAdmissionUpdate::Rejected(error),
+                RemoteAckOutcome::Alive => return,
+            };
+            admission.send_if_modified(|update| {
+                if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) = update {
+                    return false;
+                }
+                *update = terminal_update;
+                true
+            });
             return;
         }
 
@@ -911,7 +1159,7 @@ impl Runtime {
 mod tests {
     use nervix_models::{AckMode, ClusterNodeName, RemoteAckOutcome, RemoteAckResolution};
     use tokio::{
-        sync::{mpsc, watch},
+        sync::watch,
         time::{Duration, Instant, sleep, timeout},
     };
 
@@ -982,7 +1230,7 @@ mod tests {
     #[tokio::test]
     async fn remote_relay_admission_alive_resets_dispatch_timeout() {
         let runtime = Runtime::default();
-        let (admission_tx, admission_rx) = mpsc::unbounded_channel();
+        let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
         runtime
             .inner
             .remote_dispatch
@@ -1021,6 +1269,52 @@ mod tests {
                 .is_none(),
             "terminal admission ack must clear pending admission state"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_relay_admission_progress_is_coalesced() {
+        let runtime = Runtime::default();
+        let (admission_tx, mut admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
+        runtime
+            .inner
+            .remote_dispatch
+            .pending_relay_admissions
+            .insert(10, admission_tx);
+
+        for _ in 0..100 {
+            runtime.handle_remote_ack_resolution(RemoteAckResolution {
+                ack_id: 10,
+                outcome: RemoteAckOutcome::Alive,
+            });
+        }
+        assert!(
+            admission_rx
+                .has_changed()
+                .expect("sender should remain open")
+        );
+        assert!(matches!(
+            &*admission_rx.borrow_and_update(),
+            RelayAdmissionUpdate::Alive
+        ));
+        assert!(
+            !admission_rx
+                .has_changed()
+                .expect("sender should remain open"),
+            "replaceable progress must occupy one pending update"
+        );
+
+        runtime.handle_remote_ack_resolution(RemoteAckResolution {
+            ack_id: 10,
+            outcome: RemoteAckOutcome::Ack,
+        });
+        admission_rx
+            .changed()
+            .await
+            .expect("the terminal admission outcome should remain observable");
+        assert!(matches!(
+            &*admission_rx.borrow_and_update(),
+            RelayAdmissionUpdate::Admitted
+        ));
     }
 
     #[tokio::test]

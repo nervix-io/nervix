@@ -49,12 +49,14 @@ use chrono::{TimeZone, Utc};
 use dashmap::DashMap;
 use error_stack::Report;
 use fjall::Database;
-use futures_util::stream::FuturesUnordered;
+use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
-    EntityGatePurpose, Envelope, InterconnectRequest, RelayPayload, RelayPayloadKind, Transport,
+    EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
+    RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
+    Transport,
 };
 use nervix_models::{
     AckMode, Assignment, BranchName, ClickHouseValueMapping, ClientConfigEntry, ClientName,
@@ -126,7 +128,10 @@ use tokio::{
     time::{Duration, Instant, sleep, sleep_until},
 };
 use tokio_stream::StreamExt;
-use tokio_util::task::{AbortOnDropHandle, TaskTracker};
+use tokio_util::{
+    sync::CancellationToken,
+    task::{AbortOnDropHandle, TaskTracker},
+};
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;
@@ -451,9 +456,9 @@ use reingestor::ReingestorInputSpec;
 pub(crate) use relay_boundary::scheduled_relay_owner_nodes;
 use relay_boundary::{
     ConcreteRelayRuntime, ConcreteRelayRuntimeBuild, ExpiringRelayState, RelayBoundaryBuilder,
-    RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices, RelayOwnerTask,
-    RelayRegistry, RelayRetention, RelayRuntimeFanIn, RelayStateTask, RelayStateTaskSpec,
-    RemoteRuntimeConsumer, addressable_count,
+    RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices, RelayOutboundSlot,
+    RelayOwnerTask, RelayRegistry, RelayRetention, RelayRuntimeFanIn, RelayStateTask,
+    RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
 };
 use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
@@ -589,6 +594,13 @@ impl ConfiguredFaultInjection {
 
     fn entity_gate_deadline(&self) -> Option<Duration> {
         None
+    }
+
+    async fn pause_remote_relay_admission_if_armed(
+        &self,
+        _domain: &DomainName,
+        _branch: Option<&str>,
+    ) {
     }
 }
 

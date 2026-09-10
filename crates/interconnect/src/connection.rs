@@ -3,7 +3,7 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** TLS/H2 connection lifetime, pool isolation, stream leases, flow control, and relay
-//!   grant redemption.
+//!   grant, admission, reconciliation, and cancellation handling.
 //! - **Depends on.** Certificate identity, bounded rkyv codecs, and execution admission.
 //! - **Must not know.** Runtime graphs, scheduling decisions, or connector behavior.
 
@@ -24,13 +24,14 @@ use std::{
 use bytes::Bytes;
 use dashmap::{DashMap, mapref::entry::Entry};
 use error_stack::Report;
+use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use h2::{Reason, RecvStream, SendStream, client, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
-use nervix_models::{ClusterNodeName, RemoteAckOutcome};
+use nervix_models::{ClusterNodeName, RemoteAckOutcome, RemoteAckRegistration};
 use rand_core::{OsRng, RngCore as _};
 use rustls::pki_types::ServerName;
 use tokio::{
@@ -45,21 +46,31 @@ use triomphe::Arc;
 
 use super::{
     ControlEnvelope, Envelope, PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope,
-    RelayPayload, TlsConfigBundle, TransportError, TransportOptions, wire,
+    RelayAdmissionDecision, RelayAdmissionStatus, RelayDelivery, RelayPayload, RequestSubquota,
+    TlsConfigBundle, TransportError, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
     wire::{
-        ConnectionAccepted, ConnectionHello, RelayGrantRequest, RelayGrantResponse,
-        WIRE_CONTRACT_FINGERPRINT,
+        ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
+        RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
     },
 };
+
+mod relay;
 
 const CONNECT_PATH: &str = "/v1/connect";
 const CONTROL_PATH: &str = "/v1/control";
 const ACK_PATH: &str = "/v1/ack";
 const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
+const RELAY_CANCEL_PATH: &str = "/v1/relay-admissions/cancel";
+const RELAY_STATUS_PATH: &str = "/v1/relay-admissions/status";
 const RELAY_PATH_PREFIX: &str = "/v1/relay/";
+const RELAY_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const RELAY_PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const RELAY_CANCELLATION_RETRY_WINDOW: Duration = Duration::from_secs(30);
+const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
+const RELAY_CHANNEL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
 const RESET_LIMIT: usize = 128;
@@ -122,11 +133,104 @@ struct ActiveTls {
 struct ClientConnection {
     key: ConnectionSlotKey,
     sender: client::SendRequest<Bytes>,
-    stream_slots: StdArc<Semaphore>,
+    stream_slots: StreamSlotQuotas,
     peer_epoch: u64,
     retiring: CancellationToken,
     cancel: CancellationToken,
     closed: CancellationToken,
+}
+
+#[derive(Clone)]
+struct StreamSlotQuotas {
+    class: PoolClass,
+    shared: StdArc<Semaphore>,
+    discovery: StdArc<Semaphore>,
+    liveness: StdArc<Semaphore>,
+    admission: StdArc<Semaphore>,
+    cancellation: StdArc<Semaphore>,
+    terminal: StdArc<Semaphore>,
+}
+
+const MANAGEMENT_SHARED_STREAMS: usize = 40;
+const MANAGEMENT_DISCOVERY_STREAMS: usize = 4;
+const MANAGEMENT_LIVENESS_STREAMS: usize = 8;
+const MANAGEMENT_ADMISSION_STREAMS: usize = 4;
+const MANAGEMENT_CANCELLATION_STREAMS: usize = 4;
+const MANAGEMENT_TERMINAL_STREAMS: usize = 4;
+
+impl StreamSlotQuotas {
+    fn new(class: PoolClass) -> Self {
+        if class == PoolClass::Management {
+            return Self {
+                class,
+                shared: StdArc::new(Semaphore::new(MANAGEMENT_SHARED_STREAMS)),
+                discovery: StdArc::new(Semaphore::new(MANAGEMENT_DISCOVERY_STREAMS)),
+                liveness: StdArc::new(Semaphore::new(MANAGEMENT_LIVENESS_STREAMS)),
+                admission: StdArc::new(Semaphore::new(MANAGEMENT_ADMISSION_STREAMS)),
+                cancellation: StdArc::new(Semaphore::new(MANAGEMENT_CANCELLATION_STREAMS)),
+                terminal: StdArc::new(Semaphore::new(MANAGEMENT_TERMINAL_STREAMS)),
+            };
+        }
+        Self {
+            class,
+            shared: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
+            discovery: StdArc::new(Semaphore::new(0)),
+            liveness: StdArc::new(Semaphore::new(0)),
+            admission: StdArc::new(Semaphore::new(0)),
+            cancellation: StdArc::new(Semaphore::new(0)),
+            terminal: StdArc::new(Semaphore::new(0)),
+        }
+    }
+
+    fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
+        match subquota {
+            RequestSubquota::Shared => &self.shared,
+            RequestSubquota::Discovery => &self.discovery,
+            RequestSubquota::Liveness => &self.liveness,
+            RequestSubquota::Admission => &self.admission,
+            RequestSubquota::Cancellation => &self.cancellation,
+            RequestSubquota::Terminal => &self.terminal,
+        }
+    }
+
+    async fn drain(&self) {
+        if self.class != PoolClass::Management {
+            let permits: u32 = self
+                .class
+                .stream_slots_per_connection()
+                .try_into()
+                .assured("stream slot counts are much smaller than u32::MAX");
+            let permit = StdArc::clone(&self.shared)
+                .acquire_many_owned(permits)
+                .await
+                .assured("interconnect stream-slot semaphores are never closed");
+            drop(permit);
+            return;
+        }
+        let quotas = [
+            (RequestSubquota::Shared, MANAGEMENT_SHARED_STREAMS),
+            (RequestSubquota::Discovery, MANAGEMENT_DISCOVERY_STREAMS),
+            (RequestSubquota::Liveness, MANAGEMENT_LIVENESS_STREAMS),
+            (RequestSubquota::Admission, MANAGEMENT_ADMISSION_STREAMS),
+            (
+                RequestSubquota::Cancellation,
+                MANAGEMENT_CANCELLATION_STREAMS,
+            ),
+            (RequestSubquota::Terminal, MANAGEMENT_TERMINAL_STREAMS),
+        ];
+        let mut drained = Vec::with_capacity(quotas.len());
+        for (subquota, permits) in quotas {
+            tokio::task::consume_budget().await;
+            let permits: u32 = permits
+                .try_into()
+                .assured("management stream subquotas are much smaller than u32::MAX");
+            let permit = StdArc::clone(self.for_subquota(subquota))
+                .acquire_many_owned(permits)
+                .await
+                .assured("interconnect stream-slot semaphores are never closed");
+            drained.push(permit);
+        }
+    }
 }
 
 struct StreamLease {
@@ -182,15 +286,9 @@ impl Drop for InboundConnectionRegistration {
 }
 
 struct RelayGrant {
-    peer_node_id: ClusterNodeName,
-    sender_epoch: u64,
-    receiver_epoch: u64,
-    attempt: u64,
-    body_bytes: u64,
     expires_at: Instant,
-    metadata: wire::RelayMetadata,
     reservation: Reservation,
-    admission_key: RelayAdmissionKey,
+    admission: StdArc<RelayAdmissionRecord>,
     _expiry: CancelOnDrop,
 }
 
@@ -200,35 +298,270 @@ struct RelayAdmissionKey {
     ack_id: u64,
 }
 
-struct RelayAdmissionCapacity {
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct OutboundRelayKey {
+    peer_node_id: ClusterNodeName,
+    delivery: RelayDelivery,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RelayAttemptKey {
+    peer_node_id: ClusterNodeName,
+    sender_epoch: u64,
+    receiver_epoch: u64,
+    delivery: RelayDelivery,
+}
+
+impl RelayAttemptKey {
+    fn channel(&self) -> RelayChannelKey {
+        RelayChannelKey {
+            peer_node_id: self.peer_node_id.clone(),
+            sender_epoch: self.sender_epoch,
+            receiver_epoch: self.receiver_epoch,
+            channel_incarnation: self.delivery.channel_incarnation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RelayChannelKey {
+    peer_node_id: ClusterNodeName,
+    sender_epoch: u64,
+    receiver_epoch: u64,
+    channel_incarnation: [u8; 16],
+}
+
+#[derive(Debug, Clone)]
+struct RelayChannelWatermark {
+    sequence: u64,
+    status: RelayAdmissionStatus,
+    reconciled_at: Instant,
+}
+
+#[derive(Clone)]
+enum RelayAttemptEntry {
+    Active(StdArc<RelayAdmissionRecord>),
+    CancellationFence,
+}
+
+impl RelayAttemptEntry {
+    fn progress_registration(&self) -> Option<RemoteAckRegistration> {
+        match self {
+            Self::Active(record) => record.progress_registration(),
+            Self::CancellationFence => None,
+        }
+    }
+
+    fn is_unadmitted(&self) -> bool {
+        match self {
+            Self::Active(record) => matches!(
+                record.status(),
+                RelayAdmissionStatus::Reserved | RelayAdmissionStatus::BodyReceived
+            ),
+            Self::CancellationFence => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RelayAdmissionState {
+    Reserved { grant_id: u64 },
+    BodyReceived,
+    Admitted,
+    Rejected(String),
+    Cancelled,
+}
+
+struct RelayAdmissionRecord {
+    attempt: RelayAttemptKey,
+    admission_key: RelayAdmissionKey,
+    body_bytes: u64,
+    metadata: wire::RelayMetadata,
+    state: parking_lot::Mutex<RelayAdmissionState>,
+    cancellation: CancellationToken,
     _item: OwnedSemaphorePermit,
     _terminal: OwnedSemaphorePermit,
 }
 
-struct RelayAdmissionCleanup {
+struct RelayBodyCompletionGuard {
+    admission: StdArc<RelayAdmissionRecord>,
+    complete: bool,
+}
+
+impl RelayBodyCompletionGuard {
+    fn new(admission: StdArc<RelayAdmissionRecord>) -> Self {
+        Self {
+            admission,
+            complete: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for RelayBodyCompletionGuard {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.admission
+                .reject("relay body transfer did not complete".to_string());
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RelayAdmission {
+    record: StdArc<RelayAdmissionRecord>,
+}
+
+pub struct RelayCancellationGuard {
     state: TransportState,
-    key: RelayAdmissionKey,
+    peer_node_id: ClusterNodeName,
+    delivery: RelayDelivery,
     armed: bool,
 }
 
-impl RelayAdmissionCleanup {
-    fn new(state: TransportState, key: RelayAdmissionKey) -> Self {
+impl RelayCancellationGuard {
+    pub(crate) fn new(
+        state: TransportState,
+        peer_node_id: ClusterNodeName,
+        delivery: RelayDelivery,
+    ) -> Self {
         Self {
             state,
-            key,
+            peer_node_id,
+            delivery,
             armed: true,
         }
     }
 
-    fn disarm(mut self) {
+    pub fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for RelayAdmissionCleanup {
+impl Drop for RelayCancellationGuard {
     fn drop(&mut self) {
-        if self.armed {
-            self.state.relay_admissions.remove(&self.key);
+        if !self.armed || self.state.is_shutting_down() {
+            return;
+        }
+        let state = self.state.clone();
+        let peer_node_id = self.peer_node_id.clone();
+        let delivery = self.delivery;
+        self.state.tasks.spawn(async move {
+            state
+                .cancel_relay_until_resolved(peer_node_id, delivery)
+                .await;
+        });
+    }
+}
+
+impl std::fmt::Debug for RelayAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayAdmission")
+            .field("delivery", &self.record.attempt.delivery)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RelayAdmission {
+    pub fn admit(&self) -> RelayAdmissionDecision {
+        let mut state = self.record.state.lock();
+        match &*state {
+            RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived => {
+                *state = RelayAdmissionState::Admitted;
+                RelayAdmissionDecision::Admitted
+            }
+            RelayAdmissionState::Admitted => RelayAdmissionDecision::Admitted,
+            RelayAdmissionState::Rejected(_) | RelayAdmissionState::Cancelled => {
+                RelayAdmissionDecision::Cancelled
+            }
+        }
+    }
+}
+
+impl RelayAdmissionRecord {
+    fn progress_registration(&self) -> Option<RemoteAckRegistration> {
+        let state = self.state.lock();
+        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
+            self.metadata.admission.clone()
+        } else {
+            None
+        }
+    }
+
+    fn reserved_grant_id(&self) -> Option<u64> {
+        match &*self.state.lock() {
+            RelayAdmissionState::Reserved { grant_id } => Some(*grant_id),
+            RelayAdmissionState::BodyReceived
+            | RelayAdmissionState::Admitted
+            | RelayAdmissionState::Rejected(_)
+            | RelayAdmissionState::Cancelled => None,
+        }
+    }
+
+    fn status(&self) -> RelayAdmissionStatus {
+        match &*self.state.lock() {
+            RelayAdmissionState::Reserved { .. } => RelayAdmissionStatus::Reserved,
+            RelayAdmissionState::BodyReceived => RelayAdmissionStatus::BodyReceived,
+            RelayAdmissionState::Admitted => RelayAdmissionStatus::Admitted,
+            RelayAdmissionState::Rejected(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
+            RelayAdmissionState::Cancelled => RelayAdmissionStatus::Cancelled,
+        }
+    }
+
+    fn grant_disposition(&self) -> RelayGrantDisposition {
+        match &*self.state.lock() {
+            RelayAdmissionState::Reserved { grant_id } => RelayGrantDisposition::SendBody {
+                grant_id: *grant_id,
+            },
+            RelayAdmissionState::BodyReceived => RelayGrantDisposition::BodyReceived,
+            RelayAdmissionState::Admitted => RelayGrantDisposition::Admitted,
+            RelayAdmissionState::Rejected(reason) => {
+                RelayGrantDisposition::Rejected(reason.clone())
+            }
+            RelayAdmissionState::Cancelled => RelayGrantDisposition::Cancelled,
+        }
+    }
+
+    fn mark_body_received(&self) -> bool {
+        let mut state = self.state.lock();
+        if let RelayAdmissionState::Reserved { .. } = &*state {
+            *state = RelayAdmissionState::BodyReceived;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_admitted(&self) {
+        let mut state = self.state.lock();
+        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
+            *state = RelayAdmissionState::Admitted;
+        }
+    }
+
+    fn reject(&self, reason: String) {
+        let mut state = self.state.lock();
+        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
+            *state = RelayAdmissionState::Rejected(reason);
+            self.cancellation.cancel();
+        }
+    }
+
+    fn cancel(&self) -> RelayAdmissionStatus {
+        let mut state = self.state.lock();
+        match &*state {
+            RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived => {
+                *state = RelayAdmissionState::Cancelled;
+                self.cancellation.cancel();
+                RelayAdmissionStatus::Cancelled
+            }
+            RelayAdmissionState::Admitted => RelayAdmissionStatus::Admitted,
+            RelayAdmissionState::Rejected(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
+            RelayAdmissionState::Cancelled => RelayAdmissionStatus::Cancelled,
         }
     }
 }
@@ -263,7 +596,12 @@ pub(crate) struct TransportStateInner {
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
     requests: super::RequestState,
     grants: DashMap<u64, RelayGrant, RandomState>,
-    relay_admissions: DashMap<RelayAdmissionKey, RelayAdmissionCapacity, RandomState>,
+    relay_attempts: DashMap<RelayAttemptKey, RelayAttemptEntry, RandomState>,
+    active_relay_channels: DashMap<RelayChannelKey, RelayAttemptKey, RandomState>,
+    relay_admissions: DashMap<RelayAdmissionKey, StdArc<RelayAdmissionRecord>, RandomState>,
+    relay_watermarks: DashMap<RelayChannelKey, RelayChannelWatermark, RandomState>,
+    outbound_relay_epochs: DashMap<OutboundRelayKey, u64, RandomState>,
+    outbound_relay_admissions: DashMap<RelayAdmissionKey, OutboundRelayKey, RandomState>,
     relay_items: StdArc<Semaphore>,
     terminal_outcomes: StdArc<Semaphore>,
     admission_closed: CancellationToken,
@@ -349,7 +687,12 @@ impl TransportState {
                 handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
                 requests: super::RequestState::new(options.incoming_queue_capacity),
                 grants: DashMap::default(),
+                relay_attempts: DashMap::default(),
+                active_relay_channels: DashMap::default(),
                 relay_admissions: DashMap::default(),
+                relay_watermarks: DashMap::default(),
+                outbound_relay_epochs: DashMap::default(),
+                outbound_relay_admissions: DashMap::default(),
                 relay_items: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 terminal_outcomes: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 admission_closed: CancellationToken::new(),
@@ -362,6 +705,14 @@ impl TransportState {
         let accept_state = state.clone();
         state.tasks.spawn(async move {
             accept_state.accept_loop(listener).await;
+        });
+        let progress_state = state.clone();
+        state.tasks.spawn(async move {
+            progress_state.report_relay_progress().await;
+        });
+        let retirement_state = state.clone();
+        state.tasks.spawn(async move {
+            retirement_state.retire_idle_relay_channels().await;
         });
         Ok((state, incoming_rx))
     }
@@ -761,17 +1112,11 @@ impl TransportState {
         if connection.closed.is_cancelled() {
             return;
         }
-        let stream_slots = u32::try_from(connection.key.class.stream_slots_per_connection())
-            .assured("every class has far fewer stream slots than u32::MAX");
-        let drained = StdArc::clone(&connection.stream_slots).acquire_many_owned(stream_slots);
+        let drained = connection.stream_slots.drain();
         tokio::select! {
             _ = self.force_close.cancelled() => {}
             _ = sleep(self.options.shutdown_drain_timeout) => {}
-            permit = drained => {
-                if let Ok(permit) = permit {
-                    drop(permit);
-                }
-            }
+            _ = drained => {}
         }
     }
 
@@ -828,7 +1173,7 @@ impl TransportState {
             let connection = Arc::new(ClientConnection {
                 key: key.clone(),
                 sender,
-                stream_slots: StdArc::new(Semaphore::new(key.class.stream_slots_per_connection())),
+                stream_slots: StreamSlotQuotas::new(key.class),
                 peer_epoch: 0,
                 retiring: slot_cancel.clone(),
                 cancel,
@@ -906,6 +1251,7 @@ impl TransportState {
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
+        subquota: RequestSubquota,
         deadline: Instant,
     ) -> Result<StreamLease, TransportError> {
         loop {
@@ -942,7 +1288,9 @@ impl TransportState {
                 let Some(connection) = self.connections.get(&key).map(|item| item.clone()) else {
                     continue;
                 };
-                let permit = match StdArc::clone(&connection.stream_slots).try_acquire_owned() {
+                let permit = match StdArc::clone(connection.stream_slots.for_subquota(subquota))
+                    .try_acquire_owned()
+                {
                     Ok(permit) => permit,
                     Err(_) => continue,
                 };
@@ -983,23 +1331,42 @@ impl TransportState {
             if let RemoteAckOutcome::Alive = &ack.outcome {
                 None
             } else {
-                Some(RelayAdmissionKey {
+                let key = RelayAdmissionKey {
                     peer_node_id: node_id.clone(),
                     ack_id: ack.ack_id,
-                })
+                };
+                if let Some(record) = self.relay_admissions.get(&key) {
+                    if let RemoteAckOutcome::NoAck(reason) = &ack.outcome {
+                        record.reject(reason.clone());
+                    } else {
+                        record.mark_admitted();
+                    }
+                }
+                Some(key)
             }
         } else {
             None
         };
         let result = async {
             let class = envelope.pool_class();
+            let subquota = match &envelope {
+                Envelope::Ack(ack) => {
+                    if ack.outcome == RemoteAckOutcome::Alive {
+                        RequestSubquota::Liveness
+                    } else {
+                        RequestSubquota::Terminal
+                    }
+                }
+                Envelope::Control(_) => RequestSubquota::Shared,
+                Envelope::RelayPayload(_) => RequestSubquota::Admission,
+            };
             let timeout_duration = self.options.request_timeout;
             let deadline = Instant::now()
                 .checked_add(timeout_duration)
                 .ok_or_else(|| TransportError::InvalidOptions {
                     reason: "request deadline exceeds the monotonic clock range".to_string(),
                 })?;
-            let lease = self.lease(node_id, class, deadline).await?;
+            let lease = self.lease(node_id, class, subquota, deadline).await?;
             match envelope {
                 Envelope::Ack(ack) => {
                     let bytes = wire::encode_rkyv(
@@ -1062,8 +1429,10 @@ impl TransportState {
             Ok(())
         }
         .await;
-        if let Some(key) = completed_admission {
-            self.relay_admissions.remove(&key);
+        if result.is_ok()
+            && let Some(key) = completed_admission
+        {
+            self.retire_relay_admission(&key);
         }
         result
     }
@@ -1072,6 +1441,7 @@ impl TransportState {
         &self,
         node_id: &ClusterNodeName,
         control: ControlEnvelope,
+        subquota: RequestSubquota,
         timeout_duration: Duration,
     ) -> Result<wire::Decoded<ControlEnvelope>, TransportError> {
         let class = control.pool_class();
@@ -1080,7 +1450,7 @@ impl TransportState {
             .ok_or_else(|| TransportError::InvalidOptions {
                 reason: "request deadline exceeds the monotonic clock range".to_string(),
             })?;
-        let lease = self.lease(node_id, class, deadline).await?;
+        let lease = self.lease(node_id, class, subquota, deadline).await?;
         let bytes = wire::encode_rkyv(
             &self.executor,
             class.memory_class(),
@@ -1111,90 +1481,6 @@ impl TransportState {
         .await
     }
 
-    async fn send_relay(
-        &self,
-        node_id: &ClusterNodeName,
-        payload: RelayPayload,
-    ) -> Result<(), TransportError> {
-        let timeout_duration = self.options.request_timeout;
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })?;
-        // The relay connection and local stream slot are leased before receiver memory is asked
-        // for, so a saturated pool never holds a remote application grant.
-        let relay = self.lease(node_id, PoolClass::Relay, deadline).await?;
-        let attempt = OsRng.next_u64();
-        let grant = RelayGrantRequest {
-            sender_epoch: self.process_epoch,
-            attempt,
-            body_bytes: payload
-                .batch_ipc
-                .len()
-                .try_into()
-                .assured("an in-memory allocation length fits in u64"),
-            metadata: wire::RelayMetadata::from_payload(&payload),
-        };
-        let metadata = wire::encode_rkyv(
-            &self.executor,
-            MemoryClass::Relay,
-            CpuClass::Data,
-            self.executor.limits().relay_encoded_bytes.as_u64(),
-            grant,
-        )
-        .await?;
-        let management = self.lease(node_id, PoolClass::Management, deadline).await?;
-        let grant_response = management
-            .request_raw(
-                self,
-                RawRequest {
-                    path: RELAY_GRANT_PATH,
-                    body: Some(metadata),
-                    response_class: PoolClass::Management,
-                    response_limit: self.executor.limits().management_event_bytes.as_u64(),
-                    timeout: deadline.saturating_duration_since(Instant::now()),
-                    headers: &[],
-                },
-            )
-            .await?;
-        let grant = wire::decode_rkyv::<RelayGrantResponse>(
-            &self.executor,
-            MemoryClass::Management,
-            CpuClass::Control,
-            grant_response,
-        )
-        .await?
-        .into_value();
-        if grant.receiver_epoch != management.connection.peer_epoch {
-            return Err(TransportError::RelayGrant(
-                "receiver process epoch changed before transfer".to_string(),
-            ));
-        }
-        let path = format!("{RELAY_PATH_PREFIX}{}", grant.grant_id);
-        let sender_epoch = self.process_epoch.to_string();
-        let receiver_epoch = grant.receiver_epoch.to_string();
-        let attempt = attempt.to_string();
-        relay
-            .request_raw(
-                self,
-                RawRequest {
-                    path: &path,
-                    body: Some(payload.batch_ipc),
-                    response_class: PoolClass::Relay,
-                    response_limit: RESPONSE_LIMIT,
-                    timeout: deadline.saturating_duration_since(Instant::now()),
-                    headers: &[
-                        ("x-nervix-sender-epoch", sender_epoch.as_str()),
-                        ("x-nervix-receiver-epoch", receiver_epoch.as_str()),
-                        ("x-nervix-attempt", attempt.as_str()),
-                    ],
-                },
-            )
-            .await?;
-        Ok(())
-    }
-
     fn deliver_incoming(
         &self,
         peer_addr: SocketAddr,
@@ -1210,6 +1496,22 @@ impl TransportState {
                 decoded,
             ))
             .map_err(|_| TransportError::IncomingQueueFull)
+    }
+
+    async fn deliver_terminal_incoming(
+        &self,
+        peer_addr: SocketAddr,
+        peer_node_id: ClusterNodeName,
+        envelope: Envelope,
+        decoded: Option<Reservation>,
+    ) -> Result<(), TransportError> {
+        let received = ReceivedEnvelope::new(peer_addr, peer_node_id, envelope, decoded);
+        tokio::select! {
+            _ = self.admission_closed.cancelled() => Err(TransportError::ShuttingDown),
+            result = self.incoming_tx.send(received) => {
+                result.map_err(|_| TransportError::ShuttingDown)
+            }
+        }
     }
 
     async fn accept_loop(self, listener: TcpListener) {
@@ -1570,7 +1872,7 @@ impl TransportState {
         peer: InboundPeer,
         request: Request<RecvStream>,
         mut respond: server::SendResponse<Bytes>,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         if request.method() != Method::POST {
             send_static_error(
                 &mut respond,
@@ -1583,19 +1885,19 @@ impl TransportState {
         }
         let path = request.uri().path().to_string();
         if path == CONTROL_PATH {
-            return self
-                .handle_control(
-                    peer.addr,
-                    peer.node_id,
-                    peer.advertised_host,
-                    peer.class,
-                    request.into_body(),
-                    respond,
-                )
-                .await;
+            self.handle_control(
+                peer.addr,
+                peer.node_id,
+                peer.advertised_host,
+                peer.class,
+                request.into_body(),
+                respond,
+            )
+            .await?;
+            return Ok(());
         }
         if path == ACK_PATH {
-            if peer.class != PoolClass::Relay {
+            if peer.class != PoolClass::Management {
                 send_static_error(
                     &mut respond,
                     StatusCode::FORBIDDEN,
@@ -1607,22 +1909,47 @@ impl TransportState {
             }
             let bytes = read_body(
                 &self.executor,
-                MemoryClass::Relay,
+                MemoryClass::Management,
                 peer.class.control_body_limit(&self.executor),
                 self.options.progress_timeout,
                 request.into_body(),
             )
             .await?;
-            let decoded =
-                wire::decode_rkyv(&self.executor, MemoryClass::Relay, CpuClass::Data, bytes)
-                    .await?;
+            let decoded = wire::decode_rkyv::<nervix_models::RemoteAckResolution>(
+                &self.executor,
+                MemoryClass::Management,
+                CpuClass::Control,
+                bytes,
+            )
+            .await?;
             let (ack, reservation) = decoded.into_parts();
-            self.deliver_incoming(
-                peer.addr,
-                peer.node_id,
-                Envelope::Ack(ack),
-                Some(reservation),
-            )?;
+            let terminal_admission = if ack.outcome == RemoteAckOutcome::Alive {
+                None
+            } else {
+                Some(RelayAdmissionKey {
+                    peer_node_id: peer.node_id.clone(),
+                    ack_id: ack.ack_id,
+                })
+            };
+            if ack.outcome == RemoteAckOutcome::Alive {
+                self.deliver_incoming(
+                    peer.addr,
+                    peer.node_id,
+                    Envelope::Ack(ack),
+                    Some(reservation),
+                )?;
+            } else {
+                self.deliver_terminal_incoming(
+                    peer.addr,
+                    peer.node_id,
+                    Envelope::Ack(ack),
+                    Some(reservation),
+                )
+                .await?;
+            }
+            if let Some(admission_key) = terminal_admission {
+                self.retire_outbound_relay_admission(&admission_key);
+            }
             send_response(
                 respond,
                 StatusCode::NO_CONTENT,
@@ -1631,6 +1958,27 @@ impl TransportState {
             )
             .await?;
             return Ok(());
+        }
+        if path == RELAY_CANCEL_PATH || path == RELAY_STATUS_PATH {
+            if peer.class != PoolClass::Management {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::FORBIDDEN,
+                    "wrong pool class",
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+            return self
+                .handle_relay_admission_control(
+                    peer.node_id,
+                    peer.process_epoch,
+                    path == RELAY_CANCEL_PATH,
+                    request.into_body(),
+                    respond,
+                )
+                .await;
         }
         if path == RELAY_GRANT_PATH {
             if peer.class != PoolClass::Management {
@@ -1660,16 +2008,16 @@ impl TransportState {
             let grant_id = grant_id.parse::<u64>().map_err(|error| {
                 TransportError::RelayGrant(format!("invalid grant id: {error}"))
             })?;
-            return self
-                .handle_relay_body(
-                    peer.addr,
-                    peer.node_id,
-                    peer.process_epoch,
-                    grant_id,
-                    request,
-                    respond,
-                )
-                .await;
+            self.handle_relay_body(
+                peer.addr,
+                peer.node_id,
+                peer.process_epoch,
+                grant_id,
+                request,
+                respond,
+            )
+            .await?;
+            return Ok(());
         }
 
         send_static_error(
@@ -1767,274 +2115,6 @@ impl TransportState {
             Envelope::Control(control),
             Some(reservation),
         )?;
-        send_response(
-            respond,
-            StatusCode::NO_CONTENT,
-            None,
-            self.options.progress_timeout,
-        )
-        .await
-    }
-
-    async fn handle_relay_grant(
-        &self,
-        peer_node_id: ClusterNodeName,
-        peer_epoch: u64,
-        body: RecvStream,
-        mut respond: server::SendResponse<Bytes>,
-    ) -> Result<(), TransportError> {
-        let encoded = read_body(
-            &self.executor,
-            MemoryClass::Relay,
-            self.executor.limits().relay_encoded_bytes.as_u64(),
-            self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let grant = wire::decode_rkyv::<RelayGrantRequest>(
-            &self.executor,
-            MemoryClass::Relay,
-            CpuClass::Data,
-            encoded,
-        )
-        .await?
-        .into_value();
-        if grant.sender_epoch != peer_epoch
-            || grant.body_bytes > self.executor.limits().relay_encoded_bytes.as_u64()
-        {
-            send_response(
-                respond,
-                StatusCode::BAD_REQUEST,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
-        }
-        let Some(admission) = grant.metadata.admission.as_ref() else {
-            send_response(
-                respond,
-                StatusCode::BAD_REQUEST,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
-        };
-        if admission.reply_node_id != peer_node_id {
-            send_response(
-                respond,
-                StatusCode::FORBIDDEN,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
-        }
-        let admission_key = RelayAdmissionKey {
-            peer_node_id: peer_node_id.clone(),
-            ack_id: admission.ack_id,
-        };
-        let operation_bytes = grant
-            .body_bytes
-            .checked_add(self.executor.limits().relay_decoded_bytes.as_u64())
-            .ok_or_else(|| {
-                TransportError::RelayGrant("relay operation limits overflow".to_string())
-            })?;
-        let operation_bytes = operation_bytes
-            .checked_add(self.executor.limits().relay_scratch_bytes.as_u64())
-            .ok_or_else(|| {
-                TransportError::RelayGrant("relay operation limits overflow".to_string())
-            })?;
-        let reservation = match self
-            .executor
-            .try_reserve(MemoryClass::Relay, operation_bytes)
-        {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay admission is full",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                debug!(?error, "relay grant refused by memory admission");
-                return Ok(());
-            }
-        };
-        let item = match StdArc::clone(&self.relay_items).try_acquire_owned() {
-            Ok(item) => item,
-            Err(_) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay item admission is full",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        let terminal = match StdArc::clone(&self.terminal_outcomes).try_acquire_owned() {
-            Ok(terminal) => terminal,
-            Err(_) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay terminal-outcome admission is full",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        match self.relay_admissions.entry(admission_key.clone()) {
-            Entry::Occupied(_) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay admission is already active",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(RelayAdmissionCapacity {
-                    _item: item,
-                    _terminal: terminal,
-                });
-            }
-        }
-        let grant_id = self.next_grant_id();
-        let receiver_epoch = self.process_epoch;
-        let expiry = CancellationToken::new();
-        self.grants.insert(
-            grant_id,
-            RelayGrant {
-                peer_node_id,
-                sender_epoch: peer_epoch,
-                receiver_epoch,
-                attempt: grant.attempt,
-                body_bytes: grant.body_bytes,
-                expires_at: Instant::now()
-                    .checked_add(RELAY_GRANT_LIFETIME)
-                    .assured("the fixed relay grant lifetime fits the monotonic clock"),
-                metadata: grant.metadata,
-                reservation,
-                admission_key,
-                _expiry: CancelOnDrop::new(expiry.clone()),
-            },
-        );
-        let grants = self.clone();
-        self.tasks.spawn(async move {
-            tokio::select! {
-                _ = expiry.cancelled() => {}
-                _ = sleep(RELAY_GRANT_LIFETIME) => {
-                    let expired = grants
-                        .grants
-                        .remove_if(&grant_id, |_, grant| Instant::now() >= grant.expires_at);
-                    if let Some((_, grant)) = expired {
-                        grants.relay_admissions.remove(&grant.admission_key);
-                    }
-                }
-            }
-        });
-        let response = wire::encode_rkyv(
-            &self.executor,
-            MemoryClass::Management,
-            CpuClass::Control,
-            self.executor.limits().management_event_bytes.as_u64(),
-            RelayGrantResponse {
-                grant_id,
-                receiver_epoch,
-            },
-        )
-        .await?;
-        send_response(
-            respond,
-            StatusCode::OK,
-            Some(response),
-            self.options.progress_timeout,
-        )
-        .await
-    }
-
-    fn next_grant_id(&self) -> u64 {
-        loop {
-            let id = OsRng.next_u64();
-            if id != 0 && !self.grants.contains_key(&id) {
-                return id;
-            }
-        }
-    }
-
-    async fn handle_relay_body(
-        &self,
-        peer_addr: SocketAddr,
-        peer_node_id: ClusterNodeName,
-        peer_epoch: u64,
-        grant_id: u64,
-        request: Request<RecvStream>,
-        mut respond: server::SendResponse<Bytes>,
-    ) -> Result<(), TransportError> {
-        let sender_epoch = header_u64(&request, "x-nervix-sender-epoch")?;
-        let receiver_epoch = header_u64(&request, "x-nervix-receiver-epoch")?;
-        let attempt = header_u64(&request, "x-nervix-attempt")?;
-        let claimed = self.grants.remove_if(&grant_id, |_, grant| {
-            grant.peer_node_id == peer_node_id
-                && grant.sender_epoch == sender_epoch
-                && grant.sender_epoch == peer_epoch
-                && grant.receiver_epoch == receiver_epoch
-                && grant.attempt == attempt
-                && Instant::now() < grant.expires_at
-        });
-        let Some((_, grant)) = claimed else {
-            respond.send_reset(Reason::REFUSED_STREAM);
-            return Ok(());
-        };
-        drop(grant._expiry);
-        let admission_cleanup =
-            RelayAdmissionCleanup::new(self.clone(), grant.admission_key.clone());
-
-        let encoded_limit = self.executor.limits().relay_encoded_bytes.as_u64();
-        let encoded_bytes = grant.body_bytes;
-        let (encoded_reservation, overlap) = grant
-            .reservation
-            .split(encoded_bytes)
-            .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
-        let mut buffer = BudgetedBuffer::with_limit(encoded_reservation, encoded_limit);
-        read_body_into(
-            &mut buffer,
-            self.options.progress_timeout,
-            request.into_body(),
-        )
-        .await?;
-        let actual: u64 = buffer
-            .len()
-            .try_into()
-            .assured("an in-memory allocation length fits in u64");
-        if actual != grant.body_bytes {
-            respond.send_reset(Reason::ENHANCE_YOUR_CALM);
-            return Err(TransportError::RelayGrant(format!(
-                "relay body length {actual} differs from granted length {}",
-                grant.body_bytes
-            )));
-        }
-        let (body, body_reservation) = buffer.into_parts();
-        let operation_reservation = body_reservation
-            .merge(overlap)
-            .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
-        let body = ChargedBytes::from_owned(body, operation_reservation);
-        let payload = grant.metadata.into_payload(body);
-        self.deliver_incoming(
-            peer_addr,
-            peer_node_id,
-            Envelope::RelayPayload(payload),
-            None,
-        )?;
-        admission_cleanup.disarm();
         send_response(
             respond,
             StatusCode::NO_CONTENT,
@@ -2169,7 +2249,12 @@ impl TransportState {
         self.requests.shutdown();
         self.cancel_all_slots();
         self.grants.clear();
+        self.relay_attempts.clear();
+        self.active_relay_channels.clear();
         self.relay_admissions.clear();
+        self.relay_watermarks.clear();
+        self.outbound_relay_epochs.clear();
+        self.outbound_relay_admissions.clear();
         self.tasks.close();
         if timeout(self.options.shutdown_drain_timeout, self.tasks.wait())
             .await

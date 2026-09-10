@@ -1,7 +1,11 @@
+//! Branch-local relay boundary tests.
+//!
 //! Layer: test harness.
-//! Owns: focused verification of relay boundary routing, retention, and acknowledgement behavior.
-//! May depend on: relay boundary internals and runtime test fixtures.
-//! Must not know: production control-plane orchestration or connector protocols.
+//!
+//! - **Owns.** Focused tests for relay fan-out, delivery ordering, branch generations, retention,
+//!   acknowledgement propagation, and materialized relay state.
+//! - **Depends on.** The runtime relay boundary and its test fixtures.
+//! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
 use std::sync::Arc as StdArc;
 
@@ -26,6 +30,69 @@ use crate::{
     runtime_ack::{AckOutcome, AckSet},
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
+
+#[test]
+fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
+    let slot = RelayOutboundSlot::new();
+    let start = Instant::now();
+    let first = slot.next_delivery_at(start);
+    let active_at = start
+        .checked_add(
+            RELAY_CHANNEL_IDLE_ROTATION
+                .checked_sub(Duration::from_nanos(1))
+                .expect("the relay idle duration is longer than one nanosecond"),
+        )
+        .expect("the fixed relay idle duration should fit the monotonic clock");
+    let second = slot.next_delivery_at(active_at);
+    let reopened = slot.next_delivery_at(
+        active_at
+            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
+            .expect("the fixed relay idle duration should fit the monotonic clock"),
+    );
+
+    assert_eq!(first.channel_incarnation, second.channel_incarnation);
+    assert_eq!(first.sequence, 0);
+    assert_eq!(second.sequence, 1);
+    assert_ne!(first.channel_incarnation, reopened.channel_incarnation);
+    assert_eq!(reopened.sequence, 0);
+}
+
+#[test]
+fn indeterminate_delivery_reopens_with_a_fresh_channel_incarnation() {
+    let slot = RelayOutboundSlot::new();
+    let unresolved = slot.next_delivery();
+
+    slot.reopen_delivery_channel();
+
+    let retry = slot.next_delivery();
+    assert_ne!(unresolved.channel_incarnation, retry.channel_incarnation);
+    assert_eq!(retry.sequence, 0);
+}
+
+#[test]
+fn branch_eviction_cancels_and_reopens_relay_channel_generations() {
+    let services = test_relay_boundary_services();
+    let node = ClusterNodeName::parse("node-2").expect("valid node name");
+    let relay = RelayName::parse("notifications").expect("valid relay name");
+    let branch = string_branch_key("tenant", "acme");
+    let ingress = services.ingress_slot(&branch);
+    let outbound = services.outbound_slot(&node, &relay, RelayPayloadKind::Routed, &branch);
+    let first_delivery = outbound.next_delivery();
+
+    services.remove_branch_slots(&branch);
+
+    assert!(ingress.cancellation().is_cancelled());
+    assert!(outbound.cancellation().is_cancelled());
+    let reopened = services.outbound_slot(&node, &relay, RelayPayloadKind::Routed, &branch);
+    let reopened_delivery = reopened.next_delivery();
+    assert!(!reopened.cancellation().is_cancelled());
+    assert_ne!(
+        first_delivery.channel_incarnation,
+        reopened_delivery.channel_incarnation
+    );
+    assert_eq!(reopened_delivery.sequence, 0);
+}
+
 #[tokio::test]
 async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let runtime = Runtime::default();
@@ -579,24 +646,28 @@ async fn owner_ingress_touches_expiring_stream_state() {
         RelayRetention::default(),
     );
     runtime
-        .handle_remote_stream(RelayPayload {
-            kind: RelayPayloadKind::Ingress,
-            domain: domain.clone(),
-            relay: relay_id.clone(),
-            key: BranchKey::to_remote_key(&key),
-            batch_ipc,
-            metadata: vec![
-                test_runtime_row([("user_id".to_string(), RuntimeValue::U32(42))])
-                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(42))
-                    .metadata()
-                    .to_remote(),
-            ],
-            acks: vec![None],
-            admission: Some(RemoteAckRegistration {
-                ack_id: 1,
-                reply_node_id: ClusterNodeName::parse("producer-node").expect("valid name"),
-            }),
-        })
+        .handle_remote_stream_payload_with_owner_ingress(
+            RelayPayload {
+                delivery: RelayDelivery {
+                    channel_incarnation: [1; 16],
+                    sequence: 0,
+                },
+                kind: RelayPayloadKind::Ingress,
+                domain: domain.clone(),
+                relay: relay_id.clone(),
+                key: BranchKey::to_remote_key(&key),
+                batch_ipc,
+                metadata: vec![
+                    test_runtime_row([("user_id".to_string(), RuntimeValue::U32(42))])
+                        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(42))
+                        .metadata()
+                        .to_remote(),
+                ],
+                acks: vec![None],
+                admission: None,
+            },
+            true,
+        )
         .await
         .expect("remote relay payload should dispatch");
     timeout(Duration::from_secs(1), async {
@@ -989,7 +1060,6 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
         .expect("existing receiver should get batch after resize");
     assert_eq!(key_label(&batch.key), r#"{"branch":"after_resize"}"#);
 }
-
 #[test]
 fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
     let schema = test_schema(&[
@@ -1178,6 +1248,10 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
         .enumerate()
         .map(|(index, consumer)| {
             routed_payload(RoutedDelivery {
+                delivery: RelayDelivery {
+                    channel_incarnation: [1; 16],
+                    sequence: index.arch_into(),
+                },
                 domain: &domain,
                 consumer,
                 batch: &batch,
