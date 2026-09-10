@@ -371,9 +371,9 @@ impl Runtime {
         };
         if should_spawn {
             let runtime = self.clone();
-            drop(tokio::spawn(async move {
+            self.inner.state_replication_tasks.spawn(async move {
                 runtime.reconcile_passive_state_replica(placement).await;
-            }));
+            });
         }
     }
 
@@ -679,11 +679,11 @@ impl Runtime {
         if should_spawn {
             let runtime = self.clone();
             let placement = placement.clone();
-            drop(tokio::spawn(async move {
+            self.inner.state_replication_tasks.spawn(async move {
                 runtime
                     .dispatch_pending_state_checkpoint_announcements(placement)
                     .await;
-            }));
+            });
         }
     }
 

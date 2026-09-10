@@ -8,13 +8,18 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 arch-into = { workspace = true }
 ciborium = { workspace = true }
 error-stack = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }
+imbl = { workspace = true }
 meticulous = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }

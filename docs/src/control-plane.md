@@ -30,6 +30,29 @@ In practice, the control plane covers:
 
 This is the part of Nervix where Raft-backed consistency matters. It keeps cluster-wide definitions coherent.
 
+## Durability and recovery
+
+Consensus acknowledges votes, appended log entries, and applied administrative writes only after
+synchronizing both data and filesystem metadata. The storage device and filesystem must honor
+these synchronization requests. This uses Fjall's
+[full synchronization contract](https://docs.rs/fjall/latest/fjall/enum.PersistMode.html#variant.SyncAll).
+
+Each applied command atomically stores its changed semantic records with its applied position,
+membership, transaction progress, and revision. Domain configuration and schedule changes within
+one command therefore recover together. Transaction effects recover with the corresponding commit
+progress. Updating a resource replica writes that replica and application metadata; it does not
+rewrite unrelated domains or schedules. Log purging atomically stores its deletion boundary with
+the deleted entries.
+
+Observers see a coherent state revision only after durable success. Change notifications identify
+committed revisions and may coalesce intermediate revisions; readers retrieve a coherent current
+view. A storage failure stops that node's consensus writes and returns an error. An error does not
+prove that the command was uncommitted: the durable write may have completed before the failure
+was reported. On restart, recovery loads complete durable state and replays committed log entries.
+Inspect the resulting domain or transaction state before retrying an uncertain administrative
+operation. Persisted consensus records must have the current complete storage shape; incompatible
+or incomplete stored state fails startup and must be recreated.
+
 ## Replicated NSPL Transactions
 
 NSPL command grouping is explicit. `BEGIN` creates a Raft-replicated control-plane transaction and
