@@ -891,7 +891,7 @@ struct ConsensusState {
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
-    topology_changes: watch::Sender<u64>,
+    topology_changes: watch::Sender<()>,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -1026,7 +1026,7 @@ impl Consensus {
         .await
         .map_err(|_| ConsensusError::Startup)?;
         let events = ConsensusEvents::new();
-        let (topology_changes, _) = watch::channel(0_u64);
+        let (topology_changes, _) = watch::channel(());
         let metrics_raft = raft.clone();
         let metrics_events = events.clone();
         let metrics_topology_changes = topology_changes.clone();
@@ -1073,11 +1073,7 @@ impl Consensus {
                         .collect(),
                 };
                 if last_topology.as_ref() != Some(&topology) {
-                    metrics_topology_changes.send_modify(|version| {
-                        *version = version
-                            .checked_add(1)
-                            .assured("a node cannot observe 2^64 Raft topology changes");
-                    });
+                    metrics_topology_changes.send_replace(());
                     last_topology = Some(topology);
                 }
             }
@@ -1313,7 +1309,7 @@ impl Observer {
 
     /// Observe retained leadership and voter-set changes without coupling callers to OpenRaft's
     /// complete metrics stream.
-    pub fn subscribe_topology(&self) -> watch::Receiver<u64> {
+    pub fn subscribe_topology(&self) -> watch::Receiver<()> {
         self.inner.topology_changes.subscribe()
     }
 
