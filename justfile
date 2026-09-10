@@ -447,7 +447,11 @@ wasm-processor-go-guest:
         exit 127
     fi
     cd examples/wasm-processors/go-guest
-    tinygo build \
+    # TinyGo compiles against the standard library of the Go toolchain that `go` selects, and
+    # automatic selection never moves below a newer host Go, so the go.mod toolchain is forced.
+    toolchain="$(sed -n 's/^toolchain //p' go.mod)"
+    test -n "${toolchain}"
+    GOTOOLCHAIN="${toolchain}" tinygo build \
         -target=wasm-unknown \
         -scheduler=none \
         -opt=z \
