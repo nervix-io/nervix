@@ -381,6 +381,50 @@ build-apps: build-cli build-server
 
 build-all: generate-dev-tls build-deps build-apps
 
+# Stage the three distributable binaries for the host platform as one archive with its checksum.
+# The server embeds the web console, so the console is built first. This is the plain release
+# profile: the fat LTO and the cargo-sonic CPU multiversioning that the container images use belong
+# to Dockerfile.debian, which targets one known CPU baseline per published architecture.
+package-binaries destination=(cargo_target_dir + "/binaries"): build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v cargo-auditable >/dev/null 2>&1; then
+        echo "cargo-auditable is required so the staged binaries carry their dependency list" >&2
+        exit 127
+    fi
+    target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+    test -n "${target_triple}"
+    cargo auditable build --release --target "${target_triple}" \
+        --package nervix-server --bin nervix-server \
+        --package nervix-cli --bin nervix-cli \
+        --package nervix-nspl-format --bin nervix-nspl-format
+    archive="nervix-$(toml get -r Cargo.toml workspace.package.version)-${target_triple}"
+    # GitHub Actions artifacts are rezipped without the executable bit, so the archive rather than
+    # the directory is the unit that leaves this recipe.
+    staging="$(mktemp -d)"
+    trap 'rm -rf "${staging}"' EXIT
+    mkdir -p "${staging}/${archive}"
+    for binary in nervix-server nervix-cli nervix-nspl-format; do
+        install -m 0755 \
+            "{{ cargo_target_dir }}/${target_triple}/release/${binary}" \
+            "${staging}/${archive}/${binary}"
+        # The staged binary has to start on this host before it is archived for another one: a
+        # missing system library or a broken link surfaces here rather than on a user's machine.
+        "${staging}/${archive}/${binary}" --help > /dev/null
+    done
+    install -m 0644 LICENSE.md README.md "${staging}/${archive}/"
+    mkdir -p {{ quote(destination) }}
+    destination="$(cd {{ quote(destination) }} && pwd)"
+    tar -czf "${destination}/${archive}.tar.gz" -C "${staging}" "${archive}"
+    cd "${destination}"
+    # macOS ships shasum and no sha256sum; Linux ships the reverse on a minimal image.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${archive}.tar.gz" > "${archive}.tar.gz.sha256"
+    else
+        shasum -a 256 "${archive}.tar.gz" > "${archive}.tar.gz.sha256"
+    fi
+    echo "staged ${destination}/${archive}.tar.gz"
+
 wasm-processor-rust-guest:
     #!/usr/bin/env bash
     set -euo pipefail
