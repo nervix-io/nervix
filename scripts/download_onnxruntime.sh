@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${ONNXRUNTIME_VERSION:-1.24.2}"
+version="${ONNXRUNTIME_VERSION:-1.27.1}"
 root="${NERVIX_ONNXRUNTIME_DIR:-.nervix-deps/onnxruntime}"
 mode="${1:-download}"
 
