@@ -2,6 +2,8 @@ module github.com/apache/arrow-go/v18/arrow/nervix-wasm-processor-go-guest
 
 go 1.26
 
+toolchain go1.26.8
+
 require (
 	github.com/apache/arrow-go/v18 v18.4.1
 	github.com/google/flatbuffers v25.2.10+incompatible
