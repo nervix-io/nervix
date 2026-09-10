@@ -65,7 +65,7 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
-    /// Wall time already elapsed when the next committed mapping for a domain starts.
+    /// Wall time already elapsed when the next newly supplied mapping for a domain starts.
     domain_clock_initial_elapsed: DashMap<DomainName, Duration, RandomState>,
     state_replica_polling_paused: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
@@ -486,11 +486,14 @@ impl FaultInjection {
             .insert(domain, elapsed);
     }
 
-    pub(crate) fn domain_clock_initial_elapsed(&self, domain: &DomainName) -> Option<Duration> {
-        self.inner
-            .domain_clock_initial_elapsed
-            .get(domain)
-            .map(|elapsed| *elapsed.value())
+    pub(crate) fn take_domain_clock_initial_elapsed(
+        &self,
+        domain: &DomainName,
+    ) -> Option<Duration> {
+        let Some((_, elapsed)) = self.inner.domain_clock_initial_elapsed.remove(domain) else {
+            return None;
+        };
+        Some(elapsed)
     }
 
     pub fn pause_domain_clock_progress_on(&self, domain: impl Into<String>, node: ClusterNodeName) {

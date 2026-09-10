@@ -10,6 +10,10 @@ use nervix_models::{DomainAdmissionWindow, DomainClockPeriod, DomainName, Timest
 
 use super::*;
 
+/// A liveness watchdog for public HTTP and session events; no clock-position arithmetic depends on
+/// this duration.
+const PUBLIC_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct IngestionProbe {
     host: String,
     client: reqwest::Client,
@@ -47,7 +51,7 @@ impl IngestionProbe {
         Self {
             host: expand_placeholders(world, host),
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
+                .timeout(PUBLIC_PROBE_TIMEOUT)
                 .build()
                 .assured("the probe uses the default HTTP client configuration"),
             base_url: world
@@ -100,8 +104,8 @@ impl IngestionProbe {
         self.publish("/clock", 0, Timestamp::from_unix_nanos(0))
             .await;
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
-            .assured("five seconds fits the monotonic clock");
+            .checked_add(PUBLIC_PROBE_TIMEOUT)
+            .assured("the public probe timeout fits the monotonic clock");
         loop {
             tokio::task::consume_budget().await;
             let remaining = deadline
@@ -235,7 +239,7 @@ async fn retained_admission(
         match candidate.expected {
             ExpectedAdmission::Accepted => {
                 let event = probe
-                    .observation(world, Duration::from_secs(10))
+                    .observation(world, PUBLIC_PROBE_TIMEOUT)
                     .await
                     .assured("an inclusive admission edge reaches the public subscription");
                 assert_eq!(event["sequence"], sequence);
@@ -251,7 +255,7 @@ async fn retained_admission(
                     .active_session
                     .as_mut()
                     .assured("the probe has a public session")
-                    .try_next_server_error(Duration::from_secs(10))
+                    .try_next_server_error(PUBLIC_PROBE_TIMEOUT)
                     .await
                     .assured("the public server-error stream remains connected")
                     .assured("an event outside the admission edge produces a server error");
