@@ -25,8 +25,21 @@ is stored.
 While the domain is running:
 
 - Nervix produces domain ticks
-- paced ingestors only admit records whose effective timestamp falls inside the tick window
-- `SKEW` defines the allowed admission window around each tick
+- paced ingestors admit records whose effective timestamp falls within `SKEW` of an eligible
+  logical tick center
+
+Centers are `origin + n × PERIOD`, where `origin` is the committed logical start and `n` is
+nonnegative. The current domain mapping determines the reached frontier. Only the newest 256
+positions through that frontier are eligible; position zero is eligible immediately on start.
+`SKEW` is an inclusive logical-time distance: an event exactly at either edge is accepted.
+Overlapping windows admit their union, while gaps between windows reject events.
+
+Admission reconstructs these positions from the installed mapping. Delayed, missing, or coalesced
+tick notifications do not change eligibility. A hypothetical future center is never eligible:
+an event can extend past the last reached center only by its declared `SKEW`. An event before
+the origin can be admitted within the origin's tolerance while that position remains eligible.
+`TIME RATE` changes when the frontier advances in real time; it does not scale source timestamps,
+`PERIOD`, or `SKEW`.
 
 Paced time is also important for expiration:
 
@@ -167,9 +180,18 @@ Every ingested record receives internal ingestion metadata, including mandatory 
 
 Timestamp sources:
 
-- `TIMESTAMP NOW`
-- `TIMESTAMP AT <field>`
+- `TIMESTAMP NOW` selects the installed domain's logical time when the ingest group is delivered.
+  Buffered intake released after automatic quiescing receives that delivery time. In an unpaced
+  domain, the same clock capability supplies actual UTC.
+- `TIMESTAMP AT <field>` preserves the decoded `DATETIME` field as the event time. Connector
+  timestamps selected when this clause is omitted in an unpaced domain, and broker metadata,
+  retain their external values. None of these values is multiplied by `TIME RATE`.
 
 In paced domains, ingestors must declare a timestamp source explicitly. In unpaced domains, timestamp metadata is still recorded, but it is not used to gate admission.
+
+Both ingestion watermarks initially equal the selected event time and travel with the record
+through relays and across nodes. Timestamp selection and admission share one delivery snapshot.
+An unknown, stopped, or uninstalled domain clock produces a lifecycle error; a paused domain
+withholds delivery until its ingestion path resumes.
 
 Window processors also use this metadata. Duration windows evaluate input event time from the record low watermark. Emitted aggregate records receive a low watermark equal to the minimum input low watermark in the emitted window and a high watermark equal to the current domain time at emission.

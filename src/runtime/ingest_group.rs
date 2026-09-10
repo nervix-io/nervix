@@ -1,3 +1,10 @@
+//! Columnar ingestion group execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Group decoding, timestamped row metadata, route execution and in-memory ACKs.
+//! - **Depends on.** Installed domain capabilities, compiled codecs and branch-local routes.
+//! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
+
 use std::borrow::Cow;
 
 use super::*;
@@ -939,10 +946,10 @@ impl Runtime {
         }
         // One execution clock for the whole group: a batch is evaluated against the
         // state it was admitted with.
-        let execution_now = self
-            .current_stream_expiration_time(domain)
-            .ok()
-            .unwrap_or_else(current_timestamp);
+        let ingestion_time = self
+            .ingestion_time(domain, ingestor)
+            .map_err(|error| format!("{error:?}"))?;
+        let execution_now = ingestion_time.now();
 
         if let Some(filter_where) = filter_where {
             let owner_nodes = match self.inner.executions.get(domain) {
@@ -1029,13 +1036,9 @@ impl Runtime {
         let mut event_timestamps = Vec::with_capacity(rows.len());
         for row in 0..rows.len() {
             let record = rows.row(row)?;
-            let event_timestamp = self.resolve_ingested_record_timestamp(
-                domain,
-                ingestor,
-                timestamp_source,
-                &record,
-            )?;
-            self.ensure_domain_allows_ingestion(domain, ingestor, event_timestamp)?;
+            let event_timestamp = ingestion_time
+                .select(timestamp_source, &record)
+                .map_err(|error| format!("{error:?}"))?;
             event_timestamps.push(event_timestamp);
         }
         rows.record_metadata = std::mem::take(&mut rows.record_metadata)
@@ -1383,127 +1386,6 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) fn resolve_ingested_record_timestamp(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        timestamp_source: Option<&IngestTimestampSource>,
-        record: &RuntimeRow,
-    ) -> Result<Timestamp, String> {
-        match timestamp_source {
-            Some(IngestTimestampSource::Now) => Ok(record.metadata().ingested_at_low_watermark()),
-            Some(IngestTimestampSource::At(timestamp_field)) => {
-                match record.value(timestamp_field.as_str())? {
-                    Some(RuntimeValue::Datetime(value)) => Timestamp::try_from(value.to_utc())
-                        .map_err(|error| {
-                            format!(
-                                "TIMESTAMP field '{}' for ingestor '{}' is outside the supported \
-                                 range: {error}",
-                                timestamp_field.as_str(),
-                                ingestor.as_str()
-                            )
-                        }),
-                    Some(_) => Err(format!(
-                        "TIMESTAMP field '{}' for ingestor '{}' is not DATETIME at runtime",
-                        timestamp_field.as_str(),
-                        ingestor.as_str()
-                    )),
-                    None => Err(format!(
-                        "TIMESTAMP field '{}' for ingestor '{}' is missing from decoded record",
-                        timestamp_field.as_str(),
-                        ingestor.as_str()
-                    )),
-                }
-            }
-            None => {
-                let pace = match self.inner.domains.get(domain) {
-                    Some(state) => state.config.pace,
-                    None => DomainPace::Unpaced,
-                };
-                if let DomainPace::Paced = pace {
-                    Err(format!(
-                        "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \
-                         TIMESTAMP AT <field>",
-                        domain.as_str(),
-                        ingestor.as_str()
-                    ))
-                } else {
-                    Ok(record.metadata().ingested_at_low_watermark())
-                }
-            }
-        }
-    }
-
-    pub(in crate::runtime) fn ensure_domain_allows_ingestion(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        event_timestamp: Timestamp,
-    ) -> Result<(), String> {
-        let Some(domain_state) = self.inner.domains.get(domain) else {
-            return Ok(());
-        };
-        match domain_state.status {
-            nervix_models::DomainStatus::Stopped => {
-                return Err(format!(
-                    "domain '{}' is stopped; ingestor '{}' cannot accept events",
-                    domain.as_str(),
-                    ingestor.as_str()
-                ));
-            }
-            nervix_models::DomainStatus::Paused => {
-                return Err(format!(
-                    "domain '{}' is paused; ingestor '{}' cannot accept events",
-                    domain.as_str(),
-                    ingestor.as_str()
-                ));
-            }
-            nervix_models::DomainStatus::Running => {}
-        }
-        if let DomainPace::Unpaced = domain_state.config.pace {
-            return Ok(());
-        }
-
-        let skew = humantime::parse_duration(&domain_state.config.skew).map_err(|error| {
-            format!(
-                "invalid skew '{}' for paced domain '{}': {error}",
-                domain_state.config.skew,
-                domain.as_str()
-            )
-        })?;
-        let ticks = domain_state.ticks.lock();
-        if ticks.iter().any(|tick| {
-            event_timestamp
-                .into_datetime()
-                .signed_duration_since(tick.wall_clock.into_datetime())
-                .abs()
-                .to_std()
-                .is_ok_and(|distance| distance <= skew)
-        }) {
-            return Ok(());
-        }
-        drop(ticks);
-
-        let period = humantime::parse_duration(&domain_state.config.period).map_err(|error| {
-            format!(
-                "invalid period '{}' for paced domain '{}': {error}",
-                domain_state.config.period,
-                domain.as_str()
-            )
-        })?;
-        if let Some(clock) = domain_state.clock.paced_mapping()
-            && domain_clock_window_matches(&clock, period, skew, event_timestamp)
-        {
-            return Ok(());
-        }
-
-        Err(format!(
-            "paced domain '{}' rejected ingestor '{}' event outside any tick window",
-            domain.as_str(),
-            ingestor.as_str()
-        ))
-    }
-
     pub(in crate::runtime) async fn initialize_domain_kafka_consumer_offsets(
         &self,
         domain: &DomainName,
@@ -1622,14 +1504,14 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc as StdArc};
+    use std::sync::Arc as StdArc;
 
     use ahash::{HashMap, HashSet};
     use arc_swap::ArcSwapOption;
     use nervix_models::{
-        AckMode, CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, DomainConfig,
-        DomainPace, DomainState, DomainStatus, ErrorPolicies, IngestTimestampSource, JsonType,
-        ModelKind, ParseAsType, ResolvedCodecWireFormat, SchemaField, Timestamp, WireSchemaField,
+        AckMode, CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, ErrorPolicies,
+        JsonType, ModelKind, ParseAsType, ResolvedCodecWireFormat, SchemaField, Timestamp,
+        WireSchemaField,
     };
     use tokio::time::{Duration, timeout};
     use triomphe::Arc;
@@ -1832,108 +1714,6 @@ mod tests {
         assert_eq!(
             rows.batch.value(1, "user_id").expect("readable"),
             Some(RuntimeValue::I64(3))
-        );
-    }
-
-    #[test]
-    fn runtime_uses_configured_timestamp_field_when_present() {
-        let runtime = Runtime::new();
-        let record = test_runtime_row([(
-            "occurred_at".to_string(),
-            RuntimeValue::Datetime(
-                chrono::DateTime::parse_from_rfc3339("2026-04-07T12:34:56Z")
-                    .expect("valid timestamp"),
-            ),
-        )])
-        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(1));
-
-        let timestamp = runtime
-            .resolve_ingested_record_timestamp(
-                &domain("paced"),
-                &named("ing"),
-                Some(&IngestTimestampSource::At(named("occurred_at"))),
-                &record,
-            )
-            .expect("timestamp should resolve");
-
-        assert_eq!(
-            timestamp,
-            Timestamp::try_from(
-                chrono::DateTime::parse_from_rfc3339("2026-04-07T12:34:56Z")
-                    .expect("valid timestamp")
-                    .to_utc()
-            )
-            .expect("fixture timestamp is representable")
-        );
-    }
-
-    #[test]
-    fn runtime_uses_ingested_watermark_for_timestamp_now() {
-        let runtime = Runtime::new();
-        let record =
-            test_runtime_row([]).with_ingested_at_watermarks(Timestamp::from_unix_nanos(9_876_543));
-
-        let timestamp = runtime
-            .resolve_ingested_record_timestamp(
-                &domain("paced"),
-                &named("ing"),
-                Some(&IngestTimestampSource::Now),
-                &record,
-            )
-            .expect("timestamp should resolve");
-
-        assert_eq!(timestamp, Timestamp::from_unix_nanos(9_876_543));
-    }
-
-    #[test]
-    fn paced_domain_requires_explicit_timestamp_source() {
-        let runtime = Runtime::new();
-        let mut domains = BTreeMap::new();
-        domains.insert(domain("paced"), paced_domain_state("paced"));
-        runtime.sync_domains(&domains);
-
-        let error = runtime
-            .resolve_ingested_record_timestamp(
-                &domain("paced"),
-                &named("ing"),
-                None,
-                &test_runtime_row([]).with_ingested_at_watermarks(Timestamp::from_unix_nanos(1)),
-            )
-            .expect_err("paced domain should require explicit timestamp source");
-
-        assert!(error.contains("TIMESTAMP NOW or TIMESTAMP AT <field>"));
-    }
-
-    #[test]
-    fn stopped_unpaced_domain_rejects_ingestion() {
-        let runtime = Runtime::new();
-        let mut domains = BTreeMap::new();
-        domains.insert(
-            domain("default"),
-            DomainState {
-                id: domain("default"),
-                config: DomainConfig {
-                    pace: DomainPace::Unpaced,
-                    period: "1s".to_string(),
-                    skew: "0ms".to_string(),
-                    placement: nervix_models::PlacementPolicy::Neutral,
-                },
-                status: DomainStatus::Stopped,
-                start_version: 0,
-                last_start: nervix_models::DomainStartPoint::Resume,
-                clock: None,
-            },
-        );
-        runtime.sync_domains(&domains);
-
-        assert!(
-            runtime
-                .ensure_domain_allows_ingestion(
-                    &domain("default"),
-                    &named("ing"),
-                    Timestamp::from_unix_nanos(10_000_000),
-                )
-                .is_err()
         );
     }
 

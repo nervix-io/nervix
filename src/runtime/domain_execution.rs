@@ -1,3 +1,12 @@
+//! Installed domain execution and lifecycle state.
+//!
+//! Layer: data plane.
+//! - **Owns.** Applying committed domain state to clocks and node-local execution ownership.
+//! - **Depends on.** Vocabulary, installed plans and runtime infrastructure.
+//! - **Must not know.** Parsing or control-plane placement and transaction decisions.
+//!
+//! Existing model-backed execution fields violate the data-plane plan boundary.
+
 use super::*;
 
 /// One resource as a domain owns it, which is how installed resource versions are tracked.
@@ -74,8 +83,6 @@ pub(crate) struct LookupRuntime {
     pub(super) entries: Arc<HashMap<String, usize>>,
 }
 
-pub(super) const DOMAIN_TICK_HISTORY_LIMIT: usize = 256;
-
 #[derive(Debug, Clone)]
 pub(super) struct ObservedDomainTick {
     pub(super) tick_id: u64,
@@ -90,7 +97,7 @@ pub(super) struct RuntimeDomainState {
     pub(super) last_start: nervix_models::DomainStartPoint,
     pub(super) clock_authority: DomainClockAuthority,
     pub(super) clock: DomainClockLifecycle,
-    pub(super) ticks: parking_lot::Mutex<VecDeque<ObservedDomainTick>>,
+    pub(super) progress: parking_lot::Mutex<Option<ObservedDomainTick>>,
 }
 
 impl Runtime {
@@ -154,7 +161,7 @@ impl Runtime {
                     last_start: state.last_start.clone(),
                     clock_authority: authority.clone(),
                     clock,
-                    ticks: parking_lot::Mutex::new(VecDeque::new()),
+                    progress: parking_lot::Mutex::new(None),
                 }
             });
             let generation_changed = entry.start_version != state.start_version;
@@ -165,7 +172,7 @@ impl Runtime {
             entry.clock_authority = authority.clone();
             entry.clock.synchronize(state, &authority);
             if generation_changed || matches!(state.status, nervix_models::DomainStatus::Stopped) {
-                entry.ticks.lock().clear();
+                *entry.progress.lock() = None;
             }
         }
         self.inner.domain_status_changed.send_modify(|version| {
@@ -847,7 +854,7 @@ mod tests {
     use crate::runtime::domain_clock::DomainClockAccessError;
 
     #[test]
-    fn sync_domains_clears_ticks_when_paced_domain_stops() {
+    fn sync_domains_stops_ingestion_when_paced_domain_stops() {
         let runtime = Runtime::new();
         let mut domains = BTreeMap::new();
         domains.insert(domain("paced"), paced_domain_state("paced"));
@@ -884,11 +891,7 @@ mod tests {
 
         assert!(
             runtime
-                .ensure_domain_allows_ingestion(
-                    &domain("paced"),
-                    &named("ing"),
-                    Timestamp::from_unix_nanos(10_000_000),
-                )
+                .ingestion_time(&domain("paced"), &named("ing"))
                 .is_err()
         );
     }
@@ -922,19 +925,20 @@ mod tests {
                 .domains
                 .get(&domain("paced"))
                 .expect("domain should remain")
-                .ticks
+                .progress
                 .lock()
-                .len(),
-            1
+                .as_ref()
+                .map(|progress| progress.tick_id),
+            Some(1)
         );
         let error = runtime
-            .ensure_domain_allows_ingestion(
-                &domain("paced"),
-                &named("ing"),
-                Timestamp::from_unix_nanos(10_000_000_000),
-            )
-            .expect_err("paused domain must reject ingestion");
-        assert!(error.contains("paused"));
+            .ingestion_time(&domain("paced"), &named("ing"))
+            .err()
+            .assured("paused domain must reject ingestion");
+        assert!(matches!(
+            error.current_context(),
+            super::ingestion_time::IngestionTimeError::Paused { .. }
+        ));
     }
 
     #[test]
