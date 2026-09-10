@@ -1,4 +1,5 @@
 Feature: MongoDB emission
+  @domain_execution_time
   Scenario Outline: MongoDB emitter inserts mapped documents from a relay
     Given MQTT is running
     And MongoDB is running
@@ -6,7 +7,7 @@ Feature: MongoDB emission
     And a <nodes> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And MongoDB collection "notifications_mongodb_out_{{test_id}}" exists
     When these NSPL commands are executed
@@ -34,6 +35,7 @@ Feature: MongoDB emission
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC mongodb_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         ON QUIESCE DROP DECODE USING notification_codec
+        TIMESTAMP NOW
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -48,12 +50,12 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
-        START;
+        START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And emitter "to_mongodb" enters stall mode
     Then within "10s" repeatedly publishing MQTT message to topic "mongodb_notifications_in_{{test_id}}" yields a relay subscription payload

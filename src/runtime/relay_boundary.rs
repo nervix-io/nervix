@@ -1410,9 +1410,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
     ) -> DomainClockAccessResult<Timestamp> {
-        let clock = self.bind_domain_clock(domain)?;
-        let snapshot = clock.snapshot()?;
-        Ok(snapshot.now())
+        Ok(self.domain_execution_snapshot(domain)?.now())
     }
 
     pub(in crate::runtime) fn touch_stream_key(
@@ -1474,10 +1472,21 @@ impl Runtime {
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
-        let now = self
-            .current_stream_expiration_time(domain)
-            .ok()
-            .unwrap_or_else(current_timestamp);
+        let now = match self.current_stream_expiration_time(domain) {
+            Ok(now) => now,
+            Err(error) => {
+                let reason = format!(
+                    "relay '{}' in domain '{}' could not read domain time: {error}",
+                    relay.as_str(),
+                    domain.as_str(),
+                );
+                self.events().report_error(reason.clone());
+                for ack in batch.acks.iter() {
+                    ack.no_ack(reason.clone());
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        };
         branches.registry.touch(&batch.key, now);
         self.touch_stream_key(domain, relay, &batch.key, now);
         branches
@@ -1665,10 +1674,17 @@ impl Runtime {
                             std::future::pending::<()>().await;
                         }
                     } => {
-                        let now = runtime
-                            .current_stream_expiration_time(&domain)
-                            .ok()
-                            .unwrap_or_else(current_timestamp);
+                        let now = match runtime.current_stream_expiration_time(&domain) {
+                            Ok(now) => now,
+                            Err(error) => {
+                                runtime.events().report_error(format!(
+                                    "relay '{}' in domain '{}' lost its clock: {error}",
+                                    relay.as_str(),
+                                    domain.as_str(),
+                                ));
+                                break;
+                            }
+                        };
                         for (expired_key, _) in branches.instances.expire(
                             now,
                             branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
@@ -1769,10 +1785,17 @@ impl Runtime {
                     && let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
                 {
-                    let now = runtime
-                        .current_stream_expiration_time(&domain)
-                        .ok()
-                        .unwrap_or_else(current_timestamp);
+                    let now = match runtime.current_stream_expiration_time(&domain) {
+                        Ok(now) => now,
+                        Err(error) => {
+                            runtime.events().report_error(format!(
+                                "materialized relay '{}' in domain '{}' lost its clock: {error}",
+                                relay.as_str(),
+                                domain.as_str(),
+                            ));
+                            break 'state_task;
+                        }
+                    };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         tokio::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &key);
@@ -1844,10 +1867,21 @@ impl Runtime {
                     }
                 };
                 let branch_key = batch.key.clone();
-                let now = runtime
-                    .current_stream_expiration_time(&domain)
-                    .ok()
-                    .unwrap_or_else(current_timestamp);
+                let now = match runtime.current_stream_expiration_time(&domain) {
+                    Ok(now) => now,
+                    Err(error) => {
+                        let reason = format!(
+                            "materialized relay '{}' in domain '{}' lost its clock: {error}",
+                            relay.as_str(),
+                            domain.as_str(),
+                        );
+                        runtime.events().report_error(reason.clone());
+                        for ack in batch.acks.iter() {
+                            ack.no_ack(reason.clone());
+                        }
+                        break;
+                    }
+                };
                 branch_instances
                     .get_or_try_create_with(branch_key.clone(), now, |_| {
                         Ok::<(), std::convert::Infallible>(())

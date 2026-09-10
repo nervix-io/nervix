@@ -540,6 +540,7 @@ impl Runtime {
         domain: &DomainName,
         branch_key: &Option<BranchKey>,
         dependencies: &[nervix_models::MaterializedStateDependency],
+        execution_now: Timestamp,
     ) -> Result<MaterializedDependencyResolution, String> {
         if dependencies.is_empty() {
             return Ok(MaterializedDependencyResolution::Ready(HashMap::default()));
@@ -579,9 +580,12 @@ impl Runtime {
                         ) {
                             continue;
                         }
-                        let value =
-                            evaluate_constant_expression_vm(&assignment.value, udfs.as_ref())
-                                .await?;
+                        let value = evaluate_constant_expression_vm(
+                            &assignment.value,
+                            udfs.as_ref(),
+                            execution_now,
+                        )
+                        .await?;
                         resolved.insert(
                             format!(
                                 "relay_state.{}.{}",
@@ -603,18 +607,25 @@ impl Runtime {
         dependencies: &[nervix_models::MaterializedStateDependency],
         batch: RelayRecordBatch,
         wait: MaterializedBatchWaitContext<'_>,
-    ) -> Result<Option<(RelayRecordBatch, HashMap<String, RuntimeValue>)>, String> {
+    ) -> Result<Option<(RelayRecordBatch, HashMap<String, RuntimeValue>, Timestamp)>, String> {
         let MaterializedBatchWaitContext {
             shutdown_rx,
             wait_for_required_state,
             mut quiesce_work,
         } = wait;
+        let domain_clock = self
+            .bind_domain_clock(domain)
+            .map_err(|error| error.to_string())?;
         let mut required_wait = None;
         loop {
             tokio::task::consume_budget().await;
+            let execution_now = domain_clock
+                .snapshot()
+                .map_err(|error| error.to_string())?
+                .now();
             let changed = self.inner.materialized_state_changed.notified();
             match self
-                .resolve_materialized_dependencies(domain, &batch.key, dependencies)
+                .resolve_materialized_dependencies(domain, &batch.key, dependencies, execution_now)
                 .await?
             {
                 MaterializedDependencyResolution::Ready(values) => {
@@ -622,7 +633,7 @@ impl Runtime {
                         work.resume_from_required_materialized_state();
                     }
                     drop(required_wait.take());
-                    return Ok(Some((batch, values)));
+                    return Ok(Some((batch, values, execution_now)));
                 }
                 MaterializedDependencyResolution::Skip => {
                     if let Some(work) = quiesce_work.as_deref_mut() {
@@ -705,6 +716,11 @@ mod tests {
                 ty: ParseAsType::String,
                 optional: true,
             },
+            OptionalTestField {
+                name: "evaluated_at",
+                ty: ParseAsType::Datetime,
+                optional: true,
+            },
         ]);
         let (shutdown, _) = watch::channel(false);
         let materialized_stream_specs = ["profiles", "rules"]
@@ -760,13 +776,23 @@ mod tests {
 
         let default = nervix_models::MaterializedStateDependency {
             relay: named("profiles"),
-            policy: nervix_models::MaterializedStatePolicy::Default(vec![Assignment {
-                target: AssignmentTarget::bare(named("status")),
-                value: Expression::Literal(nervix_models::Literal::String("unknown".to_string())),
-            }]),
+            policy: nervix_models::MaterializedStatePolicy::Default(vec![
+                Assignment {
+                    target: AssignmentTarget::bare(named("status")),
+                    value: Expression::Literal(nervix_models::Literal::String(
+                        "unknown".to_string(),
+                    )),
+                },
+                Assignment {
+                    target: AssignmentTarget::bare(named("evaluated_at")),
+                    value: nervix_nspl::parse_expression("now()")
+                        .expect("NOW is a valid materialized default expression"),
+                },
+            ]),
         };
+        let execution_now = Timestamp::from_unix_nanos(946_684_800_000_000_000);
         let resolved = runtime
-            .resolve_materialized_dependencies(&domain, &None, &[default])
+            .resolve_materialized_dependencies(&domain, &None, &[default], execution_now)
             .await
             .expect("default dependency should resolve");
         let MaterializedDependencyResolution::Ready(values) = resolved else {
@@ -777,6 +803,12 @@ mod tests {
             Some(&RuntimeValue::String("unknown".to_string()))
         );
         assert!(!values.contains_key("relay_state.profiles.note"));
+        assert_eq!(
+            values.get("relay_state.profiles.evaluated_at"),
+            Some(&RuntimeValue::Datetime(
+                execution_now.as_datetime().fixed_offset()
+            ))
+        );
 
         let wait = nervix_models::MaterializedStateDependency {
             relay: named("profiles"),
@@ -788,14 +820,24 @@ mod tests {
         };
         assert!(matches!(
             runtime
-                .resolve_materialized_dependencies(&domain, &None, &[wait.clone(), skip.clone()])
+                .resolve_materialized_dependencies(
+                    &domain,
+                    &None,
+                    &[wait.clone(), skip.clone()],
+                    Timestamp::from_unix_nanos(1),
+                )
                 .await
                 .expect("missing dependencies should produce a policy outcome"),
             MaterializedDependencyResolution::Wait
         ));
         assert!(matches!(
             runtime
-                .resolve_materialized_dependencies(&domain, &None, &[skip, wait])
+                .resolve_materialized_dependencies(
+                    &domain,
+                    &None,
+                    &[skip, wait],
+                    Timestamp::from_unix_nanos(1),
+                )
                 .await
                 .expect("missing dependencies should produce a policy outcome"),
             MaterializedDependencyResolution::Skip

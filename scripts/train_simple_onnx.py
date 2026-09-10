@@ -205,6 +205,15 @@ def matrix_graph() -> bytes:
     return bytes(out)
 
 
+def scalar_graph() -> bytes:
+    out = bytearray()
+    out += message_field(1, node("Identity", ["value"], ["result"], "result"))
+    out += field_string(2, "nervix_scalar_identity")
+    out += message_field(11, value_info("value", []))
+    out += message_field(12, value_info("result", []))
+    return bytes(out)
+
+
 def model_proto(graph: bytes) -> bytes:
     opset_import = field_string(1, "") + field_varint(2, 13)
     return (
@@ -242,6 +251,11 @@ def main() -> None:
         default="tests/fixtures/onnx/dynamic_batch_score.onnx",
         help="path to write the generated dynamically shaped batched ONNX model",
     )
+    parser.add_argument(
+        "--scalar-output",
+        default="tests/fixtures/onnx/scalar_identity.onnx",
+        help="path to write the generated scalar identity ONNX model",
+    )
     args = parser.parse_args()
 
     weights, bias = train_linear_regressor()
@@ -260,11 +274,15 @@ def main() -> None:
     dynamic_batch_output = Path(args.dynamic_batch_output)
     dynamic_batch_output.parent.mkdir(parents=True, exist_ok=True)
     dynamic_batch_output.write_bytes(model_proto(dynamic_batch_graph()))
+    scalar_output = Path(args.scalar_output)
+    scalar_output.parent.mkdir(parents=True, exist_ok=True)
+    scalar_output.write_bytes(model_proto(scalar_graph()))
     print(f"wrote {output} weights={weights!r} bias={bias!r}")
     print(f"wrote {batch_output}")
     print(f"wrote {f64_output}")
     print(f"wrote {matrix_output}")
     print(f"wrote {dynamic_batch_output}")
+    print(f"wrote {scalar_output}")
 
 
 if __name__ == "__main__":

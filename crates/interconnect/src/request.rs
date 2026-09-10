@@ -168,6 +168,7 @@ pub enum RequestSubquota {
     Shared,
     Discovery,
     Liveness,
+    Progress,
     Admission,
     Cancellation,
     Terminal,
@@ -271,20 +272,58 @@ struct RequestQuotas {
     shared: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
+    progress: StdArc<Semaphore>,
     admission: StdArc<Semaphore>,
     cancellation: StdArc<Semaphore>,
     terminal: StdArc<Semaphore>,
 }
 
+// Per-node admission limits for reserved request classes. These cap requests across all peers and
+// connections on one node, separately for inbound and outbound flow. They are independent policy
+// inputs from the per-connection HTTP/2 stream partition owned by `connection`.
+const PER_NODE_RESERVED_REQUEST_MINIMUM: usize = 1;
+const PER_NODE_STANDARD_REQUEST_LIMIT: usize = 8;
+const PER_NODE_COMPLETION_REQUEST_LIMIT: usize = 4;
+const _: () = assert!(
+    PER_NODE_RESERVED_REQUEST_MINIMUM > 0
+        && PER_NODE_STANDARD_REQUEST_LIMIT > 0
+        && PER_NODE_COMPLETION_REQUEST_LIMIT > 0,
+    "per-node request policy inputs must be nonzero",
+);
+const _: () = assert!(
+    PER_NODE_STANDARD_REQUEST_LIMIT >= PER_NODE_RESERVED_REQUEST_MINIMUM
+        && PER_NODE_COMPLETION_REQUEST_LIMIT >= PER_NODE_RESERVED_REQUEST_MINIMUM,
+    "each per-node request limit must include the reserved minimum",
+);
+
 impl RequestQuotas {
     fn new(capacity: usize) -> Self {
         Self {
             shared: StdArc::new(Semaphore::new(capacity)),
-            discovery: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
-            liveness: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
-            admission: StdArc::new(Semaphore::new(capacity.clamp(1, 8))),
-            cancellation: StdArc::new(Semaphore::new(capacity.clamp(1, 4))),
-            terminal: StdArc::new(Semaphore::new(capacity.clamp(1, 4))),
+            discovery: StdArc::new(Semaphore::new(capacity.clamp(
+                PER_NODE_RESERVED_REQUEST_MINIMUM,
+                PER_NODE_STANDARD_REQUEST_LIMIT,
+            ))),
+            liveness: StdArc::new(Semaphore::new(capacity.clamp(
+                PER_NODE_RESERVED_REQUEST_MINIMUM,
+                PER_NODE_STANDARD_REQUEST_LIMIT,
+            ))),
+            progress: StdArc::new(Semaphore::new(capacity.clamp(
+                PER_NODE_RESERVED_REQUEST_MINIMUM,
+                PER_NODE_STANDARD_REQUEST_LIMIT,
+            ))),
+            admission: StdArc::new(Semaphore::new(capacity.clamp(
+                PER_NODE_RESERVED_REQUEST_MINIMUM,
+                PER_NODE_STANDARD_REQUEST_LIMIT,
+            ))),
+            cancellation: StdArc::new(Semaphore::new(capacity.clamp(
+                PER_NODE_RESERVED_REQUEST_MINIMUM,
+                PER_NODE_COMPLETION_REQUEST_LIMIT,
+            ))),
+            terminal: StdArc::new(Semaphore::new(capacity.clamp(
+                PER_NODE_RESERVED_REQUEST_MINIMUM,
+                PER_NODE_COMPLETION_REQUEST_LIMIT,
+            ))),
         }
     }
 
@@ -293,6 +332,7 @@ impl RequestQuotas {
             RequestSubquota::Shared => &self.shared,
             RequestSubquota::Discovery => &self.discovery,
             RequestSubquota::Liveness => &self.liveness,
+            RequestSubquota::Progress => &self.progress,
             RequestSubquota::Admission => &self.admission,
             RequestSubquota::Cancellation => &self.cancellation,
             RequestSubquota::Terminal => &self.terminal,

@@ -623,6 +623,7 @@ pub(super) fn correlator_output_batch_errors(
     processor: &ModelName,
     matched: &CorrelatorMatchedBatch,
     acks: Vec<AckSet>,
+    execution_now: Timestamp,
     code: MessageErrorCode,
     reason: &str,
     operation: MessageErrorOperation,
@@ -636,6 +637,7 @@ pub(super) fn correlator_output_batch_errors(
             Err(Box::new(planned_structured_message_error(
                 source,
                 structured_message_error(
+                    execution_now,
                     code,
                     format!("correlator '{}' {reason}", processor.as_str()),
                     operation,
@@ -644,6 +646,7 @@ pub(super) fn correlator_output_batch_errors(
                 ),
                 None,
                 matched.materialized_state[row].snapshot(),
+                execution_now,
             )))
         })
         .collect()
@@ -695,6 +698,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 processor,
                 matched,
                 acks,
+                execution_now,
                 MessageErrorCode::Evaluation,
                 &format!("failed to prepare TO output lookup inputs: {error}"),
                 MessageErrorOperation::Set,
@@ -732,6 +736,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 processor,
                 matched,
                 acks,
+                execution_now,
                 MessageErrorCode::Internal,
                 &format!("failed to build TO output input batch: {error}"),
                 MessageErrorOperation::Set,
@@ -756,6 +761,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 processor,
                 matched,
                 acks,
+                execution_now,
                 MessageErrorCode::Internal,
                 &format!("failed to evaluate TO output: {error}"),
                 MessageErrorOperation::Set,
@@ -767,6 +773,7 @@ pub(super) async fn evaluate_correlator_output_batch(
             processor,
             matched,
             acks,
+            execution_now,
             MessageErrorCode::Internal,
             &format!(
                 "TO output produced {} rows for {} selected correlations",
@@ -783,6 +790,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 processor,
                 matched,
                 acks,
+                execution_now,
                 MessageErrorCode::Internal,
                 &format!("TO output selected row {input_row} outside its {row_count} correlations"),
                 MessageErrorOperation::Finalize,
@@ -793,6 +801,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 processor,
                 matched,
                 acks,
+                execution_now,
                 MessageErrorCode::Internal,
                 &format!("TO output selected correlation row {input_row} more than once"),
                 MessageErrorOperation::Finalize,
@@ -822,6 +831,7 @@ pub(super) async fn evaluate_correlator_output_batch(
             outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
                 source,
                 program.program.structured_side_error(
+                    execution_now,
                     format!(
                         "correlator '{}' TO output side error {}: {} at {}",
                         processor.as_str(),
@@ -834,6 +844,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 ),
                 captured_partial_output(&result.batch, output_row),
                 matched.materialized_state[input_row].snapshot(),
+                execution_now,
             ))));
             continue;
         }
@@ -842,6 +853,7 @@ pub(super) async fn evaluate_correlator_output_batch(
             outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
                 source,
                 structured_message_error(
+                    execution_now,
                     MessageErrorCode::Validation,
                     format!(
                         "correlator '{}' failed to finalize TO output row",
@@ -853,6 +865,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 ),
                 captured_partial_output(&result.batch, output_row),
                 matched.materialized_state[input_row].snapshot(),
+                execution_now,
             ))));
             continue;
         }
@@ -894,6 +907,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                                 Some(Err(Box::new(planned_structured_message_error(
                                     correlation.source,
                                     structured_message_error(
+                                        execution_now,
                                         MessageErrorCode::Internal,
                                         error,
                                         MessageErrorOperation::Finalize,
@@ -902,6 +916,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                                     ),
                                     None,
                                     matched.materialized_state[input_row].snapshot(),
+                                    execution_now,
                                 ))));
                         }
                     }
@@ -914,6 +929,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                     outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
                         correlation.source,
                         structured_message_error(
+                            execution_now,
                             MessageErrorCode::Validation,
                             format!(
                                 "correlator '{}' failed to finalize TO output row: {error}",
@@ -925,6 +941,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                         ),
                         captured_partial_output(&result.batch, output_row),
                         matched.materialized_state[input_row].snapshot(),
+                        execution_now,
                     ))));
                 }
             }
@@ -983,9 +1000,12 @@ pub(super) async fn enqueue_correlator_output(
                     branch
                         .runtime
                         .handle_message_error_with_policy(
-                            &branch.domain,
-                            node_kind,
-                            processor,
+                            MessageErrorSourceContext {
+                                domain: &branch.domain,
+                                node_kind,
+                                node: processor,
+                                execution_now,
+                            },
                             &policy,
                             message,
                             MessageErrorFailure::new(
@@ -1074,15 +1094,28 @@ pub(super) async fn enqueue_correlator_output(
     }
 }
 
+pub(super) struct CorrelatorTimeoutContext<'a> {
+    pub(super) graph: &'a SharedActiveGraph,
+    pub(super) branch: &'a mut BranchRuntime,
+    pub(super) node_kind: ModelKind,
+    pub(super) processor: &'a ModelName,
+    pub(super) error_policies: &'a ErrorPolicies,
+    pub(super) execution_now: Timestamp,
+}
+
 pub(super) async fn handle_correlator_timeout_action(
-    graph: &SharedActiveGraph,
-    branch: &mut BranchRuntime,
-    node_kind: ModelKind,
-    processor: &ModelName,
-    error_policies: &ErrorPolicies,
+    context: CorrelatorTimeoutContext<'_>,
     action: &CorrelationTimeoutAction,
     message: RelayMessage,
 ) {
+    let CorrelatorTimeoutContext {
+        graph,
+        branch,
+        node_kind,
+        processor,
+        error_policies,
+        execution_now,
+    } = context;
     match action {
         CorrelationTimeoutAction::Drop => {
             message.acks.ack_success();
@@ -1109,9 +1142,12 @@ pub(super) async fn handle_correlator_timeout_action(
                         branch
                             .runtime
                             .handle_message_error(
-                                &branch.domain,
-                                node_kind,
-                                processor,
+                                MessageErrorSourceContext {
+                                    domain: &branch.domain,
+                                    node_kind,
+                                    node: processor,
+                                    execution_now,
+                                },
                                 error_policies,
                                 message,
                                 MessageErrorFailure::publish(None, error.to_string()),

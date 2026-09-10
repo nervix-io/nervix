@@ -15,8 +15,11 @@ use arrow_array::{
     Array, BooleanArray, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
     TimestampMicrosecondArray, UInt64Array,
 };
-use arrow_ipc::reader::StreamReader;
-use arrow_schema::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+use arrow_schema::{
+    DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+    TimeUnit as ArrowTimeUnit,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cucumber::{
     World as _, WriterExt,
@@ -80,9 +83,9 @@ use uuid::Uuid;
 
 use crate::common::{
     cluster::{
-        BrokerObserver, Cluster, InterconnectCredentialFault, StallableTcpProxy,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        client_connect_options,
+        BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
+        InterconnectCredentialFault, StallableTcpProxy, TEST_AUTH_USERNAME, TestClusterConfig,
+        TestSession, WebsocketExchangeAction, client_connect_options,
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
@@ -299,6 +302,31 @@ impl ScenarioWorld {
             )
             .await
             .expect("observability endpoint did not report the expected metric value");
+    }
+
+    async fn wait_for_domain_clock_progress_pause_on(
+        &self,
+        duration: Duration,
+        domain: &str,
+        node_id: &str,
+    ) {
+        let domain = expand_placeholders(self, domain);
+        let node_id = expand_placeholders(self, node_id);
+        tokio::time::timeout(
+            duration,
+            self.fault_injection
+                .wait_for_domain_clock_progress_pause_on(
+                    &domain,
+                    &crate::common::cluster::node_name(&node_id),
+                ),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "domain clock progress for '{domain}' on '{node_id}' did not reach its delivery \
+                 pause within {duration:?}: {error}"
+            )
+        });
     }
 }
 
@@ -2255,6 +2283,19 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
     );
 }
 
+#[given(expr = "the next pending entity drain in domain {string} is forced to time out")]
+async fn given_next_pending_entity_drain_is_forced_to_time_out(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .force_next_entity_drain_timeout(domain);
+}
+
 #[given("graceful shutdown drain is enabled")]
 async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
     assert!(
@@ -2360,6 +2401,7 @@ async fn given_node_has_onnx_fixture_resource_directory(
         "batch_score.onnx",
         "dynamic_batch_score.onnx",
         "matrix_identity.onnx",
+        "scalar_identity.onnx",
         "f64_score.onnx",
     ] {
         let source_path = source_path.with_file_name(fixture);
@@ -2558,6 +2600,24 @@ async fn given_node_has_uninitialized_output_wasm_processor_fixture_resource_dir
     .await;
 }
 
+#[given(
+    expr = "node {string} has historical-time tokenless WASM processor fixture resource directory \
+            {string}"
+)]
+async fn given_node_has_historical_time_tokenless_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        historical_time_tokenless_wasm_fixture("generated_events"),
+    )
+    .await;
+}
+
 #[given(expr = "node {string} has trapping WASM processor fixture resource directory {string}")]
 async fn given_node_has_trapping_wasm_processor_fixture_resource_directory(
     world: &mut ScenarioWorld,
@@ -2674,6 +2734,108 @@ fn malformed_output_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
     )"#
+}
+
+fn historical_time_tokenless_wasm_fixture(output_relay: &str) -> Vec<u8> {
+    let schema = StdArc::new(ArrowSchema::new(vec![ArrowField::new(
+        "",
+        ArrowDataType::Int64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![StdArc::new(Int64Array::from(vec![42_i64]))],
+    )
+    .expect("historical-time WASM generated batch must build");
+    let mut generated_arrow_ipc_batch = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut generated_arrow_ipc_batch, &schema)
+            .expect("historical-time WASM Arrow writer must build");
+        writer
+            .write(&batch)
+            .expect("historical-time WASM generated batch must encode");
+        writer
+            .finish()
+            .expect("historical-time WASM Arrow stream must finish");
+    }
+    let encoded = WasmEnvelope::output(
+        generated_arrow_ipc_batch,
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![WasmOutputColumnRef::generated(0)],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow::default()],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("historical-time WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+
+    format!(
+        r#"(module
+          (import "env" "nervix_domain_time_nanos" (func $domain_time (result i64)))
+          (import "env" "nervix_timeout_after_nanos" (func $timeout (param i64) (result i64)))
+          (memory (export "memory") 2)
+          (global $emitted (mut i32) (i32.const 0))
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
+          (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "nervix_init") (param i32 i32) (result i32)
+            call $domain_time
+            i64.const 978307200000000000
+            i64.lt_s
+            if
+              i32.const 0
+              return
+            end
+            i32.const -1)
+          (func (export "nervix_current_domain_time_nanos") (result i64) call $domain_time)
+          (func (export "nervix_process_batch") (param i32 i32) (result i32)
+            call $domain_time
+            i64.const 978307200000000000
+            i64.lt_s
+            if
+              i64.const 1000000000
+              call $timeout
+              drop
+            end
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32)
+            call $domain_time
+            i64.const 978307200000000000
+            i64.lt_s
+            if
+              i32.const 1
+              global.set $emitted
+            end
+            i32.const 0)
+          (func (export "nervix_flush") (result i32) (i32.const 0))
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32) (i32.const 0))
+          (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_reset_state") (result i32)
+            i32.const 0
+            global.set $emitted
+            i32.const 0)
+        )"#
+    )
+    .into_bytes()
 }
 
 fn uninitialized_output_wasm_fixture(output_relay: &str) -> Vec<u8> {
@@ -3528,24 +3690,27 @@ async fn then_domain_clock_progress_reaches_pause_on_node(
 ) {
     let duration =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
-    let domain = expand_placeholders(world, &domain);
-    let node_id = expand_placeholders(world, &node_id);
-    tokio::time::timeout(
-        duration,
-        world
-            .fault_injection
-            .wait_for_domain_clock_progress_pause_on(
-                &domain,
-                &crate::common::cluster::node_name(&node_id),
-            ),
-    )
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "domain clock progress for '{domain}' on '{node_id}' did not reach its delivery \
-             pause: {error}"
+    world
+        .wait_for_domain_clock_progress_pause_on(duration, &domain, &node_id)
+        .await;
+}
+
+#[then(
+    expr = "domain clock progress for domain {string} on node {string} reaches the delivery pause \
+            within the authority observation budget"
+)]
+async fn then_domain_clock_progress_reaches_pause_within_authority_observation_budget(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node_id: String,
+) {
+    world
+        .wait_for_domain_clock_progress_pause_on(
+            DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
+            &domain,
+            &node_id,
         )
-    });
+        .await;
 }
 
 #[when(expr = "domain clock progress for domain {string} resumes")]
@@ -12936,6 +13101,34 @@ async fn then_timestamp_placeholder_is_not_before(
     );
 }
 
+#[then(expr = "timestamp placeholder {string} equals timestamp placeholder {string}")]
+async fn then_timestamp_placeholder_equals(
+    world: &mut ScenarioWorld,
+    actual_placeholder: String,
+    expected_placeholder: String,
+) {
+    let actual = world
+        .placeholders
+        .get(&actual_placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{actual_placeholder}' is not defined"));
+    let expected = world
+        .placeholders
+        .get(&expected_placeholder)
+        .unwrap_or_else(|| panic!("timestamp placeholder '{expected_placeholder}' is not defined"));
+    let Ok(actual_timestamp) = chrono::DateTime::parse_from_rfc3339(actual) else {
+        panic!("timestamp placeholder '{actual_placeholder}' is not RFC 3339: {actual}");
+    };
+    let Ok(expected_timestamp) = chrono::DateTime::parse_from_rfc3339(expected) else {
+        panic!("timestamp placeholder '{expected_placeholder}' is not RFC 3339: {expected}");
+    };
+
+    assert_eq!(
+        actual_timestamp, expected_timestamp,
+        "timestamp placeholder '{actual_placeholder}' was {actual_timestamp}, expected the same \
+         instant as '{expected_placeholder}' ({expected_timestamp})"
+    );
+}
+
 #[then(expr = "timestamp placeholder {string} is before {string}")]
 async fn then_timestamp_placeholder_is_before(
     world: &mut ScenarioWorld,
@@ -13182,6 +13375,29 @@ async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+#[then(expr = "the Sentry event timestamp is before {string}")]
+async fn then_sentry_event_timestamp_is_before(world: &mut ScenarioWorld, expected: String) {
+    let event = world
+        .dependencies
+        .sentry_event(&world.test_id)
+        .await
+        .expect("Sentry event query must succeed")
+        .expect("the preceding Sentry assertion must have observed an event");
+    let timestamp = event
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .expect("Sentry event timestamp must be an RFC 3339 string");
+    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .expect("Sentry event timestamp must parse as RFC 3339");
+    let expected = chrono::DateTime::parse_from_rfc3339(&expected)
+        .expect("expected Sentry timestamp boundary must parse as RFC 3339");
+
+    assert!(
+        timestamp < expected,
+        "Sentry event timestamp {timestamp} was not before {expected}"
+    );
 }
 
 #[then(expr = "Quickwit index {string} eventually contains {string}")]

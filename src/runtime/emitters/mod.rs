@@ -401,9 +401,16 @@ struct EmitterBatchContext<'a> {
 #[derive(Clone)]
 struct EmitterPublishBatch {
     batch: RelayRecordBatch,
+    execution_now: Timestamp,
     headers: Option<Vec<EmitterHeaders>>,
     sqs_message_groups: Vec<Result<Option<String>, String>>,
     delivered: Vec<bool>,
+}
+
+pub(super) struct EmitterBatchExecutionContext<'a> {
+    pub(super) batch_index: usize,
+    pub(super) batch: &'a RelayRecordBatch,
+    pub(super) execution_now: Timestamp,
 }
 
 /// The bound every byte estimate in this module relies on: each term counts bytes of a batch,
@@ -413,17 +420,22 @@ const BYTES_IN_MEMORY: &str =
     "every term counts bytes of a value this node already holds in memory";
 
 impl EmitterPublishBatch {
-    fn from_batch(batch: RelayRecordBatch) -> Self {
+    fn from_batch(batch: RelayRecordBatch, execution_now: Timestamp) -> Self {
         let row_count = batch.batch.batch().num_rows();
         Self {
             batch,
+            execution_now,
             headers: None,
             sqs_message_groups: vec![Ok(None); row_count],
             delivered: vec![false; row_count],
         }
     }
 
-    fn new(batch: RelayRecordBatch, headers: Option<Vec<EmitterHeaders>>) -> Result<Self, String> {
+    fn new(
+        batch: RelayRecordBatch,
+        headers: Option<Vec<EmitterHeaders>>,
+        execution_now: Timestamp,
+    ) -> Result<Self, String> {
         let row_count = batch.batch.batch().num_rows();
         if let Some(headers) = &headers
             && row_count != headers.len()
@@ -436,6 +448,7 @@ impl EmitterPublishBatch {
         }
         Ok(Self {
             batch,
+            execution_now,
             headers,
             sqs_message_groups: vec![Ok(None); row_count],
             delivered: vec![false; row_count],
@@ -577,6 +590,7 @@ struct EncodedBrokerRecord {
     headers: EmitterHeaders,
     sqs_message_group: Result<Option<String>, String>,
     acks: AckSet,
+    execution_now: Timestamp,
 }
 
 impl EncodedBrokerRecord {
@@ -697,13 +711,19 @@ pub(in crate::runtime) struct CompiledSqlValuesProgram {
 }
 
 impl CompiledSqlValuesProgram {
-    fn structured_side_error(&self, reason: String, span: VmSpan) -> StructuredMessageError {
+    fn structured_side_error(
+        &self,
+        execution_now: Timestamp,
+        reason: String,
+        span: VmSpan,
+    ) -> StructuredMessageError {
         let site = self.error_sites.get(&span);
         let operation = match site {
             Some(site) => site.operation,
             None => MessageErrorOperation::Values,
         };
         structured_message_error(
+            execution_now,
             MessageErrorCode::Evaluation,
             reason,
             operation,
@@ -966,9 +986,9 @@ impl EmitterBatchBuffer {
         let domain_timestamp = self
             .pending
             .iter()
-            .filter_map(EmitterPublishBatch::domain_timestamp)
+            .map(|batch| batch.domain_timestamp().unwrap_or(batch.execution_now))
             .max()
-            .unwrap_or_else(current_timestamp);
+            .verified("a non-empty emitter buffer has an observation time for every batch");
         Some(PublishReport::flushed(
             self.pending_messages,
             bytes,
@@ -1320,6 +1340,7 @@ async fn sql_mapped_batch_values(
     for row in 0..row_count {
         if let Some(side_error) = output.errors().row(row).first() {
             rows.push(Err(program.structured_side_error(
+                execution_now,
                 format!(
                     "{} VALUES side error {}: {} at {}",
                     program.label,
@@ -1346,6 +1367,7 @@ async fn sql_mapped_batch_values(
             Ok(mapped) => mapped,
             Err(error) => {
                 rows.push(Err(structured_message_error(
+                    execution_now,
                     MessageErrorCode::Validation,
                     format!(
                         "{} VALUES failed to decode output row: {error}",
@@ -2263,7 +2285,7 @@ impl SinkEmitter {
                     .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
                 await_until_emitter_stop_deadline(
                     control.stop_rx,
-                    emitter.publish_batch(batch.batch),
+                    emitter.publish_batch(batch.batch, batch.execution_now),
                 )
                 .await
                 .map_err(|()| EmitterPublishFailure::sink(emitter_stop_deadline_elapsed()))?
@@ -2318,7 +2340,10 @@ impl SinkEmitter {
         let mut report = None;
         while let Some(batch) = pending.next() {
             tokio::task::consume_budget().await;
-            match emitter.publish_batch(batch.batch).await {
+            match emitter
+                .publish_batch(batch.batch, batch.execution_now)
+                .await
+            {
                 Ok(published) => {
                     report = PublishReport::merge_optional(report, published);
                 }
@@ -2484,11 +2509,14 @@ impl SinkEmitter {
                         let pending_rows = batch.pending_record_rows();
                         emitter
                             .publish_pending_rows(
-                                batch_index,
+                                EmitterBatchExecutionContext {
+                                    batch_index,
+                                    batch: &batch.batch,
+                                    execution_now: batch.execution_now,
+                                },
                                 signal,
                                 values,
                                 attributes,
-                                &batch.batch,
                                 &pending_rows,
                             )
                             .await
@@ -2518,6 +2546,7 @@ impl SinkEmitter {
                                 values,
                                 &batch.batch,
                                 &pending_chunks,
+                                batch.execution_now,
                             )
                             .await
                     };
@@ -2542,11 +2571,14 @@ impl SinkEmitter {
                         let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
-                                batch_index,
+                                EmitterBatchExecutionContext {
+                                    batch_index,
+                                    batch: &batch.batch,
+                                    execution_now: batch.execution_now,
+                                },
                                 table,
                                 values,
                                 conflict_action,
-                                &batch.batch,
                                 &pending_chunks,
                             )
                             .await
@@ -2572,11 +2604,14 @@ impl SinkEmitter {
                         let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
-                                batch_index,
+                                EmitterBatchExecutionContext {
+                                    batch_index,
+                                    batch: &batch.batch,
+                                    execution_now: batch.execution_now,
+                                },
                                 table,
                                 values,
                                 conflict_action,
-                                &batch.batch,
                                 &pending_chunks,
                             )
                             .await
@@ -2602,11 +2637,14 @@ impl SinkEmitter {
                         let pending_chunks = batch.pending_record_chunks(*max_batch);
                         emitter
                             .publish_pending_chunks(
-                                batch_index,
+                                EmitterBatchExecutionContext {
+                                    batch_index,
+                                    batch: &batch.batch,
+                                    execution_now: batch.execution_now,
+                                },
                                 collection,
                                 values,
                                 conflict_action,
-                                &batch.batch,
                                 &pending_chunks,
                             )
                             .await
@@ -2728,6 +2766,7 @@ impl SinkEmitter {
                         source_route: None,
                         policy: &context.error_policies.message,
                         message,
+                        execution_now: error.occurred_at,
                         error,
                         partial_output: None,
                         materialized_state: HashMap::default(),
@@ -2924,6 +2963,7 @@ async fn encode_broker_records(
                 headers,
                 sqs_message_group,
                 acks,
+                execution_now: batch.execution_now,
             });
         }
     }
@@ -2973,10 +3013,17 @@ async fn finish_rejected_records(
             batch_index,
             row_index,
         } = rejected.position;
+        let batch = batches.get_mut(batch_index).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "record rejection references missing emitter batch {batch_index}"
+            ))
+        })?;
+        let execution_now = batch.execution_now;
         let error = if let Some(error) = rejected.structured_error {
             error
         } else {
             structured_message_error(
+                execution_now,
                 MessageErrorCode::External,
                 rejected.reason,
                 operation,
@@ -2984,11 +3031,6 @@ async fn finish_rejected_records(
                 std::iter::empty(),
             )
         };
-        let batch = batches.get_mut(batch_index).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "record rejection references missing emitter batch {batch_index}"
-            ))
-        })?;
         let record = batch.batch.runtime_row(row_index).map_err(|reason| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
         })?;
@@ -3018,6 +3060,7 @@ async fn finish_rejected_records(
                         partial_output: None,
                         materialized_state: HashMap::default(),
                         ingest_metadata: None,
+                        execution_now,
                     }),
             )
             .await?;
@@ -4152,6 +4195,7 @@ impl EmitterBatchContext<'_> {
                     policy: &self.error_policies.message,
                     message,
                     error: structured_message_error(
+                        batch.execution_now,
                         MessageErrorCode::External,
                         reason.clone(),
                         operation,
@@ -4161,6 +4205,7 @@ impl EmitterBatchContext<'_> {
                     partial_output: None,
                     materialized_state: HashMap::default(),
                     ingest_metadata: None,
+                    execution_now: batch.execution_now,
                 })
                 .await;
         }
@@ -4209,15 +4254,10 @@ impl EmitterBatchContext<'_> {
         };
         // The node-wide dependencies are resolved once for the batch, so every emitter program
         // reads that snapshot instead of re-reading the state store per program.
-        let (batch, materialized_values) = batch;
+        let (batch, materialized_values, execution_now) = batch;
         let batch = self
-            .filter_source_batch(input_relay, batch, &materialized_values)
+            .filter_source_batch(input_relay, batch, &materialized_values, execution_now)
             .await?;
-        let execution_now = self
-            .runtime
-            .current_stream_expiration_time(self.domain)
-            .ok()
-            .unwrap_or_else(current_timestamp);
         let sqs_message_groups = match self.sqs_fifo_group {
             None => vec![Ok(None); batch.batch.batch().num_rows()],
             Some(CompiledSqsFifoGroup::FromBranch) => batch
@@ -4256,7 +4296,7 @@ impl EmitterBatchContext<'_> {
             }
         };
         let Some(filter_map) = self.filter_map else {
-            return match EmitterPublishBatch::from_batch(batch)
+            return match EmitterPublishBatch::from_batch(batch, execution_now)
                 .with_sqs_message_groups(sqs_message_groups)
             {
                 Ok(batch) => Some(batch),
@@ -4306,7 +4346,7 @@ impl EmitterBatchContext<'_> {
                     )
                     .await;
                 let batch = plan.batch?;
-                match EmitterPublishBatch::new(batch, plan.headers)
+                match EmitterPublishBatch::new(batch, plan.headers, execution_now)
                     .and_then(|batch| batch.with_sqs_message_groups(selected_sqs_message_groups))
                 {
                     Ok(batch) => Some(batch),
@@ -4346,6 +4386,7 @@ impl EmitterBatchContext<'_> {
         input_relay: &RelayName,
         batch: RelayRecordBatch,
         side_inputs: &HashMap<String, RuntimeValue>,
+        execution_now: Timestamp,
     ) -> Option<RelayRecordBatch> {
         let Some(program) = self.source_filters.get(input_relay) else {
             return Some(batch);
@@ -4356,10 +4397,7 @@ impl EmitterBatchContext<'_> {
             "FROM WHERE",
             program,
             batch,
-            self.runtime
-                .current_stream_expiration_time(self.domain)
-                .ok()
-                .unwrap_or_else(current_timestamp),
+            execution_now,
             side_inputs,
         )
         .await
@@ -4649,7 +4687,7 @@ mod publishing_mode_tests {
             acks,
         )
         .expect("test emitter batch must build");
-        let mut batch = EmitterPublishBatch::from_batch(batch);
+        let mut batch = EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(100));
 
         assert!(
             tokio::time::timeout(
@@ -4695,7 +4733,7 @@ mod publishing_mode_tests {
             acks,
         )
         .expect("test emitter batch must build");
-        let mut batch = EmitterPublishBatch::from_batch(batch);
+        let mut batch = EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(100));
         batch
             .mark_rejected(0)
             .expect("test record must be marked rejected");
@@ -4783,7 +4821,8 @@ mod tests {
     #[test]
     fn publish_batch_requires_one_header_row_per_record() {
         let batch = input_batch();
-        let from_batch = EmitterPublishBatch::from_batch(batch.clone());
+        let from_batch =
+            EmitterPublishBatch::from_batch(batch.clone(), Timestamp::from_unix_nanos(100));
         assert!(from_batch.headers.is_none());
         assert_eq!(from_batch.message_count(), 1);
         assert_eq!(
@@ -4792,8 +4831,12 @@ mod tests {
         );
 
         let headers = vec![vec![("route".to_string(), "fast".to_string())]];
-        let with_headers = EmitterPublishBatch::new(batch.clone(), Some(headers.clone()))
-            .expect("row-aligned headers must build");
+        let with_headers = EmitterPublishBatch::new(
+            batch.clone(),
+            Some(headers.clone()),
+            Timestamp::from_unix_nanos(100),
+        )
+        .expect("row-aligned headers must build");
         assert_eq!(with_headers.headers.as_ref(), Some(&headers));
         let header_bytes: u64 = "routefast".len().arch_into();
         assert_eq!(
@@ -4801,7 +4844,11 @@ mod tests {
             batch.estimated_bytes() + header_bytes
         );
 
-        let error = match EmitterPublishBatch::new(batch, Some(Vec::new())) {
+        let error = match EmitterPublishBatch::new(
+            batch,
+            Some(Vec::new()),
+            Timestamp::from_unix_nanos(100),
+        ) {
             Err(error) => error,
             Ok(_) => panic!("missing row headers must be rejected"),
         };
@@ -4811,7 +4858,10 @@ mod tests {
     #[tokio::test]
     async fn publish_batch_ack_helpers_preserve_and_complete_all_roots() {
         let (acks, completion) = AckSet::root();
-        let batch = EmitterPublishBatch::from_batch(input_batch_with(1, 0, acks));
+        let batch = EmitterPublishBatch::from_batch(
+            input_batch_with(1, 0, acks),
+            Timestamp::from_unix_nanos(100),
+        );
 
         assert!(!batch.merged_acks().is_empty());
         batch.merged_acks().ack_success();
@@ -4822,7 +4872,10 @@ mod tests {
     fn batch_buffer_rejects_input_without_an_initialized_flush_policy() {
         let mut buffer = EmitterBatchBuffer::default();
         let error = buffer
-            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch(),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect_err("an unconfigured buffer must reject input");
 
         assert_eq!(
@@ -4844,7 +4897,10 @@ mod tests {
             max_batch_size: u64::MAX,
         });
         buffer.buffered_messages = buffered_messages.clone();
-        let first = EmitterPublishBatch::from_batch(input_batch_with(1, 10, AckSet::empty()));
+        let first = EmitterPublishBatch::from_batch(
+            input_batch_with(1, 10, AckSet::empty()),
+            Timestamp::from_unix_nanos(100),
+        );
         let second_batch = RelayRecordBatch::from_messages(
             input_schema(),
             vec![
@@ -4869,6 +4925,7 @@ mod tests {
                 vec![("name".to_string(), "value".to_string())],
                 Vec::new(),
             ]),
+            Timestamp::from_unix_nanos(100),
         )
         .expect("headers must align");
         let expected_bytes = first
@@ -4903,7 +4960,10 @@ mod tests {
 
         assert!(
             buffer
-                .push(EmitterPublishBatch::from_batch(input_batch()))
+                .push(EmitterPublishBatch::from_batch(
+                    input_batch(),
+                    Timestamp::from_unix_nanos(100),
+                ))
                 .expect("batch must buffer")
         );
         let original = buffer.deadline().expect("push must set a deadline");
@@ -4925,7 +4985,10 @@ mod tests {
             max_batch_size: u64::MAX,
         });
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch(),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("retry batch must buffer");
         assert!(!buffer.is_due());
 
@@ -4959,7 +5022,10 @@ mod tests {
             max_batch_size: u64::MAX,
         });
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch(),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("retry batch must buffer");
 
         assert!(
@@ -5024,7 +5090,10 @@ mod tests {
         );
         assert!(buffer.flush_policy.is_some());
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch(),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("configured buffer must accept input");
         assert_eq!(buffer.pending_messages, 1);
         buffer.reconfigure(&context, &FlushPolicy::Immediate);
@@ -5040,7 +5109,10 @@ mod tests {
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
 
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch(),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("reconfigured buffer must accept input");
         assert_eq!(buffer.pending_messages, 1);
         buffer.clear();
@@ -5060,16 +5132,16 @@ mod tests {
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch_with(
-                1, 0, first_acks,
-            )))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch_with(1, 0, first_acks),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("first batch must buffer");
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch_with(
-                2,
-                0,
-                second_acks,
-            )))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch_with(2, 0, second_acks),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("second batch must buffer");
 
         assert!(!buffer.pending_acks().is_empty());
@@ -5082,7 +5154,10 @@ mod tests {
     async fn retained_batch_clone_owns_exactly_one_attached_ack_share() {
         let (root, mut completion) = AckSet::root();
         let attached = root.attached();
-        let batch = EmitterPublishBatch::from_batch(input_batch_with(1, 0, attached));
+        let batch = EmitterPublishBatch::from_batch(
+            input_batch_with(1, 0, attached),
+            Timestamp::from_unix_nanos(100),
+        );
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
 
@@ -5156,16 +5231,16 @@ mod tests {
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer.buffered_messages = buffered_messages.clone();
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch_with(
-                1, 0, first_acks,
-            )))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch_with(1, 0, first_acks),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("first batch must buffer");
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch_with(
-                2,
-                0,
-                second_acks,
-            )))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch_with(2, 0, second_acks),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("second batch must buffer");
 
         drop(buffer);
@@ -5204,7 +5279,10 @@ mod tests {
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch()))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch(),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("batch must buffer");
 
         let error = match sink
@@ -5353,24 +5431,21 @@ mod tests {
             max_batch_size: u64::MAX,
         });
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch_with(
-                1,
-                0,
-                AckSet::empty(),
-            )))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch_with(1, 0, AckSet::empty()),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("older batch must buffer");
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch_with(
-                2,
-                0,
-                AckSet::empty(),
-            )))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch_with(2, 0, AckSet::empty()),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("current clone must buffer");
-        let mut current = Some(EmitterPublishBatch::from_batch(input_batch_with(
-            2,
-            0,
-            AckSet::empty(),
-        )));
+        let mut current = Some(EmitterPublishBatch::from_batch(
+            input_batch_with(2, 0, AckSet::empty()),
+            Timestamp::from_unix_nanos(100),
+        ));
         let failure = EmitterPublishFailure::buffer(Report::new(EmitterRuntimeError::EncodeBatch));
 
         let (error, failed) = failure.drain_failed_batches(&mut current, &mut buffer);
@@ -5392,17 +5467,15 @@ mod tests {
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer
-            .push(EmitterPublishBatch::from_batch(input_batch_with(
-                1,
-                0,
-                AckSet::empty(),
-            )))
+            .push(EmitterPublishBatch::from_batch(
+                input_batch_with(1, 0, AckSet::empty()),
+                Timestamp::from_unix_nanos(100),
+            ))
             .expect("older batch must buffer");
-        let mut current = Some(EmitterPublishBatch::from_batch(input_batch_with(
-            2,
-            0,
-            AckSet::empty(),
-        )));
+        let mut current = Some(EmitterPublishBatch::from_batch(
+            input_batch_with(2, 0, AckSet::empty()),
+            Timestamp::from_unix_nanos(100),
+        ));
         let failure = EmitterPublishFailure::caller(Report::new(
             EmitterRuntimeError::FlushPolicyNotInitialized,
         ));
@@ -5450,7 +5523,7 @@ mod tests {
                 &mut control,
                 None,
                 &mut buffer,
-                EmitterPublishBatch::from_batch(input_batch()),
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
             )
             .await
         {
