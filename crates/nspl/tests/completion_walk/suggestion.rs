@@ -31,6 +31,10 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("max_fuel", "1000000"),
     ("max_in_flight", "10"),
     ("max_instances", "16"),
+    // Drawn so the pair is orderable: a walk that wrote a minimum above the maximum would report
+    // the ordering check rather than the branch it set out to reach.
+    ("max_pool_size", "8"),
+    ("min_pool_size", "1"),
     ("mqtt_qos", "1"),
     ("resource_version", "1"),
     // Deliberately constant: a conflict target has to name a column the VALUES record already

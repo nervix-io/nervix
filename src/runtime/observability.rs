@@ -370,13 +370,28 @@ impl Runtime {
             None
         };
         if let Some(detail) = detail {
-            nervix_dataflow_graph::DataflowNodeHealth {
+            return nervix_dataflow_graph::DataflowNodeHealth {
                 status: nervix_dataflow_graph::DataflowNodeStatus::Error,
                 detail: Some(detail),
                 reconnect_wait_millis,
-            }
-        } else {
-            nervix_dataflow_graph::DataflowNodeHealth::default()
+            };
+        }
+        // A full pool is a waiting state rather than a failure, so the node stays healthy and says
+        // what it is waiting for. Without this it would read as idle while holding no connection.
+        let Ok(model_kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
+            return nervix_dataflow_graph::DataflowNodeHealth::default();
+        };
+        match self.pool_wait(&DomainNodeRef::node_in(
+            domain.clone(),
+            model_kind,
+            identifier,
+        )) {
+            Some(wait) => nervix_dataflow_graph::DataflowNodeHealth {
+                status: nervix_dataflow_graph::DataflowNodeStatus::Waiting,
+                detail: Some(wait.describe()),
+                reconnect_wait_millis,
+            },
+            None => nervix_dataflow_graph::DataflowNodeHealth::default(),
         }
     }
 

@@ -6,36 +6,110 @@ use nervix_models::ChannelName;
 
 use super::*;
 
+/// The node's shared pool of Redis command connections for one named client.
+///
+/// Every entry is an independent connection, so the declared maximum bounds sockets rather than
+/// handles, and a checked-out connection carries one publisher's outstanding operation alone.
+pub(in crate::runtime) type RedisCommandPool = bb8::Pool<RedisClient>;
+
+/// One command connection borrowed from that pool, returned when it is dropped.
+pub(in crate::runtime) type RedisPooledConnection<'pool> =
+    bb8::PooledConnection<'pool, RedisClient>;
+
+/// Open the node's shared Redis command pool for one named client, sized by its declared bounds.
+///
+/// Subscription connections are not drawn from here: a Redis Pub/Sub ingestor owns its own
+/// dedicated connection, so command-pool pressure never interrupts a healthy subscription.
+pub(in crate::runtime) async fn open_redis_command_pool(
+    config: &[nervix_models::ClientConfigEntry],
+    bounds: ClientPoolBounds,
+) -> Result<RedisCommandPool, Report<OpenClientError>> {
+    let Some(addr) = optional_client_config_value(config, "addr") else {
+        return Err(Report::new(OpenClientError::MissingConfig {
+            transport: "Redis",
+            key: "addr",
+        }));
+    };
+    let client = RedisEmitter::client_from_config(addr, config).map_err(|error| {
+        Report::new(OpenClientError::InvalidConfig {
+            transport: "Redis",
+            reason: emitter_error_message(&error),
+        })
+    })?;
+    bb8::Pool::builder()
+        .max_size(bounds.maximum().get())
+        .min_idle(Some(bounds.minimum()))
+        .build(client)
+        .await
+        .map_err(|source| {
+            Report::new(OpenClientError::Connect {
+                transport: "Redis",
+                reason: source.to_string(),
+            })
+        })
+}
+
 pub(in crate::runtime) struct RedisEmitter {
-    connection: Option<::redis::aio::MultiplexedConnection>,
+    client: Option<RedisEmitterClient>,
+}
+
+/// This publisher's interest in the node's shared Redis command pool.
+///
+/// Each pooled entry is its own connection rather than another handle to one multiplexed
+/// connection, so the declared maximum bounds physical connections and two concurrent publishers
+/// never share one.
+struct RedisEmitterClient {
+    lease: SharedClientLease,
+    /// The client borrowed from, named in this emitter's diagnostics and in its pool wait.
+    client: ClientName,
+    runtime: Runtime,
+    /// This emitter, as the key its pool wait is recorded under for `DESCRIBE` to read.
+    waiter: DomainNodeRef,
+}
+
+impl RedisEmitterClient {
+    /// Borrow a command connection for one publish, reporting the wait until the pool hands one
+    /// over. The connection returns to the shared pool as soon as the publish completes.
+    async fn connection(&self) -> EmitterRuntimeResult<RedisPooledConnection<'_>> {
+        let pool = self
+            .lease
+            .client()
+            .redis(&self.client)
+            .map_err(|error| emitter_init_error(error.to_string()))?;
+        let waiting = self.runtime.pool_wait_guard(&self.waiter, &self.client);
+        let connection = pool.get().await.map_err(emitter_init_error);
+        drop(waiting);
+        connection
+    }
 }
 
 impl RedisEmitter {
     pub(in crate::runtime) async fn new(
+        model: &Model,
         client: &CreateClientRedis,
         resolved: Option<&ResolvedClientConfig>,
+        context: &EmitterSinkContext,
     ) -> EmitterRuntimeResult<Self> {
-        let config = client_config_entries(resolved, client.config.as_slice());
-        let connection = Self::connection_from_config(config).await?;
+        let lease = context
+            .runtime
+            .lease_shared_client(&context.domain, &client.name, model, resolved)
+            .await
+            .map_err(|error| emitter_init_error(error.to_string()))?;
         Ok(Self {
-            connection: Some(connection),
+            client: Some(RedisEmitterClient {
+                lease,
+                client: client.name.clone(),
+                runtime: context.runtime.clone(),
+                waiter: DomainNodeRef::node_in(
+                    context.domain.clone(),
+                    ModelKind::Emitter,
+                    context.emitter.clone(),
+                ),
+            }),
         })
     }
 
-    async fn connection_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<::redis::aio::MultiplexedConnection> {
-        let addr = emitter_config_value(config, "addr", || {
-            "missing Redis client config key 'addr'".to_string()
-        })?;
-        let client = Self::client_from_config(&addr, config)?;
-        client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(emitter_init_error)
-    }
-
-    fn client_from_config(
+    pub(in crate::runtime) fn client_from_config(
         addr: &str,
         config: &[nervix_models::ClientConfigEntry],
     ) -> EmitterRuntimeResult<RedisClient> {
@@ -81,12 +155,21 @@ impl RedisEmitter {
         let mut outcome = PerRecordPublishOutcome::empty();
         for record in records {
             tokio::task::consume_budget().await;
-            let Some(connection) = self.connection.as_mut() else {
+            let Some(client) = self.client.as_ref() else {
                 outcome.fail(
                     Report::new(EmitterRuntimeError::SinkNotInitialized)
                         .attach_printable("no initialized redis sink client"),
                 );
                 break;
+            };
+            // Borrowed per publish and returned with the guard: an emitter between publishes, or
+            // waiting out a flush interval, holds no connection at all.
+            let mut connection = match client.connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    outcome.fail(error);
+                    break;
+                }
             };
             let published: ::redis::RedisResult<i64> = await_emitter_confirmation(
                 &record.acks,

@@ -210,30 +210,30 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::{NonZeroU64, NonZeroUsize};
+    use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
     use bolero::check;
     use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchName, BranchSelection,
-        ClientConfigEntry, ClusterNodeName, CodecWireFormat, CordonNode, CorrelatorName,
-        CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest, CreateClientKafka,
-        CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientPulsar,
-        CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
-        CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
-        CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateWireSchema, DeduplicatorName, DescribeRelay, DrainNode,
-        DropModel, DropNode, EmitSink, EmitterName, EmitterPublishingMode, EndpointIngestMode,
-        EndpointName, EndpointType, ErrorPolicies, FieldName, FlushPolicy, GeneralErrorPolicy,
-        IngestQuiesceMode, IngestSource, IngestorName, JsonType, JunctionName, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, ModelName, MqttIngestMode, MqttQos,
-        MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode,
-        ReingestorName, RelayName, ReordererName, ResourceName, RetryPolicy, SchemaField,
-        SchemaName, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-        SignalingWaitStep, SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField,
-        ZeroMqIngestMode,
+        ClientConfigEntry, ClientPoolBounds, ClusterNodeName, CodecWireFormat, CordonNode,
+        CorrelatorName, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
+        CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
+        CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+        CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
+        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, DeduplicatorName,
+        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EmitterName,
+        EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies,
+        FieldName, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode, IngestSource, IngestorName,
+        JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model,
+        ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, OutputBranch,
+        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
+        RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayName, ReordererName,
+        ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
+        WasmProcessorName, WindowProcessorName, WireSchemaField, ZeroMqIngestMode,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -330,6 +330,16 @@ mod tests {
             let generated = self.bounded_nonzero_u64(min, max);
             NonZeroUsize::try_from(generated)
                 .assured("the generated bound stays inside this generator's u8-derived span")
+        }
+
+        /// Pool bounds whose minimum is drawn from below the generated maximum, so the pair is
+        /// always orderable and the render/reparse comparison is about the syntax, not the check.
+        fn pool_bounds(&mut self) -> ClientPoolBounds {
+            let maximum = NonZeroU32::new(1 + u32::from(self.next_u8()))
+                .assured("one plus a u8 is never zero");
+            let minimum = u32::from(self.next_u8()) % (maximum.get() + 1);
+            ClientPoolBounds::new(minimum, maximum)
+                .assured("the generated minimum is drawn from 0 through the generated maximum")
         }
 
         /// A generated name of whatever kind the position needs.
@@ -720,6 +730,7 @@ mod tests {
             }),
             6 => Model::ClientRedis(CreateClientRedis {
                 name: g.name(),
+                pool: g.pool_bounds(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -2443,6 +2454,7 @@ mod tests {
         r#"
             CREATE CLIENT redis_main
               TYPE REDIS
+              POOL SIZE MIN 1 MAX 4
               CONFIG {
                 'addr' = 'redis://127.0.0.1:6379/',
                 'read_timeout_ms' = 5000

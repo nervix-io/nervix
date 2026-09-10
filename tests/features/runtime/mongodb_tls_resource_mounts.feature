@@ -52,6 +52,7 @@ Feature: MongoDB TLS resource mounts
         ON GENERAL ERROR LOG;
         CREATE CLIENT mongodb_client
         TYPE MONGODB
+        POOL SIZE MIN 2 MAX 8
         MOUNT dev_tls
         CONFIG {
           'addr' = '{{mongodb_tls_addr}}',

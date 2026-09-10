@@ -27,14 +27,18 @@ use iceberg::{
 };
 use kafka::KafkaEmitter;
 use mongodb::MongoDbEmitter;
+pub(in crate::runtime) use mongodb::{MongoDbClient, open_mongodb_client};
 use mqtt::MqttEmitter;
 use mysql::MySqlEmitter;
+pub(in crate::runtime) use mysql::{MySqlPool, MySqlSharedPool, open_mysql_pool};
 use nats::NatsEmitter;
 use otel::{OtelEmitter, OtelEmitterInit};
 use postgres::PostgresEmitter;
+pub(in crate::runtime) use postgres::{PgPool, open_postgres_pool};
 use pulsar::PulsarEmitter;
 use rabbitmq::RabbitMqEmitter;
 use redis::RedisEmitter;
+pub(in crate::runtime) use redis::{RedisCommandPool, open_redis_command_pool};
 use sentry::SentryEmitter;
 use sqs::{SqsEmitter, SqsPublishingMode};
 use syslog::SyslogEmitter;
@@ -1682,8 +1686,8 @@ impl SinkEmitter {
                     }
                 }
             }
-            (EmitSink::Redis { .. }, Some(Model::ClientRedis(client)), _) => {
-                match RedisEmitter::new(client, resolved).await {
+            (EmitSink::Redis { .. }, Some(model @ Model::ClientRedis(client)), _) => {
+                match RedisEmitter::new(model, client, resolved, context).await {
                     Ok(emitter) => Self::Redis(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("redis", context, &error),
                 }
@@ -1775,9 +1779,10 @@ impl SinkEmitter {
                     input_schema.arrow_schema(),
                 ))
             }
-            (EmitSink::Postgres { values, .. }, Some(Model::ClientPostgres(client)), _) => {
+            (EmitSink::Postgres { values, .. }, Some(model @ Model::ClientPostgres(client)), _) => {
                 Self::Postgres(
                     PostgresEmitter::new(
+                        model,
                         client,
                         resolved,
                         context,
@@ -1787,19 +1792,23 @@ impl SinkEmitter {
                     .await,
                 )
             }
-            (EmitSink::MySql { values, .. }, Some(Model::ClientMySql(client)), _) => Self::MySql(
-                MySqlEmitter::new(
-                    client,
-                    resolved,
-                    context,
-                    values,
-                    input_schema.arrow_schema(),
+            (EmitSink::MySql { values, .. }, Some(model @ Model::ClientMySql(client)), _) => {
+                Self::MySql(
+                    MySqlEmitter::new(
+                        model,
+                        client,
+                        resolved,
+                        context,
+                        values,
+                        input_schema.arrow_schema(),
+                    )
+                    .await,
                 )
-                .await,
-            ),
-            (EmitSink::MongoDb { values, .. }, Some(Model::ClientMongoDb(client)), _) => {
+            }
+            (EmitSink::MongoDb { values, .. }, Some(model @ Model::ClientMongoDb(client)), _) => {
                 Self::MongoDb(
                     MongoDbEmitter::new(
+                        model,
                         client,
                         resolved,
                         context,

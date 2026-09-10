@@ -23,6 +23,7 @@ Feature: Redis ingestion
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
         CREATE CLIENT redis_main
         TYPE REDIS
+        POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
@@ -80,6 +81,7 @@ Feature: Redis ingestion
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
         CREATE CLIENT redis_main
         TYPE REDIS
+        POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
         };

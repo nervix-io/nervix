@@ -45,6 +45,7 @@ aws-sdk-sqs = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 base64 = { workspace = true }
+bb8 = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chitchat = { workspace = true }
@@ -167,6 +168,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
+sqlx = { workspace = true }
 storekey = { workspace = true }
 strum = { workspace = true }
 tempfile = { workspace = true }
@@ -174,8 +176,6 @@ thiserror = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
-tokio-postgres-rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
@@ -292,6 +292,7 @@ aws-sdk-sqs = { version = "1.76", default-features = false, features = [
 ] }
 aws-smithy-http-client = "1.1.12"
 base64 = "0.22"
+bb8 = "0.9.1"
 blake3 = "1"
 bolero = "0.13"
 byte-unit = "5.2"
@@ -428,6 +429,7 @@ rcgen = { version = "0.13", default-features = false, features = [
 rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "aws-lc", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
+  "bb8",
   "tokio-comp",
   "tls-rustls",
   "tokio-rustls-comp",
@@ -462,6 +464,11 @@ serde_bytes = "0.11"
 serde_json = "1.0.149"
 simd-json = "0.17.0"
 sorted-vec = "0.8"
+sqlx = { version = "0.9", default-features = false, features = [
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls-aws-lc-rs",
+] }
 storekey = "0.5"
 strum = "0.26"
 tempfile = "3"
@@ -475,9 +482,7 @@ thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
-tokio-postgres = "0.7"
 # 0.14 adds explicit AWS-LC support; the previous 0.13 line depended on Ring.
-tokio-postgres-rustls = { version = "0.14", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26"
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"

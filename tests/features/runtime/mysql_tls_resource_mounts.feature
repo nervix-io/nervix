@@ -52,6 +52,7 @@ Feature: MySQL TLS resource mounts
         ON GENERAL ERROR LOG;
         CREATE CLIENT mysql_client
         TYPE MYSQL
+        POOL SIZE MIN 2 MAX 8
         MOUNT dev_tls
         CONFIG {
           'addr' = '{{mysql_tls_addr}}',

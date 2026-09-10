@@ -36,6 +36,7 @@
     - [JAQ Reference](./jaq-reference.md)
   - [Common](./common.md)
     - [Syslog](./syslog.md)
+    - [Database Client Connection Pools](./database-client-pools.md)
   - [Resources](./resources.md)
   - [Ingestors](./ingestors.md)
   - [Runtime Nodes](./processors.md)
