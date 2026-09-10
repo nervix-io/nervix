@@ -67,6 +67,9 @@ applying effects; a queued model mutation reports its statement-local quiesce le
 Correct a rejected statement and continue the same transaction. Do not imply that one undivided
 request can mix those phases.
 
+For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
+and recovery` before suggesting a retry.
+
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
 `DROP` for one domain in the same transaction, including schema, wire-schema, relay, junction,

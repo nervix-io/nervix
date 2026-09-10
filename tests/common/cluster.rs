@@ -2165,6 +2165,8 @@ impl NodeHandle {
                 Err(io::Error::other("timed out waiting for node shutdown"))
             }
         };
+        self.fault_injection
+            .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
             self.ensure_database_unlocked().await?;
         }

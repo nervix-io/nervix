@@ -48,6 +48,7 @@ struct FaultInjectionState {
     unavailable_otel_clients: DashMap<String, (), RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
+    consensus_probes: DashMap<ClusterNodeName, ConsensusProbe, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     command_pauses: DashMap<CommandPausePoint, Arc<CommandPause>, RandomState>,
@@ -66,6 +67,17 @@ struct FaultInjectionState {
     entity_gate_deadline: RwLock<Option<Duration>>,
     scheduler_mode: RwLock<SchedulerMode>,
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
+}
+
+struct ConsensusProbe {
+    observer: nervix_consensus::Observer,
+    fault: nervix_consensus::StorageFault,
+}
+
+impl std::fmt::Debug for ConsensusProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsensusProbe").finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -141,6 +153,7 @@ impl Default for FaultInjection {
                 unavailable_otel_clients: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
+                consensus_probes: DashMap::default(),
                 bulk_executions: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -159,6 +172,49 @@ impl Default for FaultInjection {
 }
 
 impl FaultInjection {
+    pub fn unregister_consensus(&self, node: &ClusterNodeName) {
+        self.inner.consensus_probes.remove(node);
+    }
+
+    pub(crate) fn register_consensus(
+        &self,
+        node: ClusterNodeName,
+        consensus: &nervix_consensus::Consensus,
+    ) {
+        self.inner.consensus_probes.insert(
+            node,
+            ConsensusProbe {
+                observer: consensus.observer(),
+                fault: consensus.storage_fault(),
+            },
+        );
+    }
+
+    pub fn consensus_observer(&self, node: &ClusterNodeName) -> nervix_consensus::Observer {
+        use meticulous::OptionExt as _;
+        self.inner
+            .consensus_probes
+            .get(node)
+            .verified("the harness started this node before observing consensus")
+            .observer
+            .clone()
+    }
+
+    pub fn fail_consensus_storage(
+        &self,
+        node: &ClusterNodeName,
+        operation: String,
+        boundary: nervix_consensus::StorageBoundary,
+    ) {
+        use meticulous::OptionExt as _;
+        self.inner
+            .consensus_probes
+            .get(node)
+            .verified("the harness started this node before injecting storage failure")
+            .fault
+            .fail_next(operation, boundary);
+    }
+
     pub fn fail_emitter(&self, emitter: &str) {
         self.inner
             .emitter_faults

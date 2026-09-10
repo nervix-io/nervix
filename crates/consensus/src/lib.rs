@@ -13,7 +13,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Cursor},
-    ops::RangeBounds,
     path::Path,
     sync::{
         Arc as StdArc,
@@ -23,15 +22,14 @@ use std::{
 };
 
 use error_stack::Report;
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
-use futures_util::StreamExt;
+use fjall::{Database, Keyspace};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::Transport;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     DomainClockAuthority, DomainClockState, DomainName, DomainPace, DomainSchedule,
     DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
-    ResourceVersionCounter, ResourceVersionStatus, Statement, UserName,
+    ResourceVersionStatus, Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -41,12 +39,8 @@ pub use openraft::raft::{
 use openraft::{
     BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
     Vote,
-    entry::{EntryPayload, RaftPayload},
     error::{ClientWriteError, RPCError, RaftError, StreamingError},
     network::{RPCOption, RaftNetworkV2},
-    storage::{
-        IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine,
-    },
     type_config::{
         alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf},
         async_runtime::watch::WatchReceiver,
@@ -64,7 +58,19 @@ use tokio::{
 use tracing::{error, info};
 use triomphe::Arc;
 
+mod durable_batch;
+mod records;
+mod storage;
+mod storage_fault;
+
+use records::{Records, ResourceRecords, ScheduleRecords};
+#[cfg(test)]
+use storage::FjallLogReader;
+use storage::FjallStore;
 mod transaction;
+
+#[cfg(any(test, feature = "testing"))]
+pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 mod wire;
 
 pub use transaction::{
@@ -313,7 +319,7 @@ openraft::declare_raft_types!(
         Node = BasicNode
 );
 
-type NervixRaft = Raft<TypeConfig, StdArc<FjallStore>>;
+type NervixRaft = Raft<TypeConfig, FjallStore>;
 pub type Node = BasicNode;
 pub type LogIdOf = LogId<CommittedLeaderIdOf<TypeConfig>>;
 pub type VoteOf = Vote<LeaderIdOf<TypeConfig>>;
@@ -322,12 +328,6 @@ pub type StoredMembershipOf =
 pub type SnapshotOf =
     Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, Cursor<Vec<u8>>>;
 
-const KEY_VOTE: &[u8] = b"vote";
-const KEY_COMMITTED: &[u8] = b"committed";
-const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEY_STATE_MACHINE: &[u8] = b"state_machine";
-const KEY_SNAPSHOT: &[u8] = b"snapshot";
-const KEY_CLUSTER_SCHEDULE: &[u8] = b"cluster_schedule";
 const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// How many consensus transitions a session can fall behind before the bus drops the oldest.
 const CONSENSUS_EVENT_CAPACITY: usize = 256;
@@ -339,6 +339,7 @@ pub struct ConsensusSettings {
     pub cluster_name: String,
     pub node_id: ClusterNodeName,
     pub interconnect: Transport,
+    pub executor: nervix_execution::Executor,
     pub node_unavailability_timeout: Duration,
     pub raft_heartbeat_interval: Duration,
     pub raft_election_timeout_min: Duration,
@@ -400,17 +401,16 @@ pub struct ConsensusRuntimeState {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct StateMachineData {
     last_applied_log_id: Option<LogIdOf>,
-    last_membership: StoredMembershipOf,
+    // Independently retained revisions share unchanged membership.
+    last_membership: Arc<StoredMembershipOf>,
     runtime_revision: u64,
-    schedule: ClusterSchedule,
-    domains: BTreeMap<DomainName, DomainState>,
-    domain_clock_authorities: BTreeMap<DomainName, DomainClockAuthority>,
-    #[serde(default)]
-    users: BTreeMap<UserName, UserCredentials>,
-    resources: ResourceVersionStatus,
-    #[serde(default)]
-    cordoned_node_ids: BTreeSet<ClusterNodeName>,
-    transactions: BTreeMap<String, ReplicatedTransaction>,
+    schedule: ScheduleRecords,
+    domains: Records<DomainName, DomainState>,
+    domain_clock_authorities: Records<DomainName, DomainClockAuthority>,
+    users: Records<UserName, UserCredentials>,
+    resources: ResourceRecords,
+    cordoned_node_ids: Records<ClusterNodeName, ()>,
+    transactions: Records<String, ReplicatedTransaction>,
 }
 
 impl StateMachineData {
@@ -655,14 +655,10 @@ enum SnapshotTransferError {
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
-    #[error("failed to open raft database")]
-    OpenDatabase,
-    #[error("failed to open raft keyspace")]
-    OpenKeyspace,
-    #[error("failed to serialize raft value")]
-    Serialize,
-    #[error("failed to deserialize raft value")]
-    Deserialize,
+    #[error("consensus storage failed: {0}")]
+    Storage(#[source] io::Error),
+    #[error("consensus storage failed: {0}")]
+    RaftStorage(#[source] openraft::StorageError<TypeConfig>),
     #[error("raft startup failed")]
     Startup,
     #[error("failed to create raft client endpoint")]
@@ -725,6 +721,9 @@ impl From<RaftError<TypeConfig, ClientWriteError<TypeConfig>>> for ConsensusErro
                 Self::LeadershipLost {
                     leader_id: forward.leader_id,
                 }
+            }
+            RaftError::Fatal(openraft::error::Fatal::StorageError(error)) => {
+                Self::RaftStorage(error)
             }
             error => Self::Write(format!("raft write failed: {error}")),
         }
@@ -883,7 +882,7 @@ pub struct Administrator {
 struct ConsensusState {
     raft: NervixRaft,
     // The Raft runtime independently owns the store as both log storage and state machine.
-    store: StdArc<FjallStore>,
+    store: FjallStore,
     local_node_id: ClusterNodeName,
     interconnect: Transport,
     node_unavailability_timeout: Duration,
@@ -933,6 +932,11 @@ impl std::ops::Deref for Proposer {
 }
 
 impl Consensus {
+    #[cfg(feature = "testing")]
+    pub fn storage_fault(&self) -> StorageFault {
+        self.inner.store.inner.faults.clone()
+    }
+
     pub fn observer(&self) -> Observer {
         Observer {
             inner: self.inner.clone(),
@@ -961,9 +965,22 @@ impl Consensus {
         path: impl AsRef<Path>,
         settings: ConsensusSettings,
     ) -> Result<Self, ConsensusError> {
-        let db = Database::builder(path)
-            .open()
-            .map_err(|_| ConsensusError::OpenDatabase)?;
+        let path = path.as_ref().to_path_buf();
+        let reservation = settings
+            .executor
+            .reserve(nervix_execution::MemoryClass::Management, 4096)
+            .await
+            .map_err(|error| ConsensusError::Storage(io::Error::other(error)))?;
+        let db = settings
+            .executor
+            .run_storage(
+                nervix_execution::StorageClass::Consensus,
+                reservation,
+                move |_, _| Database::builder(path).open(),
+            )
+            .await
+            .map_err(|error| ConsensusError::Storage(io::Error::other(error)))?
+            .map_err(|error| ConsensusError::Storage(io::Error::other(error)))?;
         Self::from_database(db, settings).await
     }
 
@@ -971,7 +988,7 @@ impl Consensus {
         db: Database,
         settings: ConsensusSettings,
     ) -> Result<Self, ConsensusError> {
-        let store = StdArc::new(FjallStore::from_database(db)?);
+        let store = FjallStore::from_database(db, settings.executor.clone()).await?;
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
@@ -1246,134 +1263,70 @@ impl Observer {
         self.inner.events.subscribe()
     }
 
-    pub fn subscribe_schedule(&self) -> watch::Receiver<ClusterSchedule> {
+    pub fn subscribe_schedule(&self) -> watch::Receiver<u64> {
         self.inner.store.inner.schedule_tx.subscribe()
     }
 
-    pub fn subscribe_domains(&self) -> watch::Receiver<BTreeMap<DomainName, DomainState>> {
+    pub fn subscribe_domains(&self) -> watch::Receiver<u64> {
         self.inner.store.inner.domain_tx.subscribe()
     }
 
-    pub fn subscribe_resources(&self) -> watch::Receiver<ResourceVersionStatus> {
+    pub fn subscribe_resources(&self) -> watch::Receiver<u64> {
         self.inner.store.inner.resource_tx.subscribe()
     }
 
-    pub fn subscribe_transactions(
-        &self,
-    ) -> watch::Receiver<BTreeMap<String, ReplicatedTransaction>> {
+    pub fn subscribe_transactions(&self) -> watch::Receiver<u64> {
         self.inner.store.inner.transaction_tx.subscribe()
     }
 
     pub async fn current_schedule(&self) -> ClusterSchedule {
-        self.inner
-            .store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .schedule
-            .clone()
+        (&self.inner.store.inner.state().schedule).into()
     }
-
     pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
-        self.inner
-            .store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .domains
-            .clone()
+        (&self.inner.store.inner.state().domains).into()
     }
-
     pub async fn current_transactions(&self) -> BTreeMap<String, ReplicatedTransaction> {
-        self.inner
-            .store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .transactions
-            .clone()
+        (&self.inner.store.inner.state().transactions).into()
     }
-
     pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
-        self.inner
-            .store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .transactions
-            .get(id)
-            .cloned()
+        self.inner.store.inner.state().transactions.get(id).cloned()
     }
-
     pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
-        let state = self.inner.store.inner.state_machine.read().await;
+        let state = self.inner.store.inner.state();
         ConsensusRuntimeState {
             revision: state.runtime_revision,
-            schedule: state.schedule.clone(),
-            domains: state.domains.clone(),
-            domain_clock_authorities: state.domain_clock_authorities.clone(),
+            schedule: (&state.schedule).into(),
+            domains: (&state.domains).into(),
+            domain_clock_authorities: (&state.domain_clock_authorities).into(),
         }
     }
-
     pub async fn current_domain(&self, domain_id: &DomainName) -> Option<DomainState> {
         self.inner
             .store
             .inner
-            .state_machine
-            .read()
-            .await
+            .state()
             .domains
             .get(domain_id)
             .cloned()
     }
-
     pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
-        self.inner
-            .store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .users
-            .clone()
+        (&self.inner.store.inner.state().users).into()
     }
-
     pub async fn current_user(&self, user: &UserName) -> Option<UserCredentials> {
-        self.inner
-            .store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .users
-            .get(user)
-            .cloned()
+        self.inner.store.inner.state().users.get(user).cloned()
     }
-
     pub async fn current_resources(&self) -> ResourceVersionStatus {
-        self.inner
-            .store
-            .inner
-            .state_machine
-            .read()
-            .await
-            .resources
-            .clone()
+        (&self.inner.store.inner.state().resources).into()
     }
-
     pub async fn cordoned_node_ids(&self) -> BTreeSet<ClusterNodeName> {
         self.inner
             .store
             .inner
-            .state_machine
-            .read()
-            .await
+            .state()
             .cordoned_node_ids
-            .clone()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     pub fn local_node_id(&self) -> &ClusterNodeName {
@@ -1881,7 +1834,7 @@ impl Administrator {
     }
 
     pub async fn maybe_initialize(&self) -> Result<bool, ConsensusError> {
-        if self.inner.store.has_raft_state().await {
+        if self.inner.store.has_raft_state().await? {
             return Ok(false);
         }
 
@@ -2262,12 +2215,6 @@ fn snapshot_request_timeout(deadline: Instant) -> io::Result<Duration> {
     Ok(remaining)
 }
 
-fn storage_encode<T: Serialize>(value: &T) -> Result<Vec<u8>, io::Error> {
-    let mut out = Vec::new();
-    ciborium::into_writer(value, &mut out).map_err(io_error)?;
-    Ok(out)
-}
-
 fn storage_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
     ciborium::from_reader(Cursor::new(bytes)).map_err(io_error)
 }
@@ -2428,401 +2375,6 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
     }
 }
 
-struct StoreInner {
-    _db: Database,
-    logs: Keyspace,
-    meta: Keyspace,
-    sm: Keyspace,
-    schedule: Keyspace,
-    snapshot: Keyspace,
-    state_machine: RwLock<StateMachineData>,
-    current_snapshot: RwLock<Option<StoredSnapshotData>>,
-    schedule_tx: watch::Sender<ClusterSchedule>,
-    domain_tx: watch::Sender<BTreeMap<DomainName, DomainState>>,
-    resource_tx: watch::Sender<ResourceVersionStatus>,
-    transaction_tx: watch::Sender<BTreeMap<String, ReplicatedTransaction>>,
-}
-
-impl StoreInner {
-    fn log_key(index: u64) -> io::Result<Vec<u8>> {
-        storekey::serialize(&index).map_err(io_error)
-    }
-
-    fn log_entries_in_range<RB: RangeBounds<u64>>(
-        &self,
-        range: RB,
-    ) -> io::Result<Vec<EntryOf<TypeConfig>>> {
-        let mut out = Vec::new();
-        for item in self.logs.iter() {
-            let (key, value) = item.into_inner().map_err(io_error)?;
-            let index: u64 = storekey::deserialize(&key).map_err(io_error)?;
-            if !range.contains(&index) {
-                continue;
-            }
-            out.push(storage_decode::<EntryOf<TypeConfig>>(value.as_ref())?);
-        }
-        out.sort_by_key(|entry| entry.log_id.index);
-        Ok(out)
-    }
-
-    async fn read_last_purged(&self) -> io::Result<Option<LogIdOf>> {
-        read_key(&self.meta, KEY_LAST_PURGED)
-    }
-
-    async fn write_last_purged(&self, value: &Option<LogIdOf>) -> io::Result<()> {
-        write_key(&self.meta, KEY_LAST_PURGED, value)
-    }
-
-    async fn read_committed(&self) -> io::Result<Option<LogIdOf>> {
-        read_key(&self.meta, KEY_COMMITTED)
-    }
-
-    async fn write_committed(&self, value: &Option<LogIdOf>) -> io::Result<()> {
-        write_key(&self.meta, KEY_COMMITTED, value)
-    }
-
-    async fn read_vote(&self) -> io::Result<Option<VoteOf>> {
-        read_key(&self.meta, KEY_VOTE)
-    }
-
-    async fn write_vote(&self, vote: &VoteOf) -> io::Result<()> {
-        write_key(&self.meta, KEY_VOTE, vote)
-    }
-}
-
-/// Owns the write authority over the shared store: appending, truncating, purging, voting,
-/// snapshotting, and recovery all run through this handle.
-struct FjallStore {
-    inner: Arc<StoreInner>,
-}
-
-impl FjallStore {
-    fn from_database(db: Database) -> Result<Self, ConsensusError> {
-        let logs = db
-            .keyspace("raft_logs", KeyspaceCreateOptions::default)
-            .map_err(|_| ConsensusError::OpenKeyspace)?;
-        let meta = db
-            .keyspace("raft_meta", KeyspaceCreateOptions::default)
-            .map_err(|_| ConsensusError::OpenKeyspace)?;
-        let sm = db
-            .keyspace("raft_state_machine", KeyspaceCreateOptions::default)
-            .map_err(|_| ConsensusError::OpenKeyspace)?;
-        let schedule = db
-            .keyspace("raft_schedule", KeyspaceCreateOptions::default)
-            .map_err(|_| ConsensusError::OpenKeyspace)?;
-        let snapshot = db
-            .keyspace("raft_snapshot", KeyspaceCreateOptions::default)
-            .map_err(|_| ConsensusError::OpenKeyspace)?;
-
-        let mut state_machine: StateMachineData =
-            load_value(&sm, KEY_STATE_MACHINE)?.unwrap_or_default();
-        if state_machine.schedule.domains.is_empty()
-            && let Some(schedule_state) = load_value(&schedule, KEY_CLUSTER_SCHEDULE)?
-        {
-            state_machine.schedule = schedule_state;
-        }
-        let current_snapshot = load_value(&snapshot, KEY_SNAPSHOT)?;
-        let (schedule_tx, _) = watch::channel(state_machine.schedule.clone());
-        let (domain_tx, _) = watch::channel(state_machine.domains.clone());
-        let (resource_tx, _) = watch::channel(state_machine.resources.clone());
-        let (transaction_tx, _) = watch::channel(state_machine.transactions.clone());
-
-        Ok(Self {
-            inner: Arc::new(StoreInner {
-                _db: db,
-                logs,
-                meta,
-                sm,
-                schedule,
-                snapshot,
-                state_machine: RwLock::new(state_machine),
-                current_snapshot: RwLock::new(current_snapshot),
-                schedule_tx,
-                domain_tx,
-                resource_tx,
-                transaction_tx,
-            }),
-        })
-    }
-
-    async fn has_raft_state(&self) -> bool {
-        self.inner.read_vote().await.ok().flatten().is_some()
-            || self
-                .inner
-                .logs
-                .iter()
-                .next()
-                .and_then(|v| v.into_inner().ok())
-                .is_some()
-    }
-
-    /// Lends the shared store to a reader without lending it the write authority.
-    ///
-    /// This is the only construction site of [`FjallLogReader`], so
-    /// [`RaftLogStorage::get_log_reader`] is the one way to obtain one.
-    fn log_reader(&self) -> FjallLogReader {
-        FjallLogReader {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl Clone for FjallStore {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-/// Read-only view of the Raft log and vote, handed to OpenRaft's replication tasks.
-///
-/// It shares the writer's store internals, so an entry is readable through this handle the
-/// moment [`RaftLogStorage::append`] returns. Those internals are its only field and are
-/// private, and the type offers no accessor, conversion, or `Deref` back to [`FjallStore`]:
-/// holding a reader grants the log and vote reads below and nothing more.
-struct FjallLogReader {
-    inner: Arc<StoreInner>,
-}
-
-impl RaftLogReader<TypeConfig> for FjallLogReader {
-    async fn try_get_log_entries<
-        RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
-    >(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<EntryOf<TypeConfig>>, io::Error> {
-        self.inner.log_entries_in_range(range)
-    }
-
-    async fn read_vote(&mut self) -> Result<Option<VoteOf>, io::Error> {
-        self.inner.read_vote().await
-    }
-}
-
-impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
-    type LogReader = FjallLogReader;
-
-    async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, io::Error> {
-        let last_purged_log_id = self.inner.read_last_purged().await?;
-        let mut last_log_id = last_purged_log_id.clone();
-        for item in self.inner.logs.iter() {
-            let (_, value) = item.into_inner().map_err(io_error)?;
-            let entry: EntryOf<TypeConfig> = storage_decode(value.as_ref())?;
-            last_log_id = Some(entry.log_id);
-        }
-
-        Ok(LogState {
-            last_purged_log_id,
-            last_log_id,
-        })
-    }
-
-    async fn get_log_reader(&mut self) -> Self::LogReader {
-        self.log_reader()
-    }
-
-    async fn save_vote(&mut self, vote: &VoteOf) -> Result<(), io::Error> {
-        self.inner.write_vote(vote).await
-    }
-
-    async fn save_committed(&mut self, committed: Option<LogIdOf>) -> Result<(), io::Error> {
-        self.inner.write_committed(&committed).await
-    }
-
-    async fn read_committed(&mut self) -> Result<Option<LogIdOf>, io::Error> {
-        self.inner.read_committed().await
-    }
-
-    async fn append<I>(
-        &mut self,
-        entries: I,
-        callback: IOFlushed<TypeConfig>,
-    ) -> Result<(), io::Error>
-    where
-        I: IntoIterator<Item = EntryOf<TypeConfig>> + openraft::OptionalSend,
-        I::IntoIter: openraft::OptionalSend,
-    {
-        for entry in entries {
-            let key = StoreInner::log_key(entry.log_id.index)?;
-            let bytes = storage_encode(&entry)?;
-            self.inner.logs.insert(key, bytes).map_err(io_error)?;
-        }
-        callback.io_completed(Ok(()));
-        Ok(())
-    }
-
-    async fn truncate_after(&mut self, last_log_id: Option<LogIdOf>) -> Result<(), io::Error> {
-        let cut = match &last_log_id {
-            Some(last_log_id) => last_log_id.index,
-            None => 0,
-        };
-        let mut to_delete = Vec::new();
-        for item in self.inner.logs.iter() {
-            let (key, _) = item.into_inner().map_err(io_error)?;
-            let index: u64 = storekey::deserialize(&key).map_err(io_error)?;
-            if last_log_id.is_none() || index > cut {
-                to_delete.push(key);
-            }
-        }
-        for key in to_delete {
-            self.inner.logs.remove(key).map_err(io_error)?;
-        }
-        Ok(())
-    }
-
-    async fn purge(&mut self, log_id: LogIdOf) -> Result<(), io::Error> {
-        let mut to_delete = Vec::new();
-        for item in self.inner.logs.iter() {
-            let (key, _) = item.into_inner().map_err(io_error)?;
-            let index: u64 = storekey::deserialize(&key).map_err(io_error)?;
-            if index <= log_id.index {
-                to_delete.push(key);
-            }
-        }
-        for key in to_delete {
-            self.inner.logs.remove(key).map_err(io_error)?;
-        }
-        self.inner.write_last_purged(&Some(log_id)).await
-    }
-}
-
-impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
-    type SnapshotData = Cursor<Vec<u8>>;
-
-    type SnapshotBuilder = StdArc<FjallStore>;
-
-    async fn applied_state(&mut self) -> Result<(Option<LogIdOf>, StoredMembershipOf), io::Error> {
-        let state = self.inner.state_machine.read().await;
-        Ok((
-            state.last_applied_log_id.clone(),
-            state.last_membership.clone(),
-        ))
-    }
-
-    async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
-    where
-        Strm: futures_util::Stream<
-                Item = Result<openraft::storage::EntryResponder<TypeConfig>, io::Error>,
-            > + Unpin
-            + openraft::OptionalSend,
-    {
-        while let Some(item) = entries.next().await {
-            tokio::task::consume_budget().await;
-            let (entry, responder) = item?;
-            let mut state = self.inner.state_machine.write().await;
-            state.last_applied_log_id = Some(entry.log_id.clone());
-            if let Some(membership) = entry.get_membership() {
-                state.last_membership =
-                    StoredMembership::new(Some(entry.log_id.clone()), membership);
-            }
-            if let EntryPayload::Normal(command) = &entry.payload {
-                let applied = apply_consensus_command(&mut state, command);
-                state.record_runtime_revision(entry.log_id.index, &applied);
-                // These four watches publish committed state, and a node subscribes to them
-                // whenever a service that reads them starts, not only at boot. `send_replace`
-                // stores the value even while nothing is listening, so a subscriber that arrives
-                // afterwards observes what was committed rather than the last value that happened
-                // to have an audience.
-                if applied.schedule_changed {
-                    write_key(&self.inner.schedule, KEY_CLUSTER_SCHEDULE, &state.schedule)?;
-                    self.inner.schedule_tx.send_replace(state.schedule.clone());
-                }
-                if applied.domains_changed {
-                    self.inner.domain_tx.send_replace(state.domains.clone());
-                }
-                if applied.resources_changed {
-                    self.inner.resource_tx.send_replace(state.resources.clone());
-                }
-                if applied.transactions_changed {
-                    self.inner
-                        .transaction_tx
-                        .send_replace(state.transactions.clone());
-                }
-                write_key(&self.inner.sm, KEY_STATE_MACHINE, &*state)?;
-                drop(state);
-                if let Some(responder) = responder {
-                    responder.send(applied.response);
-                }
-                continue;
-            }
-            write_key(&self.inner.sm, KEY_STATE_MACHINE, &*state)?;
-            drop(state);
-            if let Some(responder) = responder {
-                responder.send(ConsensusResponse::Applied);
-            }
-        }
-        Ok(())
-    }
-
-    async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        self.clone()
-    }
-
-    async fn install_snapshot(
-        &mut self,
-        meta: &SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
-        snapshot: Cursor<Vec<u8>>,
-    ) -> Result<(), io::Error> {
-        let bytes = snapshot.into_inner();
-        let stored: StateMachineData = storage_decode(&bytes)?;
-        {
-            let mut state = self.inner.state_machine.write().await;
-            *state = stored.clone();
-        }
-        write_key(&self.inner.sm, KEY_STATE_MACHINE, &stored)?;
-        write_key(&self.inner.schedule, KEY_CLUSTER_SCHEDULE, &stored.schedule)?;
-        self.inner.schedule_tx.send_replace(stored.schedule.clone());
-        self.inner.domain_tx.send_replace(stored.domains.clone());
-        self.inner
-            .resource_tx
-            .send_replace(stored.resources.clone());
-        self.inner
-            .transaction_tx
-            .send_replace(stored.transactions.clone());
-        let stored_snapshot = StoredSnapshotData {
-            meta: meta.clone(),
-            data: bytes,
-        };
-        write_key(&self.inner.snapshot, KEY_SNAPSHOT, &stored_snapshot)?;
-        let mut current = self.inner.current_snapshot.write().await;
-        *current = Some(stored_snapshot);
-        Ok(())
-    }
-
-    async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf>, io::Error> {
-        let snapshot = self.inner.current_snapshot.read().await.clone();
-        Ok(snapshot.map(|stored| Snapshot {
-            meta: stored.meta,
-            snapshot: Cursor::new(stored.data),
-        }))
-    }
-}
-
-impl RaftSnapshotBuilder<TypeConfig> for StdArc<FjallStore> {
-    type SnapshotData = Cursor<Vec<u8>>;
-
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf, io::Error> {
-        let state = self.inner.state_machine.read().await.clone();
-        let meta = SnapshotMeta {
-            last_log_id: state.last_applied_log_id.clone(),
-            last_membership: state.last_membership.clone(),
-        };
-        let data = storage_encode(&state)?;
-        let stored_snapshot = StoredSnapshotData {
-            meta: meta.clone(),
-            data: data.clone(),
-        };
-        write_key(&self.inner.snapshot, KEY_SNAPSHOT, &stored_snapshot)?;
-        let mut current = self.inner.current_snapshot.write().await;
-        *current = Some(stored_snapshot);
-        Ok(Snapshot {
-            meta,
-            snapshot: Cursor::new(data),
-        })
-    }
-}
-
 #[derive(Debug, Default)]
 struct StateMachineChanges {
     schedule_changed: bool,
@@ -2967,30 +2519,35 @@ fn apply_consensus_command(
             );
         }
         ConsensusCommand::CreateUser { user } => {
-            state
-                .users
-                .entry(user.name.clone())
-                .or_insert_with(|| user.as_ref().clone());
+            if !state.users.contains_key(&user.name) {
+                state.users.insert(user.name.clone(), user.as_ref().clone());
+            }
         }
         ConsensusCommand::CreateResourceCatalog { domain, identifier } => {
-            ensure_resource_catalog(&mut state.resources, domain, identifier);
+            state.resources.ensure_catalog(domain, identifier);
             changes.resources_changed = true;
         }
         ConsensusCommand::AdvanceResourceVersion { domain, identifier } => {
-            advance_resource_version(&mut state.resources, domain, identifier);
+            state.resources.advance_version(domain, identifier);
             changes.resources_changed = true;
         }
         ConsensusCommand::PutResourceVersion { resource } => {
-            upsert_resource_version(&mut state.resources, resource.as_ref().clone());
+            state
+                .resources
+                .versions
+                .insert(resource.id.clone(), resource.as_ref().clone());
             changes.resources_changed = true;
         }
         ConsensusCommand::PutResourceReplica { replica } => {
-            upsert_resource_replica(&mut state.resources, replica.as_ref().clone());
+            state
+                .resources
+                .replicas
+                .insert(replica.key.clone(), replica.as_ref().clone());
             changes.resources_changed = true;
         }
         ConsensusCommand::SetNodeCordoned { node_id, cordoned } => {
             if *cordoned {
-                state.cordoned_node_ids.insert(node_id.clone());
+                state.cordoned_node_ids.insert(node_id.clone(), ());
             } else {
                 state.cordoned_node_ids.remove(node_id);
             }
@@ -3421,7 +2978,7 @@ fn apply_transaction_step_effect(
             changes.domains_changed = state.commit_domain_stop(domain_id);
         }
         TransactionStepEffect::CreateResourceCatalog { identifier } => {
-            ensure_resource_catalog(&mut state.resources, domain, identifier);
+            state.resources.ensure_catalog(domain, identifier);
             changes.resources_changed = true;
         }
     }
@@ -3436,121 +2993,16 @@ struct RaftTransition {
     leader: Option<ClusterNodeName>,
 }
 
-fn ensure_resource_catalog(
-    resources: &mut ResourceVersionStatus,
-    domain: &DomainName,
-    identifier: &ResourceName,
-) {
-    if let Err(index) = resources.resource_slot(domain, identifier) {
-        resources.next_version_by_resource.mutate_vec(|entries| {
-            entries.insert(
-                index,
-                ResourceVersionCounter {
-                    domain: domain.clone(),
-                    identifier: identifier.clone(),
-                    next_version: 1,
-                },
-            );
-        });
-    }
-}
-
-fn advance_resource_version(
-    resources: &mut ResourceVersionStatus,
-    domain: &DomainName,
-    identifier: &ResourceName,
-) {
-    match resources.resource_slot(domain, identifier) {
-        Ok(index) => {
-            resources.next_version_by_resource.mutate_vec(|entries| {
-                entries[index].next_version = entries[index].next_version.checked_add(1).assured(
-                    "a resource cannot be replaced 2^64 times in the lifetime of a cluster",
-                );
-            });
-        }
-        Err(index) => {
-            resources.next_version_by_resource.mutate_vec(|entries| {
-                entries.insert(
-                    index,
-                    ResourceVersionCounter {
-                        domain: domain.clone(),
-                        identifier: identifier.clone(),
-                        next_version: 2,
-                    },
-                );
-            });
-        }
-    }
-}
-
-fn upsert_resource_version(resources: &mut ResourceVersionStatus, version: ResourceVersion) {
-    match resources
-        .versions
-        .binary_search_by(|existing| existing.id.cmp(&version.id))
-    {
-        Ok(index) => {
-            resources.versions.mutate_vec(|versions| {
-                versions[index] = version;
-            });
-        }
-        Err(index) => {
-            resources
-                .versions
-                .mutate_vec(|versions| versions.insert(index, version));
-        }
-    }
-}
-
-fn upsert_resource_replica(resources: &mut ResourceVersionStatus, replica: ResourceNodeStatus) {
-    match resources
-        .replicas
-        .binary_search_by(|existing| existing.key.cmp(&replica.key))
-    {
-        Ok(index) => {
-            resources.replicas.mutate_vec(|replicas| {
-                replicas[index] = replica;
-            });
-        }
-        Err(index) => {
-            resources
-                .replicas
-                .mutate_vec(|replicas| replicas.insert(index, replica));
-        }
-    }
-}
-
-fn load_value<T: DeserializeOwned>(
-    keyspace: &Keyspace,
-    key: &[u8],
-) -> Result<Option<T>, ConsensusError> {
-    let Some(bytes) = keyspace
-        .get(key)
-        .map_err(|_| ConsensusError::OpenKeyspace)?
-    else {
-        return Ok(None);
-    };
-    storage_decode(bytes.as_ref())
-        .map(Some)
-        .map_err(|_| ConsensusError::Deserialize)
-}
-
 fn read_key<T: DeserializeOwned>(keyspace: &Keyspace, key: &[u8]) -> io::Result<Option<T>> {
     let Some(bytes) = keyspace.get(key).map_err(io_error)? else {
         return Ok(None);
     };
-    storage_decode(bytes.as_ref())
-}
-
-fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Result<()> {
-    keyspace
-        .insert(key, storage_encode(value)?)
-        .map_err(io_error)?;
-    Ok(())
+    storage_decode(bytes.as_ref()).map(Some)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, io::Cursor, ops::RangeInclusive, sync::Arc as StdArc};
+    use std::{collections::BTreeSet, ops::RangeInclusive};
 
     use fjall::Database;
     use meticulous::OptionExt as _;
@@ -3563,9 +3015,7 @@ mod tests {
     };
     use openraft::{
         entry::RaftEntry,
-        storage::{
-            RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftSnapshotBuilder, RaftStateMachine,
-        },
+        storage::{RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
         type_config::alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf},
         vote::RaftLeaderIdExt,
     };
@@ -3573,12 +3023,11 @@ mod tests {
 
     use super::{
         ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
-        GossipNode, GossipState, KEY_CLUSTER_SCHEDULE, KEY_SNAPSHOT, ProtocolOriginError,
-        StateMachineChanges, StateMachineData, TransactionCommandResult, TransactionMutationError,
-        TransactionOutcome, TransactionStatement, TransactionStepEffect, TransactionStepResult,
-        TypeConfig, UserCredentials, apply_consensus_command, apply_transaction_step_effect,
-        io_error, load_value, read_key, storage_decode, storage_encode, validate_protocol_origin,
-        write_key,
+        GossipNode, GossipState, ProtocolOriginError, ResourceRecords, StateMachineChanges,
+        StateMachineData, TransactionCommandResult, TransactionMutationError, TransactionOutcome,
+        TransactionStatement, TransactionStepEffect, TransactionStepResult, TypeConfig,
+        UserCredentials, apply_consensus_command, apply_transaction_step_effect, io_error,
+        storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
@@ -3998,7 +3447,8 @@ mod tests {
             schedule: Some(Box::new(domain_schedule("tenant"))),
         };
 
-        let bytes = storage_encode(&command).expect("command should encode");
+        let bytes = crate::durable_batch::DurableBatch::encode(&command, 1024)
+            .expect("command should encode");
         let decoded: ConsensusCommand = storage_decode(&bytes).expect("command should decode");
         assert_eq!(decoded, command);
 
@@ -4017,7 +3467,7 @@ mod tests {
     #[test]
     fn apply_consensus_command_replaces_sorts_and_clears_schedule() {
         let mut state = StateMachineData {
-            schedule: ClusterSchedule::from_iter([domain_schedule("zeta")]),
+            schedule: ClusterSchedule::from_iter([domain_schedule("zeta")]).into(),
             ..Default::default()
         };
 
@@ -4093,7 +3543,7 @@ mod tests {
     fn schedule_publication_rejects_a_changed_base() {
         let committed = domain_schedule("tenant");
         let mut state = StateMachineData {
-            schedule: ClusterSchedule::from_iter([committed.clone()]),
+            schedule: ClusterSchedule::from_iter([committed.clone()]).into(),
             ..Default::default()
         };
 
@@ -4334,7 +3784,7 @@ mod tests {
     #[test]
     fn apply_consensus_command_tracks_resource_versions_and_replicas() {
         let mut state = StateMachineData {
-            resources: ResourceVersionStatus::default(),
+            resources: ResourceRecords::default(),
             ..Default::default()
         };
 
@@ -4346,8 +3796,7 @@ mod tests {
             },
         );
         assert_eq!(
-            state
-                .resources
+            ResourceVersionStatus::from(&state.resources)
                 .next_version_by_resource
                 .iter()
                 .cloned()
@@ -4374,7 +3823,12 @@ mod tests {
             },
         );
         assert_eq!(
-            state.resources.versions.iter().cloned().collect::<Vec<_>>(),
+            state
+                .resources
+                .versions
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
             vec![version.clone()]
         );
 
@@ -4398,7 +3852,12 @@ mod tests {
             },
         );
         assert_eq!(
-            state.resources.replicas.iter().cloned().collect::<Vec<_>>(),
+            state
+                .resources
+                .replicas
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
             vec![replica]
         );
     }
@@ -4414,7 +3873,7 @@ mod tests {
                 cordoned: true,
             },
         );
-        assert!(state.cordoned_node_ids.contains("node-2"));
+        assert!(state.cordoned_node_ids.contains_key("node-2"));
 
         apply_consensus_command(
             &mut state,
@@ -4423,7 +3882,7 @@ mod tests {
                 cordoned: false,
             },
         );
-        assert!(!state.cordoned_node_ids.contains("node-2"));
+        assert!(!state.cordoned_node_ids.contains_key("node-2"));
     }
 
     #[test]
@@ -4459,42 +3918,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn store_restores_legacy_schedule_and_detects_saved_vote() {
-        let db = temp_database();
-        let schedule_keyspace = db
-            .keyspace("raft_schedule", fjall::KeyspaceCreateOptions::default)
-            .expect("schedule keyspace");
-        let schedule = ClusterSchedule::from_iter([domain_schedule("tenant")]);
-        write_key(&schedule_keyspace, KEY_CLUSTER_SCHEDULE, &schedule).expect("write schedule");
-
-        let store = FjallStore::from_database(db).expect("store should open");
-        assert_eq!(
-            store
-                .inner
-                .state_machine
-                .read()
-                .await
-                .schedule
-                .domains
-                .keys()
-                .map(DomainName::as_str)
-                .collect::<Vec<_>>(),
-            vec!["tenant"]
-        );
-        assert!(!store.has_raft_state().await);
-
-        store
-            .inner
-            .write_vote(&VoteOf::new(
-                7,
-                ClusterNodeName::parse("node-1").expect("valid name"),
-            ))
-            .await
-            .expect("vote should persist");
-        assert!(store.has_raft_state().await);
-    }
-
     /// The handle `get_log_reader` returns reads the log and the vote and carries nothing else.
     ///
     /// `AmbiguousIfImpl` has one impl that covers every type and one per mutating storage trait.
@@ -4518,7 +3941,9 @@ mod tests {
     #[tokio::test]
     async fn log_reader_returns_the_requested_range_in_index_order() {
         let mut store =
-            StdArc::new(FjallStore::from_database(temp_database()).expect("store should open"));
+            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
+                .await
+                .expect("store should open");
         let vote = VoteOf::new(4, ClusterNodeName::parse("node-1").expect("valid name"));
         RaftLogStorage::<TypeConfig>::save_vote(&mut store, &vote)
             .await
@@ -4566,7 +3991,9 @@ mod tests {
     #[tokio::test]
     async fn log_reader_observes_writes_the_storage_owner_makes() {
         let mut store =
-            StdArc::new(FjallStore::from_database(temp_database()).expect("store should open"));
+            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
+                .await
+                .expect("store should open");
         let mut reader = RaftLogStorage::<TypeConfig>::get_log_reader(&mut store).await;
         assert!(
             reader
@@ -4610,80 +4037,47 @@ mod tests {
         assert_eq!(state.last_purged_log_id.map(|log_id| log_id.index), Some(2));
         assert_eq!(state.last_log_id.map(|log_id| log_id.index), Some(4));
     }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use openraft::{entry::EntryPayload, storage::RaftStateMachine as _, vote::RaftLeaderId as _};
+
+    use super::*;
 
     #[tokio::test]
-    async fn snapshot_build_and_install_roundtrip_preserves_state() {
-        let tenant = domain("tenant");
-        let state = StateMachineData {
-            schedule: ClusterSchedule::from_iter([domain_schedule("tenant")]),
-            domains: [(tenant, running_domain_state("tenant"))]
-                .into_iter()
-                .collect(),
-            ..Default::default()
+    async fn failed_application_does_not_publish_state_or_applied_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let database = Database::builder(directory.path()).open()?;
+        let mut store =
+            FjallStore::from_database(database, nervix_execution::Executor::default()).await?;
+        let mut notifications = store.inner.resource_tx.subscribe();
+        let domain = DomainName::try_from("durability")?;
+        let identifier = ResourceName::parse("artifact")?;
+        let command = ConsensusCommand::CreateResourceCatalog { domain, identifier };
+        store
+            .inner
+            .faults
+            .fail_next(command.to_string(), StorageBoundary::BeforeCommit);
+        let entry = EntryOf::<TypeConfig> {
+            log_id: LogIdOf::new(
+                CommittedLeaderIdOf::<TypeConfig>::new(1, ClusterNodeName::parse("node-1")?),
+                1,
+            ),
+            payload: EntryPayload::Normal(command),
         };
-        let mut source = StdArc::new(
-            FjallStore::from_database(temp_database()).expect("source store should open"),
+        let result = store
+            .apply(futures_util::stream::iter([Ok((entry, None))]))
+            .await;
+        assert!(result.is_err());
+        assert!(!notifications.has_changed()?);
+        assert_eq!(store.applied_state().await?.0, None);
+        assert_eq!(
+            *store.inner.state_machine.read(),
+            StateMachineData::default()
         );
-        *source.inner.state_machine.write().await = state.clone();
-
-        let built = RaftSnapshotBuilder::<TypeConfig>::build_snapshot(&mut source)
-            .await
-            .expect("snapshot should build");
-        let meta = built.meta.clone();
-        let bytes = built.snapshot.into_inner();
-        let mut target = StdArc::new(
-            FjallStore::from_database(temp_database()).expect("target store should open"),
-        );
-
-        RaftStateMachine::<TypeConfig>::install_snapshot(
-            &mut target,
-            &meta,
-            Cursor::new(bytes.clone()),
-        )
-        .await
-        .expect("snapshot should install");
-
-        assert_eq!(*target.inner.state_machine.read().await, state);
-        let persisted: StateMachineData = read_key(&target.inner.sm, super::KEY_STATE_MACHINE)
-            .expect("persisted state should read")
-            .expect("persisted state should exist");
-        assert_eq!(persisted, state);
-        let current = RaftStateMachine::<TypeConfig>::get_current_snapshot(&mut target)
-            .await
-            .expect("current snapshot should read")
-            .expect("current snapshot should exist");
-        assert_eq!(current.meta, meta);
-        assert_eq!(current.snapshot.into_inner(), bytes);
-        assert!(
-            read_key::<super::StoredSnapshotData>(&target.inner.snapshot, KEY_SNAPSHOT)
-                .expect("stored snapshot should read")
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn key_helpers_roundtrip_and_missing_values() {
-        let db = temp_database();
-        let keyspace = db
-            .keyspace("test_keys", fjall::KeyspaceCreateOptions::default)
-            .expect("keyspace");
-
-        write_key(&keyspace, b"name", &"raft").expect("write should succeed");
-
-        let read_back: Option<String> = read_key(&keyspace, b"name").expect("read should succeed");
-        assert_eq!(read_back.as_deref(), Some("raft"));
-
-        let loaded: Option<String> = load_value(&keyspace, b"name").expect("load should succeed");
-        assert_eq!(loaded.as_deref(), Some("raft"));
-
-        let missing: Option<String> =
-            load_value(&keyspace, b"missing").expect("missing load should succeed");
-        assert_eq!(missing, None);
-
-        keyspace
-            .insert(b"broken", b"not-cbor")
-            .expect("raw insert should succeed");
-        let err = load_value::<String>(&keyspace, b"broken").expect_err("invalid value must fail");
-        assert!(matches!(err, ConsensusError::Deserialize));
+        notifications.borrow_and_update();
+        Ok(())
     }
 }

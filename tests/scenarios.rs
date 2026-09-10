@@ -3541,6 +3541,45 @@ async fn when_transaction_commit_pause_is_released(
     );
 }
 
+#[given(expr = "consensus storage on the leader fails {word} committing domain {string}")]
+async fn given_consensus_storage_failure(
+    world: &mut ScenarioWorld,
+    boundary: String,
+    domain: String,
+) {
+    let leader = current_leader_node(world).await;
+    world
+        .placeholders
+        .insert("storage_node".into(), leader.clone());
+    world.fault_injection.fail_consensus_storage(
+        &crate::common::cluster::node_name(&leader),
+        format!("put-domain:{domain}"),
+        match boundary.as_str() {
+            "before" => nervix_consensus::StorageBoundary::BeforeCommit,
+            "after" => nervix_consensus::StorageBoundary::AfterSync,
+            _ => panic!("the fixture names a before or after storage boundary"),
+        },
+    );
+}
+
+#[then(expr = "the storage-failed node has no published domain {string}")]
+async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, domain: String) {
+    use meticulous::OptionExt as _;
+    let node = world
+        .placeholders
+        .get("storage_node")
+        .verified("the preceding storage fault selected this node");
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(node));
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        observer.current_domain(&domain).await.is_none(),
+        "failed state application published the domain before durable success"
+    );
+}
+
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
     world.active_session = None;

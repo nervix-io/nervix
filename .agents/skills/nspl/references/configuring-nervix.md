@@ -21,6 +21,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
+| Administrative durability, storage errors, and recovery of uncertain commits | `Control Plane` → `Durability and recovery` |
 | Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
 | Expressions, casts, and built-in functions | `Filter-Map Functions` |
 | Trusted Roto user-defined expression functions | `User-Defined Functions` |
