@@ -18233,6 +18233,7 @@ impl Application {
             ConsensusSettings {
                 cluster_name: cluster_id.clone(),
                 node_id: node_id.clone(),
+                interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
                 interconnect: interconnect.clone(),
                 node_unavailability_timeout,
                 raft_heartbeat_interval,
@@ -20560,6 +20561,7 @@ mod tests {
             ConsensusSettings {
                 cluster_name: "test".to_string(),
                 node_id: expected_leader.clone(),
+                interconnect_advertise_addr: interconnect.local_addr().to_string(),
                 interconnect: interconnect.clone(),
                 node_unavailability_timeout: Duration::from_secs(10),
                 raft_heartbeat_interval: Duration::from_millis(50),

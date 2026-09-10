@@ -338,6 +338,7 @@ static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ConsensusSettings {
     pub cluster_name: String,
     pub node_id: ClusterNodeName,
+    pub interconnect_advertise_addr: String,
     pub interconnect: Transport,
     pub node_unavailability_timeout: Duration,
     pub raft_heartbeat_interval: Duration,
@@ -885,6 +886,7 @@ struct ConsensusState {
     // The Raft runtime independently owns the store as both log storage and state machine.
     store: StdArc<FjallStore>,
     local_node_id: ClusterNodeName,
+    interconnect_advertise_addr: String,
     interconnect: Transport,
     node_unavailability_timeout: Duration,
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
@@ -1044,6 +1046,7 @@ impl Consensus {
                 raft,
                 store,
                 local_node_id: settings.node_id,
+                interconnect_advertise_addr: settings.interconnect_advertise_addr,
                 interconnect: settings.interconnect,
                 node_unavailability_timeout: settings.node_unavailability_timeout,
                 peer_health: RwLock::new(BTreeMap::new()),
@@ -1888,7 +1891,7 @@ impl Administrator {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
-            BasicNode::new(self.inner.local_node_id.to_string()),
+            BasicNode::new(self.inner.interconnect_advertise_addr.clone()),
         );
         self.inner
             .raft
