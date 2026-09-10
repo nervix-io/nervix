@@ -755,6 +755,10 @@ struct RuntimeInner {
     /// Also held by the attached `RemoteDispatcher`, which must allocate correlation ids from the
     /// same registry the runtime resolves incoming acknowledgements against.
     remote_dispatch: Arc<RemoteDispatchRegistry>,
+    /// Cancels remote acknowledgement watchers once this runtime has drained its domain tasks.
+    remote_ack_watcher_shutdown: CancellationToken,
+    /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
+    remote_ack_watcher_tasks: TaskTracker,
     state_checkpoint_notifications: DashMap<RuntimeStatePlacement, Arc<Notify>, RandomState>,
     pending_state_replica_syncs:
         DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,

@@ -986,7 +986,7 @@ impl Runtime {
         let Some(dispatcher) = self.inner.remote_dispatcher.read().clone() else {
             return;
         };
-        tokio::spawn(async move {
+        self.spawn_remote_ack_watcher_task(async move {
             let mut completion = completion;
             loop {
                 tokio::select! {
@@ -1082,6 +1082,23 @@ impl Runtime {
         });
     }
 
+    fn spawn_remote_ack_watcher_task(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let shutdown = self.inner.remote_ack_watcher_shutdown.clone();
+        if shutdown.is_cancelled() {
+            return;
+        }
+        self.inner.remote_ack_watcher_tasks.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                _ = task => {}
+            }
+        });
+    }
+
     pub(in crate::runtime) fn remote_runtime_consumers_for_schedule(
         schedule: &DomainSchedule,
         local_node_id: &ClusterNodeName,
@@ -1159,12 +1176,54 @@ impl Runtime {
 mod tests {
     use nervix_models::{AckMode, ClusterNodeName, RemoteAckOutcome, RemoteAckResolution};
     use tokio::{
-        sync::watch,
+        sync::{oneshot, watch},
         time::{Duration, Instant, sleep, timeout},
     };
 
     use super::*;
     use crate::runtime_ack::{AckOutcome, AckSet};
+
+    struct DropNotice(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropNotice {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                sender
+                    .send(())
+                    .means_peer_left("remote ACK watcher cancellation test");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_cancels_remote_ack_watcher_tasks() {
+        let runtime = Runtime::default();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        runtime.spawn_remote_ack_watcher_task(async move {
+            let _notice = DropNotice(Some(dropped_tx));
+            started_tx
+                .send(())
+                .means_peer_left("remote ACK watcher cancellation test starter");
+            std::future::pending::<()>().await;
+        });
+        started_rx
+            .await
+            .assured("the tracked watcher sends before entering its pending state");
+
+        runtime.shutdown().await;
+
+        let dropped = timeout(Duration::from_secs(1), dropped_rx).await;
+        assert!(
+            dropped.is_ok(),
+            "runtime shutdown should cancel a pending remote ACK watcher"
+        );
+        dropped
+            .verified("the watcher cancellation deadline was checked by the assertion above")
+            .assured("dropping the watcher always sends its drop notice");
+        assert!(runtime.inner.remote_ack_watcher_tasks.is_empty());
+    }
+
     #[tokio::test]
     async fn ack_alive_resets_ingestor_ack_timeout() {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);

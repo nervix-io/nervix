@@ -126,6 +126,8 @@ impl Runtime {
                     pending_acks: DashMap::default(),
                     pending_relay_admissions: DashMap::default(),
                 }),
+                remote_ack_watcher_shutdown: CancellationToken::new(),
+                remote_ack_watcher_tasks: TaskTracker::new(),
                 state_checkpoint_notifications: DashMap::default(),
                 pending_state_replica_syncs: DashMap::default(),
                 pending_state_checkpoint_announcements: DashMap::default(),
@@ -419,6 +421,9 @@ impl Runtime {
         self.inner.endpoint_bindings.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.ingestor_readiness.clear();
+        self.inner.remote_ack_watcher_shutdown.cancel();
+        self.inner.remote_ack_watcher_tasks.close();
+        self.inner.remote_ack_watcher_tasks.wait().await;
         self.inner.pending_state_replica_syncs.clear();
         self.inner.pending_state_checkpoint_announcements.clear();
         self.inner.state_replication_tasks.close();
