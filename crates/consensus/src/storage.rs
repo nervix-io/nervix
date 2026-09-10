@@ -394,6 +394,16 @@ impl FjallStore {
             .await
     }
 
+    /// Join storage work whose async caller was cancelled after its blocking job began.
+    ///
+    /// Raft is stopped before this barrier is submitted, so no new storage operation can be
+    /// admitted behind it. The consensus storage class has one ordered worker; reaching this
+    /// no-op therefore proves every earlier blocking job has returned and released its store
+    /// handle.
+    pub(super) async fn wait_for_idle(&self) -> io::Result<()> {
+        self.inner.run(MemoryClass::Management, |_, _| Ok(())).await
+    }
+
     fn log_reader(&self) -> FjallLogReader {
         FjallLogReader {
             inner: self.inner.clone(),

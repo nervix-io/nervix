@@ -1251,6 +1251,9 @@ impl Consensus {
             "openraft joins its core task inside this call and always answers Ok; the core's own \
              outcome is not exposed here",
         );
+        self.inner.store.wait_for_idle().await.assured(
+            "the live consensus executor owns the ordered worker and its no-op barrier cannot fail",
+        );
         let handle = self.inner.metrics_task.lock().take();
         if let Some(handle) = handle {
             handle.abort();
