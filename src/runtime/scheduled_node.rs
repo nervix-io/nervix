@@ -52,6 +52,23 @@ impl ScheduledNodeTask {
             .await
     }
 
+    pub(super) async fn checkpoint_via(
+        commands: &mpsc::Sender<ProcessorNodeCommand>,
+    ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
+        let (response, receiver) = oneshot::channel();
+        commands
+            .send(ProcessorNodeCommand::Checkpoint { response })
+            .await
+            .map_err(|_| {
+                OwnershipHandoffError::checkpoint(
+                    "scheduled node task is unavailable for checkpoint",
+                )
+            })?;
+        receiver.await.map_err(|_| {
+            OwnershipHandoffError::checkpoint("scheduled node task dropped its checkpoint response")
+        })?
+    }
+
     pub(super) async fn handoff_within(
         mut self,
         grace_period: Duration,

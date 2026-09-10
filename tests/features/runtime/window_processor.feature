@@ -730,8 +730,8 @@ Feature: Window processor runtime behavior
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR duration_latency FROM metrics
-        WIDTH 300ms DURATION
-        STEP 300ms DURATION
+        WIDTH 2s DURATION
+        STEP 2s DURATION
         BRANCHED BY by_metric_ingestor
         TO metric_summaries
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), total_latency = SUM(input.latency)

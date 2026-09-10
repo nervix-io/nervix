@@ -80,9 +80,12 @@ pub use transaction::{
 pub enum ConsensusCommand {
     ReplaceDomainSchedule {
         domain: DomainName,
+        expected_schedule: Option<Box<DomainSchedule>>,
         schedule: Option<Box<DomainSchedule>>,
     },
     PutDomainAndSchedule {
+        expected_domain: Option<Box<DomainState>>,
+        expected_schedule: Option<Box<DomainSchedule>>,
         domain: Box<DomainState>,
         schedule: Option<Box<DomainSchedule>>,
     },
@@ -186,6 +189,7 @@ pub enum ConsensusCommand {
 )]
 pub enum ConsensusResponse {
     Applied,
+    Conflict(String),
     Transaction(Box<TransactionMutationResponse>),
 }
 
@@ -200,7 +204,9 @@ pub struct UserCredentials {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReplaceDomainSchedule { domain, schedule } => {
+            Self::ReplaceDomainSchedule {
+                domain, schedule, ..
+            } => {
                 if schedule.is_some() {
                     write!(f, "replace-domain-schedule:{}", domain.as_str())
                 } else {
@@ -290,6 +296,7 @@ impl std::fmt::Display for ConsensusResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Applied => f.write_str("ok"),
+            Self::Conflict(reason) => write!(f, "conflict:{reason}"),
             Self::Transaction(response) => match &response.result {
                 Ok(transaction) => write!(f, "transaction:{}", transaction.id),
                 Err(error) => write!(f, "transaction-error:{error}"),
@@ -664,6 +671,10 @@ pub enum ConsensusError {
     Transport,
     #[error("{0}")]
     Write(String),
+    #[error("consensus state changed: {0}")]
+    Conflict(String),
+    #[error("raft returned an unexpected response to a state mutation")]
+    UnexpectedResponse,
     #[error("raft proposal lost leadership")]
     LeadershipLost { leader_id: Option<ClusterNodeName> },
     #[error("node '{0}' is not a raft member")]
@@ -1502,17 +1513,24 @@ impl Proposer {
     pub async fn replace_domain_schedule(
         &self,
         domain: DomainName,
+        expected_schedule: Option<DomainSchedule>,
         schedule: Option<DomainSchedule>,
     ) -> Result<(), ConsensusError> {
-        self.inner
+        let response = self
+            .inner
             .raft
             .client_write(ConsensusCommand::ReplaceDomainSchedule {
                 domain,
+                expected_schedule: expected_schedule.map(Box::new),
                 schedule: schedule.map(Box::new),
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
+            .map_err(ConsensusError::from)?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
+            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
     }
 
     pub async fn put_domain(&self, domain: DomainState) -> Result<(), ConsensusError> {
@@ -1528,18 +1546,27 @@ impl Proposer {
 
     pub async fn put_domain_and_schedule(
         &self,
+        expected_domain: Option<DomainState>,
+        expected_schedule: Option<DomainSchedule>,
         domain: DomainState,
         schedule: Option<DomainSchedule>,
     ) -> Result<(), ConsensusError> {
-        self.inner
+        let response = self
+            .inner
             .raft
             .client_write(ConsensusCommand::PutDomainAndSchedule {
+                expected_domain: expected_domain.map(Box::new),
+                expected_schedule: expected_schedule.map(Box::new),
                 domain: Box::new(domain),
                 schedule: schedule.map(Box::new),
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
+            .map_err(ConsensusError::from)?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
+            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
     }
 
     pub async fn start_domain(
@@ -2824,6 +2851,16 @@ impl AppliedConsensusCommand {
         }
     }
 
+    fn conflict(reason: String) -> Self {
+        Self {
+            response: ConsensusResponse::Conflict(reason),
+            schedule_changed: false,
+            domains_changed: false,
+            resources_changed: false,
+            transactions_changed: false,
+        }
+    }
+
     fn transaction(
         result: Result<ReplicatedTransaction, TransactionMutationError>,
         changes: StateMachineChanges,
@@ -2846,11 +2883,38 @@ fn apply_consensus_command(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
-        ConsensusCommand::ReplaceDomainSchedule { domain, schedule } => {
+        ConsensusCommand::ReplaceDomainSchedule {
+            domain,
+            expected_schedule,
+            schedule,
+        } => {
+            if state.schedule.domain(domain) != expected_schedule.as_deref() {
+                return AppliedConsensusCommand::conflict(format!(
+                    "domain '{}' schedule changed",
+                    domain.as_str()
+                ));
+            }
             state.replace_domain_schedule(domain, schedule.as_deref());
             changes.schedule_changed = true;
         }
-        ConsensusCommand::PutDomainAndSchedule { domain, schedule } => {
+        ConsensusCommand::PutDomainAndSchedule {
+            expected_domain,
+            expected_schedule,
+            domain,
+            schedule,
+        } => {
+            if state.domains.get(&domain.id) != expected_domain.as_deref() {
+                return AppliedConsensusCommand::conflict(format!(
+                    "domain '{}' configuration changed",
+                    domain.id.as_str()
+                ));
+            }
+            if state.schedule.domain(&domain.id) != expected_schedule.as_deref() {
+                return AppliedConsensusCommand::conflict(format!(
+                    "domain '{}' schedule changed",
+                    domain.id.as_str()
+                ));
+            }
             state
                 .domains
                 .insert(domain.id.clone(), domain.as_ref().clone());
@@ -3912,10 +3976,12 @@ mod tests {
     fn consensus_command_display_distinguishes_replace_and_clear() {
         let replace = ConsensusCommand::ReplaceDomainSchedule {
             domain: domain("tenant"),
+            expected_schedule: None,
             schedule: Some(Box::new(domain_schedule("tenant"))),
         };
         let clear = ConsensusCommand::ReplaceDomainSchedule {
             domain: domain("tenant"),
+            expected_schedule: Some(Box::new(domain_schedule("tenant"))),
             schedule: None,
         };
 
@@ -3928,6 +3994,7 @@ mod tests {
     fn encode_decode_roundtrip_and_invalid_bytes_fail() {
         let command = ConsensusCommand::ReplaceDomainSchedule {
             domain: domain("tenant"),
+            expected_schedule: None,
             schedule: Some(Box::new(domain_schedule("tenant"))),
         };
 
@@ -3958,6 +4025,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
                 domain: domain("alpha"),
+                expected_schedule: None,
                 schedule: Some(Box::new(domain_schedule("alpha"))),
             },
         );
@@ -3975,6 +4043,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
                 domain: domain("alpha"),
+                expected_schedule: Some(Box::new(domain_schedule("alpha"))),
                 schedule: Some(Box::new(domain_schedule("alpha"))),
             },
         );
@@ -3984,6 +4053,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
                 domain: domain("zeta"),
+                expected_schedule: Some(Box::new(domain_schedule("zeta"))),
                 schedule: None,
             },
         );
@@ -4008,6 +4078,8 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomainAndSchedule {
+                expected_domain: None,
+                expected_schedule: None,
                 domain: Box::new(domain_state.clone()),
                 schedule: Some(Box::new(schedule.clone())),
             },
@@ -4015,6 +4087,31 @@ mod tests {
 
         assert_eq!(state.domains.get(&domain("tenant")), Some(&domain_state));
         assert_eq!(state.schedule.domain(&domain("tenant")), Some(&schedule));
+    }
+
+    #[test]
+    fn schedule_publication_rejects_a_changed_base() {
+        let committed = domain_schedule("tenant");
+        let mut state = StateMachineData {
+            schedule: ClusterSchedule::from_iter([committed.clone()]),
+            ..Default::default()
+        };
+
+        let applied = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReplaceDomainSchedule {
+                domain: domain("tenant"),
+                expected_schedule: None,
+                schedule: None,
+            },
+        );
+
+        assert_eq!(
+            applied.response,
+            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+        );
+        assert_eq!(state.schedule.domain(&domain("tenant")), Some(&committed));
+        assert!(!applied.schedule_changed);
     }
 
     #[test]
@@ -4045,6 +4142,7 @@ mod tests {
             &mut state,
             &ConsensusCommand::ReplaceDomainSchedule {
                 domain: domain("tenant"),
+                expected_schedule: None,
                 schedule: Some(Box::new(domain_schedule("tenant"))),
             },
         );

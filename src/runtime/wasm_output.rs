@@ -1412,13 +1412,53 @@ pub(super) async fn persist_wasm_guest_state(
     replicated_state: &ReplicatedWasmProcessorState,
     instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
 ) -> Result<(), String> {
+    persist_wasm_guest_state_with_failure_mode(
+        runtime,
+        processor,
+        replicated_state,
+        instance,
+        WasmStateSaveFailureMode::InvalidateInstance,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+pub(super) async fn checkpoint_wasm_guest_state(
+    runtime: &Runtime,
+    processor: &ModelName,
+    replicated_state: &ReplicatedWasmProcessorState,
+    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+) -> OwnershipHandoffResult<()> {
+    persist_wasm_guest_state_with_failure_mode(
+        runtime,
+        processor,
+        replicated_state,
+        instance,
+        WasmStateSaveFailureMode::RetainInstance,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum WasmStateSaveFailureMode {
+    InvalidateInstance,
+    RetainInstance,
+}
+
+async fn persist_wasm_guest_state_with_failure_mode(
+    runtime: &Runtime,
+    processor: &ModelName,
+    replicated_state: &ReplicatedWasmProcessorState,
+    instance: &mut Option<Box<nervix_wasm::WasmBranchInstance>>,
+    failure_mode: WasmStateSaveFailureMode,
+) -> OwnershipHandoffResult<()> {
     let save_result = match instance.as_mut() {
         Some(instance) => instance.save_state().await,
         None => {
-            return Err(format!(
+            return Err(OwnershipHandoffError::checkpoint(format!(
                 "wasm processor '{}' instance is unavailable while saving guest state",
                 processor.as_str()
-            ));
+            )));
         }
     };
     let guest_state = match save_result {
@@ -1430,18 +1470,21 @@ pub(super) async fn persist_wasm_guest_state(
                 processor.as_str(),
                 error
             );
-            if resource_limit_exceeded {
+            if resource_limit_exceeded
+                && let WasmStateSaveFailureMode::InvalidateInstance = failure_mode
+            {
                 *instance = None;
             }
-            return Err(reason);
+            return Err(OwnershipHandoffError::checkpoint(reason));
         }
     };
     let (lsm, payload) = replicated_state
         .replace_guest_state(guest_state)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
     runtime
         .persist_wasm_processor_snapshot(replicated_state, lsm, &payload)
         .await
+        .map_err(OwnershipHandoffError::checkpoint)
 }
 
 pub(super) fn relay_batch_from_wasm_output(

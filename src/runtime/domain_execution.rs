@@ -195,9 +195,6 @@ impl Runtime {
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
         if stopped || !self.inner.domains.contains_key(domain) {
-            if stopped {
-                self.purge_stopped_domain_runtime_state(domain)?;
-            }
             self.clear_domain_graph_handle(domain).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());

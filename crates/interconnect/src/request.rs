@@ -39,7 +39,11 @@ use tokio::{
 use triomphe::Arc;
 
 use super::{
-    ControlEnvelope, DescribeIngestorRequest, IngestorDescribeEnvelope, PoolClass, Transport,
+    ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
+    ConfirmOwnershipHandoffStateRequest, ControlEnvelope, DescribeIngestorRequest,
+    DiscardOwnershipHandoffStateRequest, ForcedOwnershipRecoveryPreparation,
+    IngestorDescribeEnvelope, OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
+    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest, Transport,
     TransportError, wire,
 };
 
@@ -654,4 +658,52 @@ impl InterconnectRequest for DescribeIngestorRequest {
 
     const NAME: &'static str = "describe_ingestor";
     const TIMEOUT: Duration = Duration::from_secs(10);
+}
+
+impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<Vec<OwnershipHandoffCheckpoint>>;
+
+    const NAME: &'static str = "capture_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for PrepareOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "prepare_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for ConfirmOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "confirm_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for PrepareForcedOwnershipRecoveryRequest {
+    type Response = OwnershipHandoffResponse<ForcedOwnershipRecoveryPreparation>;
+
+    const NAME: &'static str = "prepare_forced_ownership_recovery";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for ActivateOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "activate_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "discard_ownership_handoff_state";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(60);
 }
