@@ -315,7 +315,7 @@ Feature: Web console NSPL REPL
     Then selector ".resource-dialog" contains "console_bundle"
     And selector ".resource-dialog" contains "VERSIONS"
     When selector ".resource-dialog .file-upload-input" uploads resource directory "console_upload_dir"
-    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    Then selector ".resource-upload-status" contains "published resource version 1"
     And selector ".resource-version-list" contains "version 1"
     And selector ".resource-version-list" contains "2 files"
     And selector ".resource-version-list" contains "nested"

@@ -34,7 +34,7 @@ Feature: Domain-owned resources
       """
     Then the last command output contains
       """
-      uploaded resource version 1
+      published resource version 1
       """
     When client "beta" executes these NSPL commands
       """
@@ -44,7 +44,7 @@ Feature: Domain-owned resources
       """
     Then the last command output contains
       """
-      uploaded resource version 2
+      published resource version 2
       """
     When client "alpha" executes these NSPL commands
       """

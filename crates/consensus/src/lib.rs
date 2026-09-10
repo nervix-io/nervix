@@ -28,8 +28,8 @@ use nervix_interconnect::Transport;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     DomainClockAuthority, DomainClockState, DomainName, DomainPace, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceVersion,
-    ResourceVersionStatus, Statement, UserName,
+    DomainStartPoint, DomainState, DomainStatus, ResourceName, ResourceNodeStatus, ResourceUpload,
+    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, UserName,
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -126,12 +126,13 @@ pub enum ConsensusCommand {
         domain: DomainName,
         identifier: ResourceName,
     },
-    AdvanceResourceVersion {
-        domain: DomainName,
-        identifier: ResourceName,
+    BeginResourceUpload {
+        key: Box<ResourceUploadKey>,
     },
-    PutResourceVersion {
+    PublishResourceUpload {
+        key: Box<ResourceUploadKey>,
         resource: Box<ResourceVersion>,
+        replica: Box<ResourceNodeStatus>,
     },
     PutResourceReplica {
         replica: Box<ResourceNodeStatus>,
@@ -239,20 +240,24 @@ impl std::fmt::Display for ConsensusCommand {
                     identifier.as_str()
                 )
             }
-            Self::AdvanceResourceVersion { domain, identifier } => {
+            Self::BeginResourceUpload { key } => {
                 write!(
                     f,
-                    "advance-resource-version:{}.{}",
-                    domain.as_str(),
-                    identifier.as_str()
+                    "begin-resource-upload:{}.{}:{}:{}",
+                    key.domain.as_str(),
+                    key.identifier.as_str(),
+                    key.owner.as_str(),
+                    key.identity
                 )
             }
-            Self::PutResourceVersion { resource } => write!(
+            Self::PublishResourceUpload { key, resource, .. } => write!(
                 f,
-                "put-resource-version:{}.{}@{}",
+                "publish-resource-upload:{}.{}@{}:{}:{}",
                 resource.id.domain.as_str(),
                 resource.id.identifier.as_str(),
-                resource.id.version
+                resource.id.version,
+                key.owner.as_str(),
+                key.identity
             ),
             Self::PutResourceReplica { replica } => write!(
                 f,
@@ -1614,31 +1619,32 @@ impl Proposer {
             .map_err(ConsensusError::from)
     }
 
-    pub async fn allocate_resource_version(
+    pub async fn begin_resource_upload(
         &self,
-        domain: &DomainName,
-        identifier: &ResourceName,
-    ) -> Result<u64, ConsensusError> {
-        let resources = self.current_resources().await;
-        if !resources.is_declared(domain, identifier) {
-            return Err(ConsensusError::Write(format!(
-                "resource '{}' does not exist in domain '{}'",
-                identifier.as_str(),
-                domain.as_str()
-            )));
-        }
-        self.inner
+        key: ResourceUploadKey,
+    ) -> Result<ResourceUpload, Report<ConsensusError>> {
+        let response = self
+            .inner
             .raft
-            .client_write(ConsensusCommand::AdvanceResourceVersion {
-                domain: domain.clone(),
-                identifier: identifier.clone(),
+            .client_write(ConsensusCommand::BeginResourceUpload {
+                key: Box::new(key.clone()),
             })
             .await
-            .map(|_| ())
             .map_err(ConsensusError::from)?;
-
-        let resources = self.current_resources().await;
-        Ok(resources.latest_version(domain, identifier).unwrap_or(1))
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_resources()
+                .await
+                .upload(&key)
+                .cloned()
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
     }
 
     pub async fn create_resource_catalog(
@@ -1657,18 +1663,36 @@ impl Proposer {
             .map_err(ConsensusError::from)
     }
 
-    pub async fn put_resource_version(
+    pub async fn publish_resource_upload(
         &self,
+        key: ResourceUploadKey,
         resource: ResourceVersion,
-    ) -> Result<(), ConsensusError> {
-        self.inner
+        replica: ResourceNodeStatus,
+    ) -> Result<ResourceUpload, Report<ConsensusError>> {
+        let response = self
+            .inner
             .raft
-            .client_write(ConsensusCommand::PutResourceVersion {
+            .client_write(ConsensusCommand::PublishResourceUpload {
+                key: Box::new(key.clone()),
                 resource: Box::new(resource),
+                replica: Box::new(replica),
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
+            .map_err(ConsensusError::from)?;
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_resources()
+                .await
+                .upload(&key)
+                .cloned()
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
     }
 
     pub async fn put_resource_replica(
@@ -2544,15 +2568,20 @@ fn apply_consensus_command(
             state.resources.ensure_catalog(domain, identifier);
             changes.resources_changed = true;
         }
-        ConsensusCommand::AdvanceResourceVersion { domain, identifier } => {
-            state.resources.advance_version(domain, identifier);
+        ConsensusCommand::BeginResourceUpload { key } => {
+            if let Err(reason) = state.resources.begin_upload(key) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             changes.resources_changed = true;
         }
-        ConsensusCommand::PutResourceVersion { resource } => {
-            state
-                .resources
-                .versions
-                .insert(resource.id.clone(), resource.as_ref().clone());
+        ConsensusCommand::PublishResourceUpload {
+            key,
+            resource,
+            replica,
+        } => {
+            if let Err(reason) = state.resources.publish_upload(key, resource, replica) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             changes.resources_changed = true;
         }
         ConsensusCommand::PutResourceReplica { replica } => {
@@ -3027,8 +3056,9 @@ mod tests {
         ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
         DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
         DomainStatus, DomainTimeRate, ResourceId, ResourceName, ResourceNodeState,
-        ResourceNodeStatus, ResourceReplicaKey, ResourceVersion, ResourceVersionCounter,
-        ResourceVersionStatus, Statement, Timestamp,
+        ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey,
+        ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
+        Statement, Timestamp,
     };
     use openraft::{
         entry::RaftEntry,
@@ -3400,6 +3430,7 @@ mod tests {
             manifest_checksum: format!("manifest-{version}"),
             file_count: 2,
             total_bytes: 128,
+            archive_bytes: 2048,
             created_at: nervix_models::Timestamp::from_unix_nanos(42),
             created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
         }
@@ -3807,9 +3838,21 @@ mod tests {
 
         apply_consensus_command(
             &mut state,
-            &ConsensusCommand::AdvanceResourceVersion {
+            &ConsensusCommand::CreateResourceCatalog {
                 domain: domain("tenant"),
                 identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
+            },
+        );
+        let upload_key = ResourceUploadKey::new(
+            UserName::parse("uploader").expect("valid user name"),
+            domain("tenant"),
+            ResourceName::parse("fraud_model").expect("valid resource name"),
+            ResourceUploadIdentity::parse("retry-one").expect("valid upload identity"),
+        );
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::BeginResourceUpload {
+                key: Box::new(upload_key.clone()),
             },
         );
         assert_eq!(
@@ -3833,22 +3876,6 @@ mod tests {
         );
 
         let version = resource_version("tenant", "fraud_model", 1);
-        apply_consensus_command(
-            &mut state,
-            &ConsensusCommand::PutResourceVersion {
-                resource: Box::new(version.clone()),
-            },
-        );
-        assert_eq!(
-            state
-                .resources
-                .versions
-                .values()
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec![version.clone()]
-        );
-
         let replica = ResourceNodeStatus {
             key: ResourceReplicaKey::new(
                 domain("tenant"),
@@ -3864,18 +3891,42 @@ mod tests {
         };
         apply_consensus_command(
             &mut state,
-            &ConsensusCommand::PutResourceReplica {
+            &ConsensusCommand::PublishResourceUpload {
+                key: Box::new(upload_key.clone()),
+                resource: Box::new(version.clone()),
                 replica: Box::new(replica.clone()),
             },
         );
+        let resources = ResourceVersionStatus::from(&state.resources);
         assert_eq!(
-            state
-                .resources
-                .replicas
-                .values()
-                .cloned()
-                .collect::<Vec<_>>(),
+            resources.versions.iter().cloned().collect::<Vec<_>>(),
+            vec![version]
+        );
+        assert_eq!(
+            resources.replicas.iter().cloned().collect::<Vec<_>>(),
             vec![replica]
+        );
+        let upload = resources
+            .upload(&upload_key)
+            .expect("the durable upload outcome should remain addressable");
+        assert_eq!(upload.version, 1);
+        assert_eq!(
+            upload.state,
+            ResourceUploadState::Published {
+                root_checksum: "root-1".to_string(),
+            }
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::BeginResourceUpload {
+                key: Box::new(upload_key),
+            },
+        );
+        assert_eq!(
+            ResourceVersionStatus::from(&state.resources).versions.len(),
+            1,
+            "reusing an upload identity must not allocate another version"
         );
     }
 

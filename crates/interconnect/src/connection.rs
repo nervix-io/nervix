@@ -51,6 +51,7 @@ use super::{
 };
 use crate::{
     identity::CertificateIdentity,
+    request::{RequestEnvelope, StreamingResponse},
     wire::{
         ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
         RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
@@ -58,9 +59,14 @@ use crate::{
 };
 
 mod relay;
+mod stream;
+
+pub use stream::IncomingByteStream;
+pub(crate) use stream::OutboundByteStreamRequest;
 
 const CONNECT_PATH: &str = "/v1/connect";
 const CONTROL_PATH: &str = "/v1/control";
+const STREAM_PATH: &str = "/v1/stream";
 const ACK_PATH: &str = "/v1/ack";
 const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
 const RELAY_CANCEL_PATH: &str = "/v1/relay-admissions/cancel";
@@ -144,6 +150,8 @@ struct ClientConnection {
 struct StreamSlotQuotas {
     class: PoolClass,
     shared: StdArc<Semaphore>,
+    resource: StdArc<Semaphore>,
+    snapshot: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
     admission: StdArc<Semaphore>,
@@ -157,6 +165,9 @@ const MANAGEMENT_LIVENESS_STREAMS: usize = 8;
 const MANAGEMENT_ADMISSION_STREAMS: usize = 4;
 const MANAGEMENT_CANCELLATION_STREAMS: usize = 4;
 const MANAGEMENT_TERMINAL_STREAMS: usize = 4;
+const BULK_SHARED_STREAMS: usize = 1;
+const BULK_RESOURCE_STREAMS: usize = 2;
+const BULK_SNAPSHOT_STREAMS: usize = 1;
 
 impl StreamSlotQuotas {
     fn new(class: PoolClass) -> Self {
@@ -164,6 +175,8 @@ impl StreamSlotQuotas {
             return Self {
                 class,
                 shared: StdArc::new(Semaphore::new(MANAGEMENT_SHARED_STREAMS)),
+                resource: StdArc::new(Semaphore::new(0)),
+                snapshot: StdArc::new(Semaphore::new(0)),
                 discovery: StdArc::new(Semaphore::new(MANAGEMENT_DISCOVERY_STREAMS)),
                 liveness: StdArc::new(Semaphore::new(MANAGEMENT_LIVENESS_STREAMS)),
                 admission: StdArc::new(Semaphore::new(MANAGEMENT_ADMISSION_STREAMS)),
@@ -171,9 +184,24 @@ impl StreamSlotQuotas {
                 terminal: StdArc::new(Semaphore::new(MANAGEMENT_TERMINAL_STREAMS)),
             };
         }
+        if class == PoolClass::Bulk {
+            return Self {
+                class,
+                shared: StdArc::new(Semaphore::new(BULK_SHARED_STREAMS)),
+                resource: StdArc::new(Semaphore::new(BULK_RESOURCE_STREAMS)),
+                snapshot: StdArc::new(Semaphore::new(BULK_SNAPSHOT_STREAMS)),
+                discovery: StdArc::new(Semaphore::new(0)),
+                liveness: StdArc::new(Semaphore::new(0)),
+                admission: StdArc::new(Semaphore::new(0)),
+                cancellation: StdArc::new(Semaphore::new(0)),
+                terminal: StdArc::new(Semaphore::new(0)),
+            };
+        }
         Self {
             class,
             shared: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
+            resource: StdArc::new(Semaphore::new(0)),
+            snapshot: StdArc::new(Semaphore::new(0)),
             discovery: StdArc::new(Semaphore::new(0)),
             liveness: StdArc::new(Semaphore::new(0)),
             admission: StdArc::new(Semaphore::new(0)),
@@ -185,6 +213,8 @@ impl StreamSlotQuotas {
     fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
         match subquota {
             RequestSubquota::Shared => &self.shared,
+            RequestSubquota::Resource => &self.resource,
+            RequestSubquota::Snapshot => &self.snapshot,
             RequestSubquota::Discovery => &self.discovery,
             RequestSubquota::Liveness => &self.liveness,
             RequestSubquota::Admission => &self.admission,
@@ -194,7 +224,7 @@ impl StreamSlotQuotas {
     }
 
     async fn drain(&self) {
-        if self.class != PoolClass::Management {
+        if self.class != PoolClass::Management && self.class != PoolClass::Bulk {
             let permits: u32 = self
                 .class
                 .stream_slots_per_connection()
@@ -205,6 +235,26 @@ impl StreamSlotQuotas {
                 .await
                 .assured("interconnect stream-slot semaphores are never closed");
             drop(permit);
+            return;
+        }
+        if self.class == PoolClass::Bulk {
+            let quotas = [
+                (RequestSubquota::Shared, BULK_SHARED_STREAMS),
+                (RequestSubquota::Resource, BULK_RESOURCE_STREAMS),
+                (RequestSubquota::Snapshot, BULK_SNAPSHOT_STREAMS),
+            ];
+            let mut drained = Vec::with_capacity(quotas.len());
+            for (subquota, permits) in quotas {
+                tokio::task::consume_budget().await;
+                let permits: u32 = permits
+                    .try_into()
+                    .assured("bulk stream subquotas are much smaller than u32::MAX");
+                let permit = StdArc::clone(self.for_subquota(subquota))
+                    .acquire_many_owned(permits)
+                    .await
+                    .assured("interconnect stream-slot semaphores are never closed");
+                drained.push(permit);
+            }
             return;
         }
         let quotas = [
@@ -1884,6 +1934,17 @@ impl TransportState {
             return Ok(());
         }
         let path = request.uri().path().to_string();
+        if path == STREAM_PATH {
+            self.handle_stream_request(
+                peer.node_id,
+                peer.advertised_host,
+                peer.class,
+                request.into_body(),
+                respond,
+            )
+            .await?;
+            return Ok(());
+        }
         if path == CONTROL_PATH {
             self.handle_control(
                 peer.addr,
@@ -2124,6 +2185,69 @@ impl TransportState {
         .await
     }
 
+    async fn handle_stream_request(
+        &self,
+        peer_node_id: ClusterNodeName,
+        peer_advertised_host: String,
+        class: PoolClass,
+        body: RecvStream,
+        mut respond: server::SendResponse<Bytes>,
+    ) -> Result<(), Report<TransportError>> {
+        let bytes = read_body(
+            &self.executor,
+            class.memory_class(),
+            class.control_body_limit(&self.executor),
+            self.options.progress_timeout,
+            body,
+        )
+        .await?;
+        let decoded = wire::decode_rkyv::<RequestEnvelope>(
+            &self.executor,
+            class.memory_class(),
+            class.cpu_class(),
+            bytes,
+        )
+        .await?;
+        let (request, _reservation) = decoded.into_parts();
+        if request.class != class {
+            send_static_error(
+                &mut respond,
+                StatusCode::FORBIDDEN,
+                "wrong pool class",
+                self.options.progress_timeout,
+            )
+            .await?;
+            return Ok(());
+        }
+        let handled = tokio::select! {
+            handled = self.requests.handle_stream(
+                &self.executor,
+                peer_node_id,
+                peer_advertised_host,
+                request,
+            ) => handled,
+            reset = poll_fn(|context| respond.poll_reset(context)) => {
+                reset.map_err(TransportError::from)?;
+                return Ok(());
+            }
+        };
+        let handled = match handled {
+            Ok(handled) => handled,
+            Err(error) => {
+                send_static_error(
+                    &mut respond,
+                    StatusCode::BAD_REQUEST,
+                    &error.to_string(),
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let (response, _admission) = handled.into_parts();
+        send_streaming_response(respond, response, self.options.progress_timeout).await
+    }
+
     fn increment_peer(&self, node_id: &ClusterNodeName) -> Result<(), TransportError> {
         match self.peer_connections.entry(node_id.clone()) {
             Entry::Occupied(mut entry) => {
@@ -2267,6 +2391,91 @@ impl TransportState {
 }
 
 impl ClientConnection {
+    async fn request_stream_raw(
+        &self,
+        state: &TransportState,
+        request: RawRequest<'_>,
+    ) -> Result<(RecvStream, u64), Report<TransportError>> {
+        if self.closed.is_cancelled() {
+            return Err(Report::new(TransportError::Closed(self.key.target.addr)));
+        }
+        let RawRequest {
+            path,
+            body,
+            response_class,
+            response_limit,
+            timeout: timeout_duration,
+            headers,
+        } = request;
+        let operation = async {
+            let sender = self.sender.clone().ready().await?;
+            let mut request_url = url::Url::parse("https://localhost/")
+                .assured("the fixed HTTPS request base is a valid URL");
+            request_url
+                .set_host(Some(&self.key.target.server_name))
+                .map_err(|_| {
+                    TransportError::InvalidServerName(self.key.target.server_name.clone())
+                })?;
+            request_url.set_path(path);
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .version(Version::HTTP_2)
+                .uri(request_url.as_str());
+            for (name, value) in headers {
+                builder = builder.header(*name, *value);
+            }
+            let request = builder
+                .body(())
+                .map_err(|error| TransportError::Http(error.to_string()))?;
+            let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
+            let (response, mut send_stream) = {
+                let mut sender = sender;
+                sender.send_request(request, end_stream)?
+            };
+            if let Some(body) = body
+                && !body.is_empty()
+            {
+                send_body(&mut send_stream, body).await?;
+            }
+            let response = response.await?;
+            let status = response.status();
+            if !status.is_success() {
+                let message = read_body(
+                    &state.executor,
+                    response_class.memory_class(),
+                    response_limit,
+                    state.options.progress_timeout,
+                    response.into_body(),
+                )
+                .await?;
+                return Err(TransportError::RemoteRejected {
+                    status: status.as_u16(),
+                    message: String::from_utf8_lossy(message.as_ref()).into_owned(),
+                });
+            }
+            let content_length = response
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .ok_or_else(|| {
+                    TransportError::Decode(
+                        "streamed response omitted its content length".to_string(),
+                    )
+                })?
+                .to_str()
+                .map_err(|error| TransportError::Decode(error.to_string()))?
+                .parse::<u64>()
+                .map_err(|error| TransportError::Decode(error.to_string()))?;
+            Ok((response.into_body(), content_length))
+        };
+        match timeout(timeout_duration, operation).await {
+            Ok(result) => result.map_err(Report::new),
+            Err(_) => Err(Report::new(TransportError::RequestTimeout {
+                peer: self.key.node_id.clone(),
+                timeout: timeout_duration,
+            })),
+        }
+    }
+
     async fn request_raw(
         &self,
         state: &TransportState,
@@ -2434,6 +2643,122 @@ async fn send_body(
     Ok(())
 }
 
+async fn send_stream_chunk(
+    stream: &mut SendStream<Bytes>,
+    body: ChargedBytes,
+) -> Result<(), Report<TransportError>> {
+    let mut offset = 0;
+    while offset < body.len() {
+        tokio::task::consume_budget().await;
+        let remaining = body
+            .len()
+            .checked_sub(offset)
+            .verified("the send offset never advances beyond the streamed chunk");
+        let wanted = remaining.min(BODY_CHUNK_BYTES);
+        stream.reserve_capacity(wanted);
+        let assigned = poll_fn(|context| stream.poll_capacity(context))
+            .await
+            .ok_or_else(|| {
+                TransportError::Decode(
+                    "HTTP/2 stream closed while assigning send capacity".to_string(),
+                )
+            })?
+            .map_err(TransportError::from)?;
+        let ready = assigned.min(wanted);
+        if ready == 0 {
+            continue;
+        }
+        let end = offset
+            .checked_add(ready)
+            .verified("assigned capacity is bounded by the remaining streamed chunk");
+        let chunk = body
+            .slice(offset, end)
+            .verified("the streamed chunk bounds were checked against its body");
+        offset = end;
+        stream
+            .send_data(Bytes::from_owner(chunk), false)
+            .map_err(TransportError::from)?;
+    }
+    stream.reserve_capacity(0);
+    Ok(())
+}
+
+async fn send_streaming_response(
+    mut respond: server::SendResponse<Bytes>,
+    mut response: StreamingResponse,
+    progress_timeout: Duration,
+) -> Result<(), Report<TransportError>> {
+    let headers = Response::builder()
+        .status(StatusCode::OK)
+        .version(Version::HTTP_2)
+        .header(http::header::CONTENT_LENGTH, response.content_length)
+        .body(())
+        .map_err(|error| TransportError::Http(error.to_string()))?;
+    let mut stream = respond
+        .send_response(headers, false)
+        .map_err(TransportError::from)?;
+    let mut sent = 0_u64;
+    loop {
+        tokio::task::consume_budget().await;
+        let next = match timeout(progress_timeout, response.chunks.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                stream.send_reset(Reason::CANCEL);
+                return Err(Report::new(TransportError::ProgressTimeout {
+                    timeout: progress_timeout,
+                }));
+            }
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                stream.send_reset(Reason::INTERNAL_ERROR);
+                return Err(Report::new(TransportError::Decode(error.to_string())));
+            }
+        };
+        if chunk.is_empty() {
+            stream.send_reset(Reason::INTERNAL_ERROR);
+            return Err(Report::new(TransportError::Decode(
+                "stream producer yielded an empty chunk".to_string(),
+            )));
+        }
+        let chunk_bytes = u64::try_from(chunk.len())
+            .map_err(|error| TransportError::Decode(error.to_string()))?;
+        sent = sent.checked_add(chunk_bytes).ok_or_else(|| {
+            TransportError::Decode("streamed response byte count overflowed".to_string())
+        })?;
+        if sent > response.content_length {
+            stream.send_reset(Reason::INTERNAL_ERROR);
+            return Err(Report::new(TransportError::Decode(
+                "stream producer exceeded its declared content length".to_string(),
+            )));
+        }
+        match timeout(progress_timeout, send_stream_chunk(&mut stream, chunk)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                stream.send_reset(Reason::CANCEL);
+                return Err(Report::new(TransportError::ProgressTimeout {
+                    timeout: progress_timeout,
+                }));
+            }
+        }
+    }
+    if sent != response.content_length {
+        stream.send_reset(Reason::INTERNAL_ERROR);
+        return Err(Report::new(TransportError::Decode(format!(
+            "stream producer declared {} bytes but produced {sent}",
+            response.content_length
+        ))));
+    }
+    stream
+        .send_data(Bytes::new(), true)
+        .map_err(TransportError::from)?;
+    Ok(())
+}
+
 async fn send_response(
     mut respond: server::SendResponse<Bytes>,
     status: StatusCode,
@@ -2462,7 +2787,7 @@ async fn send_response(
 async fn send_static_error(
     respond: &mut server::SendResponse<Bytes>,
     status: StatusCode,
-    message: &'static str,
+    message: &str,
     progress_timeout: Duration,
 ) -> Result<(), TransportError> {
     let response = Response::builder()
@@ -2472,7 +2797,7 @@ async fn send_static_error(
         .map_err(|error| TransportError::Http(error.to_string()))?;
     let mut stream = respond.send_response(response, false)?;
     timeout(progress_timeout, async {
-        let body = Bytes::from_static(message.as_bytes());
+        let body = Bytes::copy_from_slice(message.as_bytes());
         let mut offset = 0;
         while offset < body.len() {
             tokio::task::consume_budget().await;
