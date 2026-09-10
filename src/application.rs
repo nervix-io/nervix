@@ -140,8 +140,8 @@ use nervix_models::{
     ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledModel,
     ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
     SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
-    Timestamp, UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
-    ingest_quiesce_to_nspl,
+    Timestamp, TimestampError, UniquelyKindedModel, UploadResource, UserName, VhostTlsResource,
+    expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -3609,6 +3609,11 @@ impl Drop for ClusterEntityGate {
 struct BasicAuthCredentials {
     username: String,
     password: String,
+}
+
+struct ResolvedDomainStart {
+    concrete_start: DomainStartPoint,
+    clock: DomainClockState,
 }
 
 #[derive(Debug, Error)]
@@ -9888,24 +9893,6 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    let wall_started_at = current_timestamp();
-                    let (mut logical_start, time_rate) = start.start.resolve_at(wall_started_at);
-                    if let DomainPace::Paced = domain.config.pace
-                        && let DomainStartPoint::Resume = &start.start
-                        && let Ok(Some(resume_at)) =
-                            self.inner.runtime.current_paced_domain_time(domain_id)
-                    {
-                        logical_start = resume_at;
-                    }
-                    let concrete_start = match &start.start {
-                        DomainStartPoint::Resume => DomainStartPoint::Resume,
-                        DomainStartPoint::Now { .. } => DomainStartPoint::At {
-                            timestamp: logical_start,
-                            time_rate,
-                        },
-                        DomainStartPoint::At { .. } => start.start.clone(),
-                    };
-                    let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
                     let authority = if let DomainPace::Paced = domain.config.pace {
                         match self.selected_domain_clock_authority(domain_id).await {
                             Some(authority) => Ok(Some(authority)),
@@ -9918,17 +9905,31 @@ impl SessionServiceImpl {
                         Ok(None)
                     };
                     match authority {
-                        Ok(authority) => (
-                            command_ok(format!("starting domain '{}'", domain_id.as_str())),
-                            Some(TransactionStepEffect::StartDomain {
-                                domain_id: domain_id.clone(),
-                                expected_start_version: domain.start_version,
-                                start: concrete_start,
-                                clock: matches!(domain.config.pace, DomainPace::Paced)
-                                    .then_some(clock),
-                                authority,
-                            }),
-                        ),
+                        Ok(authority) => {
+                            match self
+                                .resolve_domain_start(domain_id, &domain, &start.start)
+                                .await
+                            {
+                                Ok(resolved_start) => (
+                                    command_ok(format!("starting domain '{}'", domain_id.as_str())),
+                                    Some(TransactionStepEffect::StartDomain {
+                                        domain_id: domain_id.clone(),
+                                        expected_start_version: domain.start_version,
+                                        start: resolved_start.concrete_start,
+                                        clock: matches!(domain.config.pace, DomainPace::Paced)
+                                            .then_some(resolved_start.clock),
+                                        authority,
+                                    }),
+                                ),
+                                Err(error) => (
+                                    command_error(format!(
+                                        "failed to construct domain clock start for '{}': {error}",
+                                        domain_id.as_str()
+                                    )),
+                                    None,
+                                ),
+                            }
+                        }
                         Err(message) => (command_error(message), None),
                     }
                 }
@@ -12150,6 +12151,44 @@ impl SessionServiceImpl {
         Ok(manifest.resource.id.version)
     }
 
+    async fn resolve_domain_start(
+        &self,
+        domain_id: &DomainName,
+        domain: &DomainState,
+        requested_start: &DomainStartPoint,
+    ) -> Result<ResolvedDomainStart, Report<TimestampError>> {
+        let mut wall_started_at = current_timestamp();
+        let (mut logical_start, time_rate) = requested_start.resolve_at(wall_started_at);
+        if let DomainPace::Paced = domain.config.pace
+            && let DomainStartPoint::Resume = requested_start
+            && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
+        {
+            logical_start = resume_at;
+        }
+        #[cfg(feature = "testing")]
+        if let DomainPace::Paced = domain.config.pace
+            && let DomainStartPoint::Now { .. } | DomainStartPoint::At { .. } = requested_start
+            && let Some(initial_elapsed) = self
+                .inner
+                .runtime
+                .take_domain_clock_initial_elapsed(domain_id)
+        {
+            wall_started_at = wall_started_at.checked_sub(initial_elapsed)?;
+        }
+        let concrete_start = match requested_start {
+            DomainStartPoint::Resume => DomainStartPoint::Resume,
+            DomainStartPoint::Now { .. } => DomainStartPoint::At {
+                timestamp: logical_start,
+                time_rate,
+            },
+            DomainStartPoint::At { .. } => requested_start.clone(),
+        };
+        Ok(ResolvedDomainStart {
+            concrete_start,
+            clock: DomainClockState::new(wall_started_at, logical_start, time_rate),
+        })
+    }
+
     async fn start_domain(&self, domain_id: &DomainName, start: StartDomain) -> CommandResult {
         let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
             return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
@@ -12169,23 +12208,6 @@ impl SessionServiceImpl {
                 domain_id.as_str()
             ));
         }
-        let wall_started_at = current_timestamp();
-        let (mut logical_start, time_rate) = start.start.resolve_at(wall_started_at);
-        if let DomainPace::Paced = domain.config.pace
-            && let DomainStartPoint::Resume = &start.start
-            && let Ok(Some(resume_at)) = self.inner.runtime.current_paced_domain_time(domain_id)
-        {
-            logical_start = resume_at;
-        }
-        let concrete_start = match &start.start {
-            DomainStartPoint::Resume => DomainStartPoint::Resume,
-            DomainStartPoint::Now { .. } => DomainStartPoint::At {
-                timestamp: logical_start,
-                time_rate,
-            },
-            DomainStartPoint::At { .. } => start.start.clone(),
-        };
-        let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
         let authority = if let DomainPace::Paced = domain.config.pace {
             let Some(authority) = self.selected_domain_clock_authority(domain_id).await else {
                 return command_error(format!(
@@ -12197,13 +12219,26 @@ impl SessionServiceImpl {
         } else {
             None
         };
+        let resolved_start = match self
+            .resolve_domain_start(domain_id, &domain, &start.start)
+            .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return command_error(format!(
+                    "failed to construct domain clock start for '{}': {error}",
+                    domain_id.as_str()
+                ));
+            }
+        };
         match self
             .inner
             .consensus
             .start_domain(
                 domain_id.clone(),
-                concrete_start,
-                matches!(domain.config.pace, DomainPace::Paced).then_some(clock.clone()),
+                resolved_start.concrete_start,
+                matches!(domain.config.pace, DomainPace::Paced)
+                    .then_some(resolved_start.clock.clone()),
                 authority,
             )
             .await
@@ -18214,8 +18249,7 @@ async fn deliver_domain_clock_progress(
     }
 }
 
-const DEFAULT_TRACE_FILTER: &str =
-    "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
+const DEFAULT_TRACE_FILTER: &str = "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 

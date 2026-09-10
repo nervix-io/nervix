@@ -818,7 +818,8 @@ impl FaultInjection {
         *self.inner.branch_instance_expiration_scan_interval.read()
     }
 
-    pub(crate) fn domain_drain_timeout(&self) -> Option<Duration> {
+    #[doc(hidden)]
+    pub fn domain_drain_timeout(&self) -> Option<Duration> {
         *self.inner.domain_drain_timeout.read()
     }
 

@@ -41,7 +41,7 @@ use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
-    runtime::DEFAULT_TEMP_DIR,
+    runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
 };
 use parking_lot::Mutex;
 use proto::{
@@ -107,8 +107,26 @@ use super::dependencies::{
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(40);
+const TEST_NODE_UNAVAILABILITY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
+    match TEST_NODE_UNAVAILABILITY_TIMEOUT.checked_add(STATUS_TIMEOUT) {
+        Some(timeout) => timeout,
+        None => panic!(
+            "the test node-unavailability timeout and cluster status observation budget must fit \
+             in Duration"
+        ),
+    };
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
+    branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+/// Consensus must persist queued work and the cluster, interconnect, and database owners must
+/// finish after the bounded application and runtime drains. Give those event-driven finalization
+/// phases the same watchdog allowance as opening the node during startup.
+const SHUTDOWN_FINALIZATION_GRACE: Duration = STARTUP_TIMEOUT;
+const _: () = assert!(
+    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos() > DEFAULT_DOMAIN_DRAIN_TIMEOUT.as_nanos(),
+    "the runtime branch stop budget must include its post-drain grace"
+);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const NODE_START_ATTEMPTS: usize = 8;
 const SQS_REGION: &str = "us-east-1";
@@ -2130,7 +2148,7 @@ impl NodeHandle {
             .allow_bootstrap(self.spec.allow_bootstrap)
             .default_user(TEST_AUTH_USERNAME.to_string())
             .init_default_user_password(Some(TEST_AUTH_PASSWORD.to_string()))
-            .node_unavailability_timeout(Duration::from_secs(10))
+            .node_unavailability_timeout(TEST_NODE_UNAVAILABILITY_TIMEOUT)
             .raft_heartbeat_interval(TEST_RAFT_HEARTBEAT_INTERVAL)
             .raft_election_timeout_min(TEST_RAFT_ELECTION_TIMEOUT_MIN)
             .raft_election_timeout_max(TEST_RAFT_ELECTION_TIMEOUT_MAX)
@@ -2177,18 +2195,44 @@ impl NodeHandle {
         }
     }
 
+    fn shutdown_timeout(&self) -> io::Result<Duration> {
+        let application_drain_timeout = if self.config.graceful_shutdown_drain {
+            self.config.drain_timeout
+        } else {
+            Duration::ZERO
+        };
+        let domain_drain_timeout = self
+            .fault_injection
+            .domain_drain_timeout()
+            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+        application_drain_timeout
+            .checked_add(branch_task_stop_timeout(domain_drain_timeout))
+            .and_then(|timeout| timeout.checked_add(SHUTDOWN_FINALIZATION_GRACE))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "configured node shutdown phase budgets exceed Duration::MAX",
+                )
+            })
+    }
+
     async fn wait_stopped(&mut self) -> io::Result<()> {
+        let shutdown_timeout = self.shutdown_timeout()?;
         let Some(mut task) = self.task.take() else {
             return Ok(());
         };
-        let task_result = match timeout(SHUTDOWN_TIMEOUT, &mut task).await {
+        let task_result = match timeout(shutdown_timeout, &mut task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) if err.is_cancelled() => Ok(()),
             Ok(Err(err)) => Err(io::Error::other(err)),
             Err(_) => {
                 task.abort();
                 let _ = task.await;
-                Err(io::Error::other("timed out waiting for node shutdown"))
+                Err(io::Error::other(format!(
+                    "timed out after {} waiting for node '{}' shutdown",
+                    humantime::format_duration(shutdown_timeout),
+                    self.spec.node_id
+                )))
             }
         };
         self.fault_injection

@@ -194,11 +194,7 @@ impl Runtime {
     /// How long a branch task is given to stop: the configured drain timeout plus the grace it
     /// needs to finish the flush already in progress.
     pub(super) fn branch_task_stop_timeout(&self) -> Duration {
-        // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks
-        // to wait for as long as the process runs, and no grace can extend that further.
-        self.inner
-            .domain_drain_timeout
-            .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+        super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
     pub fn entity_gate_deadline(&self) -> Duration {

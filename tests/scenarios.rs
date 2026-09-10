@@ -84,8 +84,8 @@ use uuid::Uuid;
 use crate::common::{
     cluster::{
         BrokerObserver, Cluster, InterconnectCredentialFault, StallableTcpProxy,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        client_connect_options,
+        DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, TEST_AUTH_USERNAME, TestClusterConfig,
+        TestSession, WebsocketExchangeAction, client_connect_options,
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
@@ -302,6 +302,30 @@ impl ScenarioWorld {
             )
             .await
             .expect("observability endpoint did not report the expected metric value");
+    }
+
+    async fn wait_for_domain_clock_progress_pause_on(
+        &self,
+        duration: Duration,
+        domain: &str,
+        node_id: &str,
+    ) {
+        let domain = expand_placeholders(self, domain);
+        let node_id = expand_placeholders(self, node_id);
+        tokio::time::timeout(
+            duration,
+            self.fault_injection.wait_for_domain_clock_progress_pause_on(
+                &domain,
+                &crate::common::cluster::node_name(&node_id),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "domain clock progress for '{domain}' on '{node_id}' did not reach its delivery \
+                 pause within {duration:?}: {error}"
+            )
+        });
     }
 }
 
@@ -3665,24 +3689,27 @@ async fn then_domain_clock_progress_reaches_pause_on_node(
 ) {
     let duration =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
-    let domain = expand_placeholders(world, &domain);
-    let node_id = expand_placeholders(world, &node_id);
-    tokio::time::timeout(
-        duration,
-        world
-            .fault_injection
-            .wait_for_domain_clock_progress_pause_on(
-                &domain,
-                &crate::common::cluster::node_name(&node_id),
-            ),
-    )
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "domain clock progress for '{domain}' on '{node_id}' did not reach its delivery \
-             pause: {error}"
+    world
+        .wait_for_domain_clock_progress_pause_on(duration, &domain, &node_id)
+        .await;
+}
+
+#[then(
+    expr = "domain clock progress for domain {string} on node {string} reaches the delivery pause \
+            within the authority observation budget"
+)]
+async fn then_domain_clock_progress_reaches_pause_within_authority_observation_budget(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node_id: String,
+) {
+    world
+        .wait_for_domain_clock_progress_pause_on(
+            DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
+            &domain,
+            &node_id,
         )
-    });
+        .await;
 }
 
 #[when(expr = "domain clock progress for domain {string} resumes")]

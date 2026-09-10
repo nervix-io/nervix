@@ -630,6 +630,16 @@ pub(super) fn wall_duration_until_logical_target(
 }
 
 impl Runtime {
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_domain_clock_initial_elapsed(
+        &self,
+        domain: &DomainName,
+    ) -> Option<Duration> {
+        self.inner
+            .fault_injection
+            .take_domain_clock_initial_elapsed(domain)
+    }
+
     pub(crate) fn domain_execution_snapshot(
         &self,
         domain: &DomainName,

@@ -48,7 +48,7 @@ Feature: Domain clock contract regressions
       """
     And node "node-3" is added to the cluster
     Then node "node-1" eventually reports raft voters "node-1,node-2,node-3"
-    Then within "20s" domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
     When these NSPL commands are executed
       """
       STOP;
@@ -56,7 +56,7 @@ Feature: Domain clock contract regressions
       """
     And domain clock progress for domain "{{domain}}" on node "node-2" resumes
     Given domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
-    Then within "20s" domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
     And node "node-2" eventually accepts http traffic for host "authority-clock-{{test_id}}.example.com" path "/clock"
       """
       {"sequence":1}
@@ -85,25 +85,25 @@ Feature: Domain clock contract regressions
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
-    Then within "20s" domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
     When domain clock progress for domain "{{domain}}" on node "node-2" resumes
     And leadership is transferred from node "node-1" to node "node-3"
     Then node "node-3" eventually reports leader "node-3"
     Given domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
-    Then within "20s" domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
     When domain clock progress for domain "{{domain}}" on node "node-2" resumes
     Given domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
     When node "node-1" is restarted 1 times with a new interconnect address
-    Then within "20s" domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
     When domain clock progress for domain "{{domain}}" on node "node-2" resumes
     Given domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
     When node "node-2" is restarted 1 times with a new interconnect address
-    Then within "20s" domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
     When domain clock progress for domain "{{domain}}" on node "node-2" resumes
     Given domain clock progress for domain "{{domain}}" on node "node-1" is paused before delivery
     When node "node-2" is stopped
     Then node "node-3" eventually reports leader "node-3"
-    And within "20s" domain clock progress for domain "{{domain}}" on node "node-1" reaches the delivery pause
+    And domain clock progress for domain "{{domain}}" on node "node-1" reaches the delivery pause within the authority observation budget
 
   @domain_bound_clock
   Scenario: A joining or restarted node installs the current clock generation before execution

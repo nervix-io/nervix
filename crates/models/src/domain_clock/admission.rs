@@ -23,9 +23,9 @@ pub struct DomainAdmissionWindow {
 
 impl DomainAdmissionWindow {
     /// The number of reached logical tick centers retained for ingestion admission.
-    pub const RETAINED_POSITION_COUNT: u64 = 256;
+    pub const RETAINED_POSITION_COUNT: u32 = 256;
 
-    const RETAINED_PRECEDING_POSITION_COUNT: u64 = Self::RETAINED_POSITION_COUNT - 1;
+    const RETAINED_PRECEDING_POSITION_COUNT: u32 = Self::RETAINED_POSITION_COUNT - 1;
 
     /// Before the origin there are no eligible centers. At the origin position zero is eligible.
     pub fn reached(
@@ -128,7 +128,21 @@ mod tests {
         let period = Duration::from_nanos(100)
             .try_into()
             .assured("period is positive");
-        for frontier in [0_i64, 255, 256, 257, 10000] {
+        let retained_position_count =
+            i64::from(DomainAdmissionWindow::RETAINED_POSITION_COUNT);
+        let retained_preceding_position_count = retained_position_count
+            .checked_sub(1)
+            .assured("a nonnegative retained position count is above i64::MIN");
+        let frontier_after_full_history = retained_position_count
+            .checked_add(1)
+            .assured("the retained position count is far below i64::MAX");
+        for frontier in [
+            0_i64,
+            retained_preceding_position_count,
+            retained_position_count,
+            frontier_after_full_history,
+            10000,
+        ] {
             let reached = frontier
                 .checked_mul(100)
                 .assured("fixture frontier is at most 10000");
@@ -140,7 +154,7 @@ mod tests {
             )
             .assured("fixture time is nonnegative");
             let first = frontier
-                .checked_sub(255)
+                .checked_sub(retained_preceding_position_count)
                 .assured("fixture frontier is nonnegative")
                 .max(0);
             for position in 0..=frontier

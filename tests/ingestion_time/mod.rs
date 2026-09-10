@@ -34,12 +34,9 @@ async fn domain_clock_starts_with_complete_retained_admission_history(
     let period: DomainClockPeriod = period
         .parse()
         .assured("scenario period is positive and supported");
-    let retained_position_count =
-        u32::try_from(DomainAdmissionWindow::RETAINED_POSITION_COUNT)
-            .assured("the retained position count fits Duration's multiplier");
     let elapsed = period
         .as_duration()
-        .checked_mul(retained_position_count)
+        .checked_mul(DomainAdmissionWindow::RETAINED_POSITION_COUNT)
         .assured("the scenario period and retained position count fit Duration");
     world
         .fault_injection
