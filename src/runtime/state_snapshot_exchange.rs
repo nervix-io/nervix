@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use futures_util::stream;
+use meticulous::ResultExt as _;
 use nervix_execution::ChargedBytes;
 use nervix_interconnect::{StreamHandlerError, StreamingResponse};
 use nervix_models::ClusterNodeName;
@@ -234,7 +235,9 @@ impl SealedChunks {
         if self.offset >= self.bytes.len() {
             return None;
         }
-        let wanted = usize::try_from(self.chunk_bytes).unwrap_or(usize::MAX);
+        let wanted = usize::try_from(self.chunk_bytes).verified(
+            "the configured bulk chunk is validated against a memory budget counted in permits",
+        );
         let end = self
             .offset
             .checked_add(wanted)

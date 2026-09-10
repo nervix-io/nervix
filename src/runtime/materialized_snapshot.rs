@@ -901,3 +901,224 @@ fn estimated_identity_bytes(branch: Option<&BranchKey>) -> u64 {
 fn encode_hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use meticulous::ResultExt as _;
+    use nervix_execution::{ExecutionConfig, MemoryBudgets, OperationLimits};
+    use nervix_models::FieldName;
+    use ubyte::ByteUnit;
+
+    use super::*;
+    use crate::{
+        runtime::snapshot_staging::{SnapshotStaging, SnapshotStagingLimits},
+        runtime_schema::{RuntimeValue, test_runtime_row},
+    };
+
+    /// One row of payload in the snapshot under test. Large enough that a handful of records
+    /// exceed several section limits, small enough that no single record does.
+    const RECORD_BYTES: usize = 512 * 1024;
+
+    /// How many records the snapshot carries. Their columns alone exceed eight mebibytes and the
+    /// bulk transfer budget the narrow executor allows.
+    const RECORDS: usize = 20;
+
+    /// A node whose snapshot sections are far smaller than the snapshot under test, so a snapshot
+    /// that seals and moves proves it did so as many bounded sections and many bounded chunks
+    /// rather than as one large one.
+    fn narrow_executor() -> Executor {
+        Executor::new(ExecutionConfig {
+            budgets: MemoryBudgets {
+                bulk: ByteUnit::Mebibyte(64),
+                ..MemoryBudgets::default()
+            },
+            limits: OperationLimits {
+                snapshot_section_bytes: ByteUnit::Mebibyte(1),
+                snapshot_record_bytes: ByteUnit::Kibibyte(256),
+                snapshot_header_bytes: ByteUnit::Kibibyte(64),
+                bulk_chunk_bytes: ByteUnit::Kibibyte(64),
+                decoder_depth: NonZeroU32::new(64).assured("sixty-four is not zero"),
+                ..OperationLimits::default()
+            },
+            ..ExecutionConfig::default()
+        })
+        .assured("a bulk budget above two sections plus a header and a chunk is consistent")
+    }
+
+    fn test_index(index: usize) -> i64 {
+        i64::try_from(index).assured("the test builds fewer records than an i64 counts")
+    }
+
+    fn tenant_branch(tenant: &str) -> BranchKey {
+        BranchKey::from_fields([(
+            FieldName::try_from("tenant".to_string())
+                .assured("the test branch field name satisfies the field grammar"),
+            RuntimeValue::String(tenant.to_string()),
+        )])
+        .assured("a one-field branch key is well formed")
+    }
+
+    fn wide_generation() -> MaterializedGeneration {
+        let records = (0..RECORDS)
+            .map(|index| {
+                let row = test_runtime_row([
+                    ("index".to_string(), RuntimeValue::I64(test_index(index))),
+                    (
+                        "payload".to_string(),
+                        RuntimeValue::String("p".repeat(RECORD_BYTES)),
+                    ),
+                ]);
+                MaterializedGenerationRecord {
+                    branch: Some(tenant_branch(&format!("tenant-{index:02}"))),
+                    row,
+                }
+            })
+            .collect::<Vec<_>>();
+        let schema = records[0].row.arrow_schema();
+        MaterializedGeneration::new(7, 3, 5, [9; 32], schema, records)
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_larger_than_the_transfer_budget_moves_through_bounded_chunks() {
+        let executor = narrow_executor();
+        let generation = wide_generation();
+        let schema = generation.records()[0].row.arrow_schema();
+        let sealed = generation
+            .seal(&executor)
+            .await
+            .assured("a generation of bounded records seals into bounded sections");
+        assert!(
+            sealed.descriptor.length > ByteUnit::Mebibyte(8).as_u64(),
+            "the sealed snapshot is {} bytes, which does not exercise a large transfer",
+            sealed.descriptor.length
+        );
+        let four_sections = executor
+            .limits()
+            .snapshot_section_bytes
+            .as_u64()
+            .checked_mul(4)
+            .assured("four mebibyte-sized sections fit a u64");
+        assert!(
+            sealed.descriptor.length > four_sections,
+            "a snapshot that fits a few sections does not exercise a sectioned transfer"
+        );
+
+        // Move it exactly as a transfer does: bounded chunks into staging, then a length and
+        // digest check, then one bounded section read at a time.
+        let staging_root = tempfile::tempdir().assured("the test can create a staging directory");
+        let staging = SnapshotStaging::new(
+            staging_root.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let mut writer = staging
+            .stage(sealed.descriptor.length)
+            .await
+            .assured("the node's staging quota admits one snapshot");
+        let chunk_bytes = usize::try_from(executor.limits().bulk_chunk_bytes.as_u64())
+            .assured("a configured chunk size fits an address");
+        let mut offset = 0;
+        while offset < sealed.bytes.len() {
+            let end = offset
+                .checked_add(chunk_bytes)
+                .assured("the offset walks a buffer that already fits an address")
+                .min(sealed.bytes.len());
+            let chunk = sealed
+                .bytes
+                .slice(offset, end)
+                .assured("the window lies inside the sealed snapshot");
+            writer
+                .write_chunk(chunk)
+                .await
+                .assured("a staged chunk within the declared length is accepted");
+            offset = end;
+        }
+        let staged = writer
+            .finish(sealed.descriptor.digest)
+            .await
+            .assured("a complete transfer matches the length and digest it declared");
+
+        let restored = RestoredMaterializedSnapshot::open(
+            &executor,
+            &schema,
+            [9; 32],
+            SealedSource::staged(staged),
+        )
+        .await
+        .assured("a staged snapshot opens one bounded section at a time");
+
+        assert_eq!(restored.revision, 7);
+        assert_eq!(restored.fence, 3);
+        assert_eq!(restored.branch_generation, 5);
+        assert_eq!(restored.records.len(), RECORDS);
+        for (index, record) in restored.records.iter().enumerate() {
+            assert_eq!(
+                record.branch,
+                Some(tenant_branch(&format!("tenant-{index:02}")))
+            );
+            assert_eq!(
+                record
+                    .row
+                    .value_at(0)
+                    .assured("the restored index column loads"),
+                Some(RuntimeValue::I64(test_index(index)))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_transfer_is_refused_before_anything_reads_it() {
+        let executor = narrow_executor();
+        let sealed = wide_generation()
+            .seal(&executor)
+            .await
+            .assured("a generation of bounded records seals into bounded sections");
+        let staging_root = tempfile::tempdir().assured("the test can create a staging directory");
+        let staging = SnapshotStaging::new(
+            staging_root.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let mut writer = staging
+            .stage(sealed.descriptor.length)
+            .await
+            .assured("the node's staging quota admits one snapshot");
+        let short = sealed
+            .bytes
+            .slice(0, sealed.bytes.len() / 2)
+            .assured("half of the sealed snapshot lies inside it");
+        writer
+            .write_chunk(short)
+            .await
+            .assured("a chunk within the declared length is accepted");
+
+        assert!(writer.finish(sealed.descriptor.digest).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_corrupted_transfer_is_refused_before_anything_reads_it() {
+        let executor = narrow_executor();
+        let sealed = wide_generation()
+            .seal(&executor)
+            .await
+            .assured("a generation of bounded records seals into bounded sections");
+        let staging_root = tempfile::tempdir().assured("the test can create a staging directory");
+        let staging = SnapshotStaging::new(
+            staging_root.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let mut writer = staging
+            .stage(sealed.descriptor.length)
+            .await
+            .assured("the node's staging quota admits one snapshot");
+        writer
+            .write_chunk(sealed.bytes.clone())
+            .await
+            .assured("the whole snapshot is within the declared length");
+
+        assert!(writer.finish([0; 32]).await.is_err());
+    }
+}

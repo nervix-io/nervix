@@ -1515,7 +1515,7 @@ impl Runtime {
 mod tests {
     use std::sync::{Arc as StdArc, atomic::Ordering};
 
-    use ahash::{HashMap, HashSet};
+    use ahash::HashMap;
     use arc_swap::ArcSwapOption;
     use nervix_models::{
         AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,

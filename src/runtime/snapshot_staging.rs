@@ -21,7 +21,7 @@ use std::{
 use arch_into::ArchInto as _;
 use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, StorageClass};
 use thiserror::Error;
 use tokio::sync::OwnedSemaphorePermit;
@@ -78,6 +78,9 @@ const GIBIBYTE: u64 = 1024 * 1024 * 1024;
 /// the whole node budget fits the permit count a semaphore is expressed in.
 const STAGING_PERMIT_BYTES: u64 = 1024 * 1024;
 
+/// How much of a staged snapshot one filesystem read moves into the buffer it is building.
+const READ_BLOCK_BYTES: u64 = 64 * 1024;
+
 /// The node's staging area: one directory and the quota every transfer into it shares.
 #[derive(Debug, Clone)]
 pub(crate) struct SnapshotStaging {
@@ -95,6 +98,8 @@ struct StagingQuota {
 impl SnapshotStaging {
     pub(crate) fn new(root: PathBuf, executor: Executor, limits: SnapshotStagingLimits) -> Self {
         let blocks = limits.staging_bytes.div_ceil(STAGING_PERMIT_BYTES);
+        // A configured quota beyond what this platform can count in permits becomes the largest
+        // permit count it can express: the cap is the meaning here, not an avoided decision.
         let permits = usize::try_from(blocks).unwrap_or(usize::MAX);
         Self {
             root,
@@ -406,9 +411,12 @@ fn read_exact(
 ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
     let mut buffer = BudgetedBuffer::with_limit(charge, length.max(1));
     let mut remaining = length;
-    let mut block = vec![0_u8; usize::try_from(length.min(64 * 1024)).unwrap_or(64 * 1024)];
+    let block_bytes = usize::try_from(length.min(READ_BLOCK_BYTES))
+        .verified("the block size is capped at the read block, which fits every pointer width");
+    let mut block = vec![0_u8; block_bytes];
     while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(block.len().arch_into())).unwrap_or(block.len());
+        let wanted = usize::try_from(remaining.min(block.len().arch_into()))
+            .verified("the wanted count is capped at the block length, which is a usize");
         let read = file
             .as_file_mut()
             .read(&mut block[..wanted])
