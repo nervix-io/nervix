@@ -258,17 +258,17 @@ use kafka_offset_state::{
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
     ReplicatedKafkaOffsetState,
 };
-use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 use materialized_snapshot::{
     MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
     empty_sealed_container, inspect_sealed_container,
 };
+pub use materialized_state::MaterializedRecordReport;
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
     ReplicatedMaterializedRelayState,
 };
-pub use materialized_state::MaterializedRecordReport;
+use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
 /// operations are absent from each capability.

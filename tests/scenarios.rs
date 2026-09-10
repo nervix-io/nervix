@@ -13174,10 +13174,12 @@ async fn then_subscription_timestamp_field_is_saved(
 }
 
 #[given(expr = "a repeated text placeholder {string} of {int} bytes is prepared")]
-async fn given_repeated_text_placeholder(world: &mut ScenarioWorld, placeholder: String, bytes: usize) {
-    world
-        .placeholders
-        .insert(placeholder, "a".repeat(bytes));
+async fn given_repeated_text_placeholder(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+    bytes: usize,
+) {
+    world.placeholders.insert(placeholder, "a".repeat(bytes));
 }
 
 #[then(expr = "timestamp placeholder {string} is not before timestamp placeholder {string}")]

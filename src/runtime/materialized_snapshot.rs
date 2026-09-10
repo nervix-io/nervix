@@ -17,10 +17,10 @@
 
 use std::{io::Write as _, ops::Range, sync::Arc as StdArc};
 
-use arrow_schema::Schema as ArrowSchema;
-
 use arch_into::ArchInto as _;
+use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecordMetadata};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -232,7 +232,10 @@ pub(crate) fn empty_sealed_container(
     .map_err(MaterializedSnapshotError::encoding)?;
     let header_length = u32::try_from(header.len())
         .map_err(|_| MaterializedSnapshotError::encoding("the snapshot header is unaddressable"))?;
-    let mut container = Vec::with_capacity(CONTAINER_FRAME_BYTES.saturating_add(header.len()));
+    let capacity = CONTAINER_FRAME_BYTES
+        .checked_add(header.len())
+        .assured("a bounded header plus its fixed frame fits an address");
+    let mut container = Vec::with_capacity(capacity);
     container.extend_from_slice(&SEALED_SNAPSHOT_MAGIC);
     container.extend_from_slice(&header_length.to_le_bytes());
     container.extend_from_slice(&header);
@@ -248,10 +251,7 @@ pub(crate) fn inspect_sealed_container(
     payload: &[u8],
     header_limit: u64,
 ) -> Result<SealedSnapshotSummary, Report<MaterializedSnapshotError>> {
-    let mut cursor = SliceCursor {
-        payload,
-        offset: 0,
-    };
+    let mut cursor = SliceCursor { payload, offset: 0 };
     if cursor.take(SEALED_SNAPSHOT_MAGIC.len(), "magic")? != SEALED_SNAPSHOT_MAGIC {
         return Err(Report::new(MaterializedSnapshotError::NotASnapshot));
     }
@@ -262,12 +262,9 @@ pub(crate) fn inspect_sealed_container(
             limit: header_limit,
         }));
     }
-    let header_bytes =
-        usize::try_from(header_bytes).map_err(|_| {
-            Report::new(MaterializedSnapshotError::Truncated { section: "header" })
-        })?;
-    let header =
-        decode_aligned_rkyv::<SealedSnapshotHeader>(cursor.take(header_bytes, "header")?)?;
+    let header_bytes = usize::try_from(header_bytes)
+        .map_err(|_| Report::new(MaterializedSnapshotError::Truncated { section: "header" }))?;
+    let header = decode_aligned_rkyv::<SealedSnapshotHeader>(cursor.take(header_bytes, "header")?)?;
     for _ in 0..header.groups {
         for expected in [
             SealedSectionKind::RecordIdentities,
@@ -327,7 +324,10 @@ impl<'a> SliceCursor<'a> {
         Ok(slice)
     }
 
-    fn take_u32(&mut self, section: &'static str) -> Result<u32, Report<MaterializedSnapshotError>> {
+    fn take_u32(
+        &mut self,
+        section: &'static str,
+    ) -> Result<u32, Report<MaterializedSnapshotError>> {
         let bytes: [u8; LENGTH_PREFIX_BYTES] = self
             .take(LENGTH_PREFIX_BYTES, section)?
             .try_into()
@@ -422,19 +422,40 @@ impl MaterializedGeneration {
         for (index, record) in self.records.iter().enumerate() {
             let record_columns = record.row.one_row_batch().estimated_bytes();
             let record_identity = estimated_identity_bytes(record.branch.as_ref());
-            let next_columns = columns.saturating_add(record_columns);
-            let next_identities = identities.saturating_add(record_identity);
-            if index > start
-                && (next_columns > section_limit || next_identities > identity_limit)
-            {
+            // A total that does not fit a u64 is past every limit there is, so it closes the
+            // group exactly as an ordinary overrun does.
+            let next = match (
+                columns.checked_add(record_columns),
+                identities.checked_add(record_identity),
+            ) {
+                (Some(next_columns), Some(next_identities)) => {
+                    Some((next_columns, next_identities))
+                }
+                _ => None,
+            };
+            let overruns = match next {
+                Some((next_columns, next_identities)) => {
+                    next_columns > section_limit || next_identities > identity_limit
+                }
+                None => true,
+            };
+            if index > start && overruns {
                 groups.push(start..index);
                 start = index;
                 columns = record_columns;
                 identities = record_identity;
                 continue;
             }
-            columns = next_columns;
-            identities = next_identities;
+            match next {
+                Some((next_columns, next_identities)) => {
+                    columns = next_columns;
+                    identities = next_identities;
+                }
+                None => {
+                    columns = section_limit;
+                    identities = identity_limit;
+                }
+            }
         }
         if start < self.records.len() {
             groups.push(start..self.records.len());
@@ -566,9 +587,9 @@ impl RestoredMaterializedSnapshot {
                 columns,
             )
             .await
-                .change_context(MaterializedSnapshotError::Decode {
-                    reason: "the Arrow section could not be read".to_string(),
-                })?;
+            .change_context(MaterializedSnapshotError::Decode {
+                reason: "the Arrow section could not be read".to_string(),
+            })?;
             let batch = Arc::new(batch);
             if identities.identities.len() != batch.batch().num_rows() {
                 return Err(Report::new(MaterializedSnapshotError::LengthMismatch {
@@ -677,12 +698,10 @@ impl SealedSource {
         let length = u64::from(self.take_u32("section length").await?);
         if length > limit {
             return Err(Report::new(match expected {
-                SealedSectionKind::RecordIdentities => {
-                    MaterializedSnapshotError::RecordTooLarge {
-                        size: length,
-                        limit,
-                    }
-                }
+                SealedSectionKind::RecordIdentities => MaterializedSnapshotError::RecordTooLarge {
+                    size: length,
+                    limit,
+                },
                 SealedSectionKind::RecordColumns => MaterializedSnapshotError::SectionTooLarge {
                     size: length,
                     limit,
@@ -715,10 +734,13 @@ async fn seal_container(
         .ok_or_else(unaddressable)?;
     for section in &sections {
         let section_bytes: u64 = section.bytes.len().arch_into();
-        length = length
-            .checked_add(section_frame)
-            .and_then(|length| length.checked_add(section_bytes))
-            .ok_or_else(unaddressable)?;
+        let Some(framed) = length.checked_add(section_frame) else {
+            return Err(unaddressable());
+        };
+        let Some(next) = framed.checked_add(section_bytes) else {
+            return Err(unaddressable());
+        };
+        length = next;
     }
     let reservation = executor
         .reserve(MemoryClass::Bulk, length)
@@ -743,8 +765,9 @@ async fn seal_container(
                 cancellation
                     .check()
                     .change_context(MaterializedSnapshotError::Execution)?;
-                let section_length = u32::try_from(section.bytes.len())
-                    .map_err(|_| MaterializedSnapshotError::encoding("a section is unaddressable"))?;
+                let section_length = u32::try_from(section.bytes.len()).map_err(|_| {
+                    MaterializedSnapshotError::encoding("a section is unaddressable")
+                })?;
                 buffer
                     .write_all(&[u8::from(section.kind)])
                     .map_err(MaterializedSnapshotError::encoding)?;
@@ -822,9 +845,8 @@ async fn decode_rkyv<T>(
 ) -> Result<T, Report<MaterializedSnapshotError>>
 where
     T: Archive + Send + 'static,
-    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<
-            rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>,
-        > + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
     let reservation = executor
         .reserve(MemoryClass::Bulk, limit)
@@ -850,9 +872,8 @@ where
 fn decode_aligned_rkyv<T>(bytes: &[u8]) -> Result<T, Report<MaterializedSnapshotError>>
 where
     T: Archive,
-    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<
-            rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>,
-        > + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
     aligned.extend_from_slice(bytes);
@@ -869,7 +890,12 @@ fn estimated_identity_bytes(branch: Option<&BranchKey>) -> u64 {
         return IDENTITY_OVERHEAD_BYTES;
     };
     let rendered: u64 = branch.as_str().len().arch_into();
-    IDENTITY_OVERHEAD_BYTES.saturating_add(rendered.saturating_mul(2))
+    let fields = rendered
+        .checked_mul(2)
+        .assured("a branch key renders from a bounded batch, far below half of u64::MAX");
+    fields
+        .checked_add(IDENTITY_OVERHEAD_BYTES)
+        .assured("a branch key renders from a bounded batch, far below u64::MAX")
 }
 
 fn encode_hex(bytes: &[u8; 32]) -> String {

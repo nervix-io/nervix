@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
 
-use ahash::{HashMap, HashSet};
+use ahash::HashMap;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;

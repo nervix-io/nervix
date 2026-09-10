@@ -46,9 +46,7 @@ impl Runtime {
             .inner
             .replicated_materialized_stream_states
             .get(placement)
-            .map(|state| {
-                super::ReplicatedMaterializedRelayState::read(state.value())
-            });
+            .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
         let Some(state) = state else {
             return DescribedStateSnapshot::Unavailable(format!(
                 "this node is not currently assigned materialized state for {} '{}'",
@@ -84,23 +82,21 @@ impl Runtime {
             .inner
             .replicated_materialized_stream_states
             .get(&placement)
-            .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()))
-            .ok_or_else(|| {
-                StreamHandlerError::new(format!(
-                    "this node is not currently assigned materialized state for {} '{}'",
-                    placement.kind.as_str(),
-                    placement.identifier.as_str()
-                ))
-            })?;
-        let sealed = state
-            .sealed_at(request.revision)
-            .ok_or_else(|| {
-                StreamHandlerError::new(format!(
-                    "materialized relay '{}' no longer holds the sealed generation at revision {}",
-                    placement.identifier.as_str(),
-                    request.revision
-                ))
-            })?;
+            .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
+        let Some(state) = state else {
+            return Err(StreamHandlerError::new(format!(
+                "this node is not currently assigned materialized state for {} '{}'",
+                placement.kind.as_str(),
+                placement.identifier.as_str()
+            )));
+        };
+        let Some(sealed) = state.sealed_at(request.revision) else {
+            return Err(StreamHandlerError::new(format!(
+                "materialized relay '{}' no longer holds the sealed generation at revision {}",
+                placement.identifier.as_str(),
+                request.revision
+            )));
+        };
         let chunk_bytes = self.inner.executor.limits().bulk_chunk_bytes.as_u64();
         let length = sealed.descriptor.length;
         let chunks = stream::unfold(

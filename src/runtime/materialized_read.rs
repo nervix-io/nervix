@@ -181,7 +181,11 @@ impl Runtime {
             .replicated_materialized_stream_states
             .get(placement)
         {
-            return Some(ReplicatedMaterializedRelayState::read(state.value()).schema().clone());
+            return Some(
+                ReplicatedMaterializedRelayState::read(state.value())
+                    .schema()
+                    .clone(),
+            );
         }
         let execution = self.inner.executions.get(&placement.domain)?;
         execution
@@ -471,7 +475,6 @@ impl Runtime {
             }))
     }
 
-
     pub(crate) async fn load_materialized_side_inputs(
         &self,
         domain: &DomainName,
@@ -722,6 +725,18 @@ impl Runtime {
             }
         }
     }
+}
+
+/// Render one materialized record for the public relay-state report.
+fn materialized_record_report(
+    record: &MaterializedGenerationRecord,
+) -> Result<MaterializedRecordReport, String> {
+    Ok(MaterializedRecordReport {
+        branch: branch_key_display(&record.branch).to_string(),
+        payload: record.row.to_json_string()?,
+        ingested_at_low_watermark: record.row.metadata().ingested_at_low_watermark(),
+        ingested_at_high_watermark: record.row.metadata().ingested_at_high_watermark(),
+    })
 }
 
 #[cfg(test)]
@@ -977,16 +992,4 @@ mod tests {
             )
         );
     }
-}
-
-/// Render one materialized record for the public relay-state report.
-fn materialized_record_report(
-    record: &MaterializedGenerationRecord,
-) -> Result<MaterializedRecordReport, String> {
-    Ok(MaterializedRecordReport {
-        branch: branch_key_display(&record.branch).to_string(),
-        payload: record.row.to_json_string()?,
-        ingested_at_low_watermark: record.row.metadata().ingested_at_low_watermark(),
-        ingested_at_high_watermark: record.row.metadata().ingested_at_high_watermark(),
-    })
 }

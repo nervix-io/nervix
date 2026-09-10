@@ -564,7 +564,7 @@ impl Runtime {
                     domain,
                     RuntimeStateKind::MaterializedRelay,
                     ModelKind::Relay,
-                    &RelayName::from(&node.identifier),
+                    RelayName::from(&node.identifier),
                     None,
                 );
                 self.prepare_materialized_stream_restore(&state_placement, schema)

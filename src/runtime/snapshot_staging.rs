@@ -22,9 +22,7 @@ use arch_into::ArchInto as _;
 use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, Executor, MemoryClass, StorageClass,
-};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, StorageClass};
 use thiserror::Error;
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -95,11 +93,7 @@ struct StagingQuota {
 }
 
 impl SnapshotStaging {
-    pub(crate) fn new(
-        root: PathBuf,
-        executor: Executor,
-        limits: SnapshotStagingLimits,
-    ) -> Self {
+    pub(crate) fn new(root: PathBuf, executor: Executor, limits: SnapshotStagingLimits) -> Self {
         let blocks = limits.staging_bytes.div_ceil(STAGING_PERMIT_BYTES);
         let permits = usize::try_from(blocks).unwrap_or(usize::MAX);
         Self {
@@ -316,11 +310,13 @@ impl StagedSnapshotWriter {
                             reason: error.to_string(),
                         })
                     })?;
-                    file.as_file_mut().seek(SeekFrom::Start(0)).map_err(|error| {
-                        Report::new(SnapshotStagingError::Read {
-                            reason: error.to_string(),
-                        })
-                    })?;
+                    file.as_file_mut()
+                        .seek(SeekFrom::Start(0))
+                        .map_err(|error| {
+                            Report::new(SnapshotStagingError::Read {
+                                reason: error.to_string(),
+                            })
+                        })?;
                     Ok(file)
                 },
             )
@@ -358,16 +354,18 @@ impl StagedSnapshot {
         &mut self,
         length: u64,
     ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .filter(|end| *end <= self.length)
-            .ok_or_else(|| {
-                Report::new(SnapshotStagingError::LengthMismatch {
-                    actual: self.length,
-                    declared: length,
-                })
-            })?;
+        let truncated = || {
+            Report::new(SnapshotStagingError::LengthMismatch {
+                actual: self.length,
+                declared: length,
+            })
+        };
+        let Some(end) = self.offset.checked_add(length) else {
+            return Err(truncated());
+        };
+        if end > self.length {
+            return Err(truncated());
+        }
         let reservation = self
             .executor
             .reserve(MemoryClass::Bulk, length.max(1))
@@ -411,11 +409,14 @@ fn read_exact(
     let mut block = vec![0_u8; usize::try_from(length.min(64 * 1024)).unwrap_or(64 * 1024)];
     while remaining > 0 {
         let wanted = usize::try_from(remaining.min(block.len().arch_into())).unwrap_or(block.len());
-        let read = file.as_file_mut().read(&mut block[..wanted]).map_err(|error| {
-            Report::new(SnapshotStagingError::Read {
-                reason: error.to_string(),
-            })
-        })?;
+        let read = file
+            .as_file_mut()
+            .read(&mut block[..wanted])
+            .map_err(|error| {
+                Report::new(SnapshotStagingError::Read {
+                    reason: error.to_string(),
+                })
+            })?;
         if read == 0 {
             return Err(Report::new(SnapshotStagingError::LengthMismatch {
                 actual: length

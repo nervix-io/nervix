@@ -570,8 +570,7 @@ impl Runtime {
                     let mut source_state_by_branch =
                         HashMap::<Option<BranchKey>, Vec<RuntimeRow>>::default();
                     if !state_load_failed {
-                        let mut latest_state =
-                            HashMap::<Option<BranchKey>, RuntimeRow>::default();
+                        let mut latest_state = HashMap::<Option<BranchKey>, RuntimeRow>::default();
                         for record in state {
                             let replace = latest_state.get(&record.branch).is_none_or(|existing| {
                                 record.row.metadata().is_newer_than(existing.metadata())

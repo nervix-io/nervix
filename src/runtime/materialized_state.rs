@@ -11,12 +11,12 @@ use nervix_models::ClusterNodeName;
 use triomphe::Arc;
 
 use super::{
-    BranchKey, RuntimeStateOperationError, RuntimeStatePlacement,
-    StateAssignmentAuthority, StateAssignmentToken, StateCapability, StateReplicationRoles,
+    BranchKey, RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
+    StateAssignmentToken, StateCapability, StateReplicationRoles,
     lsm_sequence::LsmSequence,
     materialized_snapshot::{
         MaterializedGeneration, MaterializedGenerationRecord, MaterializedSnapshotError,
-        RestoredMaterializedSnapshot, SealedMaterializedSnapshot, SealedSource,
+        RestoredMaterializedSnapshot, SealedMaterializedSnapshot,
     },
 };
 use crate::runtime_schema::RuntimeRow;
@@ -110,7 +110,9 @@ impl ReplicatedMaterializedRelayState {
         state
             .branch_generation
             .store(restored.branch_generation, Ordering::SeqCst);
-        state.installed_fence.store(restored.fence, Ordering::SeqCst);
+        state
+            .installed_fence
+            .store(restored.fence, Ordering::SeqCst);
         state.current_lsm.adopt(restored.revision);
         state
             .last_persisted_lsm
@@ -218,7 +220,8 @@ impl MaterializedRelayStateRead {
                 })
                 .collect::<Vec<_>>();
             records.sort_by(|left, right| {
-                super::branch_key_display(&left.branch).cmp(super::branch_key_display(&right.branch))
+                super::branch_key_display(&left.branch)
+                    .cmp(super::branch_key_display(&right.branch))
             });
             MaterializedGeneration::new(
                 self.state.current_lsm.current(),
@@ -351,9 +354,10 @@ impl MaterializedRelayStateOriginator {
             .state
             .assignment
             .authorize(self.assignment, StateCapability::Originate, || {
-                let existing = self.read.state.entries.get(key).map(|existing| {
-                    record.metadata().is_newer_than(existing.value().metadata())
-                });
+                let existing =
+                    self.read.state.entries.get(key).map(|existing| {
+                        record.metadata().is_newer_than(existing.value().metadata())
+                    });
                 match existing {
                     Some(false) => return None,
                     Some(true) => {}
@@ -512,7 +516,7 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{DomainName, ModelKind, ModelName, RelayName};
 
-    use super::*;
+    use super::{super::materialized_snapshot::SealedSource, *};
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
 
     fn test_placement(relay: &str) -> RuntimeStatePlacement {
@@ -767,10 +771,11 @@ mod tests {
             .assured("eviction should advance the revision");
 
         // A replica that already followed the eviction refuses the generation from before it.
-        let replica_state = Arc::new(ReplicatedMaterializedRelayState::new(placement.clone(), schema.clone()));
-        replica_state
-            .branch_generation
-            .store(2, Ordering::SeqCst);
+        let replica_state = Arc::new(ReplicatedMaterializedRelayState::new(
+            placement.clone(),
+            schema.clone(),
+        ));
+        replica_state.branch_generation.store(2, Ordering::SeqCst);
         let local = ClusterNodeName::try_from("node-2".to_string())
             .assured("the test node name satisfies the node grammar");
         let mut replica = ReplicatedMaterializedRelayState::bind(

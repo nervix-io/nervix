@@ -299,56 +299,56 @@ async fn decode_body(
             contract.carriage.cpu_class(),
             reservation,
             move |_charge, cancellation| {
-            cancellation
-                .check()
-                .change_context(ArrowBodyError::Cancelled)?;
-            let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
-                .map_err(ArrowBodyError::decoding)?;
-            let schema = reader.schema();
-            if let Some(expected) = &contract.schema
-                && schema.as_ref() != expected.as_ref()
-            {
-                return Err(ArrowBodyError::decoding(
-                    "arrow ipc schema does not match the compiled schema",
-                ));
-            }
-            let mut batches = Vec::new();
-            let mut decoded = 0_u64;
-            for next in reader.by_ref() {
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
-                let batch = next.map_err(ArrowBodyError::decoding)?;
-                if batches.len() >= contract.max_sections.get() {
-                    return Err(Report::new(ArrowBodyError::TooManySections {
-                        sections: batches
-                            .len()
-                            .checked_add(1)
-                            .unwrap_or(contract.max_sections.get()),
-                        limit: contract.max_sections.get(),
-                    }));
+                let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
+                    .map_err(ArrowBodyError::decoding)?;
+                let schema = reader.schema();
+                if let Some(expected) = &contract.schema
+                    && schema.as_ref() != expected.as_ref()
+                {
+                    return Err(ArrowBodyError::decoding(
+                        "arrow ipc schema does not match the compiled schema",
+                    ));
                 }
-                let section = batch_payload_bytes(&batch);
-                decoded = decoded.checked_add(section).ok_or_else(|| {
-                    Report::new(ArrowBodyError::DecodedTooLarge {
-                        size: u64::MAX,
-                        limit: decoded_limit,
-                    })
-                })?;
-                // Each section is measured as it lands, so a body whose declared buffers expand
-                // past the limit stops at the section that crossed it.
-                if decoded > decoded_limit {
-                    return Err(Report::new(ArrowBodyError::DecodedTooLarge {
-                        size: decoded,
-                        limit: decoded_limit,
-                    }));
+                let mut batches = Vec::new();
+                let mut decoded = 0_u64;
+                for next in reader.by_ref() {
+                    cancellation
+                        .check()
+                        .change_context(ArrowBodyError::Cancelled)?;
+                    let batch = next.map_err(ArrowBodyError::decoding)?;
+                    if batches.len() >= contract.max_sections.get() {
+                        return Err(Report::new(ArrowBodyError::TooManySections {
+                            sections: batches
+                                .len()
+                                .checked_add(1)
+                                .unwrap_or(contract.max_sections.get()),
+                            limit: contract.max_sections.get(),
+                        }));
+                    }
+                    let section = batch_payload_bytes(&batch);
+                    decoded = decoded.checked_add(section).ok_or_else(|| {
+                        Report::new(ArrowBodyError::DecodedTooLarge {
+                            size: u64::MAX,
+                            limit: decoded_limit,
+                        })
+                    })?;
+                    // Each section is measured as it lands, so a body whose declared buffers expand
+                    // past the limit stops at the section that crossed it.
+                    if decoded > decoded_limit {
+                        return Err(Report::new(ArrowBodyError::DecodedTooLarge {
+                            size: decoded,
+                            limit: decoded_limit,
+                        }));
+                    }
+                    batches.push(batch);
                 }
-                batches.push(batch);
-            }
-            if batches.is_empty() && contract.schema.is_some() {
-                return Err(Report::new(ArrowBodyError::NoSection));
-            }
-            RuntimeRecordBatch::from_decoded_sections(schema, batches)
+                if batches.is_empty() && contract.schema.is_some() {
+                    return Err(Report::new(ArrowBodyError::NoSection));
+                }
+                RuntimeRecordBatch::from_decoded_sections(schema, batches)
             },
         )
         .await

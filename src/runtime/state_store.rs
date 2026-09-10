@@ -173,10 +173,7 @@ impl StateAssignmentAuthority {
     ///
     /// A capture that must record which assignment it observed reads the fence in the same
     /// critical section as the contents, so the two cannot describe different moments.
-    pub(crate) fn serialize_with<T>(
-        &self,
-        action: impl FnOnce(StateAssignmentBinding) -> T,
-    ) -> T {
+    pub(crate) fn serialize_with<T>(&self, action: impl FnOnce(StateAssignmentBinding) -> T) -> T {
         let assignment = self.assignment.lock();
         action(StateAssignmentBinding {
             generation: assignment.generation,
@@ -901,7 +898,37 @@ impl RuntimeStateStore {
         Ok(())
     }
 
+    /// Publish one sealed snapshot generation and make it durable before returning.
+    ///
+    /// The container and the manifest that names it are one stored value, so a reader either finds
+    /// the whole generation or the one before it. Returning only after the durability barrier is
+    /// what makes that true across a restart: a generation this call reported as published is on
+    /// disk, and one it did not is not referenced by anything.
+    pub fn publish_sealed_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        revision: u64,
+        payload: &[u8],
+    ) -> Result<(), RuntimePersistenceError> {
+        self.write_latest_snapshot(placement, revision, payload)?;
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(|_| RuntimePersistenceError::WriteValue)
+    }
+
     pub fn persist_latest_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lsm: u64,
+        payload: &[u8],
+    ) -> Result<(), RuntimePersistenceError> {
+        self.write_latest_snapshot(placement, lsm, payload)?;
+        self.db
+            .persist(PersistMode::Buffer)
+            .map_err(|_| RuntimePersistenceError::WriteValue)
+    }
+
+    fn write_latest_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
         lsm: u64,
@@ -920,9 +947,6 @@ impl RuntimeStateStore {
             .map_err(|_| RuntimePersistenceError::WriteValue)?;
         self.lsm_index
             .insert(placement.as_lsm_index_key(lsm), placement_key)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::Buffer)
             .map_err(|_| RuntimePersistenceError::WriteValue)?;
         Ok(())
     }
