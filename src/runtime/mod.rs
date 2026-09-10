@@ -126,7 +126,7 @@ use tokio::{
     time::{Duration, Instant, sleep, sleep_until},
 };
 use tokio_stream::StreamExt;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;
@@ -747,6 +747,9 @@ struct RuntimeInner {
         DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,
     pending_state_checkpoint_announcements:
         DashMap<RuntimeStatePlacement, PendingStateCheckpointAnnouncement, RandomState>,
+    /// Owns replica synchronization and checkpoint announcement work that outlives the event that
+    /// scheduled it.
+    state_replication_tasks: TaskTracker,
     passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
     replicated_branch_lru_snapshots:
