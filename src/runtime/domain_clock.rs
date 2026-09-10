@@ -411,6 +411,35 @@ impl DomainClock {
         }
     }
 
+    pub(super) fn deadline_reached(
+        &self,
+        deadline: &LogicalDeadline,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> DomainClockAccessResult<bool> {
+        self.revalidate()?;
+        if deadline.domain != self.inner.domain {
+            return Err(Report::new(DomainClockAccessError::DeadlineDomainMismatch {
+                clock_domain: self.inner.domain.clone(),
+                deadline_domain: deadline.domain.clone(),
+            }));
+        }
+        if deadline.generation != self.generation {
+            return Err(Report::new(DomainClockAccessError::StaleGeneration {
+                domain: self.inner.domain.clone(),
+                bound_generation: deadline.generation,
+                current_generation: self.generation,
+            }));
+        }
+        if snapshot.generation != self.generation {
+            return Err(Report::new(DomainClockAccessError::StaleGeneration {
+                domain: self.inner.domain.clone(),
+                bound_generation: snapshot.generation,
+                current_generation: self.generation,
+            }));
+        }
+        Ok(snapshot.now >= deadline.due_at)
+    }
+
     pub fn physical_duration_until(
         &self,
         current: Timestamp,

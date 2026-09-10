@@ -251,8 +251,8 @@ pub(super) async fn run_processor_node_runtime(
     loop {
         tokio::task::consume_budget().await;
         let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
-        let now = match domain_clock.snapshot() {
-            Ok(snapshot) => snapshot.now(),
+        let snapshot = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor '{}' in domain '{}' lost its clock: {error}",
@@ -262,6 +262,7 @@ pub(super) async fn run_processor_node_runtime(
                 break;
             }
         };
+        let now = snapshot.now();
         let mut did_scheduled_work = false;
         if !ownership_frozen && Instant::now() >= next_expiration_scan {
             if let Some(branch_ttl) = template.branch_ttl {
@@ -637,25 +638,15 @@ pub(super) async fn run_processor_branch_task(
     let mut quiesce_gauges = BranchQuiesceGauges::new(quiesce_counters.clone());
     let ownership_entity =
         DomainNodeRef::node_in(domain.clone(), branch.source_kind, processor.clone());
-    let domain_clock = match runtime_handle.bind_domain_clock(&domain) {
-        Ok(clock) => clock,
-        Err(error) => {
-            runtime_handle.events().report_error(format!(
-                "processor branch '{}' in domain '{}' could not bind its clock: {error}",
-                processor.as_str(),
-                domain.as_str(),
-            ));
-            return;
-        }
-    };
+    let domain_clock = branch.domain_clock.clone();
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
     let mut handoff_execution_now = None;
     loop {
         tokio::task::consume_budget().await;
         let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
-        let now = match domain_clock.snapshot() {
-            Ok(snapshot) => snapshot.now(),
+        let execution_snapshot = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor branch '{}' in domain '{}' lost its clock: {error}",
@@ -666,10 +657,25 @@ pub(super) async fn run_processor_branch_task(
                 break;
             }
         };
+        let now = execution_snapshot.now();
+        let buffer_deadline_due = match branch.buffer_deadline_due(&execution_snapshot) {
+            Ok(due) => due,
+            Err(error) => {
+                runtime_handle.events().report_error(format!(
+                    "processor branch '{}' in domain '{}' could not inspect a buffer deadline: \
+                     {error}",
+                    processor.as_str(),
+                    domain.as_str(),
+                ));
+                stop_mode = Some(ProcessorBranchStopMode::Detach);
+                break;
+            }
+        };
         if !ownership_frozen
-            && branch
-                .next_deadline()
-                .is_some_and(|deadline| deadline <= now)
+            && (buffer_deadline_due
+                || branch
+                    .next_deadline()
+                    .is_some_and(|deadline| deadline <= now))
         {
             branch.tick(&graph, now).await;
             quiesce_gauges.observe(&branch, &processor);
@@ -701,6 +707,12 @@ pub(super) async fn run_processor_branch_task(
                 None => PROCESSOR_BRANCH_TASK_IDLE_SLEEP,
             }
         };
+        let buffer_deadlines = if ownership_frozen {
+            Vec::new()
+        } else {
+            branch.buffer_deadlines()
+        };
+        let has_buffer_deadlines = !buffer_deadlines.is_empty();
         let has_pending_materialized = branch.processor_has_pending_materialized(&processor);
         tokio::select! {
             biased;
@@ -815,6 +827,20 @@ pub(super) async fn run_processor_branch_task(
                 completion.complete();
             }
             _ = runtime_handle.inner.ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
+            result = wait_for_branch_buffer_deadlines(&domain_clock, buffer_deadlines),
+                if has_buffer_deadlines =>
+            {
+                if let Err(error) = result {
+                    runtime_handle.events().report_error(format!(
+                        "processor branch '{}' in domain '{}' could not wait for a buffer \
+                         deadline: {error}",
+                        processor.as_str(),
+                        domain.as_str(),
+                    ));
+                    stop_mode = Some(ProcessorBranchStopMode::Detach);
+                    break;
+                }
+            }
             _ = sleep(sleep_duration) => {}
         }
     }

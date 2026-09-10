@@ -204,7 +204,7 @@ pub(super) struct GeneratorBranchTaskState {
 
 #[derive(Default)]
 pub(super) struct GeneratorRouteBranchTaskState {
-    pub(super) next_flush: Option<Timestamp>,
+    pub(super) flush_timer: BranchBufferTimer,
     pub(super) pending: Vec<RelayMessage>,
 }
 
@@ -428,7 +428,7 @@ impl Runtime {
                         let mut pending_groups = Vec::new();
                         for (branch_key, state) in &mut branch_states {
                             let route_state = &mut state.routes[route_index];
-                            route_state.next_flush = None;
+                            route_state.flush_timer.clear();
                             if !route_state.pending.is_empty() {
                                 pending_groups.push((
                                     branch_key.clone(),
@@ -482,7 +482,7 @@ impl Runtime {
                         let mut pending_groups = Vec::new();
                         for (branch_key, state) in &mut branch_states {
                             let route_state = &mut state.routes[route_index];
-                            route_state.next_flush = None;
+                            route_state.flush_timer.clear();
                             if !route_state.pending.is_empty() {
                                 pending_groups.push((
                                     branch_key.clone(),
@@ -647,22 +647,6 @@ impl Runtime {
                             if branch_state.next_generation.is_none() {
                                 branch_state.next_generation = Some(execution_now);
                             }
-                            for (route_state, (_, flush_policy)) in
-                                branch_state.routes.iter_mut().zip(&routes)
-                            {
-                                if route_state.next_flush.is_none()
-                                    && let RuntimeFlushPolicy::Each {
-                                        interval: flush_each,
-                                        ..
-                                    } = flush_policy
-                                {
-                                    route_state.next_flush =
-                                        Some(checked_add_duration_to_timestamp(
-                                            execution_now,
-                                            *flush_each,
-                                        ));
-                                }
-                            }
                             if !branch_state
                                 .next_generation
                                 .is_some_and(|next| execution_now >= next)
@@ -742,18 +726,43 @@ impl Runtime {
                                             let (acks, _completion) =
                                                 runtime.tracked_ack_root(&task_domain);
                                             let route_state = &mut branch_state.routes[route_index];
+                                            let flush_snapshot = match domain_clock.snapshot() {
+                                                Ok(snapshot) => snapshot,
+                                                Err(error) => {
+                                                    let reason = format!(
+                                                        "generator '{}' in domain '{}' could not \
+                                                         read the clock while buffering route \
+                                                         '{}': {error}",
+                                                        task_generator.as_str(),
+                                                        task_domain.as_str(),
+                                                        route.output.relay.as_str(),
+                                                    );
+                                                    task_events.report_error(reason.clone());
+                                                    acks.no_ack(reason);
+                                                    continue;
+                                                }
+                                            };
+                                            if let Err(error) = route_state.flush_timer.arm_flush(
+                                                *flush_policy,
+                                                &domain_clock,
+                                                &flush_snapshot,
+                                            ) {
+                                                let reason = format!(
+                                                    "generator '{}' in domain '{}' could not \
+                                                     start route '{}' flush deadline: {error}",
+                                                    task_generator.as_str(),
+                                                    task_domain.as_str(),
+                                                    route.output.relay.as_str(),
+                                                );
+                                                task_events.report_error(reason.clone());
+                                                acks.no_ack(reason);
+                                                continue;
+                                            }
                                             route_state.pending.push(RelayMessage {
                                                 key: branch_key.clone(),
                                                 record,
                                                 acks,
                                             });
-                                            if route_state.next_flush.is_none() {
-                                                route_state.next_flush =
-                                                    Some(checked_add_duration_to_timestamp(
-                                                        execution_now,
-                                                        flush_policy.interval(),
-                                                    ));
-                                            }
                                         }
                                         Ok(GeneratorProgramOutcome::MessageError {
                                             error,
@@ -838,29 +847,41 @@ impl Runtime {
                 }
 
                 let mut flushed_any_branch = false;
+                let flush_snapshot = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        task_events.report_error(format!(
+                            "generator '{}' in domain '{}' could not inspect route flush \
+                             deadlines: {error}",
+                            task_generator.as_str(),
+                            task_domain.as_str(),
+                        ));
+                        break;
+                    }
+                };
                 for (branch_key, branch_state) in &mut branch_states {
                     tokio::task::consume_budget().await;
-                    for ((route, flush_policy), route_state) in
-                        routes.iter().zip(&mut branch_state.routes)
-                    {
-                        if !route_state
-                            .next_flush
-                            .is_some_and(|next| execution_now >= next)
+                    for ((route, _), route_state) in routes.iter().zip(&mut branch_state.routes) {
+                        let due = match route_state
+                            .flush_timer
+                            .is_due(&domain_clock, &flush_snapshot)
                         {
+                            Ok(due) => due,
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "generator '{}' in domain '{}' could not inspect route '{}' \
+                                     flush deadline: {error}",
+                                    task_generator.as_str(),
+                                    task_domain.as_str(),
+                                    route.output.relay.as_str(),
+                                ));
+                                false
+                            }
+                        };
+                        if !due {
                             continue;
                         }
-                        match flush_policy {
-                            RuntimeFlushPolicy::Each { interval, .. } => {
-                                advance_scheduled_timestamp(
-                                    &mut route_state.next_flush,
-                                    *interval,
-                                    execution_now,
-                                );
-                            }
-                            RuntimeFlushPolicy::Immediate => {
-                                route_state.next_flush = None;
-                            }
-                        }
+                        route_state.flush_timer.clear();
                         if !route_state.pending.is_empty() {
                             let mut pending_group = vec![(
                                 branch_key.clone(),
@@ -898,9 +919,6 @@ impl Runtime {
                                 .values()
                                 .filter_map(|state| state.next_generation),
                         )
-                        .chain(branch_states.values().flat_map(|state| {
-                            state.routes.iter().filter_map(|route| route.next_flush)
-                        }))
                         .min();
                 let sleep_duration = if let Some(next) = next_deadline {
                     match domain_clock.physical_duration_until(execution_now, next) {
@@ -918,10 +936,29 @@ impl Runtime {
                 } else {
                     interval
                 };
+                let buffer_deadlines = branch_states
+                    .values()
+                    .flat_map(|state| &state.routes)
+                    .filter_map(|route| route.flush_timer.deadline())
+                    .collect::<Vec<_>>();
+                let has_buffer_deadlines = !buffer_deadlines.is_empty();
 
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    result = wait_for_branch_buffer_deadlines(&domain_clock, buffer_deadlines),
+                        if has_buffer_deadlines =>
+                    {
+                        if let Err(error) = result {
+                            task_events.report_error(format!(
+                                "generator '{}' in domain '{}' could not wait for a route flush \
+                                 deadline: {error}",
+                                task_generator.as_str(),
+                                task_domain.as_str(),
+                            ));
                             break;
                         }
                     }

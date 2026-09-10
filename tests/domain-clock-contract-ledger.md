@@ -133,6 +133,7 @@ just test-scenarios --input tests/features/runtime/domain_ingestion_time.feature
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_bound_clock
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
 just test-scenarios --input tests/features/runtime/domain_execution_time.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/domain_buffer_timing.feature --tags @domain_buffer_timing
 just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/inferencer.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/sqs_emission.feature --tags @domain_execution_time
@@ -150,7 +151,8 @@ logical-origin scenario and adds `domain_ingestion_time.feature` for admission, 
 duration-window coverage. The untagged
 `Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
 task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and focused tagged
-coverage in the listed runtime feature files for F6 and F7.
+coverage in the listed runtime feature files for F6 and F7. Task 07 adds
+`domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes.
 
 Physical controls are
 `tests::connection_lifetime::send_queue_admission_is_deadline_bound`,

@@ -901,7 +901,15 @@ impl EmitterBatchBuffer {
         self.flush_at = self
             .flush_policy
             .filter(|_| !self.pending.is_empty())
-            .map(|policy| Instant::now() + policy.interval());
+            .map(|policy| {
+                let interval = match policy {
+                    RuntimeFlushPolicy::Each { interval, .. } => interval,
+                    RuntimeFlushPolicy::Immediate => {
+                        RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT
+                    }
+                };
+                Instant::now() + interval
+            });
     }
 
     fn is_empty(&self) -> bool {
@@ -927,7 +935,11 @@ impl EmitterBatchBuffer {
         self.pending.push(batch);
         self.update_buffered_messages();
         if self.flush_at.is_none() {
-            self.flush_at = Some(Instant::now() + flush_policy.interval());
+            let interval = match flush_policy {
+                RuntimeFlushPolicy::Each { interval, .. } => interval,
+                RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
+            };
+            self.flush_at = Some(Instant::now() + interval);
         }
         Ok(flush_policy.size_boundary_reached(self.pending_bytes))
     }
@@ -3292,6 +3304,22 @@ impl EmitterTask {
         let task_stop_signal = stop_signal.clone();
 
         let task = tokio::spawn(async move {
+            let input_collection_clock = if input_collect_policy.is_some() {
+                match runtime.bind_domain_clock(&task_domain) {
+                    Ok(clock) => Some(clock),
+                    Err(error) => {
+                        runtime.events().report_error(format!(
+                            "emitter '{}' in domain '{}' could not bind its input collection \
+                             clock: {error}",
+                            task_emitter.as_str(),
+                            task_domain.as_str(),
+                        ));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             let work_cancel_forwarder = AbortOnDropHandle::new(tokio::spawn(async move {
                 if *domain_work_cancel_rx.borrow()
                     || domain_work_cancel_rx.changed().await.is_err()
@@ -3306,7 +3334,11 @@ impl EmitterTask {
             let interaction_inputs = inputs
                 .into_iter()
                 .map(|(relay, receiver)| {
-                    RelayInteractionInput::new(relay, receiver, input_collect_policy)
+                    let input = RelayInteractionInput::new(relay, receiver, input_collect_policy);
+                    match &input_collection_clock {
+                        Some(clock) => input.with_domain_clock(clock.clone()),
+                        None => input,
+                    }
                 })
                 .collect();
             let mut interaction = RelayInteraction::with_commands(

@@ -370,7 +370,7 @@ impl Runtime {
                 flush_policy,
                 message_error_policy: output.message_error_policy.clone(),
                 pending: Vec::new(),
-                next_flush: None,
+                flush_timer: BranchBufferTimer::default(),
                 compiled_program,
                 compiled_branch_program,
             });

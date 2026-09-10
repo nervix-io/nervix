@@ -594,7 +594,33 @@ pub(super) async fn dispatch_selected_processor_outputs(
             .await;
     }
 
-    let execution_now = scope.execution_now;
+    let domain_clock = context.branch.domain_clock.clone();
+    let flush_snapshot = match domain_clock.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let acks = batches_by_output
+                .iter()
+                .flatten()
+                .flat_map(|batch| batch.acks.iter().cloned())
+                .collect::<Vec<_>>();
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    acks.iter(),
+                    format!(
+                        "{} '{}' could not read the domain clock while buffering output: {error}",
+                        context.node_kind.as_str(),
+                        context.processor.as_str(),
+                    ),
+                );
+            return None;
+        }
+    };
     let mut dispatched_acks = Vec::new();
     for (output_index, mut batches) in batches_by_output.into_iter().enumerate() {
         let output = &mut outputs.routes[output_index];
@@ -604,12 +630,38 @@ pub(super) async fn dispatch_selected_processor_outputs(
         }
         let mut should_flush = false;
         for batch in batches.drain(..) {
-            should_flush |= output.enqueue(batch, execution_now);
+            match output.enqueue(batch, &domain_clock, &flush_snapshot) {
+                Ok(flush) => should_flush |= flush,
+                Err(error) => {
+                    let pending = output.take_pending();
+                    let acks = pending
+                        .iter()
+                        .flat_map(|batch| batch.acks.iter().cloned())
+                        .collect::<Vec<_>>();
+                    context
+                        .branch
+                        .runtime
+                        .handle_internal_processor_error_for_acks(
+                            &context.branch.domain,
+                            context.node_kind,
+                            context.processor,
+                            context.error_policies,
+                            acks.iter(),
+                            format!(
+                                "{} '{}' could not start an output flush deadline for relay '{}': \
+                                 {error}",
+                                context.node_kind.as_str(),
+                                context.processor.as_str(),
+                                relay.as_str(),
+                            ),
+                        );
+                    return None;
+                }
+            }
         }
         if flush_selected_immediately
             && selected_output.is_some_and(|selected| selected == output_index)
         {
-            output.force_flush_at(execution_now);
             should_flush = true;
         }
         if !should_flush {
@@ -682,10 +734,101 @@ pub(super) async fn dispatch_selected_processor_outputs(
 pub(super) async fn flush_due_processor_outputs(
     context: ProcessorOutputDispatchContext<'_>,
     outputs: &mut RelayProcessorOutputsNode,
-    now: Timestamp,
+    _now: Timestamp,
 ) {
+    flush_processor_outputs(context, outputs, ProcessorOutputFlush::Due).await;
+}
+
+pub(super) async fn flush_all_processor_outputs(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+) {
+    flush_processor_outputs(context, outputs, ProcessorOutputFlush::All).await;
+}
+
+#[derive(Clone, Copy)]
+enum ProcessorOutputFlush {
+    Due,
+    All,
+}
+
+async fn flush_processor_outputs(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+    flush: ProcessorOutputFlush,
+) {
+    let domain_clock = context.branch.domain_clock.clone();
+    let snapshot = match flush {
+        ProcessorOutputFlush::All => None,
+        ProcessorOutputFlush::Due => match domain_clock.snapshot() {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                for output in &mut outputs.routes {
+                    let pending = output.take_pending();
+                    let acks = pending
+                        .iter()
+                        .flat_map(|batch| batch.acks.iter().cloned())
+                        .collect::<Vec<_>>();
+                    context
+                        .branch
+                        .runtime
+                        .handle_internal_processor_error_for_acks(
+                            &context.branch.domain,
+                            context.node_kind,
+                            context.processor,
+                            context.error_policies,
+                            acks.iter(),
+                            format!(
+                                "{} '{}' could not read the domain clock while releasing output \
+                                 for relay '{}': {error}",
+                                context.node_kind.as_str(),
+                                context.processor.as_str(),
+                                output.relay.as_str(),
+                            ),
+                        );
+                }
+                return;
+            }
+        },
+    };
     for output in &mut outputs.routes {
-        if !output.flush_due(now) {
+        let flush_due = match flush {
+            ProcessorOutputFlush::All => !output.pending.is_empty(),
+            ProcessorOutputFlush::Due => {
+                let snapshot = snapshot
+                    .as_ref()
+                    .assured("due output flushing captures a clock snapshot above");
+                match output.flush_due(&domain_clock, snapshot) {
+                    Ok(due) => due,
+                    Err(error) => {
+                        let pending = output.take_pending();
+                        let acks = pending
+                            .iter()
+                            .flat_map(|batch| batch.acks.iter().cloned())
+                            .collect::<Vec<_>>();
+                        context
+                            .branch
+                            .runtime
+                            .handle_internal_processor_error_for_acks(
+                                &context.branch.domain,
+                                context.node_kind,
+                                context.processor,
+                                context.error_policies,
+                                acks.iter(),
+                                format!(
+                                    "{} '{}' could not inspect the output flush deadline for \
+                                     relay '{}': {error}",
+                                    context.node_kind.as_str(),
+                                    context.processor.as_str(),
+                                    output.relay.as_str(),
+                                ),
+                            );
+                        continue;
+                    }
+                }
+            }
+        };
+        if !flush_due {
             continue;
         }
         let pending = output.take_pending();

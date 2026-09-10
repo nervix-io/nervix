@@ -17,12 +17,13 @@ pub(super) struct ReingestorDispatchContext<'a> {
     pub(super) mode: AckMode,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    pub(super) domain_clock: &'a DomainClock,
     pub(super) execution_now: Timestamp,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ReingestorOutputFlush {
-    Due(Timestamp),
+    Due,
     All,
 }
 
@@ -648,7 +649,29 @@ impl Runtime {
             .await;
         }
 
-        let execution_now = scope.execution_now;
+        let domain_clock = context.domain_clock;
+        let flush_snapshot = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                for batches in batches_by_output {
+                    for batch in batches {
+                        self.handle_internal_processor_error_for_acks(
+                            domain,
+                            ModelKind::Reingestor,
+                            reingestor,
+                            error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "reingestor '{}' could not read the domain clock while buffering \
+                                 output: {error}",
+                                reingestor.as_str(),
+                            ),
+                        );
+                    }
+                }
+                return;
+            }
+        };
         for (output_index, mut batches) in batches_by_output.into_iter().enumerate() {
             tokio::task::consume_budget().await;
             let relay = &output_relays[output_index];
@@ -674,7 +697,29 @@ impl Runtime {
             let output = &mut output_routes.routes[output_index];
             let mut should_flush = false;
             for batch in batches.drain(..) {
-                should_flush |= output.enqueue(batch, execution_now);
+                match output.enqueue(batch, domain_clock, &flush_snapshot) {
+                    Ok(flush) => should_flush |= flush,
+                    Err(error) => {
+                        let pending = output.take_pending();
+                        let acks = pending
+                            .iter()
+                            .flat_map(|batch| batch.acks.iter().cloned())
+                            .collect::<Vec<_>>();
+                        self.handle_internal_processor_error_for_acks(
+                            domain,
+                            ModelKind::Reingestor,
+                            reingestor,
+                            error_policies,
+                            acks.iter(),
+                            format!(
+                                "reingestor '{}' could not start output '{}' flush deadline: \
+                                 {error}",
+                                reingestor.as_str(),
+                                relay.as_str(),
+                            ),
+                        );
+                    }
+                }
             }
             output_quiesce_gauge.observe(output_routes);
             if !should_flush {
@@ -775,8 +820,59 @@ impl Runtime {
         for output_index in 0..output_routes.routes.len() {
             tokio::task::consume_budget().await;
             let should_flush = match flush {
-                ReingestorOutputFlush::Due(now) => {
-                    output_routes.routes[output_index].flush_due(now)
+                ReingestorOutputFlush::Due => {
+                    let snapshot = match context.domain_clock.snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            let output = &mut output_routes.routes[output_index];
+                            let pending = output.take_pending();
+                            let acks = pending
+                                .iter()
+                                .flat_map(|batch| batch.acks.iter().cloned())
+                                .collect::<Vec<_>>();
+                            self.handle_internal_processor_error_for_acks(
+                                context.domain,
+                                ModelKind::Reingestor,
+                                context.reingestor,
+                                context.error_policies,
+                                acks.iter(),
+                                format!(
+                                    "reingestor '{}' could not read the domain clock while \
+                                     releasing output '{}': {error}",
+                                    context.reingestor.as_str(),
+                                    output.relay.as_str(),
+                                ),
+                            );
+                            continue;
+                        }
+                    };
+                    match output_routes.routes[output_index]
+                        .flush_due(context.domain_clock, &snapshot)
+                    {
+                        Ok(due) => due,
+                        Err(error) => {
+                            let output = &mut output_routes.routes[output_index];
+                            let pending = output.take_pending();
+                            let acks = pending
+                                .iter()
+                                .flat_map(|batch| batch.acks.iter().cloned())
+                                .collect::<Vec<_>>();
+                            self.handle_internal_processor_error_for_acks(
+                                context.domain,
+                                ModelKind::Reingestor,
+                                context.reingestor,
+                                context.error_policies,
+                                acks.iter(),
+                                format!(
+                                    "reingestor '{}' could not inspect output '{}' flush \
+                                     deadline: {error}",
+                                    context.reingestor.as_str(),
+                                    output.relay.as_str(),
+                                ),
+                            );
+                            false
+                        }
+                    }
                 }
                 ReingestorOutputFlush::All => {
                     !output_routes.routes[output_index].pending.is_empty()
@@ -980,7 +1076,7 @@ impl Runtime {
                         flush_policy,
                         message_error_policy: output.message_error_policy.clone(),
                         pending: Vec::new(),
-                        next_flush: None,
+                        flush_timer: BranchBufferTimer::default(),
                         compiled_program: None,
                         compiled_branch_program: None,
                     })
@@ -1035,7 +1131,8 @@ impl Runtime {
             let mut output_quiesce_gauge =
                 ReingestorOutputQuiesceGauge::new(quiesce_counters.clone());
             let interaction_input =
-                RelayInteractionInput::new(task_from_relay.clone(), receiver, input_collect_policy);
+                RelayInteractionInput::new(task_from_relay.clone(), receiver, input_collect_policy)
+                    .with_domain_clock(domain_clock.clone());
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
                 shutdown_rx,
@@ -1049,26 +1146,23 @@ impl Runtime {
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
-                let scheduling_now = match domain_clock.snapshot() {
-                    Ok(snapshot) => snapshot.now(),
-                    Err(error) => {
-                        runtime.events().report_error(format!(
-                            "reingestor '{}' in domain '{}' lost its clock: {error}",
-                            task_reingestor.as_str(),
-                            task_domain.as_str(),
-                        ));
-                        break;
-                    }
-                };
-                let wake_at = match task_output_routes.next_flush() {
-                    Some(deadline) => {
-                        let duration = match wall_duration_until_domain_deadline(
-                            &runtime,
-                            &task_domain,
-                            scheduling_now,
-                            deadline,
-                        ) {
-                            Ok(duration) => duration,
+                let output_deadlines = task_output_routes.buffer_deadlines();
+                let has_output_deadlines = !output_deadlines.is_empty();
+                let work = tokio::select! {
+                    result = wait_for_branch_buffer_deadlines(&domain_clock, output_deadlines),
+                        if has_output_deadlines =>
+                    {
+                        if let Err(error) = result {
+                            runtime.events().report_error(format!(
+                                "reingestor '{}' in domain '{}' could not wait for an output \
+                                 flush deadline: {error}",
+                                task_reingestor.as_str(),
+                                task_domain.as_str(),
+                            ));
+                            break;
+                        }
+                        let execution_now = match domain_clock.snapshot() {
+                            Ok(snapshot) => snapshot.now(),
                             Err(error) => {
                                 runtime.events().report_error(format!(
                                     "reingestor '{}' in domain '{}' lost its clock: {error}",
@@ -1078,11 +1172,29 @@ impl Runtime {
                                 break;
                             }
                         };
-                        Some(Instant::now() + duration)
+                        runtime
+                            .flush_reingestor_outputs(
+                                ReingestorDispatchContext {
+                                    domain: &task_domain,
+                                    reingestor: &task_reingestor,
+                                    from_relay: &task_from_relay,
+                                    from_where: task_from_where.as_ref(),
+                                    mode: task_mode,
+                                    error_policies: &task_error_policies,
+                                    branched_senders: &task_branched_senders,
+                                    domain_clock: &domain_clock,
+                                    execution_now,
+                                },
+                                &mut task_output_routes,
+                                ReingestorOutputFlush::Due,
+                                &mut output_quiesce_gauge,
+                            )
+                            .await;
+                        continue;
                     }
-                    None => None,
+                    work = interaction.next(None) => work,
                 };
-                let work = match interaction.next(wake_at).await {
+                let work = match work {
                     Ok(work) => work,
                     Err(error) => {
                         let reason = format!(
@@ -1124,6 +1236,7 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    domain_clock: &domain_clock,
                                     execution_now,
                                 },
                                 &mut task_output_routes,
@@ -1150,10 +1263,11 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    domain_clock: &domain_clock,
                                     execution_now,
                                 },
                                 &mut task_output_routes,
-                                ReingestorOutputFlush::Due(execution_now),
+                                ReingestorOutputFlush::Due,
                                 &mut output_quiesce_gauge,
                             )
                             .await;
@@ -1169,6 +1283,7 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    domain_clock: &domain_clock,
                                     execution_now,
                                 },
                                 &mut task_output_routes,
@@ -1266,6 +1381,7 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    domain_clock: &domain_clock,
                                     execution_now,
                                 },
                                 &mut compiled_from_where,

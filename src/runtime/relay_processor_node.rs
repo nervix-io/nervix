@@ -164,7 +164,7 @@ impl RelayProcessorNode {
                 let mut collector = previous_collectors
                     .remove(&relay)
                     .unwrap_or_else(|| RuntimeInputCollector::new(policy));
-                collector.policy = policy;
+                collector.reconfigure(policy);
                 (relay, collector)
             })
             .collect();
@@ -256,8 +256,9 @@ impl RelayProcessorNode {
         batch: RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let now = match branch.runtime.domain_execution_snapshot(&branch.domain) {
-                Ok(snapshot) => snapshot.now(),
+            let domain_clock = branch.domain_clock.clone();
+            let snapshot = match domain_clock.snapshot() {
+                Ok(snapshot) => snapshot,
                 Err(error) => {
                     branch.runtime.handle_internal_processor_error_for_acks(
                         &branch.domain,
@@ -278,7 +279,7 @@ impl RelayProcessorNode {
                 self.execute(graph, branch, incoming_relay, batch).await;
                 return;
             };
-            if !collector.push(batch, now) {
+            if !collector.push(batch, &domain_clock, &snapshot) {
                 return;
             }
             let batches = collector.take_pending();
@@ -293,14 +294,61 @@ impl RelayProcessorNode {
         &'a mut self,
         graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
-        now: Timestamp,
+        _now: Timestamp,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let due_relays = self
-                .input_collectors
-                .iter()
-                .filter_map(|(relay, collector)| collector.is_due(now).then_some(relay.clone()))
-                .collect::<Vec<_>>();
+            let domain_clock = branch.domain_clock.clone();
+            let snapshot = match domain_clock.snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    for (relay, collector) in &mut self.input_collectors {
+                        let acks = collector.merged_acks();
+                        if acks.is_empty() {
+                            continue;
+                        }
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind,
+                            &self.processor,
+                            &self.error_policies,
+                            [&acks],
+                            format!(
+                                "{} '{}' could not read the domain clock while releasing \
+                                 collected input from relay '{}': {error}",
+                                self.kind.as_str(),
+                                self.processor.as_str(),
+                                relay.as_str(),
+                            ),
+                        );
+                        collector.take_pending();
+                    }
+                    return;
+                }
+            };
+            let mut due_relays = Vec::new();
+            for (relay, collector) in &self.input_collectors {
+                match collector.is_due(&domain_clock, &snapshot) {
+                    Ok(true) => due_relays.push(relay.clone()),
+                    Ok(false) => {}
+                    Err(error) => {
+                        let acks = collector.merged_acks();
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind,
+                            &self.processor,
+                            &self.error_policies,
+                            [&acks],
+                            format!(
+                                "{} '{}' could not inspect collected input from relay '{}': \
+                                 {error}",
+                                self.kind.as_str(),
+                                self.processor.as_str(),
+                                relay.as_str(),
+                            ),
+                        );
+                    }
+                }
+            }
             for relay in due_relays {
                 let batches = match self.input_collectors.get_mut(&relay) {
                     Some(collector) => collector.take_pending(),
@@ -324,7 +372,7 @@ impl RelayProcessorNode {
                 .input_collectors
                 .iter()
                 .filter_map(|(relay, collector)| {
-                    (!collector.pending.is_empty()).then_some(relay.clone())
+                    (!collector.is_empty()).then_some(relay.clone())
                 })
                 .collect::<Vec<_>>();
             for relay in pending_relays {
@@ -1106,6 +1154,25 @@ impl RelayProcessorNode {
                         });
                     }
                     let row_ordering = Arc::new(row_ordering);
+                    let domain_clock = branch.domain_clock.clone();
+                    let flush_snapshot = match domain_clock.snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind,
+                                &self.processor,
+                                &self.error_policies,
+                                batch.acks.iter(),
+                                format!(
+                                    "reorderer '{}' could not read the domain clock while \
+                                     buffering output: {error}",
+                                    self.processor.as_str(),
+                                ),
+                            );
+                            return;
+                        }
+                    };
                     let route_batches = batch.into_attached_fanout(output_routes.routes.len());
                     let mut due_outputs = Vec::new();
                     for (output_index, route_batch) in route_batches.into_iter().enumerate() {
@@ -1113,14 +1180,15 @@ impl RelayProcessorNode {
                         output_buffer.push(route_batch, Arc::clone(&row_ordering), execution_now);
                         let output = &mut output_routes.routes[output_index];
                         match output
-                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes())
+                            .schedule_input_flush(
+                                &domain_clock,
+                                &flush_snapshot,
+                                output_buffer.estimated_bytes(),
+                            )
                         {
-                            Some(true) => {
-                                output.force_flush_at(execution_now);
-                                due_outputs.push(output_index);
-                            }
-                            Some(false) => {}
-                            None => {
+                            Ok(Some(true)) => due_outputs.push(output_index),
+                            Ok(Some(false)) => {}
+                            Ok(None) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
                                     self.kind,
@@ -1134,6 +1202,23 @@ impl RelayProcessorNode {
                                     ),
                                 );
                                 output_buffer.clear();
+                            }
+                            Err(error) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind,
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer.acks(),
+                                    format!(
+                                        "reorderer '{}' could not start output '{}' flush \
+                                         deadline: {error}",
+                                        self.processor.as_str(),
+                                        output.relay.as_str(),
+                                    ),
+                                );
+                                output_buffer.clear();
+                                output.clear_flush_timer();
                             }
                         }
                     }
@@ -1683,6 +1768,25 @@ impl RelayProcessorNode {
                         );
                         return;
                     }
+                    let domain_clock = branch.domain_clock.clone();
+                    let flush_snapshot = match domain_clock.snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind,
+                                &self.processor,
+                                &self.error_policies,
+                                batch.acks.iter(),
+                                format!(
+                                    "inferencer '{}' could not read the domain clock while \
+                                     buffering output: {error}",
+                                    self.processor.as_str(),
+                                ),
+                            );
+                            return;
+                        }
+                    };
                     let route_batches = batch.into_attached_fanout(output_routes.routes.len());
                     let mut due_outputs = Vec::new();
                     for (output_index, route_batch) in route_batches.into_iter().enumerate() {
@@ -1690,14 +1794,15 @@ impl RelayProcessorNode {
                         output_buffer.push(route_batch);
                         let output = &mut output_routes.routes[output_index];
                         match output
-                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes())
+                            .schedule_input_flush(
+                                &domain_clock,
+                                &flush_snapshot,
+                                output_buffer.estimated_bytes(),
+                            )
                         {
-                            Some(true) => {
-                                output.force_flush_at(execution_now);
-                                due_outputs.push(output_index);
-                            }
-                            Some(false) => {}
-                            None => {
+                            Ok(Some(true)) => due_outputs.push(output_index),
+                            Ok(Some(false)) => {}
+                            Ok(None) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
                                     self.kind,
@@ -1714,6 +1819,26 @@ impl RelayProcessorNode {
                                     ),
                                 );
                                 output_buffer.clear();
+                            }
+                            Err(error) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind,
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer
+                                        .pending
+                                        .iter()
+                                        .flat_map(|batch| batch.acks.iter()),
+                                    format!(
+                                        "inferencer '{}' could not start output '{}' flush \
+                                         deadline: {error}",
+                                        self.processor.as_str(),
+                                        output.relay.as_str(),
+                                    ),
+                                );
+                                output_buffer.clear();
+                                output.clear_flush_timer();
                             }
                         }
                     }
@@ -1812,6 +1937,20 @@ impl RelayProcessorNode {
                 now,
             )
             .await;
+            let domain_clock = branch.domain_clock.clone();
+            let flush_snapshot = match domain_clock.snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    branch.runtime.events().report_error(format!(
+                        "{} '{}' in domain '{}' could not read the clock while releasing \
+                         buffered output: {error}",
+                        self.kind.as_str(),
+                        self.processor.as_str(),
+                        branch.domain.as_str(),
+                    ));
+                    return;
+                }
+            };
             match &mut self.operation {
                 RelayProcessorOperationNode::Deduplicator { .. } => {}
                 RelayProcessorOperationNode::WindowProcessor {
@@ -1887,9 +2026,29 @@ impl RelayProcessorNode {
                                 .is_some_and(|received_at| {
                                     checked_add_duration_to_timestamp(received_at, *max_time) <= now
                                 });
-                        let flush_due = output_routes.routes[output_index].flush_deadline_due(now);
+                        let flush_due = match output_routes.routes[output_index]
+                            .flush_deadline_due(&domain_clock, &flush_snapshot)
+                        {
+                            Ok(due) => due,
+                            Err(error) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind,
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer.acks(),
+                                    format!(
+                                        "reorderer '{}' could not inspect output '{}' flush \
+                                         deadline: {error}",
+                                        self.processor.as_str(),
+                                        output_routes.routes[output_index].relay.as_str(),
+                                    ),
+                                );
+                                output_routes.routes[output_index].clear_flush_timer();
+                                continue;
+                            }
+                        };
                         if max_time_due || flush_due {
-                            output_routes.routes[output_index].force_flush_at(now);
                             due_outputs.push(output_index);
                         }
                     }
@@ -1974,17 +2133,37 @@ impl RelayProcessorNode {
                     output_buffers,
                     session,
                 } => {
-                    let due_outputs = output_buffers
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(output_index, output_buffer)| {
-                            (!output_buffer.pending.is_empty()
-                                && output_routes.routes[output_index].flush_deadline_due(now))
-                            .then_some(output_index)
-                        })
-                        .collect::<Vec<_>>();
+                    let mut due_outputs = Vec::new();
+                    for (output_index, output_buffer) in output_buffers.iter().enumerate() {
+                        if output_buffer.pending.is_empty() {
+                            continue;
+                        }
+                        match output_routes.routes[output_index]
+                            .flush_deadline_due(&domain_clock, &flush_snapshot)
+                        {
+                            Ok(true) => due_outputs.push(output_index),
+                            Ok(false) => {}
+                            Err(error) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind,
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer
+                                        .pending
+                                        .iter()
+                                        .flat_map(|batch| batch.acks.iter()),
+                                    format!(
+                                        "inferencer '{}' could not inspect output '{}' flush \
+                                         deadline: {error}",
+                                        self.processor.as_str(),
+                                        output_routes.routes[output_index].relay.as_str(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     for output_index in due_outputs {
-                        output_routes.routes[output_index].force_flush_at(now);
                         flush_branch_inferencer_output(
                             InferencerFlushContext {
                                 graph,
@@ -2123,6 +2302,39 @@ impl RelayProcessorNode {
                     }
                 }
             }
+        })
+    }
+
+    pub(super) fn flush_route_buffers<'a>(
+        &'a mut self,
+        graph: &'a SharedActiveGraph,
+        branch: &'a mut BranchRuntime,
+        execution_now: Timestamp,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let node_kind = self.kind;
+            let processor = &self.processor;
+            let error_policies = &self.error_policies;
+            let input_relays = &self.input_relays;
+            let materialized_state = &self.materialized_state;
+            flush_all_processor_outputs(
+                ProcessorOutputDispatchContext {
+                    graph,
+                    branch,
+                    node_kind,
+                    source_kind: node_kind,
+                    processor,
+                    error_policies,
+                    input_relays,
+                    filter_source: ProcessorOutputFilterSource::InputRelays,
+                    materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
+                        materialized_state,
+                    ),
+                    execution_now,
+                },
+                self.operation.output_routes_mut(),
+            )
+            .await;
         })
     }
 
@@ -2356,13 +2568,31 @@ impl RelayProcessorNode {
             }
         };
         operation_deadline
-            .into_iter()
-            .chain(
-                self.input_collectors
-                    .values()
-                    .filter_map(|collector| collector.deadline),
-            )
-            .chain(self.operation.output_routes().next_flush())
-            .min()
+    }
+
+    pub(super) fn buffer_deadlines(&self) -> Vec<BranchBufferDeadline> {
+        self.input_collectors
+            .values()
+            .filter_map(RuntimeInputCollector::deadline)
+            .chain(self.operation.output_routes().buffer_deadlines())
+            .collect()
+    }
+
+    pub(super) fn buffer_deadline_due(
+        &self,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
+        for collector in self.input_collectors.values() {
+            if collector.is_due(clock, snapshot)? {
+                return Ok(true);
+            }
+        }
+        for output in &self.operation.output_routes().routes {
+            if output.flush_timer.is_due(clock, snapshot)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
