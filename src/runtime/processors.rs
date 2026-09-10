@@ -1223,6 +1223,7 @@ pub(super) struct WindowFlushContext<'a> {
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct JunctionFlushContext<'a> {
@@ -1236,6 +1237,7 @@ pub(super) struct JunctionFlushContext<'a> {
     /// Resolved when the junction admitted this batch; a junction flushes within the same
     /// execution, so its routes read that snapshot rather than resolving again.
     pub(super) materialized_values: &'a HashMap<String, RuntimeValue>,
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct InferencerFlushContext<'a> {
@@ -1254,6 +1256,7 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) input_relays: &'a [RelayName],
     pub(super) session: &'a mut Option<OnnxInferencerSession>,
     pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct WasmFlushContext<'a> {
@@ -1269,6 +1272,7 @@ pub(super) struct WasmFlushContext<'a> {
     pub(super) file: &'a str,
     pub(super) limits: nervix_models::WasmProcessorLimits,
     pub(super) replicated_state: &'a ReplicatedWasmProcessorState,
+    pub(super) execution_now: Timestamp,
 }
 
 #[derive(Clone)]
@@ -1290,6 +1294,7 @@ pub(super) struct PlannedMessageError {
     pub(super) error: StructuredMessageError,
     pub(super) partial_output: Option<RuntimeRecordBatch>,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct PlannedGeneralError {

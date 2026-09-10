@@ -24,6 +24,23 @@ use crate::{
     metrics::RuntimeMetrics,
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
+
+#[test]
+fn recovered_handoff_retries_schedule_rebuild_until_activation() {
+    let mut recovered = OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest;
+
+    assert!(recovered.authorize());
+    assert!(recovered.is_authorized());
+    assert!(
+        recovered.authorize(),
+        "a failed or cancelled recovered schedule rebuild must remain retriable"
+    );
+
+    let mut ordinary = OwnershipHandoffActivationAuthorization::AuthorizedByPreparation;
+    assert!(!ordinary.authorize());
+    assert!(ordinary.is_authorized());
+}
+
 #[test]
 fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     let dir = tempdir().expect("temp dir should open");

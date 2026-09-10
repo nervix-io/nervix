@@ -1,6 +1,6 @@
 {
   "as_casts": 3,
-  "bare_error_signatures": 842,
+  "bare_error_signatures": 840,
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 11,
   "combinator_control_flow": 0,

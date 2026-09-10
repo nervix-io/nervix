@@ -692,8 +692,7 @@ Feature: Placement policies
 
   @planned-handoff-timeout
   Scenario: A timed-out placement consolidation leaves its model and schedule unchanged
-    Given entity gate deadline is configured as "250ms"
-    And the production sticky scheduler is configured
+    Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
     When these NSPL commands are executed on the leader node
@@ -738,6 +737,7 @@ Feature: Placement policies
       """
       transient error: fault injector stalled emitter publish
       """
+    Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these NSPL commands fail with "timed out draining domain"
       """
       CREATE PLACEMENT placement_timeout_local

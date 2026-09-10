@@ -63,7 +63,12 @@ impl Runtime {
                         destination_incarnation: persisted.destination_incarnation,
                         base_schedule_fingerprint: persisted.base_schedule_fingerprint,
                         target_schedule_fingerprint: persisted.target_schedule_fingerprint,
-                        activation_authorized: false,
+                        activation_authorization: super::state_replication::
+                            OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest,
+                        activation: watch::channel(
+                            super::state_replication::OwnershipHandoffActivation::Prepared,
+                        )
+                        .0,
                         checkpoints,
                     },
                 );
@@ -126,6 +131,8 @@ impl Runtime {
                     pending_acks: DashMap::default(),
                     pending_relay_admissions: DashMap::default(),
                 }),
+                remote_ack_watcher_shutdown: CancellationToken::new(),
+                remote_ack_watcher_tasks: TaskTracker::new(),
                 state_checkpoint_notifications: DashMap::default(),
                 pending_state_replica_syncs: DashMap::default(),
                 pending_state_checkpoint_announcements: DashMap::default(),
@@ -187,15 +194,18 @@ impl Runtime {
     /// How long a branch task is given to stop: the configured drain timeout plus the grace it
     /// needs to finish the flush already in progress.
     pub(super) fn branch_task_stop_timeout(&self) -> Duration {
-        // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks
-        // to wait for as long as the process runs, and no grace can extend that further.
-        self.inner
-            .domain_drain_timeout
-            .saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+        super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
     pub fn entity_gate_deadline(&self) -> Duration {
         self.inner.entity_gate_deadline
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_forced_entity_drain_timeout(domain)
     }
 
     #[cfg(feature = "testing")]
@@ -419,6 +429,9 @@ impl Runtime {
         self.inner.endpoint_bindings.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.ingestor_readiness.clear();
+        self.inner.remote_ack_watcher_shutdown.cancel();
+        self.inner.remote_ack_watcher_tasks.close();
+        self.inner.remote_ack_watcher_tasks.wait().await;
         self.inner.pending_state_replica_syncs.clear();
         self.inner.pending_state_checkpoint_announcements.clear();
         self.inner.state_replication_tasks.close();

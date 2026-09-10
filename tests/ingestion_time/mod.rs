@@ -5,10 +5,14 @@
 //! - **Depends on.** The scenario cluster and timestamp vocabulary.
 //! - **Must not know.** Runtime clock storage or admission implementation.
 
-use cucumber::then;
-use nervix_models::{DomainClockPeriod, Timestamp};
+use cucumber::{given, then};
+use nervix_models::{DomainAdmissionWindow, DomainClockPeriod, DomainName, Timestamp};
 
 use super::*;
+
+/// A liveness watchdog for public HTTP and session events; no clock-position arithmetic depends on
+/// this duration.
+const PUBLIC_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct IngestionProbe {
     host: String,
@@ -16,12 +20,35 @@ struct IngestionProbe {
     base_url: url::Url,
 }
 
+#[given(
+    expr = "domain clock for domain {string} starts with its complete retained admission history \
+            for period {string}"
+)]
+async fn domain_clock_starts_with_complete_retained_admission_history(
+    world: &mut ScenarioWorld,
+    domain: String,
+    period: String,
+) {
+    let domain = DomainName::parse(&expand_placeholders(world, &domain))
+        .assured("the scenario domain placeholder is a valid domain name");
+    let period: DomainClockPeriod = period
+        .parse()
+        .assured("scenario period is positive and supported");
+    let elapsed = period
+        .as_duration()
+        .checked_mul(DomainAdmissionWindow::RETAINED_POSITION_COUNT)
+        .assured("the scenario period and retained position count fit Duration");
+    world
+        .fault_injection
+        .set_domain_clock_initial_elapsed(domain, elapsed);
+}
+
 impl IngestionProbe {
     fn new(world: &ScenarioWorld, host: &str) -> Self {
         Self {
             host: expand_placeholders(world, host),
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
+                .timeout(PUBLIC_PROBE_TIMEOUT)
                 .build()
                 .assured("the probe uses the default HTTP client configuration"),
             base_url: world
@@ -74,13 +101,13 @@ impl IngestionProbe {
         self.publish("/clock", 0, Timestamp::from_unix_nanos(0))
             .await;
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
-            .assured("five seconds fits the monotonic clock");
+            .checked_add(PUBLIC_PROBE_TIMEOUT)
+            .assured("the public probe timeout fits the monotonic clock");
         loop {
             tokio::task::consume_budget().await;
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .assured("clock probe responds within five seconds");
+                .assured("the clock probe responds within the public probe timeout");
             let event = self
                 .observation(world, remaining)
                 .await
@@ -135,12 +162,10 @@ async fn clock_advances(
 }
 
 #[then(
-    expr = "within {string} admission at host {string} retains 256 positions from {string} with \
-            period {string}"
+    expr = "admission at host {string} retains 256 positions from {string} with period {string}"
 )]
 async fn retained_admission(
     world: &mut ScenarioWorld,
-    timeout: String,
     host: String,
     origin: String,
     period: String,
@@ -151,121 +176,69 @@ async fn retained_admission(
         .parse()
         .assured("scenario period is positive and supported");
     let period_nanos = u128::from(period.as_nanos());
-    let deadline = Instant::now()
-        .checked_add(humantime::parse_duration(&timeout).assured("scenario timeout is valid"))
-        .assured("scenario timeout fits the monotonic clock");
-    loop {
+    let upper_position = DomainAdmissionWindow::RETAINED_POSITION_COUNT
+        .checked_add(1)
+        .assured("the retained position count is far below u32::MAX");
+    let upper_offset = u128::from(upper_position)
+        .checked_mul(period_nanos)
+        .assured("the fixture period and retained history fit u128");
+    let upper = origin
+        .checked_add(Duration::from_nanos(
+            u64::try_from(upper_offset).assured("the fixture retained history fits Duration"),
+        ))
+        .assured("the fixture timestamp fits the supported range");
+
+    enum ExpectedAdmission {
+        Accepted,
+        Rejected,
+    }
+
+    struct Candidate {
+        timestamp: Timestamp,
+        expected: ExpectedAdmission,
+    }
+
+    // At frontier `RETAINED_POSITION_COUNT` with one-period skew, position one is the first
+    // retained center. Its lower inclusive edge is the origin. The last reached center is at the
+    // retained count, so its upper inclusive edge is one further period from the origin.
+    let candidates = [
+        Candidate {
+            timestamp: origin,
+            expected: ExpectedAdmission::Accepted,
+        },
+        Candidate {
+            timestamp: origin
+                .checked_sub(Duration::from_nanos(1))
+                .assured("the fixture origin is far from the minimum timestamp"),
+            expected: ExpectedAdmission::Rejected,
+        },
+        Candidate {
+            timestamp: upper,
+            expected: ExpectedAdmission::Accepted,
+        },
+        Candidate {
+            timestamp: upper
+                .checked_add(Duration::from_nanos(1))
+                .assured("the fixture upper edge is far from the maximum timestamp"),
+            expected: ExpectedAdmission::Rejected,
+        },
+    ];
+
+    for (index, candidate) in candidates.into_iter().enumerate() {
         tokio::task::consume_budget().await;
-        assert!(
-            Instant::now() < deadline,
-            "could not check retained admission within one reached position"
-        );
-        let before = probe.clock(world).await;
-        let elapsed = before
-            .duration_since(origin)
-            .assured("logical observation follows origin")
-            .as_nanos();
-        let frontier = elapsed / period_nanos;
-        // Start near the beginning of a position so the public round trips can finish before
-        // the frontier moves. Both example rates provide 100ms of physical time per position.
-        if frontier < 256 || elapsed % period_nanos > period_nanos / 8 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            continue;
-        }
-        let earliest_offset = frontier
-            .checked_sub(256)
-            .assured("frontier has reached 256")
-            .checked_mul(period_nanos)
-            .assured("fixture elapsed is bounded by its timeout");
-        let latest_offset = frontier
+        let sequence = i64::try_from(index)
+            .assured("there are four candidates")
             .checked_add(1)
-            .assured("fixture frontier is bounded by its timeout")
-            .checked_mul(period_nanos)
-            .assured("fixture elapsed is bounded by its timeout");
-        let earliest = origin
-            .checked_add(Duration::from_nanos(
-                u64::try_from(earliest_offset).assured("fixture elapsed fits u64"),
-            ))
-            .assured("fixture timestamp fits the supported range");
-        let latest = origin
-            .checked_add(Duration::from_nanos(
-                u64::try_from(latest_offset).assured("fixture elapsed fits u64"),
-            ))
-            .assured("fixture timestamp fits the supported range");
-        struct Candidate {
-            timestamp: Timestamp,
-            accepted: bool,
-        }
-        let candidates = [
-            Candidate {
-                timestamp: earliest,
-                accepted: true,
-            },
-            Candidate {
-                timestamp: Timestamp::from_unix_nanos(
-                    earliest
-                        .unix_nanos()
-                        .checked_sub(1)
-                        .assured("fixture is far from minimum time"),
-                ),
-                accepted: false,
-            },
-            Candidate {
-                timestamp: latest,
-                accepted: true,
-            },
-            Candidate {
-                timestamp: latest
-                    .checked_add(Duration::from_nanos(1))
-                    .assured("fixture is far from maximum time"),
-                accepted: false,
-            },
-        ];
-        struct Observation {
-            candidate: Candidate,
-            sequence: i64,
-            event: Option<serde_json::Value>,
-        }
-        let mut observations = Vec::new();
-        for (index, candidate) in candidates.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
-            let sequence = i64::try_from(index)
-                .assured("there are four candidates")
-                .checked_add(1)
-                .assured("four candidates fit i64");
-            probe
-                .publish("/events", sequence, candidate.timestamp)
-                .await;
-            let event = probe.observation(world, Duration::from_millis(20)).await;
-            observations.push(Observation {
-                candidate,
-                sequence,
-                event,
-            });
-        }
-        let after = probe.clock(world).await;
-        if after
-            .duration_since(origin)
-            .assured("logical observation follows origin")
-            .as_nanos()
-            / period_nanos
-            != frontier
-        {
-            continue;
-        }
-        for Observation {
-            candidate,
-            sequence,
-            event,
-        } in observations
-        {
-            assert_eq!(
-                event.is_some(),
-                candidate.accepted,
-                "frontier={frontier}, event={}, observation={event:?}",
-                candidate.timestamp
-            );
-            if let Some(event) = event {
+            .assured("four candidates fit i64");
+        probe
+            .publish("/events", sequence, candidate.timestamp)
+            .await;
+        match candidate.expected {
+            ExpectedAdmission::Accepted => {
+                let event = probe
+                    .observation(world, PUBLIC_PROBE_TIMEOUT)
+                    .await
+                    .assured("an inclusive admission edge reaches the public subscription");
                 assert_eq!(event["sequence"], sequence);
                 let source: Timestamp = event["occurred_at"]
                     .as_str()
@@ -274,7 +247,24 @@ async fn retained_admission(
                     .assured("source timestamp is supported");
                 assert_eq!(source, candidate.timestamp);
             }
+            ExpectedAdmission::Rejected => {
+                let error = world
+                    .active_session
+                    .as_mut()
+                    .assured("the probe has a public session")
+                    .try_next_server_error(PUBLIC_PROBE_TIMEOUT)
+                    .await
+                    .assured("the public server-error stream remains connected")
+                    .assured("an event outside the admission edge produces a server error");
+                assert!(
+                    error
+                        .message
+                        .contains("outside any reached logical tick window"),
+                    "unexpected server error after rejected timestamp {}: {}",
+                    candidate.timestamp,
+                    error.message
+                );
+            }
         }
-        return;
     }
 }

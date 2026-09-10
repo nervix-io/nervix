@@ -137,6 +137,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             *slot = SingleRecordFilterMapOutcome::MessageError {
                 error: filter_map.structured_side_error(
+                    execution_now,
                     format!(
                         "FILTER-MAP side error {}: {} at {}",
                         side_error.code.as_str(),
@@ -421,12 +422,14 @@ pub(super) async fn plan_filter_map_messages(
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 program.structured_side_error(
+                    execution_now,
                     reason,
                     side_error.span,
                     operation_for_filter_label(program_label),
                 ),
                 partial_output.and_then(Result::ok),
                 state_snapshot.clone(),
+                execution_now,
             ));
             continue;
         }
@@ -452,6 +455,7 @@ pub(super) async fn plan_filter_map_messages(
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 structured_message_error(
+                    execution_now,
                     MessageErrorCode::Evaluation,
                     format!(
                         "{} '{}' failed to materialize {} output row: {}",
@@ -466,6 +470,7 @@ pub(super) async fn plan_filter_map_messages(
                 ),
                 None,
                 state_snapshot.clone(),
+                execution_now,
             ));
             continue;
         }
@@ -600,6 +605,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 program.body.structured_side_error(
+                    execution_now,
                     reason,
                     side_error.span,
                     if program.codec_route {
@@ -610,6 +616,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                 ),
                 partial_output,
                 state_snapshot.clone(),
+                execution_now,
             ));
             continue;
         }
@@ -629,6 +636,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                             acks: std::mem::take(&mut acks[input_row]),
                         },
                         structured_message_error(
+                            execution_now,
                             MessageErrorCode::Evaluation,
                             format!(
                                 "emitter '{}' failed to materialize FILTER-MAP headers: {}",
@@ -641,6 +649,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                         ),
                         partial_output,
                         state_snapshot.clone(),
+                        execution_now,
                     ));
                     continue;
                 }
@@ -659,6 +668,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 structured_message_error(
+                    execution_now,
                     MessageErrorCode::Validation,
                     format!(
                         "emitter '{}' FILTER-MAP output row has uninitialized required fields",
@@ -674,6 +684,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                 ),
                 partial_output,
                 state_snapshot.clone(),
+                execution_now,
             ));
             continue;
         }

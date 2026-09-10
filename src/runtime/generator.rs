@@ -244,6 +244,7 @@ pub(super) async fn execute_generator_program_on_context(
     if let Some(side_error) = result.batch.errors().first() {
         return Ok(GeneratorProgramOutcome::MessageError {
             error: program.structured_side_error(
+                execution_now,
                 format!(
                     "GENERATOR side error {}: {} at {}",
                     side_error.code.as_str(),
@@ -400,6 +401,15 @@ impl Runtime {
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
+        let domain_clock =
+            self.bind_domain_clock(domain)
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "generator '{}' could not bind its domain clock: {error}",
+                        generator.name.as_str(),
+                    ),
+                })?;
         let runtime = self.clone();
         let task_events = self.inner.events.clone();
 
@@ -514,76 +524,17 @@ impl Runtime {
                     continue;
                 }
                 activity.set_active(true);
-                let wall_now = current_timestamp();
-                let execution_now;
-                /// The domain's pacing as this generator tick observes it: whether the domain is
-                /// paced and the committed clock mapping it started under.
-                struct PacedDomainState {
-                    pace: DomainPace,
-                    clock: Option<DomainClockState>,
-                }
-
-                let paced_state =
-                    runtime
-                        .inner
-                        .domains
-                        .get(&task_domain)
-                        .map(|domain_state| PacedDomainState {
-                            pace: domain_state.config.pace,
-                            clock: domain_state.clock.paced_mapping(),
-                        });
-                let is_paced = paced_state
-                    .as_ref()
-                    .is_some_and(|state| state.pace == DomainPace::Paced);
-                if let Some(PacedDomainState {
-                    pace: DomainPace::Paced,
-                    clock,
-                }) = &paced_state
-                {
-                    let Some(clock) = clock else {
-                        next_state_refresh = None;
-                        for state in branch_states.values_mut() {
-                            state.next_generation = None;
-                            for route in &mut state.routes {
-                                route.next_flush = None;
-                            }
-                        }
-                        tokio::select! {
-                            changed = shutdown_rx.changed() => {
-                                if changed.is_err() || *shutdown_rx.borrow() {
-                                    break;
-                                }
-                            }
-                            _ = sleep(Duration::from_millis(50)) => {}
-                            _ = source_gate.wait_closed() => {}
-                        }
-                        continue;
-                    };
-                    execution_now = match current_domain_logical_time(clock, wall_now) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            task_events.report_error(format!(
-                                "failed to resolve generator domain clock for '{}' in domain \
-                                 '{}': {}",
-                                task_generator.as_str(),
-                                task_domain.as_str(),
-                                error
-                            ));
-                            tokio::select! {
-                                changed = shutdown_rx.changed() => {
-                                    if changed.is_err() || *shutdown_rx.borrow() {
-                                        break;
-                                    }
-                                }
-                                _ = sleep(Duration::from_millis(100)) => {}
-                                _ = source_gate.wait_closed() => {}
-                            }
-                            continue;
-                        }
-                    };
-                } else {
-                    execution_now = current_timestamp();
-                }
+                let execution_now = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot.now(),
+                    Err(error) => {
+                        task_events.report_error(format!(
+                            "generator '{}' in domain '{}' lost its clock: {error}",
+                            task_generator.as_str(),
+                            task_domain.as_str(),
+                        ));
+                        break;
+                    }
+                };
 
                 if next_state_refresh.is_none() {
                     next_state_refresh = Some(execution_now);
@@ -863,6 +814,7 @@ impl Runtime {
                                                         partial_output,
                                                         materialized_state,
                                                         ingest_metadata: None,
+                                                        execution_now,
                                                     },
                                                 )
                                                 .await;
@@ -951,22 +903,17 @@ impl Runtime {
                         }))
                         .min();
                 let sleep_duration = if let Some(next) = next_deadline {
-                    if is_paced {
-                        if let Some(clock) =
-                            paced_state.as_ref().and_then(|state| state.clock.as_ref())
-                        {
-                            match wall_duration_until_logical_target(clock, execution_now, next) {
-                                Ok(duration) => duration,
-                                // A time rate the registry accepted but that no longer parses is
-                                // not something this generator can repair, so it waits a fixed
-                                // step and looks again rather than spinning.
-                                Err(_) => Duration::from_millis(100),
-                            }
-                        } else {
-                            Duration::from_millis(50)
+                    match domain_clock.physical_duration_until(execution_now, next) {
+                        Ok(duration) => duration,
+                        Err(error) => {
+                            task_events.report_error(format!(
+                                "generator '{}' in domain '{}' could not schedule its logical \
+                                 deadline: {error}",
+                                task_generator.as_str(),
+                                task_domain.as_str(),
+                            ));
+                            break;
                         }
-                    } else {
-                        wall_duration_until_timestamp(execution_now, next)
                     }
                 } else {
                     interval

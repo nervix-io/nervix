@@ -21,6 +21,7 @@ pub(super) async fn flush_branch_wasm_processor(
         file,
         limits,
         replicated_state,
+        execution_now,
     } = context;
     if pending.is_empty() {
         return;
@@ -120,6 +121,7 @@ pub(super) async fn flush_branch_wasm_processor(
             input_schema: &input_schema,
             output_schemas: &output_schemas,
             replicated_state,
+            execution_now,
         },
         compiled,
         instance,
@@ -173,12 +175,15 @@ pub(super) async fn flush_branch_wasm_processor(
     let process_result = instance
         .as_mut()
         .verified("the let-else above returned unless this branch holds an instance")
-        .process_envelope(&envelope)
+        .process_envelope_in_context(
+            &envelope,
+            nervix_wasm::WasmExecutionContext::new(execution_now),
+        )
         .await;
     let outputs = match process_result {
         Ok(outputs) => outputs,
         Err(error) => {
-            let resource_limit_exceeded = error.is_resource_limit_exceeded();
+            let resource_limit_exceeded = error.current_context().is_resource_limit_exceeded();
             branch.runtime.handle_general_error_for_acks(
                 &branch.domain,
                 node_kind,
@@ -213,6 +218,7 @@ pub(super) async fn flush_branch_wasm_processor(
             output_schemas: &output_schemas,
             key: &output_branch_key,
             dispatch_error: "failed to forward message",
+            execution_now,
         },
         outputs,
         ack_map,
@@ -229,8 +235,14 @@ pub(super) async fn flush_branch_wasm_processor(
         );
         return;
     }
-    let persist_result =
-        persist_wasm_guest_state(&branch.runtime, processor, replicated_state, instance).await;
+    let persist_result = persist_wasm_guest_state(
+        &branch.runtime,
+        processor,
+        replicated_state,
+        instance,
+        execution_now,
+    )
+    .await;
     if let Err(error) = persist_result {
         branch.runtime.handle_internal_processor_error_for_acks(
             &branch.domain,
@@ -254,6 +266,7 @@ pub(super) struct WasmInstanceContext<'a> {
     pub(super) input_schema: &'a Arc<CompiledSchema>,
     pub(super) output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     pub(super) replicated_state: &'a ReplicatedWasmProcessorState,
+    pub(super) execution_now: Timestamp,
 }
 
 impl Runtime {
@@ -322,6 +335,7 @@ pub(super) async fn ensure_wasm_processor_instance(
         input_schema,
         output_schemas,
         replicated_state,
+        execution_now,
     } = context;
     let version = branch
         .runtime
@@ -372,21 +386,6 @@ pub(super) async fn ensure_wasm_processor_instance(
                 .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
                 .collect(),
         };
-        let domain_clock = branch
-            .runtime
-            .bind_domain_clock(&branch.domain)
-            .map_err(|error| {
-                format!(
-                    "failed to bind WASM processor '{}' to domain clock: {error}",
-                    processor.as_str(),
-                )
-            })?;
-        let clock = RuntimeWasmDomainClock::new(domain_clock).map_err(|error| {
-            format!(
-                "failed to snapshot WASM processor '{}' domain clock: {error}",
-                processor.as_str(),
-            )
-        })?;
         let restored_guest_state = replicated_state.restore_guest_state();
         *instance = Some(Box::new(
             compiled
@@ -394,7 +393,7 @@ pub(super) async fn ensure_wasm_processor_instance(
                 .instantiate_branch(
                     limits,
                     init,
-                    Box::new(clock),
+                    Box::new(nervix_wasm::FixedDomainClock::new(execution_now)),
                     restored_guest_state.as_deref(),
                 )
                 .await

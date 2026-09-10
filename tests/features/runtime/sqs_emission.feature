@@ -164,7 +164,7 @@ Feature: SQS emission
       | 1            | 0             |
       | 3            | 1             |
 
-  @sqs_fifo_group_ordering
+  @sqs_fifo_group_ordering @domain_execution_time
   Scenario Outline: SQS FIFO preserves order independently for interleaved branch groups
     Given MQTT is running
     And SQS is running
@@ -172,7 +172,7 @@ Feature: SQS emission
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And SQS queue "fifo_orders_{{test_id}}.fifo" is observed
     When these NSPL commands are executed
@@ -200,6 +200,7 @@ Feature: SQS emission
       CREATE INGESTOR mqtt_orders
       FROM MQTT mqtt_ingress TOPIC sqs_fifo_in_{{test_id}} MODE NO_ACK SEQUENTIAL
       ON QUIESCE DROP DECODE USING order_codec
+      TIMESTAMP NOW
       TO orders
       INHERIT ALL
       BRANCHED BY by_tenant
@@ -215,14 +216,18 @@ Feature: SQS emission
       };
       CREATE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_orders_{{test_id}}.fifo FIFO GROUP FROM BRANCH
+      TO SQS sqs_main QUEUE fifo_orders_{{test_id}}.fifo
+      FIFO GROUP CASE
+        WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.tenant
+        ELSE ''
+      END
       MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
       INHERIT ALL
       FLUSH EACH 1s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      START;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     When these MQTT messages are rapidly published to topic "sqs_fifo_in_{{test_id}}"
       """

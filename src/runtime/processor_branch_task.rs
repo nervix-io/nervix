@@ -159,6 +159,17 @@ pub(super) async fn run_processor_node_runtime(
         graph,
     } = context;
     let processor = template.source.clone();
+    let domain_clock = match runtime_handle.bind_domain_clock(&domain) {
+        Ok(clock) => clock,
+        Err(error) => {
+            runtime_handle.events().report_error(format!(
+                "processor '{}' in domain '{}' could not bind its clock: {error}",
+                processor.as_str(),
+                domain.as_str(),
+            ));
+            return;
+        }
+    };
     let ownership_entity = DomainNodeRef::node_in(
         domain.clone(),
         template.source_kind,
@@ -250,10 +261,17 @@ pub(super) async fn run_processor_node_runtime(
     loop {
         tokio::task::consume_budget().await;
         let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
-        let now = runtime_handle
-            .current_stream_expiration_time(&domain)
-            .ok()
-            .unwrap_or_else(current_timestamp);
+        let now = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot.now(),
+            Err(error) => {
+                runtime_handle.events().report_error(format!(
+                    "processor '{}' in domain '{}' lost its clock: {error}",
+                    processor.as_str(),
+                    domain.as_str(),
+                ));
+                break;
+            }
+        };
         let mut did_scheduled_work = false;
         if !ownership_frozen && Instant::now() >= next_expiration_scan {
             if let Some(branch_ttl) = template.branch_ttl {
@@ -629,15 +647,35 @@ pub(super) async fn run_processor_branch_task(
     let mut quiesce_gauges = BranchQuiesceGauges::new(quiesce_counters.clone());
     let ownership_entity =
         DomainNodeRef::node_in(domain.clone(), branch.source_kind, processor.clone());
+    let domain_clock = match runtime_handle.bind_domain_clock(&domain) {
+        Ok(clock) => clock,
+        Err(error) => {
+            runtime_handle.events().report_error(format!(
+                "processor branch '{}' in domain '{}' could not bind its clock: {error}",
+                processor.as_str(),
+                domain.as_str(),
+            ));
+            return;
+        }
+    };
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
+    let mut handoff_execution_now = None;
     loop {
         tokio::task::consume_budget().await;
         let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
-        let now = runtime_handle
-            .current_stream_expiration_time(&domain)
-            .ok()
-            .unwrap_or_else(current_timestamp);
+        let now = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot.now(),
+            Err(error) => {
+                runtime_handle.events().report_error(format!(
+                    "processor branch '{}' in domain '{}' lost its clock: {error}",
+                    processor.as_str(),
+                    domain.as_str(),
+                ));
+                stop_mode = Some(ProcessorBranchStopMode::Detach);
+                break;
+            }
+        };
         if !ownership_frozen
             && branch
                 .next_deadline()
@@ -679,12 +717,39 @@ pub(super) async fn run_processor_branch_task(
             command = command_rx.recv() => {
                 match command {
                     Some(ProcessorBranchCommand::Checkpoint { response }) => {
-                        let result = branch.checkpoint_processor_live_state(&processor).await;
+                        let result = match domain_clock.snapshot() {
+                            Ok(snapshot) => {
+                                branch
+                                    .checkpoint_processor_live_state(&processor, snapshot.now())
+                                    .await
+                            }
+                            Err(error) => Err(OwnershipHandoffError::checkpoint(format!(
+                                "processor branch '{}' in domain '{}' lost its clock: {error}",
+                                processor.as_str(),
+                                domain.as_str(),
+                            ))),
+                        };
                         response
                             .send(result)
                             .means_peer_left("processor branch checkpoint requester");
                     }
                     Some(ProcessorBranchCommand::Stop(mode)) => {
+                        if let ProcessorBranchStopMode::Handoff(_) = &mode {
+                            let execution_now = match domain_clock.snapshot() {
+                                Ok(snapshot) => snapshot.now(),
+                                Err(error) => {
+                                    runtime_handle.events().report_error(format!(
+                                        "processor branch '{}' in domain '{}' lost its clock: \
+                                         {error}",
+                                        processor.as_str(),
+                                        domain.as_str(),
+                                    ));
+                                    stop_mode = Some(ProcessorBranchStopMode::Detach);
+                                    break;
+                                }
+                            };
+                            handoff_execution_now = Some(execution_now);
+                        }
                         stop_mode = Some(mode);
                         break;
                     }
@@ -742,7 +807,20 @@ pub(super) async fn run_processor_branch_task(
                     stop_mode = Some(ProcessorBranchStopMode::Detach);
                     break;
                 };
-                branch.force_flush(&graph, now).await;
+                let execution_now = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot.now(),
+                    Err(error) => {
+                        runtime_handle.events().report_error(format!(
+                            "processor branch '{}' in domain '{}' lost its clock: {error}",
+                            processor.as_str(),
+                            domain.as_str(),
+                        ));
+                        completion.complete();
+                        stop_mode = Some(ProcessorBranchStopMode::Detach);
+                        break;
+                    }
+                };
+                branch.force_flush(&graph, execution_now).await;
                 quiesce_gauges.observe(&branch, &processor);
                 completion.complete();
             }
@@ -762,10 +840,9 @@ pub(super) async fn run_processor_branch_task(
             branch
                 .flush_processor_collected_inputs(&graph, &processor)
                 .await;
-            let now = runtime_handle
-                .current_stream_expiration_time(&domain)
-                .ok()
-                .unwrap_or_else(current_timestamp);
+            let now = handoff_execution_now.verified(
+                "the handoff command arm captures the validated domain time for this stop mode",
+            );
             branch.force_flush(&graph, now).await;
             Some(now)
         }
@@ -1070,6 +1147,7 @@ mod tests {
     async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let graph: SharedActiveGraph = StdArc::new(ArcSwapOption::from(None));
         let schema = Arc::new(compile_schema(&CreateSchema {
             name: named("notification"),
@@ -1219,6 +1297,7 @@ mod tests {
     async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let processor = named::<ModelName>("route_orders");
         let input_relay = named::<RelayName>("orders");
         let template = junction_branch_template(processor.as_str(), input_relay.as_str());
@@ -1279,6 +1358,7 @@ mod tests {
     async fn processor_handoff_drains_ready_batches_from_every_input() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let processor = named::<ModelName>("route_orders");
         let orders = named::<RelayName>("orders");
         let returns = named::<RelayName>("returns");

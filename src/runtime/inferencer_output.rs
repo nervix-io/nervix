@@ -21,6 +21,7 @@ pub(super) async fn flush_branch_inferencer_output(
         input_relays,
         session,
         materialized_state,
+        execution_now,
     } = context;
     output_routes.routes[output_index].clear_flush_deadline();
     let pending = output_buffer.take_pending();
@@ -200,7 +201,7 @@ pub(super) async fn flush_branch_inferencer_output(
         &compiled_input_program.program,
         &mapped_vm_input,
         &VmExecutionContext {
-            now: current_timestamp(),
+            now: execution_now,
             injector: None,
         },
     )
@@ -380,6 +381,7 @@ pub(super) async fn flush_branch_inferencer_output(
             input_relays,
             filter_source: ProcessorOutputFilterSource::Inferencer(inferencer_tensors),
             materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(materialized_state),
+            execution_now,
         },
         output_routes,
         output_batch,

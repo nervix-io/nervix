@@ -186,6 +186,11 @@ Feature: Relay capacity
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
+      CREATE PLACEMENT relay_capacity_shrink_local
+        FROM notifications
+        TO zeromq_capacity_shrink_out
+        REQUIRE COLOCATION;
+
       START;
       SHOW CLUSTER STATUS;
       """
@@ -195,7 +200,11 @@ Feature: Relay capacity
       """
       {"seq":1}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}-shrink.example.com" path "/relay-capacity-shrink"
+    Then within "5s" DESCRIBE EMITTER "zeromq_capacity_shrink_out" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-shrink.example.com" path "/relay-capacity-shrink"
       """
       {"seq":2}
       """
@@ -213,10 +222,6 @@ Feature: Relay capacity
       target="notifications"
       direction="received"
       relay="notifications"
-      """
-    And within "5s" DESCRIBE EMITTER "zeromq_capacity_shrink_out" on the leader node contains
-      """
-      transient error: fault injector stalled emitter publish
       """
     When these NSPL commands are executed through the client on the leader node
       """
