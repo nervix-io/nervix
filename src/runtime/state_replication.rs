@@ -2421,18 +2421,6 @@ impl Runtime {
                 return Ok(Some(snapshot));
             }
         }
-        let materialized = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(placement)
-            .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
-        if let Some(read) = materialized {
-            let sealed = read
-                .seal_after(&self.inner.executor, after_lsm)
-                .await
-                .map_err(|error| error.to_string())?;
-            return Ok(sealed.map(SealedMaterializedSnapshot::into_persisted_entry));
-        }
         if let Some(state) = self.inner.replicated_window_processor_states.get(placement) {
             let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
             if snapshot.is_after(after_lsm) {
@@ -2531,21 +2519,6 @@ impl Runtime {
         {
             state.mark_replica_progress(node_id, ack.lsm);
         }
-    }
-
-    pub(in crate::runtime) async fn request_state_sync(
-        &self,
-        target_node_id: &ClusterNodeName,
-        placement: &RuntimeStatePlacement,
-        after_lsm: u64,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        self.request_state_sync_with_timeout(
-            target_node_id,
-            placement,
-            Some(after_lsm),
-            Duration::from_secs(5),
-        )
-        .await
     }
 
     pub(super) async fn request_state_sync_with_timeout(
@@ -2777,28 +2750,6 @@ impl Runtime {
         Ok(ReplicatedKafkaOffsetState::bind(&state, roles, local_node))
     }
 
-    /// Open a sealed materialized snapshot received from the node that owns this state.
-    pub(in crate::runtime) async fn open_replicated_materialized_snapshot(
-        &self,
-        state: &MaterializedRelayStateRead,
-        payload: Vec<u8>,
-    ) -> Result<RestoredMaterializedSnapshot, String> {
-        let sealed = self
-            .inner
-            .executor
-            .charge_owned(nervix_execution::MemoryClass::Bulk, payload)
-            .await
-            .map_err(|error| error.to_string())?;
-        RestoredMaterializedSnapshot::open(
-            &self.inner.executor,
-            state.schema(),
-            state.placement().schema_fingerprint,
-            sealed,
-        )
-        .await
-        .map_err(|error| error.to_string())
-    }
-
     /// Decode whatever this placement's materialized state should start from, before the state
     /// itself is built.
     ///
@@ -2844,7 +2795,7 @@ impl Runtime {
             &self.inner.executor,
             schema,
             placement.schema_fingerprint,
-            sealed,
+            SealedSource::memory(sealed),
         )
         .await
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;

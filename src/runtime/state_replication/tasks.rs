@@ -545,29 +545,15 @@ impl Runtime {
                 initial_sync_pending = false;
                 let after_lsm = state.read().current_lsm();
                 match runtime
-                    .request_state_sync_with_timeout(
+                    .install_materialized_snapshot_from(
                         &primary_node,
-                        state.read().placement(),
+                        state.read(),
+                        &state,
                         Some(after_lsm),
-                        poll_interval,
                     )
                     .await
                 {
-                    Ok(Some(snapshot)) => {
-                        let restored = runtime
-                            .open_replicated_materialized_snapshot(state.read(), snapshot.payload)
-                            .await;
-                        let restored = match restored {
-                            Ok(restored) => restored,
-                            Err(error) => {
-                                warn!(error = %error, "failed to open replicated materialized relay snapshot");
-                                break;
-                            }
-                        };
-                        if let Err(error) = state.install(restored) {
-                            warn!(error = %error, "failed to apply replicated materialized relay snapshot");
-                            break;
-                        }
+                    Ok(Some(revision)) => {
                         runtime.inner.materialized_state_changed.notify_waiters();
                         let dispatcher = runtime.inner.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
@@ -583,7 +569,7 @@ impl Runtime {
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
                                                 placement: state.read().placement().to_remote(),
-                                                lsm: snapshot.lsm,
+                                                lsm: revision,
                                             },
                                         ),
                                     ),

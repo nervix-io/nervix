@@ -16,7 +16,7 @@ use super::{
     lsm_sequence::LsmSequence,
     materialized_snapshot::{
         MaterializedGeneration, MaterializedGenerationRecord, MaterializedSnapshotError,
-        RestoredMaterializedSnapshot, SealedMaterializedSnapshot,
+        RestoredMaterializedSnapshot, SealedMaterializedSnapshot, SealedSource,
     },
 };
 use crate::runtime_schema::RuntimeRow;
@@ -267,6 +267,18 @@ impl MaterializedRelayStateRead {
         }
         *self.state.sealed.lock() = Some(sealed.clone());
         Ok(Some(sealed))
+    }
+
+    /// The retained sealed generation, when it is exactly the one asked for.
+    ///
+    /// A transfer names the revision it was described, so an owner that has moved on refuses
+    /// instead of substituting a different generation under that description.
+    pub(super) fn sealed_at(&self, revision: u64) -> Option<SealedMaterializedSnapshot> {
+        self.state
+            .sealed
+            .lock()
+            .clone()
+            .filter(|sealed| sealed.descriptor.revision == revision)
     }
 
     /// What the retained generation answers for `after_revision`, when it answers at all.
@@ -556,7 +568,7 @@ mod tests {
             &executor,
             &schema,
             placement.schema_fingerprint,
-            sealed.bytes,
+            SealedSource::memory(sealed.bytes),
         )
         .await
         .assured("the sealed generation should open");
@@ -781,7 +793,7 @@ mod tests {
             &executor,
             &schema,
             placement.schema_fingerprint,
-            earlier.bytes,
+            SealedSource::memory(earlier.bytes),
         )
         .await
         .assured("the sealed generation should open");

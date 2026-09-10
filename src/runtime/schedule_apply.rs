@@ -452,10 +452,25 @@ impl Runtime {
                     .get(&state_placement)
                     .map(|state| state.clone());
                 if let Some(local_replica) = local_replica {
-                    let after_lsm =
-                        ReplicatedMaterializedRelayState::read(&local_replica).current_lsm();
-                    let snapshot = self
-                        .request_state_sync(previous_owner, &state_placement, after_lsm)
+                    let read = ReplicatedMaterializedRelayState::read(&local_replica);
+                    let after_lsm = read.current_lsm();
+                    let installer =
+                        ReplicatedMaterializedRelayState::current_installer(&local_replica)
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "materialized relay '{}' is no longer a replica while \
+                                     refreshing its ownership handoff snapshot",
+                                    relay.as_str()
+                                ),
+                            })?;
+                    let installed = self
+                        .install_materialized_snapshot_from(
+                            previous_owner,
+                            &read,
+                            &installer,
+                            Some(after_lsm),
+                        )
                         .await
                         .map_err(|reason| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -465,41 +480,7 @@ impl Runtime {
                                 relay.as_str()
                             ),
                         })?;
-                    if let Some(snapshot) = snapshot {
-                        let installer =
-                            ReplicatedMaterializedRelayState::current_installer(&local_replica)
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "materialized relay '{}' is no longer a replica while \
-                                         refreshing its ownership handoff snapshot",
-                                        relay.as_str()
-                                    ),
-                                })?;
-                        let restored = self
-                            .open_replicated_materialized_snapshot(
-                                installer.read(),
-                                snapshot.payload,
-                            )
-                            .await
-                            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "failed to open ownership handoff snapshot for materialized \
-                                     relay '{}': {reason}",
-                                    relay.as_str()
-                                ),
-                            })?;
-                        installer.install(restored).map_err(|error| {
-                            RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "failed to install ownership handoff snapshot for \
-                                     materialized relay '{}': {error}",
-                                    relay.as_str()
-                                ),
-                            }
-                        })?;
+                    if installed.is_some() {
                         self.inner.materialized_state_changed.notify_waiters();
                     }
                 }

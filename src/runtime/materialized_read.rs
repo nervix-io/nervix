@@ -165,7 +165,7 @@ impl Runtime {
             &self.inner.executor,
             &schema,
             placement.schema_fingerprint,
-            sealed,
+            SealedSource::memory(sealed),
         )
         .await
         .map(Some)
@@ -334,7 +334,7 @@ impl Runtime {
             return Ok(Vec::new());
         };
         let Some(restored) = self
-            .fetch_remote_materialized_snapshot(target_node_id, &placement, &schema)
+            .fetch_sealed_materialized_snapshot(target_node_id, &placement, &schema, None)
             .await?
         else {
             return Ok(Vec::new());
@@ -384,7 +384,7 @@ impl Runtime {
                 return Ok(Vec::new());
             };
             let Some(restored) = self
-                .fetch_remote_materialized_snapshot(&owner, &placement, &schema)
+                .fetch_sealed_materialized_snapshot(&owner, &placement, &schema, None)
                 .await?
             else {
                 return Ok(Vec::new());
@@ -439,36 +439,6 @@ impl Runtime {
         Ok(records)
     }
 
-    /// Fetch and open one relay's sealed materialized snapshot from the node that owns it.
-    async fn fetch_remote_materialized_snapshot(
-        &self,
-        target_node_id: &ClusterNodeName,
-        placement: &RuntimeStatePlacement,
-        schema: &StdArc<arrow_schema::Schema>,
-    ) -> Result<Option<RestoredMaterializedSnapshot>, String> {
-        let Some(snapshot) = self
-            .request_state_sync(target_node_id, placement, 0)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let sealed = self
-            .inner
-            .executor
-            .charge_owned(nervix_execution::MemoryClass::Bulk, snapshot.payload)
-            .await
-            .map_err(|error| error.to_string())?;
-        RestoredMaterializedSnapshot::open(
-            &self.inner.executor,
-            schema,
-            placement.schema_fingerprint,
-            sealed,
-        )
-        .await
-        .map(Some)
-        .map_err(|error| error.to_string())
-    }
-
     /// The record of exactly one branch of one relay, read from the node that owns it.
     async fn remote_materialized_record(
         &self,
@@ -486,7 +456,7 @@ impl Runtime {
             None,
         );
         let Some(restored) = self
-            .fetch_remote_materialized_snapshot(target_node_id, &placement, schema)
+            .fetch_sealed_materialized_snapshot(target_node_id, &placement, schema, None)
             .await?
         else {
             return Ok(None);

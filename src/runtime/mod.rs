@@ -222,11 +222,18 @@ mod reorderer;
 mod resources;
 mod runtime_lifecycle;
 mod schedule_apply;
+mod snapshot_staging;
+
 mod schedule_delta;
 mod scheduled_node;
 mod service_url;
 mod shared_clients;
 mod state_replication;
+mod state_snapshot_exchange;
+mod state_snapshot_transfer;
+pub(crate) use state_snapshot_transfer::{
+    DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot,
+};
 mod state_store;
 mod syslog;
 #[cfg(test)]
@@ -251,14 +258,15 @@ use kafka_offset_state::{
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
     ReplicatedKafkaOffsetState,
 };
+use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 use materialized_snapshot::{
-    MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedMaterializedSnapshot,
+    MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
     empty_sealed_container, inspect_sealed_container,
 };
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
-    MaterializedRelayStateRead, ReplicatedMaterializedRelayState,
+    ReplicatedMaterializedRelayState,
 };
 pub use materialized_state::MaterializedRecordReport;
 
@@ -808,6 +816,8 @@ struct RuntimeInner {
     wasm_runtime: WasmRuntime,
     branch_instance_expiration_scan_interval: Duration,
     state_store: Option<Arc<RuntimeStateStore>>,
+    /// The bounded disk incoming sealed snapshots land on before they are verified and opened.
+    snapshot_staging: SnapshotStaging,
     state_snapshot_interval: Duration,
     state_replication_poll_interval: Duration,
     domain_drain_timeout: Duration,

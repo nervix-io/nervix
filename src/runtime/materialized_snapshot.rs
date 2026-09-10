@@ -27,7 +27,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 use triomphe::Arc;
 
-use super::BranchKey;
+use super::{BranchKey, snapshot_staging::StagedSnapshot};
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow};
 
 /// The first bytes of every sealed runtime snapshot. A file that does not start with them is not
@@ -520,14 +520,16 @@ impl RestoredMaterializedSnapshot {
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
         schema_fingerprint: [u8; 32],
-        sealed: ChargedBytes,
+        source: SealedSource,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
-        let mut cursor = SealedCursor::new(sealed);
-        let magic = cursor.take(SEALED_SNAPSHOT_MAGIC.len().arch_into(), "magic")?;
+        let mut cursor = source;
+        let magic = cursor
+            .take(SEALED_SNAPSHOT_MAGIC.len().arch_into(), "magic")
+            .await?;
         if magic.as_ref() != SEALED_SNAPSHOT_MAGIC {
             return Err(Report::new(MaterializedSnapshotError::NotASnapshot));
         }
-        let header_bytes = u64::from(cursor.take_u32("header length")?);
+        let header_bytes = u64::from(cursor.take_u32("header length").await?);
         let header_limit = executor.limits().snapshot_header_bytes.as_u64();
         if header_bytes > header_limit {
             return Err(Report::new(MaterializedSnapshotError::HeaderTooLarge {
@@ -535,7 +537,7 @@ impl RestoredMaterializedSnapshot {
                 limit: header_limit,
             }));
         }
-        let header = cursor.take(header_bytes, "header")?;
+        let header = cursor.take(header_bytes, "header").await?;
         let header = decode_rkyv::<SealedSnapshotHeader>(executor, header, header_limit).await?;
         if header.schema_fingerprint != schema_fingerprint {
             return Err(Report::new(
@@ -550,11 +552,14 @@ impl RestoredMaterializedSnapshot {
         let mut records = Vec::new();
         for _ in 0..header.groups {
             tokio::task::consume_budget().await;
-            let identities =
-                cursor.take_section(SealedSectionKind::RecordIdentities, identity_limit)?;
+            let identities = cursor
+                .take_section(SealedSectionKind::RecordIdentities, identity_limit)
+                .await?;
             let identities =
                 decode_rkyv::<SealedRecordIdentities>(executor, identities, identity_limit).await?;
-            let columns = cursor.take_section(SealedSectionKind::RecordColumns, section_limit)?;
+            let columns = cursor
+                .take_section(SealedSectionKind::RecordColumns, section_limit)
+                .await?;
             let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
                 StdArc::clone(schema),
@@ -596,35 +601,55 @@ impl RestoredMaterializedSnapshot {
     }
 }
 
-/// A position in a sealed snapshot that only moves forward, and only over bytes that are there.
-/// Each read states which part of the container it belongs to, so a truncated snapshot reports
-/// where it ended instead of which arithmetic failed.
-struct SealedCursor {
-    sealed: ChargedBytes,
-    offset: usize,
+/// Where a sealed container's bytes come from while it is opened.
+///
+/// A container that already sits in memory under one charge is read in place. A container that
+/// arrived over the interconnect is read from the file it was staged into, one bounded section at
+/// a time, so a snapshot larger than the node's transfer-memory budget opens without ever being
+/// held whole.
+pub(crate) enum SealedSource {
+    Memory { sealed: ChargedBytes, offset: usize },
+    Staged(StagedSnapshot),
 }
 
-impl SealedCursor {
-    fn new(sealed: ChargedBytes) -> Self {
-        Self { sealed, offset: 0 }
+impl SealedSource {
+    pub(crate) fn memory(sealed: ChargedBytes) -> Self {
+        Self::Memory { sealed, offset: 0 }
     }
 
-    fn take(
+    pub(crate) fn staged(staged: StagedSnapshot) -> Self {
+        Self::Staged(staged)
+    }
+
+    /// Read the next `length` bytes, naming the part of the container they belong to so a
+    /// truncated snapshot reports where it ended instead of which arithmetic failed.
+    async fn take(
         &mut self,
         length: u64,
         section: &'static str,
     ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
         let truncated = || Report::new(MaterializedSnapshotError::Truncated { section });
-        let length = usize::try_from(length).map_err(|_| truncated())?;
-        let end = self.offset.checked_add(length).ok_or_else(truncated)?;
-        let slice = self.sealed.slice(self.offset, end).ok_or_else(truncated)?;
-        self.offset = end;
-        Ok(slice)
+        match self {
+            Self::Memory { sealed, offset } => {
+                let length = usize::try_from(length).map_err(|_| truncated())?;
+                let end = offset.checked_add(length).ok_or_else(truncated)?;
+                let slice = sealed.slice(*offset, end).ok_or_else(truncated)?;
+                *offset = end;
+                Ok(slice)
+            }
+            Self::Staged(staged) => staged
+                .read(length)
+                .await
+                .change_context(MaterializedSnapshotError::Truncated { section }),
+        }
     }
 
-    fn take_u32(&mut self, section: &'static str) -> Result<u32, Report<MaterializedSnapshotError>> {
-        let bytes = self.take(LENGTH_PREFIX_BYTES.arch_into(), section)?;
-        let bytes: [u8; 4] = bytes
+    async fn take_u32(
+        &mut self,
+        section: &'static str,
+    ) -> Result<u32, Report<MaterializedSnapshotError>> {
+        let bytes = self.take(LENGTH_PREFIX_BYTES.arch_into(), section).await?;
+        let bytes: [u8; LENGTH_PREFIX_BYTES] = bytes
             .as_ref()
             .try_into()
             .map_err(|_| Report::new(MaterializedSnapshotError::Truncated { section }))?;
@@ -632,12 +657,12 @@ impl SealedCursor {
     }
 
     /// Read the next section, refusing one that names another kind or overstates its limit.
-    fn take_section(
+    async fn take_section(
         &mut self,
         expected: SealedSectionKind,
         limit: u64,
     ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
-        let kind = self.take(1, "section kind")?;
+        let kind = self.take(1, "section kind").await?;
         let Some(&kind) = kind.as_ref().first() else {
             return Err(Report::new(MaterializedSnapshotError::Truncated {
                 section: "section kind",
@@ -649,7 +674,7 @@ impl SealedCursor {
                 expected: expected.into(),
             }));
         }
-        let length = u64::from(self.take_u32("section length")?);
+        let length = u64::from(self.take_u32("section length").await?);
         if length > limit {
             return Err(Report::new(match expected {
                 SealedSectionKind::RecordIdentities => {
@@ -664,7 +689,7 @@ impl SealedCursor {
                 },
             }));
         }
-        self.take(length, "section body")
+        self.take(length, "section body").await
     }
 }
 

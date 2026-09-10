@@ -202,6 +202,7 @@ use crate::{
     resource_interconnect::{
         FetchResourceArchive, PublishResourceReplica, ResourceInterconnectError,
     },
+    runtime::{DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot},
 };
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -19168,6 +19169,40 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
+        let describe_snapshot_service = service.clone();
+        interconnect
+            .register_handler::<DescribeStateSnapshot, _, _>(move |_context, request| {
+                let service = describe_snapshot_service.clone();
+                async move {
+                    match crate::runtime::RuntimeStatePlacement::from_remote(request.placement) {
+                        Ok(placement) => {
+                            service
+                                .inner
+                                .runtime
+                                .describe_sealed_materialized_snapshot(
+                                    &placement,
+                                    request.after_revision,
+                                )
+                                .await
+                        }
+                        Err(error) => DescribedStateSnapshot::Unavailable(error),
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let fetch_snapshot_service = service.clone();
+        interconnect
+            .register_stream_handler::<FetchStateSnapshot, _, _>(move |_context, request| {
+                let service = fetch_snapshot_service.clone();
+                async move {
+                    service
+                        .inner
+                        .runtime
+                        .stream_sealed_materialized_snapshot(request)
+                        .await
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let state_sync_service = service.clone();
         interconnect
             .register_handler::<RemoteStateSyncRequest, _, _>(move |_context, request| {

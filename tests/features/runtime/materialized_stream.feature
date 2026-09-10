@@ -319,7 +319,8 @@ Feature: Materialized relay state
       | 3            | 1             |
 
   Scenario Outline: Concurrent branch updates recover from one consistent columnar snapshot
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    Given the production sticky scheduler is configured
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And a repeated text placeholder "bulk_blob" of 1500000 bytes is prepared
     And the leader node is configured with these NSPL commands

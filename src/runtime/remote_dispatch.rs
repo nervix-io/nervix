@@ -130,6 +130,21 @@ impl RemoteDispatcher {
             .map_err(|error| error.to_string())
     }
 
+    /// Open a bounded, flow-controlled stream of one bulk response's bytes.
+    pub(super) async fn request_stream<M>(
+        &self,
+        node_id: &ClusterNodeName,
+        message: M,
+    ) -> Result<nervix_interconnect::IncomingByteStream, String>
+    where
+        M: nervix_interconnect::InterconnectStreamRequest,
+    {
+        self.interconnect
+            .request_stream(node_id, message)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub(super) async fn dispatch_admitted_relay_payload(
         &self,
         node_id: &ClusterNodeName,

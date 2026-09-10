@@ -36,6 +36,7 @@ impl Runtime {
         temp_dir: PathBuf,
     ) -> Result<Self, RuntimePersistenceError> {
         let events = RuntimeEvents::new();
+        let executor = Executor::default();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
             .map(RuntimeStateStore::from_database)
@@ -153,12 +154,17 @@ impl Runtime {
                     .assured("wasmtime accepts its own default configuration"),
                 branch_instance_expiration_scan_interval,
                 state_store,
+                snapshot_staging: SnapshotStaging::new(
+                    temp_dir.join("snapshot-staging"),
+                    executor.clone(),
+                    SnapshotStagingLimits::default(),
+                ),
                 state_snapshot_interval,
                 state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
                 domain_drain_timeout,
                 entity_gate_deadline,
                 temp_dir,
-                executor: Executor::default(),
+                executor,
                 metrics: RuntimeMetrics::default(),
             }),
         })
