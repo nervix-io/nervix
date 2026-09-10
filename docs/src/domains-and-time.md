@@ -148,6 +148,28 @@ the process monotonic clock. The two deadline kinds cannot be interchanged. A lo
 revalidates its domain and generation after every wake and returns both the logical instant that
 became due and a fresh execution-time snapshot. Cancellation is a separate typed outcome.
 
+## Execution-Time Snapshots
+
+Each accepted unit of domain work reads its domain clock once and uses that execution-time snapshot
+for every expression in the unit. This applies to ingestion, processor input and output programs,
+branching, deduplication, ordering, correlation and window expressions, inferencer mappings,
+emitter filters, construction, `VALUES` and SQS FIFO-group expressions, and subscription filters.
+Buffered emitter batches and retries retain the snapshot assigned when the batch was accepted.
+Processor flushes, scheduled callbacks, and other later executions receive a new snapshot when that
+work begins. A message released from `REQUIRED WAIT` also begins again with a fresh snapshot.
+
+A message error records the snapshot of the operation that failed, and its error-route `SET`
+program uses that same instant. Generator output and WASM rows without a source token receive that
+instant as both ingestion watermarks. WASM rows with a source token retain the source metadata.
+Guest initialization, batch processing, timeouts, flushing, and state lifecycle calls each receive
+the snapshot of their owning execution.
+
+Generated timestamps at external boundaries follow their declared clock class. An omitted Sentry
+event timestamp uses the emitter batch's domain execution time, while an explicit timestamp is
+preserved. OTEL `VALUES` use domain execution time, while `observed_time_unix_nano` records actual
+UTC at export. HTTP-date `Retry-After` values are interpreted against actual UTC and converted to a
+physical monotonic wait.
+
 ## Automatic Model-Alteration Quiescing
 
 Nervix derives a quiesce level from the complete validated model diff. `ALTER SCHEMA`,

@@ -67,8 +67,7 @@ pub use ir::{
 pub use runtime::{
     ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
     FunctionInvocation, InjectedResult, RowSelection, SPAWN_BLOCKING_ROW_THRESHOLD,
-    execute_program, execute_program_in_context, execute_program_with_selection,
-    execute_program_with_selection_in_context,
+    execute_program_in_context, execute_program_with_selection_in_context,
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,

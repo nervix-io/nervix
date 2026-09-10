@@ -1911,17 +1911,25 @@ impl Runtime {
                     .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
                     .collect(),
             };
-            let clock = RuntimeWasmDomainClock::new(domain_clock.clone()).map_err(|error| {
-                OwnershipHandoffError::wasm_restore(format!(
-                    "failed to snapshot WASM processor '{}' domain clock: {error}",
-                    processor.name.as_str()
-                ))
-            })?;
+            let execution_now = domain_clock
+                .snapshot()
+                .map_err(|error| {
+                    OwnershipHandoffError::wasm_restore(format!(
+                        "failed to snapshot WASM processor '{}' domain clock: {error}",
+                        processor.name.as_str()
+                    ))
+                })?
+                .now();
             let restored_state =
                 (!snapshot.payload.is_empty()).then_some(snapshot.payload.as_slice());
             compiled
                 .compiled
-                .instantiate_branch(processor.limits, init, Box::new(clock), restored_state)
+                .instantiate_branch(
+                    processor.limits,
+                    init,
+                    Box::new(nervix_wasm::FixedDomainClock::new(execution_now)),
+                    restored_state,
+                )
                 .await
                 .map_err(|error| {
                     OwnershipHandoffError::wasm_restore(format!(

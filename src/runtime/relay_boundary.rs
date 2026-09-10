@@ -1272,9 +1272,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
     ) -> DomainClockAccessResult<Timestamp> {
-        let clock = self.bind_domain_clock(domain)?;
-        let snapshot = clock.snapshot()?;
-        Ok(snapshot.now())
+        Ok(self.domain_execution_snapshot(domain)?.now())
     }
 
     pub(in crate::runtime) fn touch_stream_key(
@@ -1323,10 +1321,21 @@ impl Runtime {
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         let physical_node_id = self.inner.remote_dispatch.local_node_id.read().clone();
-        let now = self
-            .current_stream_expiration_time(domain)
-            .ok()
-            .unwrap_or_else(current_timestamp);
+        let now = match self.current_stream_expiration_time(domain) {
+            Ok(now) => now,
+            Err(error) => {
+                let reason = format!(
+                    "relay '{}' in domain '{}' could not read domain time: {error}",
+                    relay.as_str(),
+                    domain.as_str(),
+                );
+                self.events().report_error(reason.clone());
+                for ack in batch.acks.iter() {
+                    ack.no_ack(reason.clone());
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        };
         branches.registry.touch(&batch.key, now);
         self.touch_stream_key(domain, relay, &batch.key, now);
         branches
@@ -1513,10 +1522,17 @@ impl Runtime {
                             std::future::pending::<()>().await;
                         }
                     } => {
-                        let now = runtime
-                            .current_stream_expiration_time(&domain)
-                            .ok()
-                            .unwrap_or_else(current_timestamp);
+                        let now = match runtime.current_stream_expiration_time(&domain) {
+                            Ok(now) => now,
+                            Err(error) => {
+                                runtime.events().report_error(format!(
+                                    "relay '{}' in domain '{}' lost its clock: {error}",
+                                    relay.as_str(),
+                                    domain.as_str(),
+                                ));
+                                break;
+                            }
+                        };
                         for (expired_key, _) in branches.instances.expire(
                             now,
                             branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
@@ -1616,10 +1632,17 @@ impl Runtime {
                     && let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
                 {
-                    let now = runtime
-                        .current_stream_expiration_time(&domain)
-                        .ok()
-                        .unwrap_or_else(current_timestamp);
+                    let now = match runtime.current_stream_expiration_time(&domain) {
+                        Ok(now) => now,
+                        Err(error) => {
+                            runtime.events().report_error(format!(
+                                "materialized relay '{}' in domain '{}' lost its clock: {error}",
+                                relay.as_str(),
+                                domain.as_str(),
+                            ));
+                            break 'state_task;
+                        }
+                    };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         tokio::task::consume_budget().await;
                         if let Err(error) = runtime.delete_materialized_stream_key(&state, &key) {
@@ -1690,10 +1713,21 @@ impl Runtime {
                     }
                 };
                 let branch_key = batch.key.clone();
-                let now = runtime
-                    .current_stream_expiration_time(&domain)
-                    .ok()
-                    .unwrap_or_else(current_timestamp);
+                let now = match runtime.current_stream_expiration_time(&domain) {
+                    Ok(now) => now,
+                    Err(error) => {
+                        let reason = format!(
+                            "materialized relay '{}' in domain '{}' lost its clock: {error}",
+                            relay.as_str(),
+                            domain.as_str(),
+                        );
+                        runtime.events().report_error(reason.clone());
+                        for ack in batch.acks.iter() {
+                            ack.no_ack(reason.clone());
+                        }
+                        break;
+                    }
+                };
                 branch_instances
                     .get_or_try_create_with(branch_key.clone(), now, |_| {
                         Ok::<(), std::convert::Infallible>(())
@@ -1857,6 +1891,7 @@ mod tests {
     async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
         let runtime = Runtime::default();
         let domain = DomainName::parse("default").expect("valid domain");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = RelayName::parse("notifications").expect("valid identifier");
         let schema = test_schema(&[("customer_id", ParseAsType::String)]);
         let registry = RelayRegistry::new();
@@ -1923,6 +1958,7 @@ mod tests {
     async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
         let runtime = Runtime::default();
         let domain = DomainName::parse("default").expect("valid domain");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = RelayName::parse("notifications").expect("valid identifier");
         let schema = test_schema(&[("user_id", ParseAsType::U32)]);
         let registry = RelayRegistry::new();
@@ -1974,6 +2010,7 @@ mod tests {
     async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receivers() {
         let runtime = Runtime::default();
         let domain = DomainName::parse("default").expect("valid domain");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = RelayName::parse("notifications").expect("valid identifier");
         let schema = test_schema(&[("user_id", ParseAsType::U32)]);
         let registry = RelayRegistry::new();
@@ -2035,6 +2072,7 @@ mod tests {
     async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         let runtime = Runtime::default();
         let domain = DomainName::parse("default").expect("valid domain");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = RelayName::parse("notifications").expect("valid identifier");
         let schema = test_schema(&[("user_id", ParseAsType::U32)]);
         let registry = RelayRegistry::new();
@@ -2371,6 +2409,7 @@ mod tests {
     async fn relay_owner_enforces_branch_capacity_across_batches() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = named("orders");
         let registry = RelayRegistry::new();
         let services = test_relay_boundary_services();
@@ -2438,6 +2477,7 @@ mod tests {
         )
         .expect("runtime should build");
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = named("orders");
         let key = string_branch_key("tenant", "acme");
         let registry = RelayRegistry::new();
@@ -2543,6 +2583,7 @@ mod tests {
     async fn relay_state_shutdown_drains_every_ready_batch() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = named::<RelayName>("materialized_orders");
         let schema = test_schema(&[("value", ParseAsType::I64)]);
         let mut assignment = runtime

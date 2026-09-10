@@ -8,10 +8,11 @@ use arrow_schema::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
+use nervix_models::Timestamp;
 use nervix_vm::{
-    CompileBinding, CompileOptions, CompiledProgram, OutputMode, SemanticNamespaces, TypedArray,
-    TypedBatch, compile_program_with_options_for_bindings, execute_program,
-    lower_route_construction,
+    CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
+    SemanticNamespaces, TypedArray, TypedBatch, compile_program_with_options_for_bindings,
+    execute_program_in_context, lower_route_construction,
     program::{Program, SpannedNode},
 };
 use triomphe::Arc;
@@ -19,6 +20,16 @@ use triomphe::Arc;
 /// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
 /// amortization curve below it and the cost of the blocking hop above it.
 const SWEEP_ROW_COUNTS: [usize; 6] = [64, 256, 1_024, 4_096, 16_384, 65_536];
+
+async fn execute_benchmark_program(
+    program: &Arc<CompiledProgram>,
+    batch: &TypedBatch,
+) -> Result<TypedBatch, RuntimeError> {
+    let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
+    execute_program_in_context(program, batch, &context)
+        .await
+        .map(|result| result.batch)
+}
 
 fn parse_program(source: &str) -> Result<SpannedNode<Program>, String> {
     parse_program_with_namespaces(source, SemanticNamespaces::new("input", "input"))
@@ -701,7 +712,7 @@ fn execute_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_program");
     group.bench_function("arithmetic_filter_optimized_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_program(
+            runtime.block_on(execute_benchmark_program(
                 black_box(&arithmetic_compiled),
                 black_box(&arithmetic_batch),
             ))
@@ -709,7 +720,7 @@ fn execute_benches(c: &mut Criterion) {
     });
     group.bench_function("arithmetic_filter_unoptimized_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_program(
+            runtime.block_on(execute_benchmark_program(
                 black_box(&arithmetic_unoptimized),
                 black_box(&arithmetic_batch),
             ))
@@ -717,7 +728,7 @@ fn execute_benches(c: &mut Criterion) {
     });
     group.bench_function("string_builtins_optimized_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_program(
+            runtime.block_on(execute_benchmark_program(
                 black_box(&string_compiled),
                 black_box(&string_batch),
             ))
@@ -725,7 +736,7 @@ fn execute_benches(c: &mut Criterion) {
     });
     group.bench_function("string_builtins_unoptimized_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_program(
+            runtime.block_on(execute_benchmark_program(
                 black_box(&string_unoptimized),
                 black_box(&string_batch),
             ))
@@ -733,7 +744,7 @@ fn execute_benches(c: &mut Criterion) {
     });
     group.bench_function("long_tail_builtins_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_program(
+            runtime.block_on(execute_benchmark_program(
                 black_box(&long_tail_compiled),
                 black_box(&long_tail_batch),
             ))
@@ -776,7 +787,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
             &rows,
             |b, _| {
                 b.iter(|| {
-                    runtime.block_on(execute_program(
+                    runtime.block_on(execute_benchmark_program(
                         black_box(&arithmetic_compiled),
                         black_box(&batch),
                     ))
@@ -785,7 +796,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         );
         group.bench_with_input(BenchmarkId::new("numeric_compare", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&numeric_compare_compiled),
                     black_box(&batch),
                 ))
@@ -795,7 +806,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         let batch = float_batch(rows);
         group.bench_with_input(BenchmarkId::new("float_arithmetic", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&float_arithmetic_compiled),
                     black_box(&batch),
                 ))
@@ -806,7 +817,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
             &rows,
             |b, _| {
                 b.iter(|| {
-                    runtime.block_on(execute_program(
+                    runtime.block_on(execute_benchmark_program(
                         black_box(&nullable_casts_compiled),
                         black_box(&batch),
                     ))
@@ -817,7 +828,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         let batch = string_batch(rows);
         group.bench_with_input(BenchmarkId::new("string_builtins", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&string_compiled),
                     black_box(&batch),
                 ))
@@ -825,7 +836,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new("text_transform", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&text_transform_compiled),
                     black_box(&batch),
                 ))
@@ -835,7 +846,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         let batch = list_batch(rows);
         group.bench_with_input(BenchmarkId::new("list_builtins", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&list_compiled),
                     black_box(&batch),
                 ))
@@ -845,7 +856,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         let batch = stateful_batch(&key_projection_compiled, rows);
         group.bench_with_input(BenchmarkId::new("key_projection", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&key_projection_compiled),
                     black_box(&batch),
                 ))
@@ -858,7 +869,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
             &rows,
             |b, _| {
                 b.iter(|| {
-                    runtime.block_on(execute_program(
+                    runtime.block_on(execute_benchmark_program(
                         black_box(&window_aggregate_input_compiled),
                         black_box(&batch),
                     ))
@@ -869,7 +880,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         let batch = correlation_batch(&correlate_where_compiled, rows);
         group.bench_with_input(BenchmarkId::new("correlate_where", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&correlate_where_compiled),
                     black_box(&batch),
                 ))
@@ -879,7 +890,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         let batch = correlation_batch(&correlate_output_compiled, rows);
         group.bench_with_input(BenchmarkId::new("correlate_output", rows), &rows, |b, _| {
             b.iter(|| {
-                runtime.block_on(execute_program(
+                runtime.block_on(execute_benchmark_program(
                     black_box(&correlate_output_compiled),
                     black_box(&batch),
                 ))

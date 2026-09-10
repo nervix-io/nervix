@@ -842,13 +842,30 @@ impl SessionSubscriptions {
                                 for message in messages {
                                     tokio::task::consume_budget().await;
                                     let Some(message) = (match filter_map.as_ref() {
-                                        Some(filter_map) => match execute_filter_map_on_record(
-                                            &event_name,
-                                            filter_map,
-                                            message.record.clone(),
-                                            message.key.as_ref(),
-                                            None,
-                                            &match runtime
+                                        Some(filter_map) => {
+                                            let execution_snapshot = match runtime
+                                                .domain_execution_snapshot(&task_domain)
+                                            {
+                                                Ok(snapshot) => snapshot,
+                                                Err(error) => {
+                                                    let event = SessionResponse {
+                                                        event: Some(proto::session_response::Event::Server(
+                                                            ServerEvent {
+                                                                level: i32::from(ServerEventLevel::Error),
+                                                                message: format!(
+                                                                    "session subscription '{}' could not read domain execution time: {}",
+                                                                    event_name, error
+                                                                ),
+                                                            },
+                                                        )),
+                                                    };
+                                                    if tx.send(Ok(event)).await.is_err() {
+                                                        break 'subscription_loop;
+                                                    }
+                                                    continue;
+                                                }
+                                            };
+                                            let side_inputs = match runtime
                                                 .load_materialized_side_inputs(
                                                     &task_domain,
                                                     &message.key,
@@ -875,11 +892,18 @@ impl SessionSubscriptions {
                                                     }
                                                     continue;
                                                 }
-                                            },
-                                            current_timestamp(),
-                                        )
-                                        .await
-                                        {
+                                            };
+                                            match execute_filter_map_on_record(
+                                                &event_name,
+                                                filter_map,
+                                                message.record.clone(),
+                                                message.key.as_ref(),
+                                                None,
+                                                &side_inputs,
+                                                execution_snapshot.now(),
+                                            )
+                                            .await
+                                            {
                                             Ok(Some(record)) => Some(RelayMessage {
                                                 key: message.key,
                                                 record,
@@ -903,7 +927,8 @@ impl SessionSubscriptions {
                                                 }
                                                 continue;
                                             }
-                                        },
+                                            }
+                                        }
                                         None => Some(message),
                                     }) else {
                                         continue;

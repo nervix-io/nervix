@@ -5,7 +5,7 @@
 //! test needs before it can exercise anything. A fixture used by one module belongs in
 //! that module's own test module instead.
 
-use std::{num::NonZeroUsize, sync::Arc as StdArc};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashSet};
 use arrow_array::{ArrayRef, RecordBatch};
@@ -342,6 +342,13 @@ pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
     }
+}
+
+pub(super) fn install_unpaced_test_domain(runtime: &super::Runtime, domain: &DomainName) {
+    runtime.sync_domains(&BTreeMap::from([(
+        domain.clone(),
+        unpaced_domain_state(domain.as_str()),
+    )]));
 }
 
 pub(super) fn test_domain_clock_authority() -> nervix_models::DomainClockAuthority {

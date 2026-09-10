@@ -140,8 +140,9 @@ impl OtelRecordError {
         }
     }
 
-    fn structured(self) -> StructuredMessageError {
+    fn structured(self, execution_now: Timestamp) -> StructuredMessageError {
         structured_message_error(
+            execution_now,
             MessageErrorCode::Validation,
             self.reason,
             MessageErrorOperation::Values,
@@ -616,13 +617,17 @@ impl OtelEmitter {
 
     pub(super) async fn publish_pending_rows(
         &self,
-        batch_index: usize,
+        context: EmitterBatchExecutionContext<'_>,
         signal: &OtelSignal,
         values: &[OtelValueMapping],
         attributes: &[OtelValueMapping],
-        batch: &RelayRecordBatch,
         pending_rows: &[usize],
     ) -> PerRecordPublishOutcome {
+        let EmitterBatchExecutionContext {
+            batch_index,
+            batch,
+            execution_now,
+        } = context;
         let mut outcome = PerRecordPublishOutcome::empty();
         if pending_rows.is_empty() {
             return outcome;
@@ -638,7 +643,7 @@ impl OtelEmitter {
             );
             return outcome;
         };
-        let output = match execute_sql_values_program(program, batch, current_timestamp()).await {
+        let output = match execute_sql_values_program(program, batch, execution_now).await {
             Ok(output) => output,
             Err(error) => {
                 outcome.fail(error);
@@ -646,21 +651,20 @@ impl OtelEmitter {
             }
         };
         let mapped = OtelMappedBatch::new(&output, values, attributes);
-        let observed_time =
-            match Self::timestamp_to_unix_nano(current_timestamp().unix_nanos(), "observed_time") {
-                Ok(value) => value,
-                Err(error) => {
-                    outcome.fail(emitter_publish_error(error.reason));
-                    return outcome;
-                }
-            };
+        let observed_time = match Self::observation_time_unix_nano() {
+            Ok(value) => value,
+            Err(error) => {
+                outcome.fail(emitter_publish_error(error.reason));
+                return outcome;
+            }
+        };
         let mut positions = Vec::with_capacity(pending_rows.len());
         let request = match signal {
             OtelSignal::Logs => {
                 let mut records = Vec::with_capacity(pending_rows.len());
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
-                    if let Some(error) = Self::side_error(program, &output, *row) {
+                    if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
                         outcome.reject_structured(
                             BrokerRecordPosition {
                                 batch_index,
@@ -683,7 +687,7 @@ impl OtelEmitter {
                                 batch_index,
                                 row_index: *row,
                             },
-                            error.structured(),
+                            error.structured(execution_now),
                         ),
                     }
                 }
@@ -703,7 +707,7 @@ impl OtelEmitter {
                 let mut spans = Vec::with_capacity(pending_rows.len());
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
-                    if let Some(error) = Self::side_error(program, &output, *row) {
+                    if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
                         outcome.reject_structured(
                             BrokerRecordPosition {
                                 batch_index,
@@ -726,7 +730,7 @@ impl OtelEmitter {
                                 batch_index,
                                 row_index: *row,
                             },
-                            error.structured(),
+                            error.structured(execution_now),
                         ),
                     }
                 }
@@ -746,7 +750,7 @@ impl OtelEmitter {
                 let mut metric_rows = Vec::with_capacity(pending_rows.len());
                 for row in pending_rows {
                     tokio::task::consume_budget().await;
-                    if let Some(error) = Self::side_error(program, &output, *row) {
+                    if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
                         outcome.reject_structured(
                             BrokerRecordPosition {
                                 batch_index,
@@ -765,6 +769,7 @@ impl OtelEmitter {
                         batch_index,
                         &mut positions,
                         &mut outcome,
+                        execution_now,
                     )
                     .await;
                 OtelExportRequest::Metrics(ExportMetricsServiceRequest {
@@ -814,9 +819,11 @@ impl OtelEmitter {
         program: &CompiledSqlValuesProgram,
         output: &VmTypedBatch,
         row: usize,
+        execution_now: Timestamp,
     ) -> Option<StructuredMessageError> {
         output.errors().get(row)?.first().map(|side_error| {
             program.structured_side_error(
+                execution_now,
                 format!(
                     "OTEL VALUES side error {}: {} at {}",
                     side_error.code.as_str(),
@@ -832,6 +839,13 @@ impl OtelEmitter {
         u64::try_from(value).map_err(|_| {
             OtelRecordError::new(key, format!("OTEL {key} cannot be before the Unix epoch"))
         })
+    }
+
+    fn observation_time_unix_nano() -> Result<u64, OtelRecordError> {
+        Self::timestamp_to_unix_nano(
+            crate::runtime::physical_time::actual_utc_now().unix_nanos(),
+            "observed_time",
+        )
     }
 }
 
@@ -1026,7 +1040,7 @@ impl OtelTransport {
                     .headers()
                     .get(RETRY_AFTER)
                     .and_then(|value| value.to_str().ok()),
-                chrono::Utc::now(),
+                crate::runtime::physical_time::actual_utc_now().into_datetime(),
             );
             let message = format!("OTEL HTTP export returned status {status}");
             return OtelTransportOutcome::Failed(match delay {
@@ -1347,6 +1361,7 @@ impl<'a> OtelMappedBatch<'a> {
         batch_index: usize,
         positions: &mut Vec<BrokerRecordPosition>,
         outcome: &mut PerRecordPublishOutcome,
+        execution_now: Timestamp,
     ) -> Metric {
         let data = match &model.kind {
             OtelMetricKind::Gauge | OtelMetricKind::Sum { .. } => {
@@ -1373,7 +1388,7 @@ impl<'a> OtelMappedBatch<'a> {
                                 batch_index,
                                 row_index: *row,
                             },
-                            error.structured(),
+                            error.structured(execution_now),
                         ),
                     }
                 }
@@ -1410,7 +1425,7 @@ impl<'a> OtelMappedBatch<'a> {
                                 batch_index,
                                 row_index: *row,
                             },
-                            error.structured(),
+                            error.structured(execution_now),
                         ),
                     }
                 }
@@ -2145,5 +2160,25 @@ mod tests {
             OtelTransport::http_retry_after(Some("3.5"), now),
             Some(Duration::from_millis(3500))
         );
+    }
+
+    #[test]
+    fn observation_timestamp_samples_actual_utc() {
+        let before = OtelEmitter::timestamp_to_unix_nano(
+            crate::runtime::physical_time::actual_utc_now().unix_nanos(),
+            "before",
+        )
+        .expect("actual UTC must be after the Unix epoch");
+        let observed = OtelEmitter::observation_time_unix_nano()
+            .expect("actual UTC observation time must be after the Unix epoch");
+        let after = OtelEmitter::timestamp_to_unix_nano(
+            crate::runtime::physical_time::actual_utc_now().unix_nanos(),
+            "after",
+        )
+        .expect("actual UTC must be after the Unix epoch");
+
+        assert!(before <= observed);
+        assert!(observed <= after);
+        assert!(observed > 978_307_200_000_000_000);
     }
 }

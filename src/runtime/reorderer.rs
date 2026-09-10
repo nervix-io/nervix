@@ -107,6 +107,7 @@ pub(super) struct ReordererFlushContext<'a> {
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     pub(super) input_relays: &'a [RelayName],
     pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
+    pub(super) execution_now: Timestamp,
 }
 
 pub(super) async fn flush_branch_reorderer_output(
@@ -121,6 +122,7 @@ pub(super) async fn flush_branch_reorderer_output(
     let output_routes = context.output_routes;
     let input_relays = context.input_relays;
     let materialized_state = context.materialized_state;
+    let execution_now = context.execution_now;
     let branch = context.branch;
     output_routes.routes[output_index].clear_flush_deadline();
 
@@ -158,6 +160,7 @@ pub(super) async fn flush_branch_reorderer_output(
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
             materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(materialized_state),
+            execution_now,
         },
         output_routes,
         batch,

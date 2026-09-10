@@ -33,6 +33,7 @@ pub(super) struct ProcessorOutputDispatchContext<'a> {
     pub(super) input_relays: &'a [RelayName],
     pub(super) filter_source: ProcessorOutputFilterSource<'a>,
     pub(super) materialized_state: ProcessorMaterializedState<'a>,
+    pub(super) execution_now: Timestamp,
 }
 
 /// How a dispatched batch obtains the node-wide materialized state its output routes read.
@@ -62,12 +63,18 @@ impl ProcessorMaterializedState<'_> {
         node_kind: ModelKind,
         node: &ModelName,
         branch_key: &Option<BranchKey>,
+        execution_now: Timestamp,
     ) -> Result<HashMap<String, RuntimeValue>, String> {
         match self {
             Self::Admitted(values) => Ok((*values).clone()),
             Self::ResolvedAtDispatch(dependencies) => {
                 match runtime
-                    .resolve_materialized_dependencies(domain, branch_key, dependencies)
+                    .resolve_materialized_dependencies(
+                        domain,
+                        branch_key,
+                        dependencies,
+                        execution_now,
+                    )
                     .await?
                 {
                     MaterializedDependencyResolution::Ready(values) => Ok(values),
@@ -272,6 +279,7 @@ pub(super) async fn evaluate_processor_output_events(
                 key: batch.keys[input_row].clone(),
                 record,
                 error: program.structured_side_error(
+                    scope.execution_now,
                     format!(
                         "{} '{}' FILTER-MAP side error {}: {} at {}",
                         context.node_kind.as_str(),
@@ -423,6 +431,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
             context.node_kind,
             context.processor,
             &batch.key,
+            context.execution_now,
         )
         .await
     {
@@ -442,16 +451,10 @@ pub(super) async fn dispatch_selected_processor_outputs(
             return None;
         }
     };
-    let execution_now = context
-        .branch
-        .runtime
-        .current_stream_expiration_time(&context.branch.domain)
-        .ok()
-        .unwrap_or_else(current_timestamp);
     let mut scope = ProcessorOutputBatchScope {
         state_snapshot: relay_state_snapshot_from_side_inputs(&side_inputs),
         side_inputs,
-        execution_now,
+        execution_now: context.execution_now,
         output_schemas,
         shared: SharedBatchColumns::default(),
     };
@@ -586,6 +589,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                 partial_output: error.partial_output,
                 materialized_state: error.materialized_state,
                 ingest_metadata: None,
+                execution_now: scope.execution_now,
             })
             .await;
     }

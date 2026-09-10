@@ -104,6 +104,15 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
   of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
   an unreached future center.
+- Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
+  unit uses the same instant, including filters, construction, keys, correlation and window
+  programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.
+  Buffered emitter batches and retries retain their assigned snapshot; work resumed after
+  `REQUIRED WAIT` starts with a fresh one. Error occurrence and error-route `SET` share the failing
+  snapshot. Generator output and tokenless WASM output use it for generated watermarks, while
+  source-token WASM output preserves source metadata. Omitted Sentry timestamps use domain time;
+  explicit Sentry timestamps are preserved; OTEL `observed_time_unix_nano` and HTTP-date
+  `Retry-After` interpretation use actual UTC.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every

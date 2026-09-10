@@ -297,11 +297,12 @@ impl BranchRuntime {
     pub(super) async fn checkpoint_processor_live_state(
         &mut self,
         processor_id: &ModelName,
+        execution_now: Timestamp,
     ) -> OwnershipHandoffResult<()> {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return Ok(());
         };
-        let result = processor.checkpoint_live_state(self).await;
+        let result = processor.checkpoint_live_state(self, execution_now).await;
         self.processors.insert(processor_id.clone(), processor);
         result
     }
@@ -619,7 +620,7 @@ impl BranchRuntime {
                 continue;
             };
             processor.flush_all_collected_inputs(graph, self).await;
-            processor.flush_guest_buffers(graph, self).await;
+            processor.flush_guest_buffers(graph, self, now).await;
             let current = graph.load_full();
             processor.refresh(
                 &self.runtime,
@@ -1101,6 +1102,18 @@ impl BranchExecutionRuntime {
         runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
 
         let task = tokio::spawn(async move {
+            let domain_clock = match runtime_handle.bind_domain_clock(&domain) {
+                Ok(clock) => clock,
+                Err(error) => {
+                    runtime_handle.events().report_error(format!(
+                        "branch runtime for ingestor '{}' in domain '{}' could not bind its \
+                         clock: {error}",
+                        ingestor.as_str(),
+                        domain.as_str(),
+                    ));
+                    return;
+                }
+            };
             let mut instances =
                 BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
             let mut last_persisted_lru_lsm = match restore_branch_instance_lru_snapshot(
@@ -1133,10 +1146,17 @@ impl BranchExecutionRuntime {
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
-            let now = runtime_handle
-                .current_stream_expiration_time(&domain)
-                .ok()
-                .unwrap_or_else(current_timestamp);
+            let now = match domain_clock.snapshot() {
+                Ok(snapshot) => snapshot.now(),
+                Err(error) => {
+                    runtime_handle.events().report_error(format!(
+                        "branch runtime for ingestor '{}' in domain '{}' lost its clock: {error}",
+                        ingestor.as_str(),
+                        domain.as_str(),
+                    ));
+                    return;
+                }
+            };
             let mut next_branch_deadline =
                 tick_due_branch_instance_branches(&graph, now, &instances).await;
             let ownership_entity = DomainNodeRef::node_in(
@@ -1150,10 +1170,18 @@ impl BranchExecutionRuntime {
                 tokio::task::consume_budget().await;
                 let ownership_frozen =
                     runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
-                let now = runtime_handle
-                    .current_stream_expiration_time(&domain)
-                    .ok()
-                    .unwrap_or_else(current_timestamp);
+                let now = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot.now(),
+                    Err(error) => {
+                        runtime_handle.events().report_error(format!(
+                            "branch runtime for ingestor '{}' in domain '{}' lost its clock: \
+                             {error}",
+                            ingestor.as_str(),
+                            domain.as_str(),
+                        ));
+                        break;
+                    }
+                };
                 let mut did_scheduled_work = false;
                 if !ownership_frozen && Instant::now() >= next_expiration_scan {
                     if let Some(branch_ttl) = template.branch_ttl {
@@ -1297,10 +1325,6 @@ impl BranchExecutionRuntime {
                             input.close();
                             while let Some(message) = input.recv().await {
                                 tokio::task::consume_budget().await;
-                                let drain_now = runtime_handle
-                                    .current_stream_expiration_time(&domain)
-                                    .ok()
-                                    .unwrap_or_else(current_timestamp);
                                 record_next_branch_instance_branch_deadline(
                                     &mut next_branch_deadline,
                                     Self::dispatch_prepared_inputs(
@@ -1310,7 +1334,7 @@ impl BranchExecutionRuntime {
                                             ingestor: &ingestor,
                                             graph: &graph,
                                             template: &template,
-                                            now: drain_now,
+                                            now,
                                         },
                                         &mut instances,
                                         vec![message],
@@ -1615,6 +1639,7 @@ pub(super) async fn flush_branch_junction(
         input_relays,
         output_routes,
         materialized_values,
+        execution_now,
     } = context;
     if let Some(acks) = dispatch_processor_outputs(
         ProcessorOutputDispatchContext {
@@ -1627,6 +1652,7 @@ pub(super) async fn flush_branch_junction(
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
             materialized_state: ProcessorMaterializedState::Admitted(materialized_values),
+            execution_now,
         },
         output_routes,
         forwarded,

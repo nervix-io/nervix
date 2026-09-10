@@ -306,6 +306,7 @@ pub(super) struct IngestorFilterWhereError<'a> {
     pub(super) acks: AckSet,
     pub(super) error: StructuredMessageError,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
+    pub(super) execution_now: Timestamp,
 }
 
 /// Accumulates one source ingest group before program execution, then holds its routed
@@ -1004,6 +1005,7 @@ impl Runtime {
                             acks,
                             error,
                             materialized_state,
+                            execution_now,
                         })
                         .await;
                     }
@@ -1228,6 +1230,7 @@ impl Runtime {
                                 output_index,
                                 outcome: SingleRecordFilterMapOutcome::MessageError {
                                     error: structured_message_error(
+                                        execution_now,
                                         MessageErrorCode::Evaluation,
                                         reason,
                                         MessageErrorOperation::Set,
@@ -1307,6 +1310,7 @@ impl Runtime {
                     partial_output: route_error.partial_output,
                     materialized_state: route_error.materialized_state,
                     ingest_metadata: rows.metadata_row(row),
+                    execution_now,
                 })
                 .await;
             }
@@ -1351,6 +1355,7 @@ impl Runtime {
             acks,
             error,
             materialized_state,
+            execution_now,
         } = handling;
         let route_count = output_routes.routes.len();
         if route_count == 0 {
@@ -1381,6 +1386,7 @@ impl Runtime {
                 partial_output: None,
                 materialized_state: materialized_state.clone(),
                 ingest_metadata: ingest_metadata.clone(),
+                execution_now,
             })
             .await;
         }
@@ -1754,6 +1760,7 @@ mod tests {
     async fn branched_root_without_children_acks_success() {
         let runtime = Runtime::default();
         let root_domain = domain("default");
+        install_unpaced_test_domain(&runtime, &root_domain);
         let root_relay = named("tenant_orders");
         let root_registry = RelayRegistry::new();
         let root_services = test_relay_boundary_services();
@@ -1830,6 +1837,7 @@ mod tests {
     async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let root_relay = named("notifications");
         let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
         let mut fan_in =
@@ -1917,6 +1925,7 @@ mod tests {
             tokio::task::consume_budget().await;
             let runtime = Runtime::default();
             let domain = domain("default");
+            install_unpaced_test_domain(&runtime, &domain);
             let root_relay = named("notifications");
             let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
             let mut fan_in = RelayRuntimeFanIn::new(

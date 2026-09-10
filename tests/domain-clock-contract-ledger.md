@@ -90,6 +90,8 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Logical collection/flush and physical minima | `Paced branch collection and flush follow logical time while Immediate and source idle remain physical`, task 07 | Two interleaved branches on one and three nodes, preserving fields |
 | Logical emitter cadence and physical retry/ACK | `Emitter cadence follows logical time while retry and ACK deadlines remain physical`, task 08 | One- and three-node random schedules with controlled sink failure |
 | Fresh branch activity and logical retention | `Activity sampled after an awaited record keeps each logical branch alive`, task 10 | Two interleaved branches on one and three nodes, preserving fields |
+| One snapshot across expression contexts | `Every expression context observes its domain execution time`, task 06 | One- and three-node random schedules through ingestion, a junction, and a subscription, extended by focused generator, inferencer, SQS, database, Iceberg, Sentry, and OTEL scenarios |
+| Failure, guest, generated metadata, and telemetry clock classes | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes`, task 06 | One- and three-node random schedules with historical domain time, error routing, WASM lifecycle callbacks, tokenless output, and external telemetry fixtures |
 
 ## Reusable fixtures
 
@@ -130,13 +132,25 @@ just test-scenarios --input tests/features/runtime/domain_clock_contract.feature
 just test-scenarios --input tests/features/runtime/domain_ingestion_time.feature
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_bound_clock
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
+just test-scenarios --input tests/features/runtime/domain_execution_time.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/inferencer.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/sqs_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/postgres_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/mysql_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/clickhouse_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/mongodb_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/iceberg_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/sentry_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/otel_emission.feature --tags @domain_execution_time
 ```
 
 The delayed-progress scenario is part of the ordinary suite after task 02. Task 05 enables the
 logical-origin scenario and adds `domain_ingestion_time.feature` for admission, delivery and
 duration-window coverage. The untagged
 `Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
-task 02's F10 public coverage.
+task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and focused tagged
+coverage in the listed runtime feature files for F6 and F7.
 
 Physical controls are
 `tests::connection_lifetime::send_queue_admission_is_deadline_bound`,
