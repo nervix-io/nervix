@@ -3,13 +3,13 @@
 This ledger is the acceptance record for [Domain clocks 01](https://app.clickup.com/t/86bbwcrya)
 under the [domain clocks epic](https://app.clickup.com/t/86bbwcry1). The source audit was made at
 `fdd79a3cd7ed0d93be53f3710cf9ad67a87af574` on 8 September 2026. The four isolated failures from
-that audit are represented here in current-source tests without repairing their product paths.
+that audit are represented by the current-source regressions below. Tasks 02–05 repair their
+owning product paths.
 
 The Cucumber scenarios exercise NSPL and runtime behavior through public endpoints and session
-subscriptions. Expected failures carry `@clock_contract_expected_failure`; the default Cucumber
-run excludes that tag, while an explicit `--tags` selection runs the recorded red baseline. Direct
-arithmetic regressions use ignored desired-behavior tests for the same reason. A later owning task
-removes the quarantine when its repair makes the assertion pass.
+subscriptions. The clock-contract scenarios and direct arithmetic regressions run in the ordinary
+suite. Explicit tag selections isolate the focused cases; the validation records preserve the
+observed red baselines and subsequent results.
 
 ## Clock classification
 
@@ -119,20 +119,22 @@ runtime::domain_clock::tests::logical_time_projection_reports_range_overflow
 ```
 
 Task 02 made the delayed-progress, scheduled-timestamp, and projection probes part of the ordinary
-suite. The historical-origin probe remains ignored for task 05. The passing arithmetic control is
-`runtime::domain_clock::tests::logical_rate_conversion_scales_physical_waits`.
+suite. Task 05 enables the historical-origin probe in the ordinary suite. The passing arithmetic
+control is `runtime::domain_clock::tests::logical_rate_conversion_scales_physical_waits`.
 
 The focused public scenarios are selected independently:
 
 ```console
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @delayed_clock_progress
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @logical_origin_admission
+just test-scenarios --input tests/features/runtime/domain_ingestion_time.feature
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_bound_clock
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
 ```
 
-The delayed-progress scenario is part of the ordinary suite after task 02. The logical-origin
-scenario remains quarantined for task 05. The untagged
+The delayed-progress scenario is part of the ordinary suite after task 02. Task 05 enables the
+logical-origin scenario and adds `domain_ingestion_time.feature` for admission, delivery and
+duration-window coverage. The untagged
 `Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
 task 02's F10 public coverage.
 
@@ -222,5 +224,23 @@ Recorded on 9 September 2026 against the task 04 worktree:
 | Authority and progress unit coverage | Pass; pure selection covered membership and incarnation changes, consensus covered revision fencing and identical direct/transactional lifecycle commits, and runtime covered exact generation/revision/incarnation/peer fences, stopped and restarted generations, missing domains, bounded tick history, and execution refusal without installed authority. |
 | `just validate` with `RUSTC_WRAPPER=kache` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. Clamped-arithmetic debt fell from 13 to 11 and string-error debt fell from 512 to 510. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 05 validation record
+
+Recorded on 9 September 2026 against the task 05 worktree:
+
+| Probe | Result |
+| --- | --- |
+| Public historical-origin reproducer before product changes | Expected red in both the one- and three-node examples; the event at the exact logical origin produced no relay payload. |
+| `Logical ingestion time and admission` | Pass; 16 one- and three-node scenarios and all 140 steps covered `TIMESTAMP NOW` at delivery, preserved `TIMESTAMP AT`, slow and fast rates, inclusive skew edges, future rejection, exactly 256 retained positions, delayed progress delivery, quiesce-buffer release, interleaved branches, and duration-window membership. |
+| `Domain clock contract and regression ledger` | Pass; all 13 scenarios and 156 steps passed, including the enabled historical-origin scenario. |
+| Source-timestamp controls | Pass; all three HTTP examples and 18 steps, and all three Kafka examples and 21 steps, preserved explicit external timestamps in unpaced domains. |
+| `nervix-models` unit suite | Pass; 103 tests included exact integer admission arithmetic across inclusive edges, gaps, overlapping windows, the 256-position bound, and the full timestamp range. |
+| `nervix-server` library suite | Pass; 799 tests passed with no ignored tests. |
+| `just book 0.1.0-dev` | Pass; executable documentation, console screenshots, and the HTML, LLM, and Markdown book renderers completed. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and executable NSPL documentation. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell by two. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.

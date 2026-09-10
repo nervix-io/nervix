@@ -129,10 +129,9 @@ the same logical clock, which is what makes accelerated replay reproducible; det
 preserve that reproducibility too ([Domains And Time](domains-and-time.md), UDF determinism under
 [Nulls, Errors, And Volatility](udfs.md#nulls-errors-and-volatility)).
 
-A record whose timestamp falls outside every tick window is rejected at ingestion with
-`rejected ingestor ... event outside any tick window` — that is `SKEW` doing its job. And as
-everywhere, `START` clears materialized relay state, so a fresh replay starts from an empty
-snapshot surface.
+A record whose timestamp falls outside every reached logical tick window is rejected at
+ingestion — that is `SKEW` doing its job. And as everywhere, `START` clears materialized relay
+state, so a fresh replay starts from an empty snapshot surface.
 
 ## Where To Go Next
 

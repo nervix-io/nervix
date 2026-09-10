@@ -126,7 +126,7 @@ use tokio::{
     time::{Duration, Instant, sleep, sleep_until},
 };
 use tokio_stream::StreamExt;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;
@@ -180,6 +180,7 @@ mod inferencer;
 mod inferencer_output;
 mod ingest_group;
 mod ingest_metadata;
+mod ingestion_time;
 mod ingestor_quiesce;
 mod ingestor_start;
 mod ingestor_start_plan;
@@ -347,13 +348,11 @@ use correlator::{
 use domain_clock::{
     DomainClock, DomainClockAccessResult, DomainClockLifecycle, RuntimeWasmDomainClock,
     advance_scheduled_timestamp, checked_add_duration_to_timestamp, current_domain_logical_time,
-    current_timestamp, domain_clock_window_matches, wall_duration_until_logical_target,
-    wall_duration_until_timestamp,
+    current_timestamp, wall_duration_until_logical_target, wall_duration_until_timestamp,
 };
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
-    DOMAIN_TICK_HISTORY_LIMIT, DomainExecution, DomainResourceKey, ObservedDomainTick,
-    RuntimeDomainState,
+    DomainExecution, DomainResourceKey, ObservedDomainTick, RuntimeDomainState,
 };
 use domain_rebuild::{branch_relays_from_branched_specs, relay_branching_schema_for_runtime};
 use domain_wire_schemas::DomainWireSchemas;
@@ -748,6 +747,9 @@ struct RuntimeInner {
         DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,
     pending_state_checkpoint_announcements:
         DashMap<RuntimeStatePlacement, PendingStateCheckpointAnnouncement, RandomState>,
+    /// Owns replica synchronization and checkpoint announcement work that outlives the event that
+    /// scheduled it.
+    state_replication_tasks: TaskTracker,
     passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
     replicated_branch_lru_snapshots:

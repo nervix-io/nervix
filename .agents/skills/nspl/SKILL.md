@@ -99,6 +99,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node installs that revision. `STOP` revokes the authority, while automatic ALTER quiescing leaves
   it running. Never describe a missing, stopped, uninstalled, or stale paced clock as falling back
   to wall time. Unpaced domains receive actual UTC through the same domain-time capability.
+- For ingestion, read `Domains And Time` → `Ingestion Timestamps`: `TIMESTAMP NOW` uses domain
+  time at delivery, including after quiescing; explicit source times remain unchanged. Check
+  admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
+  of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
+  an unreached future center.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
