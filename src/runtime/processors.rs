@@ -30,8 +30,8 @@ use triomphe::Arc;
 
 use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime,
-    CompiledBranchProgram, CompiledDeduplicatorKeyProgram, DomainClock, DomainExecutionSnapshot,
-    CompiledProgramWithMaterializedInterest, PendingMaterializedBatch, RelayBoundaryServices,
+    CompiledBranchProgram, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
+    DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
     RelayMessage, RelayRecordBatch, RelayRegistry, ReplicatedDeduplicatorState,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
     RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WindowProcessorState,

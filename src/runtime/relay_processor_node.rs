@@ -371,9 +371,7 @@ impl RelayProcessorNode {
             let pending_relays = self
                 .input_collectors
                 .iter()
-                .filter_map(|(relay, collector)| {
-                    (!collector.is_empty()).then_some(relay.clone())
-                })
+                .filter_map(|(relay, collector)| (!collector.is_empty()).then_some(relay.clone()))
                 .collect::<Vec<_>>();
             for relay in pending_relays {
                 let batches = match self.input_collectors.get_mut(&relay) {
@@ -1179,13 +1177,11 @@ impl RelayProcessorNode {
                         let output_buffer = &mut output_buffers[output_index];
                         output_buffer.push(route_batch, Arc::clone(&row_ordering), execution_now);
                         let output = &mut output_routes.routes[output_index];
-                        match output
-                            .schedule_input_flush(
-                                &domain_clock,
-                                &flush_snapshot,
-                                output_buffer.estimated_bytes(),
-                            )
-                        {
+                        match output.schedule_input_flush(
+                            &domain_clock,
+                            &flush_snapshot,
+                            output_buffer.estimated_bytes(),
+                        ) {
                             Ok(Some(true)) => due_outputs.push(output_index),
                             Ok(Some(false)) => {}
                             Ok(None) => {
@@ -1793,13 +1789,11 @@ impl RelayProcessorNode {
                         let output_buffer = &mut output_buffers[output_index];
                         output_buffer.push(route_batch);
                         let output = &mut output_routes.routes[output_index];
-                        match output
-                            .schedule_input_flush(
-                                &domain_clock,
-                                &flush_snapshot,
-                                output_buffer.estimated_bytes(),
-                            )
-                        {
+                        match output.schedule_input_flush(
+                            &domain_clock,
+                            &flush_snapshot,
+                            output_buffer.estimated_bytes(),
+                        ) {
                             Ok(Some(true)) => due_outputs.push(output_index),
                             Ok(Some(false)) => {}
                             Ok(None) => {
@@ -1942,8 +1936,8 @@ impl RelayProcessorNode {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     branch.runtime.events().report_error(format!(
-                        "{} '{}' in domain '{}' could not read the clock while releasing \
-                         buffered output: {error}",
+                        "{} '{}' in domain '{}' could not read the clock while releasing buffered \
+                         output: {error}",
                         self.kind.as_str(),
                         self.processor.as_str(),
                         branch.domain.as_str(),
@@ -2537,7 +2531,7 @@ impl RelayProcessorNode {
     }
 
     pub(super) fn next_deadline(&self) -> Option<Timestamp> {
-        let operation_deadline = match &self.operation {
+        match &self.operation {
             RelayProcessorOperationNode::Deduplicator { .. } => None,
             RelayProcessorOperationNode::WindowProcessor {
                 width_duration,
@@ -2566,8 +2560,7 @@ impl RelayProcessorNode {
             RelayProcessorOperationNode::WasmProcessor { instance, .. } => {
                 wasm_instance_next_deadline(instance.as_deref())
             }
-        };
-        operation_deadline
+        }
     }
 
     pub(super) fn buffer_deadlines(&self) -> Vec<BranchBufferDeadline> {

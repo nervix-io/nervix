@@ -207,14 +207,17 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Add `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` after a relay input list only when the node
   should assemble input batches before execution. Omission means no additional input collection.
   The policy is per source relay and concrete branch; correlators configure each side
-  independently. Never add it to an ingestor.
+  independently. Its duration uses the domain clock and starts when an empty collector receives
+  data. Never add it to an ingestor.
 - Add `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` to every flush-based
-  route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
-  one-message batch guarantee. `MAX BATCH SIZE` counts logical Arrow value, offset, and validity
-  bytes, not unused buffer capacity or object overhead. Windows use `WIDTH` and `STEP`; WASM output
-  cadence is controlled by the guest. Choose `FLUSH` values as latency and boundary-cost controls,
-  not as a throughput lever: `MAX BATCH SIZE` only clamps a batch, and the flush tuning guidance
-  in the docs records which sinks benefit from larger batches.
+  route. `FLUSH EACH` is domain-logical and branch-local. Treat `FLUSH IMMEDIATE` as the physical,
+  system-owned 100 µs minimum batching window, not a one-message batch guarantee; domain pacing
+  never scales it. Both timers start when an empty route buffer receives data. `MAX BATCH SIZE`
+  counts logical Arrow value, offset, and validity bytes, not unused buffer capacity or object
+  overhead. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by the guest. Choose
+  `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
+  only clamps a batch, and the flush tuning guidance in the docs records which sinks benefit from
+  larger batches.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
   never accepts `MAX`.
 - End every ingestor source specification with an explicit source-supported `ON QUIESCE` body

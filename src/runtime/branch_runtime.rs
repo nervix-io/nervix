@@ -887,8 +887,8 @@ impl IngestorRouteTask {
                         self.handle_general_error(
                             &batch.acks,
                             format!(
-                                "{} '{}' could not read the domain clock while starting an \
-                                 output flush: {error}",
+                                "{} '{}' could not read the domain clock while starting an output \
+                                 flush: {error}",
                                 self.template.branch.source_kind.as_str(),
                                 self.ingestor.as_str(),
                             ),
@@ -897,11 +897,9 @@ impl IngestorRouteTask {
                     }
                 };
                 let mut flush_timer = BranchBufferTimer::default();
-                if let Err(error) = flush_timer.arm_flush(
-                    self.template.flush_policy,
-                    domain_clock,
-                    &snapshot,
-                ) {
+                if let Err(error) =
+                    flush_timer.arm_flush(self.template.flush_policy, domain_clock, &snapshot)
+                {
                     self.handle_general_error(
                         &batch.acks,
                         format!(
@@ -2047,11 +2045,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use nervix_interconnect::EntityGatePurpose;
-    use nervix_models::{
-        IngestorName, MessageErrorPolicy, ModelKind, ModelName, NodeRef, ParseAsType, RelayName,
-        Timestamp,
-    };
-    use tokio::time::Duration;
+    use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
     use triomphe::Arc;
 
     use super::*;
@@ -2063,6 +2057,7 @@ mod tests {
     fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let processor = named::<ModelName>("wait_for_customer");
         let input_relay = named::<RelayName>("orders");
         let template = junction_branch_template(processor.as_str(), input_relay.as_str());
@@ -2213,5 +2208,4 @@ mod tests {
         assert_eq!(handoff.outstanding_acks, 0);
         assert!(handoff.is_drained());
     }
-
 }

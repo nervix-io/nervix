@@ -312,8 +312,7 @@ use processors::{
     RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
     RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
     ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
-    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
-    WindowFlushContext,
+    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -341,9 +340,8 @@ use branch_key::branch_key_display;
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, IngestorRouteRuntime,
     MaterializedBatchWaitContext, PendingMaterializedBatch, branch_lru_placement,
-    flush_branch_junction, internal_processor_error_policies,
-    output_error_policies, persist_branch_instance_lru_snapshot,
-    wall_duration_until_domain_deadline,
+    flush_branch_junction, internal_processor_error_policies, output_error_policies,
+    persist_branch_instance_lru_snapshot, wall_duration_until_domain_deadline,
 };
 pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 use client_config::{
@@ -449,8 +447,7 @@ use processor_output::{
     PendingProcessorOutputBatch, PendingProcessorOutputMessageError, ProcessorMaterializedState,
     ProcessorOutputBatchScope, ProcessorOutputDispatchContext, ProcessorOutputFilterSource,
     dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
-    flush_due_processor_outputs, pending_output_batches_by_key,
-    processor_output_input_sensitivity,
+    flush_due_processor_outputs, pending_output_batches_by_key, processor_output_input_sensitivity,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, wasm_guest_call_schemas,

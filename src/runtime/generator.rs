@@ -206,6 +206,31 @@ pub(super) struct GeneratorBranchTaskState {
 pub(super) struct GeneratorRouteBranchTaskState {
     pub(super) flush_timer: BranchBufferTimer,
     pub(super) pending: Vec<RelayMessage>,
+    pending_bytes: u64,
+}
+
+impl GeneratorRouteBranchTaskState {
+    fn enqueue(
+        &mut self,
+        message: RelayMessage,
+        policy: RuntimeFlushPolicy,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
+        self.flush_timer.arm_flush(policy, clock, snapshot)?;
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(message.record.batch().estimated_bytes())
+            .assured("the count estimates generated rows this route already holds in memory");
+        self.pending.push(message);
+        Ok(policy.size_boundary_reached(self.pending_bytes))
+    }
+
+    fn take_pending(&mut self) -> Vec<RelayMessage> {
+        self.pending_bytes = 0;
+        self.flush_timer.clear();
+        std::mem::take(&mut self.pending)
+    }
 }
 
 pub(super) enum GeneratorProgramOutcome {
@@ -334,6 +359,47 @@ impl Runtime {
             .clone()
     }
 
+    async fn flush_generator_route_buffers(
+        &self,
+        domain: &DomainName,
+        generator: &GeneratorName,
+        routes: &[(GeneratorTaskRouteSpec, RuntimeFlushPolicy)],
+        task_events: &RuntimeEvents,
+        branch_states: &mut HashMap<Option<BranchKey>, GeneratorBranchTaskState>,
+    ) {
+        for (route_index, (route, _)) in routes.iter().enumerate() {
+            tokio::task::consume_budget().await;
+            let mut pending_groups = Vec::new();
+            for (branch_key, state) in &mut *branch_states {
+                let pending = state
+                    .routes
+                    .get_mut(route_index)
+                    .verified("every generator branch has one buffer for every compiled route")
+                    .take_pending();
+                if !pending.is_empty() {
+                    pending_groups.push((branch_key.clone(), pending));
+                }
+            }
+            if pending_groups.is_empty() {
+                continue;
+            }
+            flush_generator_groups(
+                GeneratorFlushContext {
+                    runtime: self,
+                    domain,
+                    generator,
+                    output_relay: &route.output.relay,
+                    output_schema: &route.output_schema,
+                    output_registry: &route.output_registry,
+                    output_services: &route.output_services,
+                    task_events,
+                },
+                &mut pending_groups,
+            )
+            .await;
+        }
+    }
+
     pub(in crate::runtime) fn spawn_generator_task(
         &self,
         domain: &DomainName,
@@ -423,36 +489,15 @@ impl Runtime {
             loop {
                 tokio::task::consume_budget().await;
                 if source_gate.is_closed() {
-                    for (route_index, (route, _)) in routes.iter().enumerate() {
-                        tokio::task::consume_budget().await;
-                        let mut pending_groups = Vec::new();
-                        for (branch_key, state) in &mut branch_states {
-                            let route_state = &mut state.routes[route_index];
-                            route_state.flush_timer.clear();
-                            if !route_state.pending.is_empty() {
-                                pending_groups.push((
-                                    branch_key.clone(),
-                                    std::mem::take(&mut route_state.pending),
-                                ));
-                            }
-                        }
-                        if !pending_groups.is_empty() {
-                            flush_generator_groups(
-                                GeneratorFlushContext {
-                                    runtime: &runtime,
-                                    domain: &task_domain,
-                                    generator: &task_generator,
-                                    output_relay: &route.output.relay,
-                                    output_schema: &route.output_schema,
-                                    output_registry: &route.output_registry,
-                                    output_services: &route.output_services,
-                                    task_events: &task_events,
-                                },
-                                &mut pending_groups,
-                            )
-                            .await;
-                        }
-                    }
+                    runtime
+                        .flush_generator_route_buffers(
+                            &task_domain,
+                            &task_generator,
+                            &routes,
+                            &task_events,
+                            &mut branch_states,
+                        )
+                        .await;
                     quiesce_activity.take();
                     activity.set_active(false);
                     tokio::select! {
@@ -477,36 +522,15 @@ impl Runtime {
                         matches!(state.status, nervix_models::DomainStatus::Paused)
                     })
                 {
-                    for (route_index, (route, _)) in routes.iter().enumerate() {
-                        tokio::task::consume_budget().await;
-                        let mut pending_groups = Vec::new();
-                        for (branch_key, state) in &mut branch_states {
-                            let route_state = &mut state.routes[route_index];
-                            route_state.flush_timer.clear();
-                            if !route_state.pending.is_empty() {
-                                pending_groups.push((
-                                    branch_key.clone(),
-                                    std::mem::take(&mut route_state.pending),
-                                ));
-                            }
-                        }
-                        if !pending_groups.is_empty() {
-                            flush_generator_groups(
-                                GeneratorFlushContext {
-                                    runtime: &runtime,
-                                    domain: &task_domain,
-                                    generator: &task_generator,
-                                    output_relay: &route.output.relay,
-                                    output_schema: &route.output_schema,
-                                    output_registry: &route.output_registry,
-                                    output_services: &route.output_services,
-                                    task_events: &task_events,
-                                },
-                                &mut pending_groups,
-                            )
-                            .await;
-                        }
-                    }
+                    runtime
+                        .flush_generator_route_buffers(
+                            &task_domain,
+                            &task_generator,
+                            &routes,
+                            &task_events,
+                            &mut branch_states,
+                        )
+                        .await;
                     activity.set_active(false);
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
@@ -725,6 +749,7 @@ impl Runtime {
                                         Ok(GeneratorProgramOutcome::Output(record)) => {
                                             let (acks, _completion) =
                                                 runtime.tracked_ack_root(&task_domain);
+                                            let failure_acks = acks.clone();
                                             let route_state = &mut branch_state.routes[route_index];
                                             let flush_snapshot = match domain_clock.snapshot() {
                                                 Ok(snapshot) => snapshot,
@@ -742,27 +767,50 @@ impl Runtime {
                                                     continue;
                                                 }
                                             };
-                                            if let Err(error) = route_state.flush_timer.arm_flush(
+                                            let should_flush = match route_state.enqueue(
+                                                RelayMessage {
+                                                    key: branch_key.clone(),
+                                                    record,
+                                                    acks,
+                                                },
                                                 *flush_policy,
                                                 &domain_clock,
                                                 &flush_snapshot,
                                             ) {
-                                                let reason = format!(
-                                                    "generator '{}' in domain '{}' could not \
-                                                     start route '{}' flush deadline: {error}",
-                                                    task_generator.as_str(),
-                                                    task_domain.as_str(),
-                                                    route.output.relay.as_str(),
-                                                );
-                                                task_events.report_error(reason.clone());
-                                                acks.no_ack(reason);
-                                                continue;
+                                                Ok(should_flush) => should_flush,
+                                                Err(error) => {
+                                                    let reason = format!(
+                                                        "generator '{}' in domain '{}' could not \
+                                                         start route '{}' flush deadline: {error}",
+                                                        task_generator.as_str(),
+                                                        task_domain.as_str(),
+                                                        route.output.relay.as_str(),
+                                                    );
+                                                    task_events.report_error(reason.clone());
+                                                    failure_acks.no_ack(reason);
+                                                    continue;
+                                                }
+                                            };
+                                            if should_flush {
+                                                let mut pending_group = vec![(
+                                                    branch_key.clone(),
+                                                    route_state.take_pending(),
+                                                )];
+                                                flush_generator_groups(
+                                                    GeneratorFlushContext {
+                                                        runtime: &runtime,
+                                                        domain: &task_domain,
+                                                        generator: &task_generator,
+                                                        output_relay: &route.output.relay,
+                                                        output_schema: &route.output_schema,
+                                                        output_registry: &route.output_registry,
+                                                        output_services: &route.output_services,
+                                                        task_events: &task_events,
+                                                    },
+                                                    &mut pending_group,
+                                                )
+                                                .await;
                                             }
-                                            route_state.pending.push(RelayMessage {
-                                                key: branch_key.clone(),
-                                                record,
-                                                acks,
-                                            });
                                         }
                                         Ok(GeneratorProgramOutcome::MessageError {
                                             error,
@@ -881,12 +929,9 @@ impl Runtime {
                         if !due {
                             continue;
                         }
-                        route_state.flush_timer.clear();
-                        if !route_state.pending.is_empty() {
-                            let mut pending_group = vec![(
-                                branch_key.clone(),
-                                std::mem::take(&mut route_state.pending),
-                            )];
+                        let pending = route_state.take_pending();
+                        if !pending.is_empty() {
+                            let mut pending_group = vec![(branch_key.clone(), pending)];
                             flush_generator_groups(
                                 GeneratorFlushContext {
                                     runtime: &runtime,
@@ -911,15 +956,14 @@ impl Runtime {
                     continue;
                 }
 
-                let next_deadline =
-                    next_state_refresh
-                        .into_iter()
-                        .chain(
-                            branch_states
-                                .values()
-                                .filter_map(|state| state.next_generation),
-                        )
-                        .min();
+                let next_deadline = next_state_refresh
+                    .into_iter()
+                    .chain(
+                        branch_states
+                            .values()
+                            .filter_map(|state| state.next_generation),
+                    )
+                    .min();
                 let sleep_duration = if let Some(next) = next_deadline {
                     match domain_clock.physical_duration_until(execution_now, next) {
                         Ok(duration) => duration,
@@ -966,6 +1010,15 @@ impl Runtime {
                     _ = source_gate.wait_closed() => {}
                 }
             }
+            runtime
+                .flush_generator_route_buffers(
+                    &task_domain,
+                    &task_generator,
+                    &routes,
+                    &task_events,
+                    &mut branch_states,
+                )
+                .await;
         }))
     }
 }
@@ -983,6 +1036,36 @@ mod tests {
 
     use super::*;
     use crate::runtime_schema::RuntimeValue;
+
+    #[test]
+    fn generator_route_honors_each_size_boundary() {
+        let clock = test_domain_clock(&domain("generator_flush_size"));
+        let snapshot = clock
+            .snapshot()
+            .assured("the fixture installs a running unpaced clock");
+        let mut state = GeneratorRouteBranchTaskState::default();
+        let should_flush = state
+            .enqueue(
+                RelayMessage {
+                    key: None,
+                    record: test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]),
+                    acks: AckSet::empty(),
+                },
+                RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(60),
+                    max_batch_size: 1,
+                },
+                &clock,
+                &snapshot,
+            )
+            .assured("the fixture clock and logical deadline belong to the same generation");
+
+        assert!(should_flush);
+        assert_eq!(state.take_pending().len(), 1);
+        assert!(state.pending.is_empty());
+        assert!(state.flush_timer.deadline().is_none());
+    }
+
     #[tokio::test]
     async fn generator_set_program_projects_columnar_state_and_branch_context() {
         let source_schema = test_schema(&[

@@ -35,10 +35,10 @@ use tokio::{
 use triomphe::Arc;
 
 use super::{
-    BranchKey, DomainClock, DomainForceFlushCompletion, DomainForceFlushParticipant,
-    NodeQuiesceCounters, NodeQuiesceWorkGuard, RelayRecordBatch, RelayRuntimeFanIn,
-    RuntimeInputCollectPolicy, RuntimeInputCollector, branch_buffering::BranchBufferDeadline,
-    branch_buffering::wait_for_branch_buffer_deadline,
+    BranchBufferTimingResult, BranchKey, DomainClock, DomainForceFlushCompletion,
+    DomainForceFlushParticipant, NodeQuiesceCounters, NodeQuiesceWorkGuard, RelayRecordBatch,
+    RelayRuntimeFanIn, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    branch_buffering::{BranchBufferDeadline, wait_for_branch_buffer_deadline},
 };
 use crate::runtime_ack::AckSet;
 
@@ -192,10 +192,12 @@ impl RelayInputCollection {
                 acks: batch.merged_acks(),
             });
         };
-        let snapshot = domain_clock.snapshot().map_err(|error| RelayInputCollectionError {
-            reason: format!("could not read the domain clock while collecting input: {error}"),
-            acks: batch.merged_acks(),
-        })?;
+        let snapshot = domain_clock
+            .snapshot()
+            .map_err(|error| RelayInputCollectionError {
+                reason: format!("could not read the domain clock while collecting input: {error}"),
+                acks: batch.merged_acks(),
+            })?;
         let key = batch.key.clone();
         let collection = self
             .pending
@@ -232,10 +234,12 @@ impl RelayInputCollection {
         let Some(domain_clock) = &self.domain_clock else {
             return Ok(None);
         };
-        let snapshot = domain_clock.snapshot().map_err(|error| RelayInputCollectionError {
-            reason: format!("could not read the domain clock while releasing input: {error}"),
-            acks: self.pending_acks(),
-        })?;
+        let snapshot = domain_clock
+            .snapshot()
+            .map_err(|error| RelayInputCollectionError {
+                reason: format!("could not read the domain clock while releasing input: {error}"),
+                acks: self.pending_acks(),
+            })?;
         let mut due_key = None;
         for (key, collection) in &self.pending {
             let is_due = collection
@@ -743,7 +747,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 Selected::CollectionDue(Ok(())) => {}
                 Selected::CollectionDue(Err(reason)) => {
                     return Err(RelayInteractionError::CollectionTiming {
-                        reason,
+                        reason: reason.to_string(),
                         acks: self.inputs.pending_acks(),
                     });
                 }
@@ -876,7 +880,7 @@ enum Selected<C> {
     Shutdown(Result<(), ()>),
     ForceFlush(Result<DomainForceFlushCompletion, ()>),
     Wake,
-    CollectionDue(Result<(), String>),
+    CollectionDue(BranchBufferTimingResult<()>),
     Input(Option<ReceivedBatch>),
 }
 
@@ -913,18 +917,14 @@ async fn wait_until(deadline: Option<Instant>) {
 
 async fn wait_for_collection_deadlines(
     deadlines: Vec<(DomainClock, BranchBufferDeadline)>,
-) -> Result<(), String> {
+) -> BranchBufferTimingResult<()> {
     if deadlines.is_empty() {
         pending::<()>().await;
         return Ok(());
     }
     let mut waits = FuturesUnordered::new();
     for (clock, deadline) in deadlines {
-        waits.push(async move {
-            wait_for_branch_buffer_deadline(&clock, deadline)
-                .await
-                .map_err(|error| error.to_string())
-        });
+        waits.push(async move { wait_for_branch_buffer_deadline(&clock, deadline).await });
     }
     waits
         .next()

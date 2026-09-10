@@ -275,3 +275,19 @@ Recorded on 10 September 2026 against the task 06 worktree, including the merged
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. The relay-boundary tests moved to their focused module, and bare-error signature debt fell from 844 to 843. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 07 validation record
+
+Recorded on 10 September 2026 against the task 07 worktree, including the merged task 06 fixes:
+
+| Probe | Result |
+| --- | --- |
+| Public paced branch-buffering reproducer before product changes | Expected red; fast logical `FLUSH EACH` and `COLLECT FOR` missed their physical observation windows, slow logical `COLLECT FOR` emitted too early, and physical `FLUSH IMMEDIATE` followed slow domain time. |
+| `Domain-paced branch buffering` | Pass; all six one- and three-node scenarios and all 48 steps covered fast logical collection and flush deadlines, slow physical immediate flushes, separate concrete-branch deadlines, payload fields, and acknowledgement completion. |
+| Reingestor branch-buffering regressions | Pass; staggered branches retained independent deadlines and acknowledgement ownership, forced and shutdown drains completed, and per-route byte bounds flushed independently. |
+| Generator flush regressions | Pass; route buffers honored `EACH` byte boundaries and drained on source gating, domain pause, and task exit. |
+| `nervix-server` library suite | Pass; 801 tests passed with no ignored tests. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell from 497 to 496. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.

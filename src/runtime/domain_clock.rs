@@ -418,10 +418,12 @@ impl DomainClock {
     ) -> DomainClockAccessResult<bool> {
         self.revalidate()?;
         if deadline.domain != self.inner.domain {
-            return Err(Report::new(DomainClockAccessError::DeadlineDomainMismatch {
-                clock_domain: self.inner.domain.clone(),
-                deadline_domain: deadline.domain.clone(),
-            }));
+            return Err(Report::new(
+                DomainClockAccessError::DeadlineDomainMismatch {
+                    clock_domain: self.inner.domain.clone(),
+                    deadline_domain: deadline.domain.clone(),
+                },
+            ));
         }
         if deadline.generation != self.generation {
             return Err(Report::new(DomainClockAccessError::StaleGeneration {

@@ -259,9 +259,7 @@ pub(super) async fn wait_for_branch_buffer_deadline(
                 .change_context(BranchBufferTimingError::LogicalDeadline)?;
         }
         BranchBufferDeadline::Physical(deadline) => {
-            PhysicalDeadlineCapability::new()
-                .wait_until(deadline)
-                .await;
+            PhysicalDeadlineCapability::new().wait_until(deadline).await;
         }
     }
     Ok(())

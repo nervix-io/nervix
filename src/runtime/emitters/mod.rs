@@ -904,9 +904,7 @@ impl EmitterBatchBuffer {
             .map(|policy| {
                 let interval = match policy {
                     RuntimeFlushPolicy::Each { interval, .. } => interval,
-                    RuntimeFlushPolicy::Immediate => {
-                        RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT
-                    }
+                    RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
                 };
                 Instant::now() + interval
             });

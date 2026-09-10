@@ -230,8 +230,8 @@ impl MessageErrorRouteTask {
                     self.report_failure(
                         &delivery.source_acks,
                         format!(
-                            "message-error route for '{}' in domain '{}' could not read its \
-                             flush clock: {error}",
+                            "message-error route for '{}' in domain '{}' could not read its flush \
+                             clock: {error}",
                             self.route.node.identifier.as_str(),
                             self.route.domain.as_str(),
                         ),
@@ -240,9 +240,7 @@ impl MessageErrorRouteTask {
                 }
             };
             let mut flush_timer = BranchBufferTimer::default();
-            if let Err(error) =
-                flush_timer.arm_flush(self.flush_policy, domain_clock, &snapshot)
-            {
+            if let Err(error) = flush_timer.arm_flush(self.flush_policy, domain_clock, &snapshot) {
                 self.report_failure(
                     &delivery.source_acks,
                     format!(
@@ -280,10 +278,7 @@ impl MessageErrorRouteTask {
         }
     }
 
-    async fn flush_due(
-        &mut self,
-        domain_clock: &DomainClock,
-    ) -> BranchBufferTimingResult<()> {
+    async fn flush_due(&mut self, domain_clock: &DomainClock) -> BranchBufferTimingResult<()> {
         let snapshot = domain_clock
             .snapshot()
             .map_err(|error| error.change_context(BranchBufferTimingError::LogicalDeadline))?;
