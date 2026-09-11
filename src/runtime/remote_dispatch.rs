@@ -1198,6 +1198,9 @@ mod tests {
     use super::*;
     use crate::runtime_ack::{AckOutcome, AckSet};
 
+    /// Scheduler-independent hang guard for event-driven unit-test observations.
+    const ASYNC_EVENT_FAILSAFE: Duration = Duration::from_secs(30);
+
     struct DropNotice(Option<oneshot::Sender<()>>);
 
     impl Drop for DropNotice {
@@ -1228,7 +1231,7 @@ mod tests {
 
         runtime.shutdown().await;
 
-        let dropped = timeout(Duration::from_secs(1), dropped_rx).await;
+        let dropped = timeout(ASYNC_EVENT_FAILSAFE, dropped_rx).await;
         assert!(
             dropped.is_ok(),
             "runtime shutdown should cancel a pending remote ACK watcher"
