@@ -370,6 +370,14 @@ build and the existing tests, and nothing in it changes behavior.
 - Prefer compact refactors that collapse duplicate logic into the owning parser, model, or runtime
   path and remove obsolete layers. Add a wrapper, adapter, or helper layer only when it reduces
   total complexity or isolates a real boundary.
+- Prefer explicitness to brevity. Collapsing duplicated logic into its owner is a simplification;
+  compressing a clear sequence of steps into a denser expression is not. When a shorter form and a
+  longer form differ only in density, write the longer one. Density is a decision or a sequence
+  buried inside an expression: a multi-stage iterator chain that selects, rejects, or classifies on
+  the way through, a closure nested inside another closure, an expression-position `match` written
+  to save a binding, a single line performing several unrelated steps. Name each step with a
+  binding and write the steps in the order they happen. This removes density only; the abstraction
+  that owns the shared logic stays exactly where the preceding rule put it.
 - Model internal special cases with typed variants or internal-only structures, never magic or
   reserved user-visible identifiers that can collide with user-defined names.
 - A structure that can hold a value together with a contradicting description of it — a string
@@ -432,8 +440,11 @@ build and the existing tests, and nothing in it changes behavior.
   match written as a single call, however short the arms are. Write the arms.
 - One adapter performing one transformation stays, because it decides nothing: a `map_err` or an
   `ok_or_else` shaping a value on its way into `?`, an `unwrap_or` supplying a default. The rule
-  governs `Option` and `Result`, not sequences; `map`, `filter`, and `collect` over many elements
-  are a pipeline and stay as they are.
+  governs `Option` and `Result`, not sequences; `map`, `filter`, and `collect` projecting many
+  elements through one transformation are a pipeline and stay as they are. Sequences answer to the
+  explicitness rule instead: a projection whose closures only shape each element stays, and a chain
+  whose closures decide, branch, accumulate, or fail is expanded into named steps however short it
+  reads.
 - In `if` conditions, prefer `if let` or `if let` chains over `matches!` when they express the same
   logic cleanly. Use `matches!` when an `if let` form would be unclear or outside an `if`
   condition.

@@ -826,23 +826,8 @@ fn resolve_branch_relay_templates(
     model_index: &ModelIndex,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
-) -> Result<
-    (
-        HashMap<RelayName, RelayProcessorRelayTemplate>,
-        HashSet<RelayName>,
-    ),
-    String,
-> {
-    let materialized_streams = branch_relay_ids
-        .iter()
-        .filter(|relay| {
-            model_index
-                .configured::<CreateRelay>(*relay)
-                .is_some_and(|model| model.materialized_state.is_some())
-        })
-        .cloned()
-        .collect::<HashSet<_>>();
-    let relays = branch_relay_ids
+) -> Result<HashMap<RelayName, RelayProcessorRelayTemplate>, String> {
+    branch_relay_ids
         .into_iter()
         .map(|relay| {
             if model_index.configured::<CreateRelay>(&relay).is_none() {
@@ -858,8 +843,7 @@ fn resolve_branch_relay_templates(
                 .ok_or_else(|| format!("missing branched relay services '{}'", relay.as_str()))?;
             Ok((relay, RelayProcessorRelayTemplate { registry, services }))
         })
-        .collect::<Result<HashMap<_, _>, String>>()?;
-    Ok((relays, materialized_streams))
+        .collect::<Result<HashMap<_, _>, String>>()
 }
 
 pub(in crate::runtime) fn materialize_ingestor_route_template(
@@ -870,7 +854,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
 ) -> Result<IngestorRouteTemplate, String> {
     let mut branch_relay_ids = HashSet::default();
     branch_relay_ids.insert(spec.root_relay.clone());
-    let (relays, materialized_streams) = resolve_branch_relay_templates(
+    let relays = resolve_branch_relay_templates(
         branch_relay_ids,
         model_index,
         relay_registries,
@@ -890,7 +874,6 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
             branch_max_instances: spec.branch_max_instances.map(addressable_count),
             error_policies: spec.error_policies.clone(),
             relays,
-            materialized_streams,
             processors: HashMap::default(),
         },
         ack_boundary: spec.output_ack_boundary,
@@ -918,7 +901,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
             spec.processor.as_str()
         )
     })?;
-    let (relays, materialized_streams) = resolve_branch_relay_templates(
+    let relays = resolve_branch_relay_templates(
         spec.output_relays(),
         model_index,
         relay_registries,
@@ -942,7 +925,6 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         branch_max_instances: node.branch_max_instances.map(addressable_count),
         error_policies: spec.error_policies.clone(),
         relays,
-        materialized_streams,
         processors,
     })
 }

@@ -329,9 +329,10 @@ Recorded on 11 September 2026 against the task 10 worktree:
 | Branch-local timing regressions | Pass; domain buffer timing, window processor, WASM processor, reingestor, reingestor flush, and generator scenarios covered logical collection, flush, window, guest timeout, and cadence deadlines across 121 scenarios. |
 | Clock-contract and metric regressions | Pass; domain clock contract, execution time, ingestion time, domain, junction, and reingestor metric scenarios covered 45 scenarios and 510 steps. |
 | Ownership handoff and scheduling regressions | Pass; relocation and cluster scheduling covered 40 scenarios and 640 steps with the production sticky scheduler where those scenarios select it. |
-| `nervix-server` library suite | Pass; 833 tests passed with no ignored tests. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
-| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. |
+| `nervix-server` library suite | Pass; 833 tests passed with no ignored tests, and 838 after merging the current `origin/main`. |
+| `just validate` | Pass before and after merging `origin/main`, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass before and after merging `origin/main`; every architecture-debt count is at or below its checked-in baseline. |
+| Post-merge re-verification | Pass; against the merged `origin/main` the fresh-activity scenario, branched expiration, correlator, domain buffer timing, materialized relay, and window processor features covered 77 scenarios and 965 steps, including the columnar snapshot streaming and shared cadence work that landed on main. |
 
 Emitter delivery-latency observation still reads actual UTC against domain ingestion watermarks.
 That boundary belongs to [08](https://app.clickup.com/t/86bbwcrzd), which owns the emitter's clock

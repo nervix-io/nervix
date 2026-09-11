@@ -8,227 +8,210 @@ pub(super) struct MaterializedRelayRead<'a> {
 }
 
 impl Runtime {
-    pub fn local_materialized_stream_state(
+    /// Every materialized record one relay holds on this node, each reported with the concrete
+    /// branch it belongs to.
+    ///
+    /// This is the relay-scoped report, and it says so. Reading one branch is a different
+    /// operation that names that branch.
+    pub async fn local_materialized_stream_state(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
-        let mut entries = Vec::new();
-        for state in self.inner.replicated_materialized_stream_states.iter() {
-            let placement = state.key();
-            if placement.domain == *domain
-                && placement.kind == ModelKind::Relay
-                && placement.identifier == ModelName::from(relay)
-            {
-                entries.extend(
-                    self.visible_materialized_stream_remote_entries(
-                        placement,
-                        &ReplicatedMaterializedRelayState::read(state.value()),
-                    )?
-                    .into_iter()
-                    .map(|(key, record)| (branch_key_display(&key).to_string(), record)),
-                );
-            }
-        }
-        if !entries.is_empty() {
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            return Ok(entries);
-        }
-        self.local_materialized_stream_state_for_branch(domain, relay, &None)
-    }
-
-    pub(in crate::runtime) fn local_materialized_stream_state_for_branch(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-        branch_key: &Option<BranchKey>,
-    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
-        let placement = self.state_placement(
-            domain,
-            RuntimeStateKind::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            branch_key.clone(),
-        );
-        if let Some(state) = self
+    ) -> Result<Vec<MaterializedRecordReport>, String> {
+        let states = self
             .inner
             .replicated_materialized_stream_states
-            .get(&placement)
-        {
-            let entries = self
-                .visible_materialized_stream_remote_entries(
-                    &placement,
-                    &ReplicatedMaterializedRelayState::read(state.value()),
-                )?
-                .into_iter()
-                .map(|(key, record)| (branch_key_display(&key).to_string(), record))
-                .collect::<Vec<_>>();
-            if !entries.is_empty() || branch_key.is_none() {
-                return Ok(entries);
-            }
-        }
-        if branch_key.is_some() {
-            let aggregate_placement = RuntimeStatePlacement {
-                branch_key: None,
-                ..placement.clone()
-            };
-            if let Some(state) = self
-                .inner
-                .replicated_materialized_stream_states
-                .get(&aggregate_placement)
-            {
-                return Ok(self
-                    .visible_materialized_stream_remote_entries(
-                        &aggregate_placement,
-                        &ReplicatedMaterializedRelayState::read(state.value()),
-                    )?
-                    .into_iter()
-                    .filter(|(key, _)| key == branch_key)
-                    .map(|(key, record)| (branch_key_display(&key).to_string(), record))
-                    .collect());
-            }
-        }
-        if let Some(store) = &self.inner.state_store
-            && let Some(snapshot) = store
-                .latest_snapshot(&placement)
-                .map_err(|error| error.to_string())?
-        {
-            return decode_materialized_stream_snapshot(&snapshot.payload)
-                .map(|entries| {
-                    let mut visible = entries
-                        .into_iter()
-                        .map(|(key, record)| (branch_key_display(&key).to_string(), record))
-                        .collect::<Vec<_>>();
-                    visible.sort_by(|left, right| left.0.cmp(&right.0));
-                    visible
-                })
-                .map_err(|error| error.to_string());
-        }
-        if branch_key.is_some() {
-            let aggregate_placement = RuntimeStatePlacement {
-                branch_key: None,
-                ..placement
-            };
-            if let Some(store) = &self.inner.state_store
-                && let Some(snapshot) = store
-                    .latest_snapshot(&aggregate_placement)
-                    .map_err(|error| error.to_string())?
-            {
-                return decode_materialized_stream_snapshot(&snapshot.payload)
-                    .map(|entries| {
-                        let mut visible = entries
-                            .into_iter()
-                            .filter(|(key, _)| key == branch_key)
-                            .map(|(key, record)| (branch_key_display(&key).to_string(), record))
-                            .collect::<Vec<_>>();
-                        visible.sort_by(|left, right| left.0.cmp(&right.0));
-                        visible
-                    })
-                    .map_err(|error| error.to_string());
-            }
-        }
-        Ok(Vec::new())
-    }
-
-    pub(super) fn materialized_stream_values_from_snapshot(
-        &self,
-        payload: &[u8],
-        branch_key: &Option<BranchKey>,
-        schema: &StdArc<arrow_schema::Schema>,
-        fields: &[MaterializedFieldInterest],
-    ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
-        let record = decode_materialized_stream_snapshot(payload)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find_map(|(key, record)| (key == *branch_key).then_some(record));
-        let Some(record) = record else {
-            return Ok(None);
-        };
-        let record = RuntimeRow::from_remote(schema.clone(), record)?;
-        fields
             .iter()
-            .map(|field| record.value_at(field.column_index))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .filter(|state| {
+                let placement = state.key();
+                placement.domain == *domain
+                    && placement.kind == ModelKind::Relay
+                    && placement.identifier == ModelName::from(relay)
+            })
+            .map(|state| {
+                (
+                    state.key().clone(),
+                    ReplicatedMaterializedRelayState::read(state.value()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut reports = Vec::new();
+        let mut found = false;
+        for (placement, state) in states {
+            found = true;
+            for record in state.records() {
+                if !self.materialized_stream_key_is_visible(&placement, &record.branch) {
+                    continue;
+                }
+                reports.push(materialized_record_report(&record)?);
+            }
+        }
+        if !found {
+            let placement = self.state_placement(
+                domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                relay,
+                None,
+            );
+            if let Some(restored) = self.open_stored_materialized_snapshot(&placement).await? {
+                for record in restored.records {
+                    reports.push(materialized_record_report(&MaterializedGenerationRecord {
+                        branch: record.branch,
+                        row: record.row,
+                    })?);
+                }
+            }
+        }
+        reports.sort_by(|left, right| left.branch.cmp(&right.branch));
+        Ok(reports)
     }
 
-    pub(super) fn local_materialized_stream_values_for_branch(
+    /// Find the branch's record wherever this node keeps it.
+    ///
+    /// A relay scheduled on the cluster keeps every branch's record in one relay-owned state; a
+    /// branch-local relay keeps each branch's record in its own. Both are addressed by naming the
+    /// branch, and both answer with that branch's record alone.
+    async fn local_materialized_record(
         &self,
         domain: &DomainName,
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
-        schema: &StdArc<arrow_schema::Schema>,
-        fields: &[MaterializedFieldInterest],
-    ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
-        let placement = self.state_placement(
-            domain,
-            RuntimeStateKind::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            branch_key.clone(),
-        );
-        if let Some(state) = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(&placement)
-        {
-            let values = if self.materialized_stream_key_is_visible(&placement, branch_key) {
-                ReplicatedMaterializedRelayState::read(state.value())
-                    .values_at(branch_key, fields.iter().map(|field| field.column_index))?
-            } else {
-                None
-            };
-            if values.is_some() || branch_key.is_none() {
-                return Ok(values);
-            }
-        }
-        if branch_key.is_some() {
-            let aggregate_placement = RuntimeStatePlacement {
-                branch_key: None,
-                ..placement.clone()
-            };
-            if let Some(state) = self
+    ) -> Result<Option<MaterializedGenerationRecord>, String> {
+        for placement in self.materialized_record_placements(domain, relay, branch_key) {
+            let state = self
                 .inner
                 .replicated_materialized_stream_states
-                .get(&aggregate_placement)
-                && self.materialized_stream_key_is_visible(&aggregate_placement, branch_key)
-                && let Some(values) = ReplicatedMaterializedRelayState::read(state.value())
-                    .values_at(branch_key, fields.iter().map(|field| field.column_index))?
-            {
-                return Ok(Some(values));
+                .get(&placement)
+                .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
+            let Some(state) = state else {
+                continue;
+            };
+            if !self.materialized_stream_key_is_visible(&placement, branch_key) {
+                continue;
+            }
+            if let Some(record) = state.record(branch_key) {
+                return Ok(Some(record));
             }
         }
-        if let Some(store) = &self.inner.state_store
-            && let Some(snapshot) = store
-                .latest_snapshot(&placement)
-                .map_err(|error| error.to_string())?
-        {
-            return self.materialized_stream_values_from_snapshot(
-                &snapshot.payload,
-                branch_key,
-                schema,
-                fields,
-            );
-        }
-        if branch_key.is_some() {
-            let aggregate_placement = RuntimeStatePlacement {
-                branch_key: None,
-                ..placement
+        for placement in self.materialized_record_placements(domain, relay, branch_key) {
+            let Some(restored) = self.open_stored_materialized_snapshot(&placement).await? else {
+                continue;
             };
-            if let Some(store) = &self.inner.state_store
-                && let Some(snapshot) = store
-                    .latest_snapshot(&aggregate_placement)
-                    .map_err(|error| error.to_string())?
+            if let Some(record) = restored
+                .records
+                .into_iter()
+                .find(|record| record.branch == *branch_key)
             {
-                return self.materialized_stream_values_from_snapshot(
-                    &snapshot.payload,
-                    branch_key,
-                    schema,
-                    fields,
-                );
+                return Ok(Some(MaterializedGenerationRecord {
+                    branch: record.branch,
+                    row: record.row,
+                }));
             }
         }
         Ok(None)
+    }
+
+    /// The placements that may hold one branch's record, most specific first.
+    fn materialized_record_placements(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        branch_key: &Option<BranchKey>,
+    ) -> Vec<RuntimeStatePlacement> {
+        let relay_scoped = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Relay,
+            relay,
+            None,
+        );
+        let Some(branch_key) = branch_key.clone() else {
+            return vec![relay_scoped];
+        };
+        vec![
+            RuntimeStatePlacement {
+                branch_key: Some(branch_key),
+                ..relay_scoped.clone()
+            },
+            relay_scoped,
+        ]
+    }
+
+    /// Open the sealed snapshot this node persisted for a placement, if it has one.
+    async fn open_stored_materialized_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> Result<Option<RestoredMaterializedSnapshot>, String> {
+        let Some(store) = &self.inner.state_store else {
+            return Ok(None);
+        };
+        let Some(snapshot) = store
+            .latest_snapshot(placement)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let Some(schema) = self.materialized_relay_schema(placement) else {
+            return Ok(None);
+        };
+        let sealed = self
+            .inner
+            .executor
+            .charge_owned(nervix_execution::MemoryClass::Bulk, snapshot.payload)
+            .await
+            .map_err(|error| error.to_string())?;
+        RestoredMaterializedSnapshot::open(
+            &self.inner.executor,
+            &schema,
+            placement.schema_fingerprint,
+            SealedSource::memory(sealed),
+        )
+        .await
+        .map(Some)
+        .map_err(|error| error.to_string())
+    }
+
+    fn materialized_relay_schema(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> Option<StdArc<arrow_schema::Schema>> {
+        if let Some(state) = self
+            .inner
+            .replicated_materialized_stream_states
+            .get(placement)
+        {
+            return Some(
+                ReplicatedMaterializedRelayState::read(state.value())
+                    .schema()
+                    .clone(),
+            );
+        }
+        let execution = self.inner.executions.get(&placement.domain)?;
+        execution
+            .materialized_stream_specs
+            .get(&RelayName::from(&placement.identifier))
+            .map(|spec| spec.schema.clone())
+    }
+
+    pub(super) async fn local_materialized_stream_values_for_branch(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        branch_key: &Option<BranchKey>,
+        fields: &[MaterializedFieldInterest],
+    ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
+        let Some(record) = self
+            .local_materialized_record(domain, relay, branch_key)
+            .await?
+        else {
+            return Ok(None);
+        };
+        fields
+            .iter()
+            .map(|field| record.row.value_at(field.column_index))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 
     pub(super) async fn remote_materialized_stream_values_for_branch(
@@ -240,20 +223,17 @@ impl Runtime {
         schema: &StdArc<arrow_schema::Schema>,
         fields: &[MaterializedFieldInterest],
     ) -> Result<Option<Vec<Option<RuntimeValue>>>, String> {
-        let placement = self.state_placement(
-            domain,
-            RuntimeStateKind::MaterializedRelay,
-            ModelKind::Relay,
-            relay,
-            branch_key.clone(),
-        );
-        let Some(snapshot) = self
-            .request_state_sync(target_node_id, &placement, 0)
+        let Some(record) = self
+            .remote_materialized_record(target_node_id, domain, relay, branch_key, schema)
             .await?
         else {
             return Ok(None);
         };
-        self.materialized_stream_values_from_snapshot(&snapshot.payload, branch_key, schema, fields)
+        fields
+            .iter()
+            .map(|field| record.row.value_at(field.column_index))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 
     pub(super) async fn load_materialized_relay_values(
@@ -304,9 +284,9 @@ impl Runtime {
             domain,
             relay,
             &placement_branch_key,
-            schema,
             fields,
         )
+        .await
     }
 
     pub(super) fn materialized_stream_key_is_visible(
@@ -339,49 +319,60 @@ impl Runtime {
             .is_none_or(|state| state.contains_key(key))
     }
 
-    pub(in crate::runtime) fn visible_materialized_stream_remote_entries(
-        &self,
-        placement: &RuntimeStatePlacement,
-        state: &MaterializedRelayStateRead,
-    ) -> Result<Vec<(Option<BranchKey>, nervix_models::RemoteRuntimeRecord)>, String> {
-        let mut entries = state
-            .remote_entries()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .filter(|(key, _)| self.materialized_stream_key_is_visible(placement, key))
-            .collect::<Vec<_>>();
-        entries
-            .sort_by(|left, right| branch_key_display(&left.0).cmp(branch_key_display(&right.0)));
-        Ok(entries)
-    }
-
-    pub(super) fn visible_materialized_stream_remote_entry(
-        &self,
-        placement: &RuntimeStatePlacement,
-        state: &MaterializedRelayStateRead,
-        key: &Option<BranchKey>,
-    ) -> Result<Option<(Option<BranchKey>, nervix_models::RemoteRuntimeRecord)>, String> {
-        if !self.materialized_stream_key_is_visible(placement, key) {
-            return Ok(None);
-        }
-        state.remote_entry(key).map_err(|error| error.to_string())
-    }
-
+    /// Every materialized record one relay holds on another node, reported the same way as the
+    /// local relay-scoped view.
     pub async fn remote_materialized_stream_state(
         &self,
         target_node_id: &ClusterNodeName,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
-        self.remote_materialized_stream_state_for_branch(target_node_id, domain, relay, &None)
-            .await
+    ) -> Result<Vec<MaterializedRecordReport>, String> {
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Relay,
+            relay,
+            None,
+        );
+        let Some(schema) = self.materialized_relay_schema(&placement) else {
+            return Ok(Vec::new());
+        };
+        let Some(restored) = self
+            .fetch_sealed_materialized_snapshot(target_node_id, &placement, &schema, None)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut reports = restored
+            .records
+            .into_iter()
+            .map(|record| {
+                materialized_record_report(&MaterializedGenerationRecord {
+                    branch: record.branch,
+                    row: record.row,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        reports.sort_by(|left, right| left.branch.cmp(&right.branch));
+        Ok(reports)
     }
 
-    pub(super) async fn materialized_stream_state_from_owner(
+    /// Every materialized record one relay holds, taken from the node that owns them.
+    ///
+    /// Records keep their columns and their typed concrete branch identity: nothing is turned into
+    /// named scalar fields on the way, and nothing is rebuilt into a row on arrival.
+    pub(in crate::runtime) async fn materialized_records_from_owner(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
+    ) -> Result<Vec<MaterializedGenerationRecord>, String> {
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Relay,
+            relay,
+            None,
+        );
         let owner = if let Some(execution) = self.inner.executions.get(domain)
             && let Some(owner) = execution.materialized_stream_owner_nodes.get(relay)
         {
@@ -393,43 +384,95 @@ impl Runtime {
         if let Some(owner) = owner
             && local_node_id.as_ref() != Some(&owner)
         {
-            return self
-                .remote_materialized_stream_state(&owner, domain, relay)
-                .await;
+            let Some(schema) = self.materialized_relay_schema(&placement) else {
+                return Ok(Vec::new());
+            };
+            let Some(restored) = self
+                .fetch_sealed_materialized_snapshot(&owner, &placement, &schema, None)
+                .await?
+            else {
+                return Ok(Vec::new());
+            };
+            return Ok(restored
+                .records
+                .into_iter()
+                .map(|record| MaterializedGenerationRecord {
+                    branch: record.branch,
+                    row: record.row,
+                })
+                .collect());
         }
-        self.local_materialized_stream_state(domain, relay)
+        let states = self
+            .inner
+            .replicated_materialized_stream_states
+            .iter()
+            .filter(|state| {
+                let key = state.key();
+                key.domain == *domain
+                    && key.kind == ModelKind::Relay
+                    && key.identifier == ModelName::from(relay)
+            })
+            .map(|state| {
+                (
+                    state.key().clone(),
+                    ReplicatedMaterializedRelayState::read(state.value()),
+                )
+            })
+            .collect::<Vec<_>>();
+        if states.is_empty() {
+            let Some(restored) = self.open_stored_materialized_snapshot(&placement).await? else {
+                return Ok(Vec::new());
+            };
+            return Ok(restored
+                .records
+                .into_iter()
+                .map(|record| MaterializedGenerationRecord {
+                    branch: record.branch,
+                    row: record.row,
+                })
+                .collect());
+        }
+        let mut records = Vec::new();
+        for (placement, state) in states {
+            for record in state.records() {
+                if self.materialized_stream_key_is_visible(&placement, &record.branch) {
+                    records.push(record);
+                }
+            }
+        }
+        Ok(records)
     }
 
-    pub(in crate::runtime) async fn remote_materialized_stream_state_for_branch(
+    /// The record of exactly one branch of one relay, read from the node that owns it.
+    async fn remote_materialized_record(
         &self,
         target_node_id: &ClusterNodeName,
         domain: &DomainName,
         relay: &RelayName,
         branch_key: &Option<BranchKey>,
-    ) -> Result<Vec<(String, nervix_models::RemoteRuntimeRecord)>, String> {
+        schema: &StdArc<arrow_schema::Schema>,
+    ) -> Result<Option<MaterializedGenerationRecord>, String> {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
             ModelKind::Relay,
             relay,
-            branch_key.clone(),
+            None,
         );
-        let Some(snapshot) = self
-            .request_state_sync(target_node_id, &placement, 0)
+        let Some(restored) = self
+            .fetch_sealed_materialized_snapshot(target_node_id, &placement, schema, None)
             .await?
         else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        decode_materialized_stream_snapshot(&snapshot.payload)
-            .map(|entries| {
-                let mut visible = entries
-                    .into_iter()
-                    .map(|(key, record)| (branch_key_display(&key).to_string(), record))
-                    .collect::<Vec<_>>();
-                visible.sort_by(|left, right| left.0.cmp(&right.0));
-                visible
-            })
-            .map_err(|error| error.to_string())
+        Ok(restored
+            .records
+            .into_iter()
+            .find(|record| record.branch == *branch_key)
+            .map(|record| MaterializedGenerationRecord {
+                branch: record.branch,
+                row: record.row,
+            }))
     }
 
     pub(crate) async fn load_materialized_side_inputs(
@@ -682,6 +725,18 @@ impl Runtime {
             }
         }
     }
+}
+
+/// Render one materialized record for the public relay-state report.
+fn materialized_record_report(
+    record: &MaterializedGenerationRecord,
+) -> Result<MaterializedRecordReport, String> {
+    Ok(MaterializedRecordReport {
+        branch: branch_key_display(&record.branch).to_string(),
+        payload: record.row.to_json_string()?,
+        ingested_at_low_watermark: record.row.metadata().ingested_at_low_watermark(),
+        ingested_at_high_watermark: record.row.metadata().ingested_at_high_watermark(),
+    })
 }
 
 #[cfg(test)]

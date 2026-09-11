@@ -925,20 +925,8 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
         .await
         .expect("relay state task should drain before the shutdown deadline");
 
-    assert!(
-        state
-            .read()
-            .remote_entry(&acme)
-            .expect("the acme record should be readable")
-            .is_some()
-    );
-    assert!(
-        state
-            .read()
-            .remote_entry(&beta)
-            .expect("the beta record should be readable")
-            .is_some()
-    );
+    assert!(state.read().record(&acme).is_some());
+    assert!(state.read().record(&beta).is_some());
     assert_eq!(
         runtime
             .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay))

@@ -195,6 +195,7 @@ mod kafka_offset_state;
 mod lookup_hash_map;
 mod lsm_sequence;
 mod materialized_read;
+mod materialized_snapshot;
 mod materialized_state;
 mod message_error;
 mod message_error_delivery;
@@ -222,11 +223,18 @@ mod reorderer;
 mod resources;
 mod runtime_lifecycle;
 mod schedule_apply;
+mod snapshot_staging;
+
 mod schedule_delta;
 mod scheduled_node;
 mod service_url;
 mod shared_clients;
 mod state_replication;
+mod state_snapshot_exchange;
+mod state_snapshot_transfer;
+pub(crate) use state_snapshot_transfer::{
+    DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot,
+};
 mod state_store;
 mod syslog;
 #[cfg(test)]
@@ -256,12 +264,17 @@ use kafka_offset_state::{
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
     ReplicatedKafkaOffsetState,
 };
+use materialized_snapshot::{
+    MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
+    empty_sealed_container, inspect_sealed_container,
+};
+pub use materialized_state::MaterializedRecordReport;
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
-    MaterializedRelayStateRead, ReplicatedMaterializedRelayState,
-    decode_materialized_stream_snapshot, encode_materialized_stream_snapshot_entries,
+    ReplicatedMaterializedRelayState,
 };
+use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
 /// operations are absent from each capability.
@@ -807,6 +820,11 @@ struct RuntimeInner {
         DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>,
     replicated_materialized_stream_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>,
+    /// Sealed materialized snapshots that have been opened and are waiting for the state they
+    /// belong to to be built. Opening one is bulk work, so it happens on a path that can wait and
+    /// the synchronous construction consumes the result.
+    restored_materialized_stream_states:
+        DashMap<RuntimeStatePlacement, RestoredMaterializedSnapshot, RandomState>,
     relay_state_epochs: DashMap<DomainName, Arc<AtomicU64>, RandomState>,
     materialized_state_changed: Notify,
     replicated_window_processor_states:
@@ -818,6 +836,8 @@ struct RuntimeInner {
     wasm_runtime: WasmRuntime,
     branch_instance_expiration_scan_interval: Duration,
     state_store: Option<Arc<RuntimeStateStore>>,
+    /// The bounded disk incoming sealed snapshots land on before they are verified and opened.
+    snapshot_staging: SnapshotStaging,
     state_snapshot_interval: Duration,
     state_replication_poll_interval: Duration,
     domain_drain_timeout: Duration,

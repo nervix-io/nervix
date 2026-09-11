@@ -900,15 +900,30 @@ impl Runtime {
                 ));
             }
         }
-        for state in self.inner.replicated_materialized_stream_states.iter() {
-            if matches_entity(state.key()) {
-                checkpoints.push((
+        let materialized = self
+            .inner
+            .replicated_materialized_stream_states
+            .iter()
+            .filter(|state| matches_entity(state.key()))
+            .map(|state| {
+                (
                     state.key().clone(),
-                    ReplicatedMaterializedRelayState::read(state.value())
-                        .latest_snapshot()
-                        .map_err(OwnershipHandoffError::persistence)?,
-                ));
-            }
+                    ReplicatedMaterializedRelayState::read(state.value()),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (placement, state) in materialized {
+            tokio::task::consume_budget().await;
+            let sealed = state
+                .seal_after(&self.inner.executor, None)
+                .await
+                .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
+                .ok_or_else(|| {
+                    OwnershipHandoffError::checkpoint(
+                        "the materialized relay state produced no checkpoint generation",
+                    )
+                })?;
+            checkpoints.push((placement, sealed.into_persisted_entry()));
         }
         for state in self.inner.replicated_window_processor_states.iter() {
             if matches_entity(state.key()) {
@@ -1071,8 +1086,10 @@ impl Runtime {
                     .map_err(OwnershipHandoffError::persistence)?
                     .payload
             }
-            RuntimeStateKind::MaterializedRelay => encode_materialized_stream_snapshot_entries(&[])
-                .map_err(OwnershipHandoffError::persistence)?,
+            RuntimeStateKind::MaterializedRelay => {
+                empty_sealed_container(placement.schema_fingerprint)
+                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?
+            }
             RuntimeStateKind::BranchLru => {
                 encode_branch_lru_snapshot(&[]).map_err(OwnershipHandoffError::checkpoint)?
             }
@@ -1953,8 +1970,11 @@ impl Runtime {
                     .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
             }
             RuntimeStateKind::MaterializedRelay => {
-                decode_materialized_stream_snapshot(&snapshot.payload)
-                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
+                inspect_sealed_container(
+                    &snapshot.payload,
+                    self.inner.executor.limits().snapshot_header_bytes.as_u64(),
+                )
+                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
             }
             RuntimeStateKind::WasmProcessor => {}
             RuntimeStateKind::WindowProcessor => {
@@ -2398,53 +2418,6 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         after_lsm: Option<u64>,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        if let RuntimeStateKind::MaterializedRelay = placement.state {
-            let mut entries = Vec::new();
-            let mut latest_lsm = 0;
-            let mut found = false;
-            for state in self.inner.replicated_materialized_stream_states.iter() {
-                let concrete = state.key();
-                let read = ReplicatedMaterializedRelayState::read(state.value());
-                if concrete.domain != placement.domain
-                    || concrete.state != placement.state
-                    || concrete.kind != placement.kind
-                    || concrete.identifier != placement.identifier
-                    || concrete.schema_fingerprint != placement.schema_fingerprint
-                {
-                    continue;
-                }
-                if let Some(requested) = placement.branch_key.as_ref()
-                    && concrete
-                        .branch_key
-                        .as_ref()
-                        .is_some_and(|concrete| concrete != requested)
-                {
-                    continue;
-                }
-                found = true;
-                latest_lsm = latest_lsm.max(read.current_lsm());
-                if let Some(requested) = placement.branch_key.as_ref() {
-                    let key = Some(requested.clone());
-                    if let Some(entry) =
-                        self.visible_materialized_stream_remote_entry(concrete, &read, &key)?
-                    {
-                        entries.push(entry);
-                    }
-                } else {
-                    entries
-                        .extend(self.visible_materialized_stream_remote_entries(concrete, &read)?);
-                }
-            }
-            if found {
-                let snapshot = PersistedRuntimeStateEntry {
-                    lsm: latest_lsm,
-                    schema_fingerprint: placement.schema_fingerprint,
-                    payload: encode_materialized_stream_snapshot_entries(&entries)
-                        .map_err(|error| error.to_string())?,
-                };
-                return Ok(snapshot.is_after(after_lsm).then_some(snapshot));
-            }
-        }
         if let Some(state) = self.inner.replicated_deduplicator_states.get(placement) {
             let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
             if snapshot.is_after(after_lsm) {
@@ -2456,23 +2429,6 @@ impl Runtime {
             let snapshot = ReplicatedKafkaOffsetState::read(state.value())
                 .latest_snapshot()
                 .map_err(|error| error.to_string())?;
-            if snapshot.is_after(after_lsm) {
-                return Ok(Some(snapshot));
-            }
-        }
-        if let Some(state) = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(placement)
-        {
-            let read = ReplicatedMaterializedRelayState::read(state.value());
-            let entries = self.visible_materialized_stream_remote_entries(placement, &read)?;
-            let snapshot = PersistedRuntimeStateEntry {
-                lsm: read.current_lsm(),
-                schema_fingerprint: placement.schema_fingerprint,
-                payload: encode_materialized_stream_snapshot_entries(&entries)
-                    .map_err(|error| error.to_string())?,
-            };
             if snapshot.is_after(after_lsm) {
                 return Ok(Some(snapshot));
             }
@@ -2575,21 +2531,6 @@ impl Runtime {
         {
             state.mark_replica_progress(node_id, ack.lsm);
         }
-    }
-
-    pub(in crate::runtime) async fn request_state_sync(
-        &self,
-        target_node_id: &ClusterNodeName,
-        placement: &RuntimeStatePlacement,
-        after_lsm: u64,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        self.request_state_sync_with_timeout(
-            target_node_id,
-            placement,
-            Some(after_lsm),
-            Duration::from_secs(5),
-        )
-        .await
     }
 
     pub(super) async fn request_state_sync_with_timeout(
@@ -2821,6 +2762,61 @@ impl Runtime {
         Ok(ReplicatedKafkaOffsetState::bind(&state, roles, local_node))
     }
 
+    /// Decode whatever this placement's materialized state should start from, before the state
+    /// itself is built.
+    ///
+    /// Opening a sealed snapshot is bulk work that has to be admitted and charged, so it happens
+    /// here, on a path that can wait, rather than inside the synchronous construction that
+    /// publishes the state into the runtime.
+    pub(in crate::runtime) async fn prepare_materialized_stream_restore(
+        &self,
+        placement: &RuntimeStatePlacement,
+        schema: &StdArc<arrow_schema::Schema>,
+    ) -> Result<(), RuntimePersistenceError> {
+        if self
+            .inner
+            .restored_materialized_stream_states
+            .contains_key(placement)
+        {
+            return Ok(());
+        }
+        let sealed = match self.take_transferred_runtime_state_snapshot(placement) {
+            Some(snapshot) => Some(snapshot),
+            None => {
+                if self
+                    .inner
+                    .replicated_materialized_stream_states
+                    .contains_key(placement)
+                {
+                    return Ok(());
+                }
+                self.stored_runtime_state_snapshot(placement)
+                    .map_err(|error| error.current_context().clone())?
+            }
+        };
+        let Some(sealed) = sealed else {
+            return Ok(());
+        };
+        let sealed = self
+            .inner
+            .executor
+            .charge_owned(nervix_execution::MemoryClass::Bulk, sealed.payload)
+            .await
+            .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        let restored = RestoredMaterializedSnapshot::open(
+            &self.inner.executor,
+            schema,
+            placement.schema_fingerprint,
+            SealedSource::memory(sealed),
+        )
+        .await
+        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        self.inner
+            .restored_materialized_stream_states
+            .insert(placement.clone(), restored);
+        Ok(())
+    }
+
     pub(in crate::runtime) fn replicated_materialized_stream_state(
         &self,
         placement: RuntimeStatePlacement,
@@ -2830,8 +2826,12 @@ impl Runtime {
         local_node: Option<&ClusterNodeName>,
     ) -> Result<MaterializedRelayStateAssignment, RuntimePersistenceError> {
         let roles = StateReplicationRoles::new(primary_node, replica_nodes, 0);
-        let transferred = self.take_transferred_runtime_state_snapshot(&placement);
-        let state = if transferred.is_none()
+        let restored = self
+            .inner
+            .restored_materialized_stream_states
+            .remove(&placement)
+            .map(|(_, restored)| restored);
+        let state = if restored.is_none()
             && let Some(existing) = self
                 .inner
                 .replicated_materialized_stream_states
@@ -2839,17 +2839,11 @@ impl Runtime {
         {
             existing.clone()
         } else {
-            let initial = match transferred {
-                Some(snapshot) => Some(snapshot),
-                None => self
-                    .stored_runtime_state_snapshot(&placement)
-                    .map_err(|error| error.current_context().clone())?,
-            };
-            let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            let state = Arc::new(ReplicatedMaterializedRelayState::restored(
                 placement.clone(),
                 schema,
-                initial,
-            )?);
+                restored,
+            ));
             self.inner
                 .replicated_materialized_stream_states
                 .insert(placement, state.clone());

@@ -192,7 +192,7 @@ impl BranchRuntime {
         }
     }
 
-    pub(super) fn reconcile_materialized_state_membership(&mut self, relay: &RelayName) {
+    pub(super) async fn reconcile_materialized_state_membership(&mut self, relay: &RelayName) {
         let current_epoch = self
             .runtime
             .relay_state_epoch(&self.domain)
@@ -236,6 +236,19 @@ impl BranchRuntime {
                 relay,
                 self.key.clone(),
             );
+            if let Err(error) = self
+                .runtime
+                .prepare_materialized_stream_restore(&placement, &schema)
+                .await
+            {
+                warn!(
+                    domain = self.domain.as_str(),
+                    relay = relay.as_str(),
+                    error = %error,
+                    "failed to open the persisted branch-local materialized relay snapshot"
+                );
+                return;
+            }
             match self.runtime.replicated_materialized_stream_state(
                 placement,
                 schema,
@@ -276,7 +289,7 @@ impl BranchRuntime {
         if self.runtime.relay_is_cluster_scheduled(&self.domain, relay) {
             return;
         }
-        self.reconcile_materialized_state_membership(relay);
+        self.reconcile_materialized_state_membership(relay).await;
         let Some(state) = self.materialized_states.get(relay) else {
             return;
         };

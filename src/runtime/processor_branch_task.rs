@@ -1176,7 +1176,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use ahash::{HashMap, HashSet};
+    use ahash::HashMap;
     use arc_swap::ArcSwapOption;
     use nervix_models::{
         CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
@@ -1225,7 +1225,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: [(
                 named("dedup_users"),
                 RelayProcessorTemplate {
@@ -1457,11 +1456,13 @@ mod tests {
         )
         .await;
 
-        let recorded = instances
-            .snapshot_entries()
-            .into_iter()
-            .find_map(|(key, activity)| key.is_none().then_some(activity))
-            .expect("the unbranched instance stays registered");
+        let mut recorded = None;
+        for (key, activity) in instances.snapshot_entries() {
+            if key.is_none() {
+                recorded = Some(activity);
+            }
+        }
+        let recorded = recorded.expect("the unbranched instance stays registered");
         assert!(
             recorded >= before,
             "accepted input must record activity at or after the acceptance, got {recorded:?}"
