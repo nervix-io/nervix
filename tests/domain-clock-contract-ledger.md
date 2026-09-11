@@ -315,7 +315,8 @@ branched from:
 | Domain feature regressions | Pass; all 98 scenarios and all 978 steps covered domain lifecycle, buffer timing, execution time, ingestion time, pacing, and cadence. |
 | Relay-consumer regressions for the retyped wake | Pass; 296 scenarios across junctions, deduplicators, reorderers, correlators, window processors, inferencers, WASM processors, materialized relays, reingestors, generators, input collection, branch expiration, relay capacity and metrics, quiescing, and every `ALTER` feature. The WASM cluster-restart scenario timed out once while another suite held the machine and passed in isolation on re-run. |
 | Wake and cadence unit coverage | Pass; the branch-buffering suite covers a wake taking whichever coordinate arrives first and a cadence whose clock is gone being neither due nor silently postponed, and the emitter suite covers the logical and physical cadence coordinates, an active retry replacing the ordinary cadence wake, and a retry deadline preserved until its attempt. |
-| `nervix-server` library suite | Pass; 833 tests passed with no ignored tests. |
+| Merged `origin/main` re-run | Pass; after merging the current `origin/main`, the ten emitter cadence scenarios and 121 scenarios across Kafka emission and ingestion, Iceberg, emitter inputs, metrics and publishing modes, branch buffering, materialized relays, and reingestors passed again. |
+| `nervix-server` library suite | Pass; 840 tests passed with no ignored tests on the merged tree. |
 | `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
 | `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. |
