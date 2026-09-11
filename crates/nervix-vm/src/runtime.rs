@@ -511,21 +511,18 @@ fn execute_program_with_selection_in_context_sync(
     for output in &program.outputs {
         columns.push(registers.output_array(output.reg)?);
     }
-    let mut invocations = program
-        .invocations
-        .iter()
-        .map(|invocation| {
-            Ok(FunctionInvocation {
-                function: invocation.function.clone(),
-                arguments: invocation
-                    .inputs
-                    .iter()
-                    .map(|input| registers.output_array(*input))
-                    .collect::<Result<Vec<_>, RuntimeError>>()?,
-                span: invocation.span,
-            })
-        })
-        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    let mut invocations = Vec::with_capacity(program.invocations.len());
+    for invocation in &program.invocations {
+        let mut arguments = Vec::with_capacity(invocation.inputs.len());
+        for input in &invocation.inputs {
+            arguments.push(registers.output_array(*input)?);
+        }
+        invocations.push(FunctionInvocation {
+            function: invocation.function.clone(),
+            arguments,
+            span: invocation.span,
+        });
+    }
 
     let global_predicate = if let Some(filter_reg) = program.filter {
         Some(registers.boolean(filter_reg)?.clone())
