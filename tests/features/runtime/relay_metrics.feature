@@ -61,6 +61,7 @@ Feature: Relay metrics
       """
       relay: notifications
       """
+    And the last command output owner is saved as placeholder "relay_metrics_owner"
     And the last command output contains
       """
       branch fields: user_id
@@ -104,18 +105,18 @@ Feature: Relay metrics
       """
       messages_total received relay=notifications
       """
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains "nervix_messages_total"
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="RELAY"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="notifications"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'direction="received"'
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
+    And node "{{relay_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains "nervix_messages_total"
+    And node "{{relay_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target_kind="RELAY"'
+    And node "{{relay_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target="notifications"'
+    And node "{{relay_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'direction="received"'
+    And node "{{relay_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="RELAY"
       target="notifications"
       direction="received"
       relay="notifications"
       """
-    And node "node-1" observability metric "nervix_batches_total" with labels eventually equals 2
+    And node "{{relay_metrics_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2
       """
       target_kind="RELAY"
       target="notifications"

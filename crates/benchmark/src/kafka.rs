@@ -1,5 +1,6 @@
 use std::{io, sync::Arc as StdArc, time::Duration};
 
+use meticulous::ResultExt as _;
 use rdkafka::{
     ClientConfig,
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
@@ -44,7 +45,7 @@ pub async fn provision_topics(
     }
 
     let expected = usize::try_from(partitions)
-        .map_err(|_| io::Error::other("Kafka partition count exceeds usize"))?;
+        .assured("the partition count was converted from a non-negative u32 above");
     let admin = StdArc::new(admin);
     for topic in [input_topic, output_topic] {
         loop {
@@ -59,17 +60,17 @@ pub async fn provision_topics(
             let admin = StdArc::clone(&admin);
             let topic_name = topic.to_string();
             let observed = tokio::task::spawn_blocking(move || {
-                admin
+                let Ok(metadata) = admin
                     .inner()
                     .fetch_metadata(Some(&topic_name), request_timeout)
-                    .ok()
-                    .and_then(|metadata| {
-                        metadata
-                            .topics()
-                            .iter()
-                            .find(|metadata| metadata.name() == topic_name)
-                            .map(|metadata| metadata.partitions().len())
-                    })
+                else {
+                    return None;
+                };
+                metadata
+                    .topics()
+                    .iter()
+                    .find(|metadata| metadata.name() == topic_name)
+                    .map(|metadata| metadata.partitions().len())
             })
             .await
             .map_err(|error| io::Error::other(format!("Kafka metadata task failed: {error}")))?;

@@ -5,18 +5,23 @@
 
 use std::{num::NonZeroUsize, sync::OnceLock};
 
-use nervix_models::{CreateSchema, Identifier, ParseAsType, Timestamp};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{
+    CreateSchema, DomainClockAuthority, DomainConfig, DomainName, DomainPace, DomainStartPoint,
+    DomainState, DomainStatus, FieldName, ParseAsType, PlacementPolicy, RelayName, SchemaName,
+    Timestamp,
+};
 use tokio::{
     sync::{mpsc, watch},
     time::Instant,
 };
 
 use super::{
-    NodeQuiesceCounters, RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn,
+    DomainClockLifecycle, NodeQuiesceCounters, RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn,
+    RuntimeInputCollectPolicy,
     force_flush::DomainForceFlush,
     relay_interaction::{
         RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
-        RuntimeInputCollectPolicy,
     },
 };
 use crate::{
@@ -86,16 +91,43 @@ impl RelayInteractionBenchmark {
         collect_policy: Option<RuntimeInputCollectPolicy>,
     ) -> Self {
         assert!(source_count > 0, "benchmark requires at least one source");
-        let capacity = NonZeroUsize::new(capacity_per_source)
-            .expect("benchmark source capacity must be nonzero");
+        let capacity = NonZeroUsize::new(capacity_per_source).assured(
+            "the benchmark entry points are only reached with a nonzero constant capacity",
+        );
         let mut inputs = Vec::with_capacity(source_count);
         let mut sources = Vec::with_capacity(source_count);
+        let domain = DomainName::parse("relay_interaction_benchmark")
+            .assured("the fixed benchmark domain satisfies the identifier grammar");
+        let lifecycle = DomainClockLifecycle::new(domain.clone());
+        lifecycle.synchronize(
+            &DomainState {
+                id: domain,
+                config: DomainConfig {
+                    pace: DomainPace::Unpaced,
+                    period: "1s".to_string(),
+                    skew: "0ms".to_string(),
+                    placement: PlacementPolicy::Neutral,
+                },
+                status: DomainStatus::Running,
+                start_version: 0,
+                last_start: DomainStartPoint::Resume,
+                clock: None,
+            },
+            &DomainClockAuthority::initial(),
+        );
+        let domain_clock = lifecycle
+            .bind()
+            .assured("the benchmark installs its unpaced domain clock above");
         for source in 0..source_count {
-            let relay = Identifier::parse(&format!("benchmark_source_{source}"))
-                .expect("benchmark relay name must be valid");
+            let relay = RelayName::parse(&format!("benchmark_source_{source}")).assured(
+                "the name is built here from fixed text that satisfies the identifier grammar",
+            );
             let broadcast = RelayBroadcast::with_capacity(capacity);
             let receiver = RelayRuntimeFanIn::new(broadcast.new_receiver());
-            inputs.push(RelayInteractionInput::new(relay, receiver, collect_policy));
+            inputs.push(
+                RelayInteractionInput::new(relay, receiver, collect_policy)
+                    .with_domain_clock(domain_clock.clone()),
+            );
             sources.push(broadcast);
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -110,7 +142,7 @@ impl RelayInteractionBenchmark {
             Some(quiesce_counters.clone()),
             command_rx,
         )
-        .expect("benchmark relay interaction must build");
+        .assured("the input list is built here with at least one source");
         Self {
             interaction,
             sources,
@@ -127,7 +159,7 @@ impl RelayInteractionBenchmark {
         self.sources[source]
             .broadcast(self.batch.clone())
             .await
-            .expect("benchmark source must remain connected");
+            .verified("the benchmark owns both ends of this channel for its whole lifetime");
     }
 
     /// Latches a force-flush request. The following steps first drain already-ready input.
@@ -140,7 +172,7 @@ impl RelayInteractionBenchmark {
         self.commands
             .send(BenchmarkCommand::Drain)
             .await
-            .expect("benchmark command receiver must remain connected");
+            .verified("the benchmark owns both ends of this channel for its whole lifetime");
     }
 
     /// Requests receiver-local watch shutdown.
@@ -173,7 +205,10 @@ impl RelayInteractionBenchmark {
             .interaction
             .next(wake_at)
             .await
-            .expect("benchmark relay interaction must advance")
+            .verified(
+                "the benchmark keeps its sources and command channel alive, so the interaction \
+                 never ends",
+            )
             .into_parts();
         match event {
             RelayInteractionEvent::Batch { batch, .. } => RelayInteractionBenchmarkEvent::Batch {
@@ -197,10 +232,14 @@ fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
     SCHEMA
         .get_or_init(|| {
             triomphe::Arc::new(compile_schema(&CreateSchema {
-                name: Identifier::parse("relay_interaction_benchmark")
-                    .expect("benchmark schema name must be valid"),
+                name: SchemaName::parse("relay_interaction_benchmark").assured(
+                    "the name is built here from fixed text that satisfies the identifier grammar",
+                ),
                 fields: vec![nervix_models::SchemaField {
-                    name: Identifier::parse("value").expect("benchmark field name must be valid"),
+                    name: FieldName::parse("value").assured(
+                        "the name is built here from fixed text that satisfies the identifier \
+                         grammar",
+                    ),
                     ty: ParseAsType::I64,
                     optional: false,
                     sensitive: false,
@@ -216,19 +255,19 @@ fn benchmark_batch() -> RelayRecordBatch {
     let mut builder = schema.batch_builder(1);
     builder
         .append(Some(&RuntimeValue::I64(1)))
-        .expect("benchmark value must match its schema");
+        .assured("the single I64 value is built here against the schema declared beside it");
     builder
         .finish_row()
-        .expect("benchmark row must be complete");
-    let record = builder
+        .assured("the single I64 value is built here against the schema declared beside it");
+    let batch = builder
         .finish()
-        .and_then(|batch| {
-            batch.runtime_row(
-                0,
-                RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
-            )
-        })
-        .expect("benchmark Arrow row must build");
+        .assured("the single I64 value is built here against the schema declared beside it");
+    let record = batch
+        .runtime_row(
+            0,
+            RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
+        )
+        .assured("the single I64 value is built here against the schema declared beside it");
     RelayRecordBatch::single(schema, None, record, AckSet::empty())
-        .expect("benchmark batch must build")
+        .assured("the single I64 value is built here against the schema declared beside it")
 }

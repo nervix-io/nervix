@@ -21,7 +21,16 @@ Nervix has three separate persistence boundaries:
 
 - Execution graph configuration is control-plane state. NSPL models, domain lifecycle, and schedules are persisted with strong consistency guarantees before runtime nodes execute them.
 - Execution node state is runtime state. Selected state such as domain offsets, deduplicator history, materialized relay entries, window accumulators, metric summaries, and WASM guest state is persisted through periodic snapshot/replication mechanisms.
+  A materialized relay's snapshot is columnar: it carries the relay's records as Arrow sections under the relay's exact schema, with each record's concrete branch key, watermarks, and the state revision, ownership assignment, and branch lifecycle it was captured at described beside them. Every snapshot is one committed revision. Updates and deletions continue while it is written out, and a snapshot taken before a branch was evicted never restores that branch.
+  A snapshot larger than the transfer budget crosses the bulk pool in bounded chunks and lands on the receiving node's staging disk, where its length and digest are checked before anything reads it. A cancelled, truncated, or corrupted transfer leaves the state it would have replaced untouched.
 - Message streaming is the hot path. In-flight records, relay batches, processor handoff, outbound emitter attempts, ACK guards, ACK tokens, and ACK maps stay in memory and are never persisted as runtime state.
+
+Every relay has one scheduled owner. Producers on other cluster nodes use one fixed dispatch slot
+per relay and serialize each batch once for the owner. The owner alone maintains the bounded relay
+buffer, concrete branch presence, metrics, subscriptions, and fan-out. It sends at most one
+serialized copy to each remote consuming cluster node, where all runtime consumers and any local
+subscription share that delivery. Only a relay's optional materialized records have
+scheduler-selected state replicas; the relay's hot-path runtime is never replicated.
 
 Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, sources and ingestors react according to their delivery mode, offsets, and retry policy.
 
@@ -31,8 +40,9 @@ policy. The branch name is part of its identity: differently named branches rema
 even when they reference the same schema. Ingestor routes construct keys with `BRANCHED BY
 <branch> SET ...`; reingestor routes preserve the input key, construct another named branch, or
 become unbranched. Relays and branch-preserving processors use that exact named branch or declare
-`UNBRANCHED`. Runtime relay instances, processor buffers, deduplicator state, window state, and
-materialized entries remain scoped to one concrete branch.
+`UNBRANCHED`. Relay presence, processor buffers, deduplicator state, window state, and materialized
+entries remain scoped to one concrete branch; batches for those branches share the declared
+relay's owner buffer.
 
 Structured Model expressions are compiled into typed VM programs before local graph instantiation.
 The leader validates them eagerly so invalid scopes, construction, types, nullability, sensitivity,
@@ -97,7 +107,12 @@ Examples of state that is not treated as a durable commit log:
 - outbound emitter operations
 - intermediate processor handoff
 
-For relay movement between nodes, Nervix uses Arrow IPC batch serialization on the interconnect path. Control traffic such as lookups and state-sync RPCs still uses separate control-envelope formats.
+For relay movement between nodes, Nervix uses Arrow IPC batch serialization on the interconnect
+path. A producer or owner dispatch slot is scoped to one concrete branch and remains held until the
+receiving runtime atomically admits or rejects that batch. Other branches continue concurrently,
+while the attached ACK chain reports downstream processing after admission. A body receipt alone
+does not mean the runtime admitted the batch. Control traffic such as lookups and state-sync RPCs
+still uses separate control-envelope formats.
 
 Runtime graph metrics are maintained alongside the data plane. Prometheus export uses branch-aggregated series to keep label cardinality bounded, while `DESCRIBE` can report branch-local metrics where a concrete relay branch is being inspected. See [Metrics And Observability](metrics-and-observability.md).
 

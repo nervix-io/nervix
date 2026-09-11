@@ -6,10 +6,10 @@ use std::{
 
 pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-    KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR,
-    MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-    PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT,
-    SQS_TLS_ENDPOINT,
+    KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
+    MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR,
+    POSTGRES_TLS_ADDR, PULSAR_ADDR, PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, REDIS_ADDR,
+    RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
 };
 use nervix_test_environment::{ContainerMode, DependencyEnvironment, configure_process_lifecycle};
 use tokio::sync::Mutex;
@@ -62,6 +62,50 @@ impl TestDependencies {
         self.tls_dir.as_deref().ok_or_else(|| {
             io::Error::other("scenario TLS materials are unavailable; start a TLS dependency first")
         })
+    }
+
+    fn clock_source_observations_url(&self, name: &str) -> io::Result<url::Url> {
+        let base = self.endpoints.get(MOCK_HTTP_ADDR)?;
+        let mut url = url::Url::parse(base)
+            .map_err(|error| io::Error::other(format!("invalid HTTP mock endpoint: {error}")))?;
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| io::Error::other("HTTP mock endpoint cannot hold path segments"))?;
+        segments
+            .clear()
+            .push("clock-source-observations")
+            .push(name);
+        drop(segments);
+        Ok(url)
+    }
+
+    pub(crate) async fn reset_clock_source(&self, name: &str) -> io::Result<()> {
+        let url = self.clock_source_observations_url(name)?;
+        reqwest::Client::new()
+            .delete(url)
+            .send()
+            .await
+            .map_err(|error| io::Error::other(format!("clock source reset failed: {error}")))?
+            .error_for_status()
+            .map_err(|error| io::Error::other(format!("clock source reset failed: {error}")))?;
+        Ok(())
+    }
+
+    pub(crate) async fn clock_source_observations(
+        &self,
+        name: &str,
+    ) -> io::Result<serde_json::Value> {
+        let url = self.clock_source_observations_url(name)?;
+        reqwest::get(url)
+            .await
+            .map_err(|error| io::Error::other(format!("clock source query failed: {error}")))?
+            .error_for_status()
+            .map_err(|error| io::Error::other(format!("clock source query failed: {error}")))?
+            .json()
+            .await
+            .map_err(|error| {
+                io::Error::other(format!("clock source response was not valid JSON: {error}"))
+            })
     }
 
     dependency_starters! {

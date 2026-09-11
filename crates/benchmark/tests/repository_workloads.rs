@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, path::Path};
 
+use arch_into::ArchInto as _;
 use nervix_benchmark::{
     BenchmarkCatalog, KafkaRenderInputs, LoadShape, LoadedBenchmark, RunSettings,
 };
-use nervix_nspl::client_statement::parse_client_statement_sources;
+use nervix_client_core::split_query_statements;
 
 const LANES: u32 = 16;
 
@@ -18,10 +19,10 @@ fn load(slug: &str) -> LoadedBenchmark {
 }
 
 fn statements_starting_with(source: &str, prefix: &str) -> usize {
-    parse_client_statement_sources(source)
-        .unwrap_or_else(|error| panic!("rendered Nervix graph should parse: {error:?}"))
+    split_query_statements(source)
+        .unwrap_or_else(|error| panic!("rendered Nervix graph should parse: {error}"))
         .iter()
-        .filter(|statement| statement.source(source).starts_with(prefix))
+        .filter(|statement| statement.starts_with(prefix))
         .count()
 }
 
@@ -52,7 +53,7 @@ fn kafka_filter_map_implementations_render_from_one_workload() {
         .expect("Nervix implementation should render");
     assert_eq!(
         statements_starting_with(&nervix, "CREATE JUNCTION"),
-        LANES as usize
+        LANES.arch_into()
     );
 
     let vector = benchmark
@@ -95,11 +96,11 @@ fn kafka_dedup_window_renders_a_stateful_graph_and_a_matching_competitor() {
         .expect("Nervix implementation should render");
     assert_eq!(
         statements_starting_with(&nervix, "CREATE DEDUPLICATOR"),
-        LANES as usize
+        LANES.arch_into()
     );
     assert_eq!(
         statements_starting_with(&nervix, "CREATE WINDOW PROCESSOR"),
-        LANES as usize
+        LANES.arch_into()
     );
     assert!(nervix.contains("FILTER WHERE contains(input.value, \"x\")"));
     assert!(nervix.contains("MAX TIME 10s"));
@@ -110,7 +111,7 @@ fn kafka_dedup_window_renders_a_stateful_graph_and_a_matching_competitor() {
         nervix
             .matches("FLUSH EACH 50ms MAX BATCH SIZE 64KiB")
             .count(),
-        2 * LANES as usize
+        2 * LANES.arch_into()
     );
 
     let vector = benchmark

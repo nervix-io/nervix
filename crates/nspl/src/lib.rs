@@ -1,3 +1,14 @@
+//! The NSPL language: source text in, Models out.
+//!
+//! Layer: language, which is an edge dependency only. The language crate itself, the formatter, the
+//! client tools and the session adapter may name the parser; every other layer consumes Models.
+//!
+//! - **Owns.** The lexer, the composed statement grammar, the completion expectations derived from
+//!   it, diagnostics with source spans, and the lowering of parsed source into Models.
+//! - **Depends on.** The vocabulary.
+//! - **Must not know.** The registry, the runtime, the control plane or any engine. Parsing
+//!   produces a Model and stops.
+//!
 pub mod branch;
 pub mod client;
 #[cfg(feature = "client")]
@@ -24,6 +35,7 @@ pub mod domain;
 pub mod drop_stmt;
 pub mod emitter;
 pub mod endpoint;
+mod expression_lexer;
 pub mod generator;
 pub mod inferencer;
 pub mod ingestor;
@@ -38,6 +50,7 @@ mod semantic_program;
 pub use semantic_program::{parse_expression, parse_expression_list, parse_route_construction};
 pub mod reingestor;
 pub mod relay;
+pub mod relocation;
 pub mod reorderer;
 pub mod schema;
 #[cfg(feature = "server")]
@@ -53,7 +66,6 @@ pub mod udf;
 pub mod upload_resource;
 pub mod user;
 pub mod vhost;
-pub mod vm_program;
 pub mod wasm_processor;
 pub mod window_processor;
 

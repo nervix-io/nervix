@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
+use meticulous::OptionExt as _;
 use serde::{Deserialize, Deserializer, de};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -167,11 +168,11 @@ impl<'de> Deserialize<'de> for LoadDuration {
             where
                 E: de::Error,
             {
-                u64::try_from(value)
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .map(LoadDuration::Seconds)
-                    .ok_or_else(|| E::invalid_value(de::Unexpected::Signed(value), &self))
+                let seconds = match u64::try_from(value) {
+                    Ok(seconds) if seconds > 0 => seconds,
+                    _ => return Err(E::invalid_value(de::Unexpected::Signed(value), &self)),
+                };
+                Ok(LoadDuration::Seconds(seconds))
             }
         }
 
@@ -206,7 +207,7 @@ impl BenchmarkDefinition {
         if self.load.warmup_seconds == 0 {
             return Err("load.warmup_seconds must be positive".to_string());
         }
-        if self.load.partitions > i32::MAX as u32 {
+        if i32::try_from(self.load.partitions).is_err() {
             return Err("load.partitions exceeds Kafka's supported range".to_string());
         }
         if self.load.value_bytes == 0 {
@@ -300,7 +301,9 @@ impl LoadShape {
                 keys_per_cycle,
                 copies_per_key,
                 ..
-            } => keys_per_cycle.saturating_mul(*copies_per_key),
+            } => keys_per_cycle.checked_mul(*copies_per_key).verified(
+                "validate rejects a load shape whose cycle exceeds the supported message count",
+            ),
         }
     }
 
@@ -316,14 +319,18 @@ impl LoadShape {
     /// Records the measured path owes for `cycles` complete cycles.
     #[must_use]
     pub fn expected_output_records(&self, cycles: u64) -> u64 {
-        cycles.saturating_mul(self.output_records_per_cycle())
+        cycles
+            .checked_mul(self.output_records_per_cycle())
+            .assured("a run cannot complete more cycles than its message budget allows")
     }
 
     /// Input messages `records` output records account for, used as the live backlog signal while
     /// load is being generated.
     #[must_use]
     pub fn input_messages_for_output_records(&self, records: u64) -> u64 {
-        (records / self.output_records_per_cycle()).saturating_mul(self.messages_per_cycle())
+        (records / self.output_records_per_cycle())
+            .checked_mul(self.messages_per_cycle())
+            .assured("the records counted here were produced by this same run")
     }
 
     fn validate(&self) -> Result<(), String> {

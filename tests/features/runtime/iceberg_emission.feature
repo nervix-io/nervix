@@ -48,6 +48,7 @@ Feature: Iceberg emission
       | 1            | 0             |
       | 3            | 0             |
 
+  @domain_execution_time
   Scenario Outline: Iceberg VALUES errors reject only the poison record before staging
     Given MQTT is running
     And Iceberg dependencies are running
@@ -57,10 +58,11 @@ Feature: Iceberg emission
       """
       user_id I64
       action STRING
+      clock_class STRING
       """
     And the leader node is configured with these NSPL commands
       """
-      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     When these NSPL commands are executed
       """
@@ -93,6 +95,7 @@ Feature: Iceberg emission
       CREATE INGESTOR mqtt_notifications
       FROM MQTT mqtt_ingress TOPIC iceberg_values_error_in_{{test_id}} MODE NO_ACK SEQUENTIAL
       ON QUIESCE DROP DECODE USING notification_codec
+      TIMESTAMP NOW
       TO notifications
       INHERIT ALL
       UNBRANCHED
@@ -119,7 +122,11 @@ Feature: Iceberg emission
       TO ICEBERG ON S3 s3_main TABLE values_error_notifications_{{test_id}}
       VALUES {
         'user_id' = input.user_id / input.denominator,
-        'action' = LOWER(input.action)
+        'action' = LOWER(input.action),
+        'clock_class' = CASE
+          WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN 'historical'
+          ELSE 'physical'
+        END
       }
       LOCATION 's3://nervix-iceberg/tables/values_error_notifications_{{test_id}}'
       CATALOG iceberg_catalog
@@ -132,7 +139,7 @@ Feature: Iceberg emission
           source_user_id = input.user_id
       ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
-      START;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     When these MQTT messages are rapidly published to topic "iceberg_values_error_in_{{test_id}}"
       """
@@ -147,11 +154,11 @@ Feature: Iceberg emission
     And the relay subscription does not receive a payload within "1s"
     And the Iceberg table "values_error_notifications_{{test_id}}" eventually contains a row
       """
-      {"user_id":5,"action":"healthy_a"}
+      {"user_id":5,"action":"healthy_a","clock_class":"historical"}
       """
     And the Iceberg table "values_error_notifications_{{test_id}}" eventually contains a row
       """
-      {"user_id":4,"action":"healthy_b"}
+      {"user_id":4,"action":"healthy_b","clock_class":"historical"}
       """
     And the Iceberg table "values_error_notifications_{{test_id}}" does not contain a row within "1s"
       """
@@ -595,6 +602,7 @@ Feature: Iceberg emission
       | 1            | 0             |
       | 3            | 0             |
 
+  @planned-graceful-handoff
   Scenario Outline: Iceberg emitter commits staged IPC batches during graceful shutdown
     Given MQTT is running
     And Iceberg dependencies are running

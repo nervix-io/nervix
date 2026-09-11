@@ -19,7 +19,11 @@ Feature: Resource-backed lookups
       """
     Then the last command output contains
       """
-      uploaded resource version 1
+      published resource version 1
+      """
+    And within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
+      """
+      DESCRIBE RESOURCE zip_codes VERSION 1;
       """
     When these NSPL commands are executed
       """
@@ -108,6 +112,13 @@ Feature: Resource-backed lookups
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
+      """
+    Then within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
+      """
+      DESCRIBE RESOURCE zip_codes VERSION 1;
+      """
+    When these NSPL commands are executed on the leader node
+      """
 
       CREATE SCHEMA zip_code_entry (
         zip STRING,
@@ -158,6 +169,13 @@ Feature: Resource-backed lookups
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
+      """
+    Then within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
+      """
+      DESCRIBE RESOURCE zip_codes VERSION 1;
+      """
+    When these NSPL commands are executed on the leader node
+      """
 
       CREATE SCHEMA zip_code_entry (
         zip STRING,
@@ -231,6 +249,13 @@ Feature: Resource-backed lookups
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
+      """
+    Then within "30s" node "node-1" eventually reports describe resource as "cluster_ready: true"
+      """
+      DESCRIBE RESOURCE zip_codes VERSION 1;
+      """
+    When these NSPL commands are executed on the leader node
+      """
 
       CREATE SCHEMA zip_code_entry (
         zip STRING,

@@ -1,13 +1,15 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{AckMode, AlterReingestor, CreateReingestor, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, alter_op_separator, alter_reingestor_operation,
-        completion_context, filter_where_clause, flushed_ingestor_outputs, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
-        reingestor_name, reingestor_ref, suggest_from, suggestions_from_errors, tok,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_op_separator,
+        alter_reingestor_operation, completion_context, completion_tokens, filter_where_clause,
+        flushed_ingestor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
+        lex_input, materialized_state_dependencies, reingestor_name, reingestor_ref, suggest_from,
+        suggestions_from_errors, tok,
     },
 };
 
@@ -73,7 +75,7 @@ pub fn parse_create_reingestor_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
@@ -86,20 +88,28 @@ pub fn parse_alter_reingestor_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_reingestor(
     input: &str,
 ) -> Result<CreateStatement<CreateReingestor>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_reingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
 pub fn parse_alter_reingestor(input: &str) -> Result<AlterReingestor, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_alter_reingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -110,9 +120,8 @@ pub fn suggest_create_reingestor(input: &str, cursor: usize) -> Vec<String> {
 
 pub fn suggest_alter_reingestor(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let (_, _, tokens) = match lex_input(&source) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
     let out = alter_reingestor_parser()
         .then_ignore(end())
@@ -125,6 +134,8 @@ pub fn suggest_alter_reingestor(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::FlushPolicy;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -267,9 +278,11 @@ mod tests {
             parsed.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
     }
 

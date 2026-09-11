@@ -5,12 +5,17 @@ pub(in crate::runtime) struct EndpointIngestor;
 impl EndpointIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
-        endpoint: CreateEndpoint,
-        ingestor: CreateIngestor,
+        plan: EndpointIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let EndpointIngestorStartPlan {
+            ingestor,
+            endpoint,
+            mode: _,
+        } = plan;
+        let domain = &ingestor.domain;
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -18,7 +23,7 @@ impl EndpointIngestor {
         }
 
         let route = {
-            let Some(execution) = runtime.executions.get(domain) else {
+            let Some(execution) = runtime.inner.executions.get(domain) else {
                 return Err(RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: "domain execution is not instantiated".to_string(),
@@ -26,12 +31,12 @@ impl EndpointIngestor {
             };
             execution
                 .endpoint_routes
-                .get(&endpoint.name)
+                .get(&endpoint)
                 .cloned()
                 .ok_or_else(|| RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
                     ingestor: ingestor.name.as_str().to_string(),
-                    reason: format!("endpoint '{}' is not instantiated", endpoint.name.as_str()),
+                    reason: format!("endpoint '{}' is not instantiated", endpoint.as_str()),
                 })?
         };
 
@@ -45,7 +50,10 @@ impl EndpointIngestor {
             runtime_key: key.clone(),
             quiesce: runtime
                 .ingestor_quiesce_control(domain, &ingestor.name)
-                .expect("scheduled endpoint ingestor must have quiesce control"),
+                .verified(
+                    "the runtime registers quiesce control for an ingestor before it starts the \
+                     task",
+                ),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),
             timestamp_source: ingestor.timestamp_source.clone(),
@@ -66,6 +74,7 @@ impl EndpointIngestor {
 
         for route_key in &route_keys {
             runtime
+                .inner
                 .endpoint_bindings
                 .entry(route_key.clone())
                 .or_default()
@@ -96,7 +105,7 @@ impl EndpointIngestor {
             }
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Endpoint {
                 route_keys,

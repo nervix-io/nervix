@@ -6,6 +6,7 @@ use lapin::{
     tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
+use nervix_models::QueueName;
 
 use super::*;
 
@@ -25,15 +26,12 @@ impl RabbitMqEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientRabbitMq,
         resolved: Option<&ResolvedClientConfig>,
-        queue: &Identifier,
+        queue: &QueueName,
         mode: BrokerPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
-        let channel = Self::channel_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
-        .await?;
+        let channel =
+            Self::channel_from_config(client_config_entries(resolved, client.config.as_slice()))
+                .await?;
         channel
             .queue_declare(
                 queue.as_str().into(),
@@ -143,7 +141,7 @@ impl RabbitMqEmitter {
 
     pub(super) async fn publish_records(
         &self,
-        queue: &Identifier,
+        queue: &QueueName,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
@@ -155,6 +153,80 @@ impl RabbitMqEmitter {
             return outcome;
         };
         outcome.delivered.reserve(records.len());
+        match self.mode {
+            BrokerPublishingMode::NoAck => {
+                Self::publish_unconfirmed(channel, queue, records, &mut outcome).await;
+            }
+            BrokerPublishingMode::Ack(confirmation) => {
+                Self::publish_confirmed(channel, queue, records, confirmation, &mut outcome).await;
+            }
+        }
+        outcome
+    }
+
+    /// `MODE NO_ACK`: the channel is not in confirm mode, so the publisher confirm resolves to the
+    /// channel's acceptance and a record is delivered as soon as the broker takes it.
+    async fn publish_unconfirmed(
+        channel: &lapin::Channel,
+        queue: &QueueName,
+        records: Vec<EncodedBrokerRecord>,
+        outcome: &mut PerRecordPublishOutcome,
+    ) {
+        for record in records {
+            tokio::task::consume_budget().await;
+            let position = record.position();
+            let confirmation = match await_emitter_confirmation(
+                &record.acks,
+                Self::publish_message(channel, queue.as_str(), &record.payload, &record.headers),
+            )
+            .await
+            {
+                Ok(confirmation) => confirmation,
+                Err(error) => {
+                    outcome.fail(error);
+                    return;
+                }
+            };
+            match await_emitter_confirmation(&record.acks, confirmation).await {
+                Ok(Confirmation::NotRequested | Confirmation::Ack(None)) => {
+                    outcome.deliver(position);
+                }
+                Ok(Confirmation::Ack(Some(returned))) => {
+                    if Self::is_returned_record_rejection(&returned) {
+                        outcome.reject(position, Self::returned_message_reason(&returned));
+                    } else {
+                        outcome.fail(Self::returned_message_error(&returned));
+                        return;
+                    }
+                }
+                Ok(Confirmation::Nack(_)) => {
+                    outcome.fail(emitter_publish_error(
+                        "rabbitmq channel acceptance returned nack",
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    outcome.fail(emitter_publish_error(error));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `MODE ACK`: the channel is in confirm mode, at most `max_in_flight` publisher confirms are
+    /// outstanding at once, and every one is awaited before the batch finishes. The window carries
+    /// the confirmation settings, so the drain below never has to ask a mode that has no
+    /// confirmations what its timeout is.
+    async fn publish_confirmed(
+        channel: &lapin::Channel,
+        queue: &QueueName,
+        records: Vec<EncodedBrokerRecord>,
+        AckConfirmation {
+            max_in_flight,
+            timeout,
+        }: AckConfirmation,
+        outcome: &mut PerRecordPublishOutcome,
+    ) {
         let mut pending: VecDeque<PendingRabbitMqConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
@@ -164,7 +236,7 @@ impl RabbitMqEmitter {
                     .map(|confirmation| confirmation.acks.clone())
                     .chain(std::iter::once(record.acks.clone())),
             );
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let confirmation = match await_emitter_confirmation(
                 &enqueue_acks,
                 Self::publish_message(channel, queue.as_str(), &record.payload, &record.headers),
@@ -174,67 +246,29 @@ impl RabbitMqEmitter {
                 Ok(confirmation) => confirmation,
                 Err(error) => {
                     outcome.fail(error);
-                    return outcome;
+                    return;
                 }
             };
-            match self.mode {
-                BrokerPublishingMode::NoAck => {
-                    match await_emitter_confirmation(&record.acks, confirmation).await {
-                        Ok(Confirmation::NotRequested | Confirmation::Ack(None)) => {
-                            outcome.deliver(position);
-                        }
-                        Ok(Confirmation::Ack(Some(returned))) => {
-                            if Self::is_returned_record_rejection(&returned) {
-                                outcome.reject(position, Self::returned_message_reason(&returned));
-                            } else {
-                                outcome.fail(Self::returned_message_error(&returned));
-                                return outcome;
-                            }
-                        }
-                        Ok(Confirmation::Nack(_)) => {
-                            outcome.fail(emitter_publish_error(
-                                "rabbitmq channel acceptance returned nack",
-                            ));
-                            return outcome;
-                        }
-                        Err(error) => {
-                            outcome.fail(emitter_publish_error(error));
-                            return outcome;
-                        }
-                    }
-                }
-                BrokerPublishingMode::Ack {
-                    max_in_flight,
-                    timeout,
-                } => {
-                    pending.push_back(PendingRabbitMqConfirmation {
-                        position,
-                        acks: record.acks,
-                        deadline: Instant::now() + timeout,
-                        confirmation,
-                    });
-                    if pending.len() >= max_in_flight
-                        && let Err(error) =
-                            Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
-                    {
-                        outcome.fail(error);
-                        return outcome;
-                    }
-                }
+            pending.push_back(PendingRabbitMqConfirmation {
+                position,
+                acks: record.acks,
+                deadline: Instant::now() + timeout,
+                confirmation,
+            });
+            if pending.len() >= max_in_flight.get()
+                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await
+            {
+                outcome.fail(error);
+                return;
             }
         }
         while !pending.is_empty() {
             tokio::task::consume_budget().await;
-            let timeout = match self.mode {
-                BrokerPublishingMode::Ack { timeout, .. } => timeout,
-                BrokerPublishingMode::NoAck => unreachable!("NO_ACK has no confirmations"),
-            };
-            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
+            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await {
                 outcome.fail(error);
-                return outcome;
+                return;
             }
         }
-        outcome
     }
 
     async fn confirm_oldest(
@@ -315,6 +349,13 @@ impl RabbitMqEmitter {
         }
     }
 
+    /// Collects the records behind the oldest one whose confirmation already resolved.
+    ///
+    /// The caller reached here because the oldest record failed or timed out, and it is about to
+    /// return that failure for the whole publish. Records behind it that already succeeded or were
+    /// individually rejected are recorded so the retry does not send them again. Anything else is
+    /// deliberately left in neither list: its failure is the same infrastructure failure the
+    /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingRabbitMqConfirmation>,
         outcome: &mut PerRecordPublishOutcome,
@@ -328,9 +369,10 @@ impl RabbitMqEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready RabbitMQ confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(Confirmation::Ack(None)) => outcome.deliver(confirmation.position),
                 Ok(Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)))

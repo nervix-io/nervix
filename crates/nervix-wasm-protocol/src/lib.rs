@@ -2,8 +2,17 @@
 //!
 //! Decoding first produces verified borrowed views. Large Arrow IPC vectors stay
 //! borrowed from the FlatBuffer until a caller explicitly asks for an owned model.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The FlatBuffers schema of the ABI, its encoders, its verified decoders, and the
+//!   borrowed views decoding produces.
+//! - **Depends on.** `flatbuffers`.
+//! - **Must not know.** Anything in Nervix, deliberately. Guests link this crate, so a Model or a
+//!   name type named here would pull the server's vocabulary into every guest.
 
 use flatbuffers::{Allocator, FlatBufferBuilder, WIPOffset};
+use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
 
 #[allow(
@@ -341,9 +350,17 @@ fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
             actual: bytes.len(),
         });
     };
-    let declared = u32::from_le_bytes(prefix.try_into().expect("prefix has exactly four bytes"));
-    let declared = usize::try_from(declared).unwrap_or(usize::MAX);
-    let actual = bytes.len().saturating_sub(4);
+    let declared = u32::from_le_bytes(
+        prefix
+            .try_into()
+            .verified("the let-else above returned unless the split produced a four-byte prefix"),
+    );
+    let declared = usize::try_from(declared)
+        .assured("u32 fits usize on every architecture supported by the WASM protocol");
+    let actual = bytes
+        .len()
+        .checked_sub(4)
+        .verified("the let-else above returned unless the buffer holds a four-byte prefix");
     if declared != actual {
         return Err(ProtocolError::LengthMismatch { declared, actual });
     }
@@ -484,39 +501,84 @@ fn build_processor_type<'a, A: Allocator + 'a>(
     builder: &mut FlatBufferBuilder<'a, A>,
     ty: &ProcessorType,
 ) -> WIPOffset<wire::ProcessorType<'a>> {
-    let (kind, element, array_len) = match ty {
-        ProcessorType::U8 => (wire::ProcessorTypeKind::U8, None, 0),
-        ProcessorType::I8 => (wire::ProcessorTypeKind::I8, None, 0),
-        ProcessorType::U16 => (wire::ProcessorTypeKind::U16, None, 0),
-        ProcessorType::I16 => (wire::ProcessorTypeKind::I16, None, 0),
-        ProcessorType::U32 => (wire::ProcessorTypeKind::U32, None, 0),
-        ProcessorType::I32 => (wire::ProcessorTypeKind::I32, None, 0),
-        ProcessorType::U64 => (wire::ProcessorTypeKind::U64, None, 0),
-        ProcessorType::I64 => (wire::ProcessorTypeKind::I64, None, 0),
-        ProcessorType::Bool => (wire::ProcessorTypeKind::Bool, None, 0),
-        ProcessorType::String => (wire::ProcessorTypeKind::String, None, 0),
-        ProcessorType::Datetime => (wire::ProcessorTypeKind::Datetime, None, 0),
-        ProcessorType::F32 => (wire::ProcessorTypeKind::F32, None, 0),
-        ProcessorType::F64 => (wire::ProcessorTypeKind::F64, None, 0),
-        ProcessorType::Array { element, len } => (
-            wire::ProcessorTypeKind::Array,
-            Some(build_processor_type(builder, element)),
-            *len,
-        ),
-        ProcessorType::Vec { element } => (
-            wire::ProcessorTypeKind::Vec,
-            Some(build_processor_type(builder, element)),
-            0,
-        ),
-    };
-    wire::ProcessorType::create(
-        builder,
-        &wire::ProcessorTypeArgs {
-            kind,
-            element,
-            array_len,
+    let args = match ty {
+        ProcessorType::U8 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::U8,
+            element: None,
+            array_len: 0,
         },
-    )
+        ProcessorType::I8 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::I8,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::U16 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::U16,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::I16 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::I16,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::U32 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::U32,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::I32 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::I32,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::U64 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::U64,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::I64 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::I64,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::Bool => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::Bool,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::String => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::String,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::Datetime => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::Datetime,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::F32 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::F32,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::F64 => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::F64,
+            element: None,
+            array_len: 0,
+        },
+        ProcessorType::Array { element, len } => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::Array,
+            element: Some(build_processor_type(builder, element)),
+            array_len: *len,
+        },
+        ProcessorType::Vec { element } => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::Vec,
+            element: Some(build_processor_type(builder, element)),
+            array_len: 0,
+        },
+    };
+    wire::ProcessorType::create(builder, &args)
 }
 
 fn build_ack_sidecar<'a, A: Allocator + 'a>(
@@ -818,9 +880,9 @@ mod tests {
             panic!("expected input view");
         };
         assert_eq!(view.arrow_ipc_batch(), [0, 1, 2, 255]);
-        let start = encoded.as_ptr() as usize;
+        let start = encoded.as_ptr().addr();
         let end = start + encoded.len();
-        let borrowed = view.arrow_ipc_batch().as_ptr() as usize;
+        let borrowed = view.arrow_ipc_batch().as_ptr().addr();
         assert!((start..end).contains(&borrowed));
         assert_eq!(Envelope::decode(&encoded).expect("must own"), envelope);
     }
@@ -863,7 +925,7 @@ mod tests {
             },
         );
         let outputs = builder.create_vector(&[routed]);
-        let generated = builder.create_vector(&[] as &[u8]);
+        let generated = builder.create_vector::<u8>(&[]);
         let output = wire::OutputEnvelope::create(
             &mut builder,
             &wire::OutputEnvelopeArgs {

@@ -1,16 +1,30 @@
+//! A client session against a Nervix server.
+//!
+//! Layer: edges.
+//!
+//! - **Owns.** Connecting to the session service, TLS selection, submitting statements, transaction
+//!   state, completion suggestions, subscription streams and resource upload.
+//! - **Depends on.** The proto wire types, the language layer — an edge may name the parser, and
+//!   this one does so for client-side parsing and completion — and the vocabulary.
+//! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
+//!   it learns arrives over the session API.
+
 use std::{
     collections::VecDeque,
-    fmt,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-pub use nervix_models::SubscriptionDeliveryBehavior;
+use error_stack::Report;
+use meticulous::{OptionExt as _, ResultExt as _};
+pub use nervix_models::{ResourceUploadIdentity, SubscriptionDeliveryBehavior};
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
+use nervix_recovery::{Discarded as _, NoReceiver as _};
 use proto::{
     AttachTransactionRequest, CommandRequest, ListDomainsRequest, SessionRequest,
     session_service_client::SessionServiceClient,
@@ -19,7 +33,7 @@ use rustls::crypto::aws_lc_rs;
 use thiserror::Error;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
     time::sleep,
@@ -40,6 +54,26 @@ pub struct Diagnostic {
     pub span_end: u32,
 }
 
+#[derive(Debug, Error)]
+#[error("failed to parse the statement batch: {message}")]
+pub struct QuerySplitError {
+    message: String,
+}
+
+/// Splits a batch into the exact NSPL source slices that should be submitted separately.
+pub fn split_query_statements(query: &str) -> Result<Vec<&str>, QuerySplitError> {
+    nervix_nspl::client_statement::parse_client_statement_sources(query)
+        .map(|statements| {
+            statements
+                .iter()
+                .map(|statement| statement.source(query))
+                .collect()
+        })
+        .map_err(|error| QuerySplitError {
+            message: error.to_string(),
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub success: bool,
@@ -50,7 +84,23 @@ pub struct CommandOutcome {
     pub leader_grpc_uri: Option<String>,
     pub already_existed: bool,
     pub transaction: Option<TransactionStatus>,
+    pub resource_upload: Option<ResourceUploadOutcome>,
     pub results: Vec<CommandOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceUploadOutcome {
+    pub identity: ResourceUploadIdentity,
+    pub version: u64,
+    pub published: bool,
+    pub cluster_ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceReadiness {
+    pub version: u64,
+    pub cluster_ready: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +171,8 @@ pub struct SubscriptionEvent {
     pub payload: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerEventLevel {
     Unspecified,
     Info,
@@ -187,6 +238,10 @@ pub enum ClientError {
     BuildUploadArchive,
     #[error("upload request failed: {0}")]
     UploadResource(#[source] Box<tonic::Status>),
+    #[error("resource readiness wait failed: {0}")]
+    WaitForResourceReady(#[source] Box<tonic::Status>),
+    #[error("resource readiness timeout is too large")]
+    ResourceReadinessTimeoutTooLarge,
     #[error("failed to load TLS CA certificate")]
     LoadTlsCaCertificate(#[source] std::io::Error),
 }
@@ -283,7 +338,10 @@ impl GrpcConnector {
             return Err(ClientError::TlsRequired);
         }
         if is_https {
-            let _ = aws_lc_rs::default_provider().install_default();
+            aws_lc_rs::default_provider().install_default().discarded(
+                "a provider another client installed first is the one this client would have \
+                 installed",
+            );
             let mut tls = ClientTlsConfig::new();
             if let Some(pem) = self.options.ca_certificate_pem.clone() {
                 tls = tls.ca_certificate(Certificate::from_pem(pem));
@@ -333,7 +391,7 @@ impl Client {
         let (domain_tx, domain_rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let known_servers = current_server.iter().cloned().collect();
-        let request_tx = start_session(
+        let session = start_session(
             channel,
             connect_options.basic_authorization(),
             pending.clone(),
@@ -347,11 +405,11 @@ impl Client {
             current_server: Mutex::new(current_server),
             known_servers: Mutex::new(known_servers),
             grpc_connector: GrpcConnector::new(connect_options),
-            request_tx: Mutex::new(request_tx.0),
+            request_tx: Mutex::new(session.request_tx),
             pending,
             command_lock: Mutex::new(()),
             transaction: Mutex::new(None),
-            response_task: Mutex::new(Some(request_tx.1)),
+            response_task: Mutex::new(Some(session.response_task)),
             subscription_tx,
             subscription_rx: Mutex::new(subscription_rx),
             server_tx,
@@ -430,7 +488,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -533,7 +593,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -587,7 +649,7 @@ impl Client {
             let parsed = statements
                 .into_iter()
                 .next()
-                .expect("non-empty parsed statements must contain one statement");
+                .verified("the empty and multi-statement cases above already returned");
             let source = parsed.source(query).to_string();
             return self
                 .execute_client_statement(parsed.statement, &source)
@@ -645,7 +707,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -716,7 +780,9 @@ impl Client {
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
         if request_tx.send(request).await.is_err() {
-            let _ = self.inner.pending.lock().await.pop_back();
+            self.inner.pending.lock().await.pop_back().discarded(
+                "a response that arrived first already took this request's pending entry",
+            );
             return Err(ClientError::SessionClosed);
         }
         rx.await.map_err(|_| ClientError::SessionClosed)
@@ -728,10 +794,40 @@ impl Client {
         directory: impl AsRef<Path>,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
     ) -> Result<CommandOutcome, ClientError> {
+        self.upload_resource_from_directory_with_identity(
+            identifier,
+            directory,
+            ResourceUploadIdentity::parse(uuid::Uuid::now_v7().to_string())
+                .assured("a UUID string satisfies the upload identity grammar"),
+            on_progress,
+        )
+        .await
+    }
+
+    pub async fn upload_resource_from_directory_with_identity(
+        &self,
+        identifier: &str,
+        directory: impl AsRef<Path>,
+        upload_identity: ResourceUploadIdentity,
+        on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
+    ) -> Result<CommandOutcome, ClientError> {
         let directory = expand_user_path(directory.as_ref());
         if !directory.is_dir() {
             return Err(ClientError::BuildUploadArchive);
         }
+        let upload_archive = tempfile::NamedTempFile::new()
+            .map_err(|_| ClientError::BuildUploadArchive)?
+            .into_temp_path();
+        let archive_file = File::create(&upload_archive)
+            .await
+            .map_err(|_| ClientError::BuildUploadArchive)?;
+        build_upload_archive(&directory, archive_file)
+            .await
+            .map_err(|_| ClientError::BuildUploadArchive)?;
+        let archive_bytes = tokio::fs::metadata(&upload_archive)
+            .await
+            .map_err(|_| ClientError::BuildUploadArchive)?
+            .len();
 
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             tokio::task::consume_budget().await;
@@ -742,35 +838,35 @@ impl Client {
             let (tx, rx) = mpsc::channel(8);
             let request_identifier = identifier.to_string();
             let request_domain = self.domain().await;
-            let request_directory = directory.clone();
+            let request_upload_identity = upload_identity.clone();
+            let mut archive_reader = File::open(&upload_archive)
+                .await
+                .map_err(|_| ClientError::BuildUploadArchive)?;
             let progress_callback = on_progress.clone();
             tokio::spawn(async move {
-                let (writer, mut reader) = tokio::io::duplex(64 * 1024);
-                let build_task = tokio::spawn(async move {
-                    let _ = relay_upload_archive(&request_directory, writer).await;
-                });
-                let _ = tx
-                    .send(proto::UploadResourceRequest {
-                        event: Some(proto::upload_resource_request::Event::Start(
-                            proto::UploadResourceStart {
-                                name: request_identifier,
-                                total_bytes: 0,
-                                domain: request_domain,
-                            },
-                        )),
-                    })
-                    .await;
+                tx.send(proto::UploadResourceRequest {
+                    event: Some(proto::upload_resource_request::Event::Start(
+                        proto::UploadResourceStart {
+                            name: request_identifier,
+                            total_bytes: archive_bytes,
+                            domain: request_domain,
+                            upload_identity: request_upload_identity.to_string(),
+                        },
+                    )),
+                })
+                .await
+                .means_peer_left("resource upload stream");
                 let mut buffer = vec![0u8; 64 * 1024];
                 loop {
                     tokio::task::consume_budget().await;
-                    let read = match reader.read(&mut buffer).await {
+                    let read = match archive_reader.read(&mut buffer).await {
                         Ok(read) => read,
                         Err(_) => return,
                     };
                     if read == 0 {
                         break;
                     }
-                    progress_callback(u64::try_from(read).unwrap_or(0));
+                    progress_callback(read.arch_into());
                     if tx
                         .send(proto::UploadResourceRequest {
                             event: Some(proto::upload_resource_request::Event::Chunk(
@@ -783,16 +879,30 @@ impl Client {
                         return;
                     }
                 }
-                let _ = build_task.await;
             });
-            let response = client
+            let response = match client
                 .upload_resource(request_with_auth(
                     ReceiverStream::new(rx),
                     self.inner.grpc_connector.options.basic_authorization(),
                 )?)
                 .await
-                .map_err(|status| ClientError::UploadResource(Box::new(status)))?
-                .into_inner();
+            {
+                Ok(response) => response.into_inner(),
+                Err(status)
+                    if upload_status_is_retryable(&status)
+                        && self.await_leader_election_retry(attempt).await =>
+                {
+                    match self.recover_session().await {
+                        Ok(SessionRecovery::Ready) => continue,
+                        Ok(SessionRecovery::TransactionObserved(outcome)) => return Ok(*outcome),
+                        Ok(SessionRecovery::Unavailable) => {
+                            return Err(ClientError::UploadResource(Box::new(status)));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(status) => return Err(ClientError::UploadResource(Box::new(status))),
+            };
             let outcome = CommandOutcome {
                 success: response.success,
                 kind: match proto::CommandResultKind::try_from(response.kind).ok() {
@@ -810,6 +920,12 @@ impl Client {
                     .then_some(response.leader_grpc_uri),
                 already_existed: false,
                 transaction: None,
+                resource_upload: Some(ResourceUploadOutcome {
+                    identity: upload_identity.clone(),
+                    version: response.version,
+                    published: response.published,
+                    cluster_ready: response.cluster_ready,
+                }),
                 results: Vec::new(),
             };
             let leader_grpc_uri = match outcome.leader_routing() {
@@ -845,13 +961,54 @@ impl Client {
             leader_grpc_uri: None,
             already_existed: false,
             transaction: None,
+            resource_upload: Some(ResourceUploadOutcome {
+                identity: upload_identity,
+                version: 0,
+                published: false,
+                cluster_ready: false,
+            }),
             results: Vec::new(),
+        })
+    }
+
+    pub async fn wait_for_resource_ready(
+        &self,
+        identifier: &str,
+        version: u64,
+        timeout: Duration,
+    ) -> Result<ResourceReadiness, ClientError> {
+        let current_server = self.inner.current_server.lock().await.clone();
+        let server = current_server.ok_or(ClientError::SessionClosed)?;
+        let channel = self.inner.grpc_connector.connect(&server).await?;
+        let mut client = SessionServiceClient::new(channel);
+        let timeout_millis = u64::try_from(timeout.as_millis())
+            .map_err(|_| ClientError::ResourceReadinessTimeoutTooLarge)?;
+        let response = client
+            .wait_for_resource_ready(request_with_auth(
+                proto::WaitForResourceReadyRequest {
+                    name: identifier.to_string(),
+                    version,
+                    domain: self.domain().await,
+                    timeout_millis,
+                },
+                self.inner.grpc_connector.options.basic_authorization(),
+            )?)
+            .await
+            .map_err(|status| ClientError::WaitForResourceReady(Box::new(status)))?
+            .into_inner();
+        Ok(ResourceReadiness {
+            version: response.version,
+            cluster_ready: response.cluster_ready,
+            message: response.message,
         })
     }
 
     async fn reconnect(&self, server: &str) -> Result<(), ClientError> {
         let channel = self.inner.grpc_connector.connect(server).await?;
-        let (request_tx, response_task) = start_session(
+        let StartedSession {
+            request_tx,
+            response_task,
+        } = start_session(
             channel,
             self.inner.grpc_connector.options.basic_authorization(),
             self.inner.pending.clone(),
@@ -917,7 +1074,7 @@ async fn start_session(
     subscription_tx: mpsc::Sender<SubscriptionEvent>,
     server_tx: mpsc::Sender<ServerEvent>,
     domain_tx: mpsc::Sender<Vec<DomainInfo>>,
-) -> Result<(mpsc::Sender<SessionRequest>, JoinHandle<()>), ClientError> {
+) -> Result<StartedSession, ClientError> {
     let mut client = SessionServiceClient::new(channel);
     let (request_tx, request_rx) = mpsc::channel(32);
     let mut response = client
@@ -932,6 +1089,8 @@ async fn start_session(
         while let Ok(Some(session_response)) = response.message().await {
             tokio::task::consume_budget().await;
             match session_response.event {
+                // A caller that stopped reading its events has left the session, and ending
+                // this loop is what closes it. The send is the only place that fact arrives.
                 Some(proto::session_response::Event::Subscription(event)) => {
                     match subscription_tx.send(event.into()).await {
                         Ok(()) => {}
@@ -947,7 +1106,7 @@ async fn start_session(
                 Some(proto::session_response::Event::Result(result)) => {
                     let pending = pending.lock().await.pop_front();
                     if let Some(PendingResponse::Command(tx)) = pending {
-                        let _ = tx.send(result.into());
+                        tx.send(result.into()).means_peer_left("command requester");
                     }
                 }
                 Some(proto::session_response::Event::Domains(domains)) => {
@@ -956,7 +1115,7 @@ async fn start_session(
                     if response_to_request {
                         let pending = pending.lock().await.pop_front();
                         if let Some(PendingResponse::DomainList(tx)) = pending {
-                            let _ = tx.send(domains);
+                            tx.send(domains).means_peer_left("domain list requester");
                         }
                     } else if domain_tx.send(domains).await.is_err() {
                         break;
@@ -979,7 +1138,7 @@ async fn start_session(
                                 },
                             })
                             .collect();
-                        let _ = tx.send(suggestions);
+                        tx.send(suggestions).means_peer_left("suggestion requester");
                     }
                 }
                 #[cfg(not(feature = "autocomplete"))]
@@ -991,7 +1150,16 @@ async fn start_session(
         }
         clear_pending_responses(&pending).await;
     });
-    Ok((request_tx, response_task))
+    Ok(StartedSession {
+        request_tx,
+        response_task,
+    })
+}
+
+/// A live session: the channel commands are written to, and the task draining its responses.
+struct StartedSession {
+    request_tx: mpsc::Sender<SessionRequest>,
+    response_task: JoinHandle<()>,
 }
 
 fn request_with_auth<T>(
@@ -1016,9 +1184,10 @@ fn expand_user_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     if raw == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
+        return match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home),
+            None => path.to_path_buf(),
+        };
     }
     if let Some(stripped) = raw.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
@@ -1028,7 +1197,21 @@ fn expand_user_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-async fn relay_upload_archive(directory: &Path, writer: DuplexStream) -> Result<(), ClientError> {
+fn upload_status_is_retryable(status: &tonic::Status) -> bool {
+    if let tonic::Code::Cancelled
+    | tonic::Code::Unknown
+    | tonic::Code::DeadlineExceeded
+    | tonic::Code::Unavailable = status.code()
+    {
+        return true;
+    }
+    false
+}
+
+async fn build_upload_archive<W>(directory: &Path, writer: W) -> Result<(), Report<ClientError>>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
     let entries = collect_upload_entries(directory)?;
     let mut builder = AsyncTarBuilder::new(writer);
     builder.mode(HeaderMode::Deterministic);
@@ -1085,7 +1268,8 @@ async fn relay_upload_archive(directory: &Path, writer: DuplexStream) -> Result<
         .await
         .map_err(|_| ClientError::BuildUploadArchive);
     result?;
-    shutdown_result
+    shutdown_result?;
+    Ok(())
 }
 
 enum UploadArchiveEntry {
@@ -1179,6 +1363,7 @@ fn command_ok_outcome(message: String) -> CommandOutcome {
         leader_grpc_uri: None,
         already_existed: false,
         transaction: None,
+        resource_upload: None,
         results: Vec::new(),
     }
 }
@@ -1193,6 +1378,7 @@ fn command_error_outcome(message: String) -> CommandOutcome {
         leader_grpc_uri: None,
         already_existed: false,
         transaction: None,
+        resource_upload: None,
         results: Vec::new(),
     }
 }
@@ -1205,11 +1391,10 @@ fn recovered_transaction_outcome(mut outcome: CommandOutcome) -> CommandOutcome 
             .map(|result| result.message.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        outcome.diagnostics = outcome
-            .results
-            .last()
-            .map(|result| result.diagnostics.clone())
-            .unwrap_or_default();
+        outcome.diagnostics = match outcome.results.last() {
+            Some(result) => result.diagnostics.clone(),
+            None => Vec::new(),
+        };
     }
     if outcome.transaction.as_ref().map(|status| status.state) == Some(TransactionState::Committed)
     {
@@ -1292,6 +1477,7 @@ impl From<proto::CommandResult> for CommandOutcome {
             leader_grpc_uri: (!value.leader_grpc_uri.is_empty()).then_some(value.leader_grpc_uri),
             already_existed: value.already_existed,
             transaction: value.transaction.map(Into::into),
+            resource_upload: None,
             results: value.results.into_iter().map(Into::into).collect(),
         }
     }
@@ -1372,18 +1558,6 @@ impl CommandOutcomeKind {
     }
 }
 
-impl fmt::Display for ServerEventLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::Unspecified => "UNSPECIFIED",
-            Self::Info => "INFO",
-            Self::Warn => "WARN",
-            Self::Error => "ERROR",
-        };
-        f.write_str(label)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1391,6 +1565,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use meticulous::ResultExt as _;
     use tokio::sync::{Mutex, mpsc, oneshot};
     use triomphe::Arc;
 
@@ -1399,8 +1574,20 @@ mod tests {
         Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
         SubscriptionEvent, SubscriptionRequest, TlsRequirement, TransactionState,
         TransactionStatus, clear_pending_responses, expand_user_path, proto, reconnect_candidates,
-        recovered_transaction_outcome, transaction_operation_was_observed,
+        recovered_transaction_outcome, split_query_statements, transaction_operation_was_observed,
+        upload_status_is_retryable,
     };
+
+    #[test]
+    fn statement_splitting_returns_exact_source_slices() {
+        let query = "USE prod; LIST DOMAINS;";
+
+        assert_eq!(
+            split_query_statements(query)
+                .assured("the literal statement batch is valid current NSPL"),
+            ["USE prod;", "LIST DOMAINS;"]
+        );
+    }
 
     fn test_client(domain: &str) -> Client {
         let (request_tx, request_rx) = mpsc::channel(1);
@@ -1514,7 +1701,7 @@ mod tests {
                 span_start: 3,
                 span_end: 7,
             }],
-            kind: proto::CommandResultKind::NotLeader as i32,
+            kind: i32::from(proto::CommandResultKind::NotLeader),
             leader: "node-2".to_string(),
             leader_grpc_uri: "http://127.0.0.1:47393".to_string(),
             already_existed: true,
@@ -1523,7 +1710,7 @@ mod tests {
             transaction: Some(proto::TransactionStatus {
                 id: "tx-1".to_string(),
                 domain: "tenant".to_string(),
-                state: proto::TransactionState::Open as i32,
+                state: i32::from(proto::TransactionState::Open),
                 pending_count: 2,
                 completed_count: 0,
                 total_count: 2,
@@ -1565,7 +1752,7 @@ mod tests {
         assert_eq!(subscription.payload, "{\"id\":42}");
 
         let server = ServerEvent::from(proto::ServerEvent {
-            level: proto::ServerEventLevel::Warn as i32,
+            level: i32::from(proto::ServerEventLevel::Warn),
             message: "watch out".to_string(),
         });
         assert_eq!(
@@ -1616,6 +1803,7 @@ mod tests {
             leader_grpc_uri: None,
             already_existed: false,
             transaction: None,
+            resource_upload: None,
             results: Vec::new(),
         };
         assert_eq!(outcome.leader_routing(), LeaderRouting::AwaitElection);
@@ -1675,6 +1863,7 @@ mod tests {
                 error: None,
                 failing_step: None,
             }),
+            resource_upload: None,
             results: vec![CommandOutcome {
                 success: true,
                 kind: CommandOutcomeKind::Ok,
@@ -1684,6 +1873,7 @@ mod tests {
                 leader_grpc_uri: None,
                 already_existed: false,
                 transaction: None,
+                resource_upload: None,
                 results: Vec::new(),
             }],
         });
@@ -1796,5 +1986,22 @@ mod tests {
             expand_user_path(Path::new("/tmp/proto")),
             PathBuf::from("/tmp/proto")
         );
+    }
+
+    #[test]
+    fn upload_retries_transport_statuses_that_can_hide_a_published_response() {
+        for code in [
+            tonic::Code::Cancelled,
+            tonic::Code::Unknown,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Unavailable,
+        ] {
+            assert!(upload_status_is_retryable(&tonic::Status::new(
+                code, "lost"
+            )));
+        }
+        assert!(!upload_status_is_retryable(
+            &tonic::Status::invalid_argument("permanent",)
+        ));
     }
 }

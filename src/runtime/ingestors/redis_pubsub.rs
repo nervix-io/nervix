@@ -7,12 +7,18 @@ pub(in crate::runtime) struct RedisPubSubIngestor;
 impl RedisPubSubIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
-        client: CreateClientRedis,
-        ingestor: CreateIngestor,
+        plan: RedisPubSubIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let RedisPubSubIngestorStartPlan {
+            ingestor,
+            client,
+            channel,
+            mode: _,
+        } = plan;
+        let domain = &ingestor.domain;
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
@@ -34,16 +40,6 @@ impl RedisPubSubIngestor {
             ingestor: ingestor.name.as_str().to_string(),
             reason,
         })?;
-        let channel = match &ingestor.source {
-            IngestSource::RedisPubSub { channel, .. } => channel.clone(),
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected Redis Pub/Sub ingestor source".to_string(),
-                });
-            }
-        };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
@@ -56,7 +52,9 @@ impl RedisPubSubIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled Redis Pub/Sub ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -64,7 +62,7 @@ impl RedisPubSubIngestor {
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
         let task_channel = channel.clone();
-        let task_events = runtime.events.clone();
+        let task_events = runtime.events().clone();
         let task_addr = addr.clone();
         let task_config = resolved_client.entries.clone();
         let task_client_mounts = resolved_client.mounts.clone();
@@ -90,18 +88,23 @@ impl RedisPubSubIngestor {
                 {
                     break;
                 }
-                if task_runtime.ingestor_faults.is_failed(&task_ingestor) {
+                if task_runtime
+                    .inner
+                    .fault_injection
+                    .ingestor_is_failed(&task_ingestor)
+                {
                     continue;
                 }
                 if task_quiesce.should_suspend_intake() {
-                    let _ = task_runtime
+                    task_runtime
                         .flush_ingest_collector(
                             &task_domain,
                             &task_ingestor,
                             &branched_senders,
                             &mut collector,
                         )
-                        .await;
+                        .await
+                        .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
@@ -190,13 +193,13 @@ impl RedisPubSubIngestor {
                             })
                             .await
                         {
-                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                            task_events.report_error(format!(
                                 "failed to dispatch buffered redis pubsub payload for ingestor \
                                  '{}' in domain '{}': {}",
                                 task_ingestor.as_str(),
                                 task_domain.as_str(),
                                 error
-                            )));
+                            ));
                         }
                         continue;
                     }
@@ -206,27 +209,29 @@ impl RedisPubSubIngestor {
                     tokio::select! {
                         _ = task_quiesce.wait_for_change() => {
                             if task_quiesce.should_suspend_intake() {
-                                let _ = task_runtime
+                                task_runtime
                                     .flush_ingest_collector(
                                         &task_domain,
                                         &task_ingestor,
                                         &branched_senders,
                                         &mut collector,
                                     )
-                                    .await;
+                                    .await
+                                    .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                                 break;
                             }
                         }
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                let _ = task_runtime
+                                task_runtime
                                     .flush_ingest_collector(
                                         &task_domain,
                                         &task_ingestor,
                                         &branched_senders,
                                         &mut collector,
                                     )
-                                    .await;
+                                    .await
+                                    .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                                 break 'outer;
                             }
                         }
@@ -240,12 +245,12 @@ impl RedisPubSubIngestor {
                                 )
                                 .await
                             {
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
+                                task_events.report_error(format!(
                                     "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                     task_ingestor.as_str(),
                                     task_domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                         }
                         message = relay.next() => {
@@ -265,7 +270,7 @@ impl RedisPubSubIngestor {
 
                                     let payload = BufferedIngestPayload::new(
                                         payload,
-                                        BufferedIngestMetadata::Headers(IngestHeaders::new()),
+                                        BufferedIngestMetadata::without_headers(),
                                     );
                                     if let IngestorQuiesceIntake::Dispatch(payload) =
                                         task_quiesce.intake(0, payload, false)
@@ -285,12 +290,12 @@ impl RedisPubSubIngestor {
                                             })
                                             .await
                                         {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            task_events.report_error(format!(
                                                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                                                 task_ingestor.as_str(),
                                                 task_domain.as_str(),
                                                 error
-                                            )));
+                                            ));
                                         }
                                             if collector.len() >= INGEST_GROUP_MAX_ROWS
                                                 && let Err(error) = task_runtime
@@ -302,26 +307,27 @@ impl RedisPubSubIngestor {
                                                     )
                                                     .await
                                             {
-                                                let _ = task_events.send(RuntimeEvent::Error(
+                                                task_events.report_error(
                                                     format!(
                                                         "failed to flush messages for ingestor '{}' in domain '{}': {}",
                                                         task_ingestor.as_str(),
                                                         task_domain.as_str(),
                                                         error
                                                     ),
-                                                ));
+                                                );
                                             }
                                     }
                                 }
                                 None => {
-                                    let _ = task_runtime
+                                    task_runtime
                                         .flush_ingest_collector(
                                             &task_domain,
                                             &task_ingestor,
                                             &branched_senders,
                                             &mut collector,
                                         )
-                                        .await;
+                                        .await
+                                        .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
                                     task_runtime.record_ingestor_transient_error(
                                         &task_domain,
                                         &task_ingestor,
@@ -350,7 +356,7 @@ impl RedisPubSubIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,

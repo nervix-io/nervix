@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use nervix_models::{DomainName, IngestorName};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -20,15 +21,14 @@ pub(in crate::runtime) struct SyslogIngestor;
 #[derive(Clone)]
 struct SyslogIngestContext {
     runtime: Runtime,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
-    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     codec: Arc<CompiledCodec>,
     quiesce: Arc<IngestorQuiesceControl>,
-    events: broadcast::Sender<RuntimeEvent>,
 }
 
 struct ReceivedSyslogFrame {
@@ -87,11 +87,14 @@ enum SyslogFrameError {
         source: std::num::ParseIntError,
     },
     #[error("Syslog octet count {length} exceeds max_message_size {maximum}")]
-    OversizedOctetCount { length: usize, maximum: usize },
+    OversizedOctetCount {
+        length: usize,
+        maximum: NonZeroUsize,
+    },
     #[error("Syslog non-transparent frame exceeds max_message_size {maximum}")]
-    OversizedNonTransparentFrame { maximum: usize },
+    OversizedNonTransparentFrame { maximum: NonZeroUsize },
     #[error("Syslog stream frame exceeds max_message_size {maximum}")]
-    OversizedBufferedFrame { maximum: usize },
+    OversizedBufferedFrame { maximum: NonZeroUsize },
     #[error("Syslog TLS requires octet-counting framing")]
     NonOctetTlsFrame,
 }
@@ -99,23 +102,16 @@ enum SyslogFrameError {
 impl SyslogIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
-        client: CreateClientSyslog,
-        ingestor: CreateIngestor,
+        plan: SyslogIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let SyslogIngestorStartPlan { ingestor, client } = plan;
+        let domain = &ingestor.domain;
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-            });
-        }
-        if let IngestSource::Syslog { .. } = &ingestor.source {
-        } else {
-            return Err(RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: "expected Syslog ingestor source".to_string(),
             });
         }
         let resolved = runtime
@@ -161,8 +157,10 @@ impl SyslogIngestor {
             codec: dependencies.codec,
             quiesce: runtime
                 .ingestor_quiesce_control(domain, &ingestor.name)
-                .expect("scheduled Syslog ingestor must have quiesce control"),
-            events: runtime.events.clone(),
+                .verified(
+                    "the runtime registers quiesce control for an ingestor before it starts the \
+                     task",
+                ),
         };
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_context = context.clone();
@@ -189,8 +187,9 @@ impl SyslogIngestor {
                 }
                 if task_context
                     .runtime
-                    .ingestor_faults
-                    .is_failed(&task_context.ingestor)
+                    .inner
+                    .fault_injection
+                    .ingestor_is_failed(&task_context.ingestor)
                 {
                     continue;
                 }
@@ -248,7 +247,7 @@ impl SyslogIngestor {
             );
         });
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -315,7 +314,7 @@ impl SyslogIngestor {
                 received = socket.recv_from(&mut datagram) => {
                     let (size, peer_addr) = received
                         .map_err(|source| SyslogListenerError::UdpReceive { source })?;
-                    if size > config.max_message_size {
+                    if size > config.max_message_size.get() {
                         debug!(
                             domain = context.domain.as_str(),
                             ingestor = context.ingestor.as_str(),
@@ -490,7 +489,7 @@ impl SyslogIngestor {
     async fn read_stream_connection(
         mut stream: impl AsyncRead + Unpin,
         peer_addr: SocketAddr,
-        max_message_size: usize,
+        max_message_size: NonZeroUsize,
         allow_non_transparent: bool,
         tx: mpsc::Sender<ReceivedSyslogFrame>,
         quiesce: Arc<IngestorQuiesceControl>,
@@ -605,23 +604,23 @@ impl SyslogIngestor {
             )
             .await
         {
-            let _ = context.events.send(RuntimeEvent::Error(format!(
+            context.runtime.events().report_error(format!(
                 "failed to flush Syslog messages for ingestor '{}' in domain '{}': {error}",
                 context.ingestor.as_str(),
                 context.domain.as_str()
-            )));
+            ));
         }
     }
 }
 
 struct StreamFrameDecoder {
     bytes: Vec<u8>,
-    max_message_size: usize,
+    max_message_size: NonZeroUsize,
     allow_non_transparent: bool,
 }
 
 impl StreamFrameDecoder {
-    fn new(max_message_size: usize, allow_non_transparent: bool) -> Self {
+    fn new(max_message_size: NonZeroUsize, allow_non_transparent: bool) -> Self {
         Self {
             bytes: Vec::new(),
             max_message_size,
@@ -640,7 +639,12 @@ impl StreamFrameDecoder {
     fn read_capacity(&self) -> Result<usize, SyslogFrameError> {
         let cap = self
             .max_message_size
-            .saturating_add(MAX_OCTET_COUNT_DIGITS + 1);
+            .get()
+            .checked_add(MAX_OCTET_COUNT_DIGITS + 1)
+            .ok_or(SyslogFrameError::OversizedBufferedFrame {
+                maximum: self.max_message_size,
+            })?;
+        // The buffer is filled to at most `cap` bytes, so a longer one has no room left.
         let remaining = cap.saturating_sub(self.bytes.len());
         if remaining == 0 {
             Err(SyslogFrameError::OversizedBufferedFrame {
@@ -681,18 +685,23 @@ impl StreamFrameDecoder {
         if prefix.first() == Some(&b'0') || !prefix.iter().all(|byte| byte.is_ascii_digit()) {
             return Err(SyslogFrameError::MalformedOctetCount);
         }
-        let prefix = std::str::from_utf8(prefix).expect("ASCII digit prefix must be valid UTF-8");
+        let prefix = std::str::from_utf8(prefix)
+            .verified("the check above rejected every prefix that is not made of ASCII digits");
         let length = prefix
             .parse::<usize>()
             .map_err(|source| SyslogFrameError::InvalidOctetCount { source })?;
-        if length > self.max_message_size {
+        if length > self.max_message_size.get() {
             return Err(SyslogFrameError::OversizedOctetCount {
                 length,
                 maximum: self.max_message_size,
             });
         }
-        let payload_start = delimiter + 1;
-        let frame_end = payload_start.saturating_add(length);
+        let payload_start = delimiter
+            .checked_add(1)
+            .verified("the delimiter position is an index into the buffered bytes");
+        let frame_end = payload_start
+            .checked_add(length)
+            .verified("the octet count checked above is at most the maximum message size");
         if self.bytes.len() < frame_end {
             return Ok(None);
         }
@@ -706,8 +715,9 @@ impl StreamFrameDecoder {
             let pending_payload_size = self
                 .bytes
                 .len()
-                .saturating_sub(usize::from(self.bytes.last() == Some(&b'\r')));
-            if pending_payload_size > self.max_message_size {
+                .checked_sub(usize::from(self.bytes.last() == Some(&b'\r')))
+                .verified("a trailing carriage return means the buffer holds at least one byte");
+            if pending_payload_size > self.max_message_size.get() {
                 return Err(SyslogFrameError::OversizedNonTransparentFrame {
                     maximum: self.max_message_size,
                 });
@@ -719,7 +729,7 @@ impl StreamFrameDecoder {
         } else {
             delimiter
         };
-        if payload_end > self.max_message_size {
+        if payload_end > self.max_message_size.get() {
             return Err(SyslogFrameError::OversizedNonTransparentFrame {
                 maximum: self.max_message_size,
             });
@@ -732,11 +742,13 @@ impl StreamFrameDecoder {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
 
     #[test]
     fn stream_decoder_interleaves_both_rfc6587_framings() {
-        let mut decoder = StreamFrameDecoder::new(128, true);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
         decoder.extend(b"5 helloalpha\r\n4 test");
         assert_eq!(
             decoder.next_frame().expect("valid frame"),
@@ -755,22 +767,22 @@ mod tests {
 
     #[test]
     fn stream_decoder_rejects_malformed_and_oversized_frames() {
-        let mut malformed = StreamFrameDecoder::new(128, true);
+        let mut malformed = StreamFrameDecoder::new(nonzero!(128usize), true);
         malformed.extend(b"12x payload");
         assert!(malformed.next_frame().is_err());
 
-        let mut oversized_count = StreamFrameDecoder::new(4, true);
+        let mut oversized_count = StreamFrameDecoder::new(nonzero!(4usize), true);
         oversized_count.extend(b"5 hello");
         assert!(oversized_count.next_frame().is_err());
 
-        let mut oversized_line = StreamFrameDecoder::new(4, true);
+        let mut oversized_line = StreamFrameDecoder::new(nonzero!(4usize), true);
         oversized_line.extend(b"hello\n");
         assert!(oversized_line.next_frame().is_err());
     }
 
     #[test]
     fn stream_decoder_limits_octet_count_prefix_to_ten_digits() {
-        let mut decoder = StreamFrameDecoder::new(128, true);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
         decoder.extend(b"12345678901");
         assert!(decoder.next_frame().is_err());
     }
@@ -778,7 +790,7 @@ mod tests {
     #[test]
     fn stream_decoder_rejects_zero_and_leading_zero_octet_counts() {
         for frame in [b"0 ".as_slice(), b"05 hello".as_slice()] {
-            let mut decoder = StreamFrameDecoder::new(128, true);
+            let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
             decoder.extend(frame);
             assert!(decoder.next_frame().is_err());
         }
@@ -786,7 +798,7 @@ mod tests {
 
     #[test]
     fn stream_decoder_accepts_a_maximum_size_frame_with_split_crlf() {
-        let mut decoder = StreamFrameDecoder::new(5, true);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(5usize), true);
         decoder.extend(b"hello\r");
         assert_eq!(
             decoder.next_frame().expect("trailing CR may await LF"),
@@ -803,7 +815,7 @@ mod tests {
 
     #[test]
     fn stream_decoder_rejects_non_transparent_tls_framing() {
-        let mut decoder = StreamFrameDecoder::new(128, false);
+        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), false);
         decoder.extend(b"<13>line framed\n");
         assert!(matches!(
             decoder.next_frame(),

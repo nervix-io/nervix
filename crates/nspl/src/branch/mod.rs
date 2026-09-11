@@ -1,11 +1,13 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{BranchEviction, CreateBranch, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, branch_definition_header, branch_name,
-        if_not_exists_clause, into_parse_error, kw, lex_input, suggest_from, tok, u64_value,
+        LexedInput, ParseError, ParseFromSourceError, branch_definition_header, branch_name,
+        if_not_exists_clause, into_parse_error, kw, lex_input, nonzero_u64_value, suggest_from,
+        tok,
     },
 };
 
@@ -13,13 +15,10 @@ fn max_instances<'src>()
 -> impl Parser<'src, &'src [Token], BranchEviction, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Max)
         .ignore_then(kw(Identifier::Instances))
-        .ignore_then(u64_value().try_map(|value, span| {
-            if value == 0 {
-                Err(Rich::custom(span, "MAX INSTANCES must be greater than 0"))
-            } else {
-                Ok(value)
-            }
-        }))
+        .ignore_then(nonzero_u64_value(
+            "max_instances",
+            "MAX INSTANCES must be greater than 0",
+        ))
         .then_ignore(kw(Identifier::Evict))
         .then_ignore(kw(Identifier::Lru))
         .map(|max_instances| BranchEviction::Lru { max_instances })
@@ -57,14 +56,18 @@ pub fn parse_create_branch_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_create_branch(
     input: &str,
 ) -> Result<CreateStatement<CreateBranch>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_create_branch_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -75,6 +78,8 @@ pub fn suggest_create_branch(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nonzero_ext::nonzero;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -99,7 +104,7 @@ mod tests {
         assert_eq!(
             parsed.eviction,
             Some(BranchEviction::Lru {
-                max_instances: 1000
+                max_instances: nonzero!(1000u64)
             })
         );
     }

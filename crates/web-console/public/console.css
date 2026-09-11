@@ -1668,6 +1668,15 @@ button {
   box-shadow: 0 0 12px rgba(34, 197, 94, 0.55);
 }
 
+.node-hit.status-waiting {
+  border-color: rgba(245, 158, 11, 0.58);
+}
+
+.node-hit.status-waiting .node-status {
+  background: #f59e0b;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.62);
+}
+
 .node-hit.status-error {
   border-color: rgba(239, 68, 68, 0.58);
 }

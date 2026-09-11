@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     CreateStatement, CreateUdf, DescribeUdf, ShowUdfs, UdfArgument, UdfLanguage, UdfReturn,
 };
@@ -6,9 +7,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, completion_context, if_not_exists_clause,
-        into_parse_error, kw, lex_input, string_lit, suggestions_from_errors, tok, udf_name,
-        udf_ref,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        field_ref, if_not_exists_clause, into_parse_error, kw, lex_input, string_lit,
+        suggestions_from_errors, tok, udf_name, udf_ref,
     },
     schema::nervix_type,
 };
@@ -16,7 +17,7 @@ use crate::{
 pub fn create_udf_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateUdf>, extra::Err<ParseError<'src>>> + Clone
 {
-    let argument = udf_name()
+    let argument = field_ref()
         .then(nervix_type())
         .then(kw(Identifier::Optional).or_not())
         .map(|((name, ty), optional)| UdfArgument {
@@ -39,7 +40,7 @@ pub fn create_udf_parser<'src>()
             optional: optional.is_some(),
         })
         .boxed();
-    let language = kw(Identifier::Roto0_11).to(UdfLanguage::Roto0_11);
+    let language = kw(Identifier::Roto0_13).to(UdfLanguage::Roto0_13);
 
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -114,7 +115,11 @@ pub fn show_udfs_parser<'src>()
 }
 
 pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let output = create_udf_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -128,15 +133,14 @@ pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, Parse
     } else {
         Ok(output
             .into_output()
-            .expect("successful UDF parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn suggest_create_udf(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let (_, _, tokens) = match lex_input(&source) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
     let output = create_udf_parser()
         .then_ignore(end())
@@ -151,6 +155,7 @@ pub fn suggest_create_udf(input: &str, cursor: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use nervix_models::{Model, ParseAsType, Statement};
+    use nonzero_ext::nonzero;
 
     use super::*;
     use crate::statement::{parse_statement, suggest_statement};
@@ -158,7 +163,7 @@ mod tests {
     #[test]
     fn parses_multiline_udf_with_exact_signature_and_source() {
         let source = "CREATE UDF display_name
-            WITH ROTO_0_11
+            WITH ROTO_0_13
             ARGS (nick STRING OPTIONAL, score ARRAY<F64, 3>)
             RETURNS STRING OPTIONAL
             VOLATILE
@@ -181,7 +186,7 @@ $roto$;";
             udf.arguments[1].ty,
             ParseAsType::Array {
                 element: Box::new(ParseAsType::F64),
-                len: 3,
+                len: nonzero!(3u32),
             }
         );
         assert!(udf.returns.optional);
@@ -197,18 +202,18 @@ $roto$;";
     #[test]
     fn rejects_empty_duplicate_and_over_limit_argument_lists() {
         assert!(
-            parse_create_udf("CREATE UDF f WITH ROTO_0_11 ARGS () RETURNS I64 CODE $$fn f() {}$$;")
+            parse_create_udf("CREATE UDF f WITH ROTO_0_13 ARGS () RETURNS I64 CODE $$fn f() {}$$;")
                 .is_err()
         );
         assert!(
             parse_create_udf(
-                "CREATE UDF f WITH ROTO_0_11 ARGS (x I64, x I64) RETURNS I64 CODE $$x$$;"
+                "CREATE UDF f WITH ROTO_0_13 ARGS (x I64, x I64) RETURNS I64 CODE $$x$$;"
             )
             .is_err()
         );
         assert!(
             parse_create_udf(
-                "CREATE UDF f WITH ROTO_0_11 ARGS (a I64,b I64,c I64,d I64,e I64,f I64,g I64,h \
+                "CREATE UDF f WITH ROTO_0_13 ARGS (a I64,b I64,c I64,d I64,e I64,f I64,g I64,h \
                  I64,i I64) RETURNS I64 CODE $$x$$;"
             )
             .is_err()
@@ -226,7 +231,7 @@ $roto$;";
     #[test]
     fn completion_stays_on_the_composed_udf_grammar_branch() {
         let suggestions = suggest_statement("CREATE UDF f WITH ", "CREATE UDF f WITH ".len());
-        assert!(suggestions.contains(&"ROTO_0_11".to_string()));
+        assert!(suggestions.contains(&"ROTO_0_13".to_string()));
         assert!(!suggestions.contains(&"KAFKA".to_string()));
     }
 }

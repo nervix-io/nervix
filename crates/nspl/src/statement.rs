@@ -1,11 +1,12 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{Model, Statement};
 
 use crate::{
     lexer::Token,
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, completion_context, filter_by_prefix,
-        into_parse_error, lex_input, suggestions_from_errors,
+        LexedInput, ParseError, ParseFromSourceError, boxed_choice, completion_context,
+        completion_tokens, filter_by_prefix, into_parse_error, lex_input, suggestions_from_errors,
     },
 };
 
@@ -95,68 +96,9 @@ pub fn statement_parser<'src>()
         crate::schema::create_schema_parser()
             .map(|create| Statement::Create(create.map_body(Model::Schema).map_body(Box::new))),
     );
-    let clients = boxed_choice!(
-        crate::client::create_client_kafka_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientKafka).map_body(Box::new))
-        }),
-        crate::client::create_client_pulsar_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientPulsar).map_body(Box::new))
-        }),
-        crate::client::create_client_http_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientHttp).map_body(Box::new))),
-        crate::client::create_client_sentry_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientSentry).map_body(Box::new))
-        }),
-        crate::client::create_client_otel_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientOtel).map_body(Box::new))
-        }),
-        crate::client::create_client_prometheus_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientPrometheus).map_body(Box::new))
-        }),
-        crate::client::create_client_rabbitmq_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientRabbitMq).map_body(Box::new))
-        }),
-        crate::client::create_client_redis_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientRedis).map_body(Box::new))
-        }),
-        crate::client::create_client_mqtt_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientMqtt).map_body(Box::new))),
-        crate::client::create_client_nats_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientNats).map_body(Box::new))),
-        crate::client::create_client_zeromq_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientZeroMq).map_body(Box::new))
-        }),
-        crate::client::create_client_sqs_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientSqs).map_body(Box::new))),
-        crate::client::create_client_s3_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientS3).map_body(Box::new))),
-        crate::client::create_client_gcs_parser()
-            .map(|create| Statement::Create(create.map_body(Model::ClientGcs).map_body(Box::new))),
-        crate::client::create_client_azure_blob_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientAzureBlob).map_body(Box::new))
-        }),
-        crate::client::create_client_iceberg_rest_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientIcebergRest).map_body(Box::new))
-        }),
-        crate::client::create_client_websockets_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientWebsockets).map_body(Box::new))
-        }),
-        crate::client::create_client_syslog_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientSyslog).map_body(Box::new))
-        }),
-        crate::client::create_client_clickhouse_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientClickHouse).map_body(Box::new))
-        }),
-        crate::client::create_client_postgres_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientPostgres).map_body(Box::new))
-        }),
-        crate::client::create_client_mysql_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientMySql).map_body(Box::new))
-        }),
-        crate::client::create_client_mongodb_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientMongoDb).map_body(Box::new))
-        }),
-    );
+    let clients = crate::client::create_client_model_parser()
+        .map(Statement::Create)
+        .boxed();
     let administration = boxed_choice!(
         crate::placement::alter_placement_parser().map(Statement::AlterPlacement),
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
@@ -172,6 +114,8 @@ pub fn statement_parser<'src>()
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
+        crate::relocation::relocate_parser().map(Statement::Relocate),
+        crate::relocation::describe_relocation_parser().map(Statement::DescribeRelocation),
         crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
@@ -194,12 +138,16 @@ pub fn parse_statement_tokens(tokens: &[Token]) -> Result<Statement, Vec<ParseEr
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_statement_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
@@ -207,9 +155,8 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
 pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let (_, _, tokens) = match lex_input(&source) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
 
     let out = statement_parser()
@@ -246,6 +193,12 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             && !normalized.contains(" RANK ")
         {
             vec![";".to_string(), "RANK".to_string()]
+        } else if open
+            && (normalized.starts_with("RELOCATE ")
+                || normalized.starts_with("DESCRIBE RELOCATION "))
+            && normalized.ends_with(" PREFERENCES")
+        {
+            vec![";".to_string(), "FOR".to_string()]
         } else {
             Vec::new()
         };
@@ -257,37 +210,47 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+
     use bolero::check;
+    use meticulous::ResultExt as _;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchSelection, ClientConfigEntry,
-        CodecWireFormat, CordonNode, CreateClientAzureBlob, CreateClientGcs,
-        CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-        CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientS3, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor,
-        CreateJunction, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema,
-        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EmitterPublishingMode,
-        EndpointIngestMode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
-        Identifier as ModelIdentifier, IngestQuiesceMode, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession,
-        NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
-        SchemaField, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-        SignalingWaitStep, SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchName, BranchSelection,
+        ClientConfigEntry, ClientPoolBounds, ClusterNodeName, CodecWireFormat, CordonNode,
+        CorrelatorName, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
+        CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
+        CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+        CreateClientSqs, CreateClientSyslog, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
+        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, DeduplicatorName,
+        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EmitterName,
+        EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, ErrorPolicies,
+        FieldName, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode, IngestSource, IngestorName,
+        JsonType, JunctionName, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model,
+        ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, OutputBranch,
+        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
+        RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayName, ReordererName,
+        ResourceName, RetryPolicy, SchemaField, SchemaName, SignalingProtobufConfig,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
+        WasmProcessorName, WindowProcessorName, WireSchemaField, ZeroMqIngestMode,
     };
+    use nonzero_ext::nonzero;
+    use rstest::rstest;
 
     use super::*;
 
-    fn processor_branched_by(schema: ModelIdentifier) -> BranchSelection {
+    fn processor_branched_by(schema: BranchName) -> BranchSelection {
         BranchSelection::branched_by(schema)
     }
 
-    fn flushed_output(relay: ModelIdentifier, filter_map: Option<String>) -> ProcessorOutput {
+    fn flushed_output(relay: RelayName, filter_map: Option<String>) -> ProcessorOutput {
         let mut output = ProcessorOutput::with_flush_policy(
             relay,
-            "100ms".to_string(),
-            Some("1MiB".to_string()),
+            FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            },
         );
         output.construction = filter_map
             .map(|source| {
@@ -298,11 +261,11 @@ mod tests {
         output
     }
 
-    fn flushed_outputs(relay: ModelIdentifier) -> ProcessorOutputs {
+    fn flushed_outputs(relay: RelayName) -> ProcessorOutputs {
         ProcessorOutputs::new(vec![flushed_output(relay, None)])
     }
 
-    fn flushed_ingestor_outputs(relay: ModelIdentifier) -> ProcessorOutputs {
+    fn flushed_ingestor_outputs(relay: RelayName) -> ProcessorOutputs {
         ProcessorOutputs::new(vec![
             flushed_output(relay, None).with_branch(OutputBranch::Unbranched),
         ])
@@ -336,12 +299,15 @@ mod tests {
                 return 0;
             }
             let b = self.bytes[self.index % self.bytes.len()];
+            // Wrapping is the meaning here: this cursor only ever indexes modulo the seed length,
+            // so a fuzz run long enough to wrap it simply starts the seed over.
             self.index = self.index.wrapping_add(1);
             b
         }
 
         fn choose<T: Clone>(&mut self, items: &[T]) -> T {
-            let idx = (self.next_u8() as usize) % items.len();
+            let idx = usize::from(self.next_u8());
+            let idx = idx % items.len();
             items[idx].clone()
         }
 
@@ -351,39 +317,78 @@ mod tests {
 
         fn bounded_u64(&mut self, min: u64, max: u64) -> u64 {
             let span = max - min + 1;
-            min + (self.next_u8() as u64 % span)
+            min + (u64::from(self.next_u8()) % span)
         }
 
-        fn ident(&mut self) -> ModelIdentifier {
+        /// A bound whose floor is itself non-zero, so the generated value is too.
+        fn bounded_nonzero_u64(&mut self, min: NonZeroU64, max: NonZeroU64) -> NonZeroU64 {
+            let span = max.get() - min.get() + 1;
+            min.saturating_add(u64::from(self.next_u8()) % span)
+        }
+
+        fn bounded_nonzero_usize(&mut self, min: NonZeroU64, max: NonZeroU64) -> NonZeroUsize {
+            let generated = self.bounded_nonzero_u64(min, max);
+            NonZeroUsize::try_from(generated)
+                .assured("the generated bound stays inside this generator's u8-derived span")
+        }
+
+        /// Pool bounds whose minimum is drawn from below the generated maximum, so the pair is
+        /// always orderable and the render/reparse comparison is about the syntax, not the check.
+        fn pool_bounds(&mut self) -> ClientPoolBounds {
+            let maximum = NonZeroU32::new(1 + u32::from(self.next_u8()))
+                .assured("one plus a u8 is never zero");
+            let minimum = u32::from(self.next_u8()) % (maximum.get() + 1);
+            ClientPoolBounds::new(minimum, maximum)
+                .assured("the generated minimum is drawn from 0 through the generated maximum")
+        }
+
+        /// A generated name of whatever kind the position needs.
+        fn name<N>(&mut self) -> N
+        where
+            N: std::str::FromStr,
+            <N as std::str::FromStr>::Err: std::fmt::Debug,
+        {
+            self.raw_name()
+                .parse()
+                .expect("generator must produce a valid name")
+        }
+
+        fn ident(&mut self) -> ModelName {
+            self.name()
+        }
+
+        fn raw_name(&mut self) -> String {
             // Keep identifiers parser-valid and deterministic after canonical render.
-            let len = (self.next_u8() as usize % 8) + 1;
+            let len = usize::from(self.next_u8());
+            let len = (len % 8) + 1;
             let mut s = String::with_capacity(len);
             for i in 0..len {
                 let raw = self.next_u8();
                 let ch = if i == 0 {
-                    (b'a' + (raw % 26)) as char
+                    char::from(b'a' + (raw % 26))
                 } else {
                     match raw % 3 {
-                        0 => (b'a' + (raw % 26)) as char,
-                        1 => (b'0' + (raw % 10)) as char,
+                        0 => char::from(b'a' + (raw % 26)),
+                        1 => char::from(b'0' + (raw % 10)),
                         _ => '_',
                     }
                 };
                 s.push(ch);
             }
 
-            ModelIdentifier::try_from(s.as_str()).expect("generator must produce valid identifier")
+            s
         }
 
         fn transport_literal(&mut self) -> String {
             // No quotes/newlines so canonical serializer always succeeds.
-            let len = (self.next_u8() as usize % 16) + 1;
+            let len = usize::from(self.next_u8());
+            let len = (len % 16) + 1;
             let mut out = String::with_capacity(len);
             for _ in 0..len {
                 let b = self.next_u8();
                 let ch = match b % 7 {
-                    0 => (b'a' + (b % 26)) as char,
-                    1 => (b'0' + (b % 10)) as char,
+                    0 => char::from(b'a' + (b % 26)),
+                    1 => char::from(b'0' + (b % 10)),
                     2 => '.',
                     3 => ':',
                     4 => ',',
@@ -398,16 +403,21 @@ mod tests {
 
     /// Builds an expression tree deep enough to exercise every precedence boundary.
     fn gen_expression(g: &mut ByteGen, depth: u8) -> nervix_models::Expression {
-        use nervix_models::{BinaryOperator, Expression, FieldReference, Literal, UnaryOperator};
+        use nervix_models::{
+            BinaryOperator, Expression, FieldName, FieldReference, Literal, UnaryOperator,
+        };
 
         if depth == 0 {
             return match g.next_u8() % 4 {
-                0 => Expression::Literal(Literal::I64(g.bounded_u64(0, 999) as i64)),
+                0 => Expression::Literal(Literal::I64(
+                    i64::try_from(g.bounded_u64(0, 999))
+                        .verified("the generator bounds this value at 999"),
+                )),
                 1 => Expression::Literal(Literal::Bool(g.bool())),
                 2 => Expression::Literal(Literal::Null),
                 // Prefixed so a generated name can never collide with a language keyword.
                 _ => Expression::Field(FieldReference::bare(
-                    ModelIdentifier::try_from(format!("f_{}", g.ident().as_str()).as_str())
+                    FieldName::try_from(format!("f_{}", g.ident().as_str()).as_str())
                         .expect("prefixed identifier must be valid"),
                 )),
             };
@@ -460,11 +470,12 @@ mod tests {
         let mut g = ByteGen::new(bytes);
         match g.next_u8() % 30 {
             0 => {
-                let field_count = (g.next_u8() as usize % 5) + 1;
+                let field_count = usize::from(g.next_u8());
+                let field_count = (field_count % 5) + 1;
                 let mut fields = Vec::with_capacity(field_count);
                 for _ in 0..field_count {
                     fields.push(SchemaField {
-                        name: g.ident(),
+                        name: g.name(),
                         ty: g.choose(&[
                             ParseAsType::U8,
                             ParseAsType::I8,
@@ -486,13 +497,13 @@ mod tests {
                 }
 
                 Model::Schema(CreateSchema {
-                    name: g.ident(),
+                    name: g.name(),
                     fields,
                 })
             }
             25 => {
-                let materialized_relay = g.ident();
-                let output_relay = g.ident();
+                let materialized_relay: RelayName = g.name();
+                let output_relay: RelayName = g.name();
                 let output = flushed_output(
                     output_relay,
                     Some(format!(
@@ -501,21 +512,22 @@ mod tests {
                     )),
                 );
                 Model::Generator(CreateGenerator {
-                    name: g.ident(),
+                    name: g.name(),
                     materialized_relay,
-                    branched_by: processor_branched_by(g.ident()),
+                    branched_by: processor_branched_by(g.name()),
                     each: format!("{}ms", g.bounded_u64(1, 5000)),
                     output_routes: ProcessorOutputs::new(vec![output]),
                 })
             }
             1 => {
                 let is_json = g.bool();
-                let field_count = (g.next_u8() as usize % 5) + 1;
+                let field_count = usize::from(g.next_u8());
+                let field_count = (field_count % 5) + 1;
                 if is_json {
                     let mut fields = Vec::with_capacity(field_count);
                     for _ in 0..field_count {
                         fields.push(WireSchemaField {
-                            name: g.ident(),
+                            name: g.name(),
                             ty: g.choose(&[
                                 JsonType::String,
                                 JsonType::Number,
@@ -529,7 +541,7 @@ mod tests {
                         });
                     }
                     Model::WireJsonSchema(CreateWireSchema {
-                        name: g.ident(),
+                        name: g.name(),
                         strictness: Default::default(),
                         fields,
                     })
@@ -537,7 +549,7 @@ mod tests {
                     let mut fields = Vec::with_capacity(field_count);
                     for _ in 0..field_count {
                         fields.push(WireSchemaField {
-                            name: g.ident(),
+                            name: g.name(),
                             ty: g.choose(&[
                                 AvroType::Null,
                                 AvroType::Boolean,
@@ -557,21 +569,23 @@ mod tests {
                         });
                     }
                     Model::WireAvroSchema(CreateWireSchema {
-                        name: g.ident(),
+                        name: g.name(),
                         strictness: Default::default(),
                         fields,
                     })
                 }
             }
             2 => Model::Codec(CreateCodec {
-                name: g.ident(),
-                wire_format: CodecWireFormat::Json,
-                wire_schema: Some(g.ident()),
-                schema: g.ident(),
+                name: g.name(),
+                wire_format: CodecWireFormat::Json {
+                    wire_schema: g.name(),
+                },
+                schema: g.name(),
                 encoding_rules: Vec::new(),
             }),
             3 => {
-                let count = (g.next_u8() as usize % 6) + 1;
+                let count = usize::from(g.next_u8());
+                let count = (count % 6) + 1;
                 let mut config = Vec::with_capacity(count);
                 for _ in 0..count {
                     config.push(KafkaConfigEntry {
@@ -582,13 +596,13 @@ mod tests {
 
                 if g.bool() {
                     Model::ClientKafka(CreateClientKafka {
-                        name: g.ident(),
+                        name: g.name(),
                         mount: None,
                         config,
                     })
                 } else {
                     Model::ClientPulsar(CreateClientPulsar {
-                        name: g.ident(),
+                        name: g.name(),
                         mount: None,
                         config: vec![
                             KafkaConfigEntry {
@@ -607,7 +621,7 @@ mod tests {
                 if g.bool() {
                     let mode = match g.next_u8() % 3 {
                         0 => KafkaIngestMode::AckParallel {
-                            max: g.bounded_u64(1, 1024),
+                            max: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(1024u64)),
                             batch_timeout: format!("{}ms", g.bounded_u64(1, 1_000)),
                             timeout: format!("{}s", g.bounded_u64(1, 300)),
                             retry_policy: RetryPolicy {
@@ -627,15 +641,15 @@ mod tests {
 
                     if g.bool() {
                         Model::Ingestor(CreateIngestor {
-                            name: g.ident(),
-                            output_routes: flushed_ingestor_outputs(g.ident()),
-                            decode_using_codec: g.ident(),
+                            name: g.name(),
+                            output_routes: flushed_ingestor_outputs(g.name()),
+                            decode_using_codec: g.name(),
                             timestamp_source: None,
                             source: IngestSource::Kafka {
-                                client: g.ident(),
-                                topic: g.ident(),
-                                offset_mode: KafkaOffsetMode::ConsumerGroup(g.ident()),
-                                instances: 1,
+                                client: g.name(),
+                                topic: g.name(),
+                                offset_mode: KafkaOffsetMode::ConsumerGroup(g.name()),
+                                instances: nonzero!(1u64),
                                 mode,
                                 quiesce: IngestQuiesceMode::Suspend,
                             },
@@ -644,15 +658,15 @@ mod tests {
                         })
                     } else {
                         Model::Ingestor(CreateIngestor {
-                            name: g.ident(),
-                            output_routes: flushed_ingestor_outputs(g.ident()),
-                            decode_using_codec: g.ident(),
+                            name: g.name(),
+                            output_routes: flushed_ingestor_outputs(g.name()),
+                            decode_using_codec: g.name(),
                             timestamp_source: None,
                             source: IngestSource::Pulsar {
-                                client: g.ident(),
-                                topic: g.ident(),
-                                subscription: g.ident(),
-                                instances: 1,
+                                client: g.name(),
+                                topic: g.name(),
+                                subscription: g.name(),
+                                instances: nonzero!(1u64),
                                 mode: match mode {
                                     KafkaIngestMode::AckParallel {
                                         max,
@@ -684,14 +698,14 @@ mod tests {
                     }
                 } else {
                     Model::Ingestor(CreateIngestor {
-                        name: g.ident(),
-                        output_routes: flushed_ingestor_outputs(g.ident()),
-                        decode_using_codec: g.ident(),
+                        name: g.name(),
+                        output_routes: flushed_ingestor_outputs(g.name()),
+                        decode_using_codec: g.name(),
                         timestamp_source: None,
                         source: IngestSource::RabbitMq {
-                            client: g.ident(),
-                            queue: g.ident(),
-                            instances: 1,
+                            client: g.name(),
+                            queue: g.name(),
+                            instances: nonzero!(1u64),
                             mode: RabbitMqIngestMode::AckSequential {
                                 timeout: format!("{}s", g.bounded_u64(1, 300)),
                                 retry_policy: RetryPolicy {
@@ -707,7 +721,7 @@ mod tests {
                 }
             }
             5 => Model::ClientRabbitMq(CreateClientRabbitMq {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -715,7 +729,8 @@ mod tests {
                 }],
             }),
             6 => Model::ClientRedis(CreateClientRedis {
-                name: g.ident(),
+                name: g.name(),
+                pool: g.pool_bounds(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -723,14 +738,14 @@ mod tests {
                 }],
             }),
             7 => Model::Relay(CreateRelay {
-                name: g.ident(),
-                schema: g.ident(),
-                buffer: g.bounded_u64(1, 1024) as usize,
+                name: g.name(),
+                schema: g.name(),
+                buffer: g.bounded_nonzero_usize(nonzero!(1u64), nonzero!(1024u64)),
                 branching: nervix_models::RelayBranching::unbranched(),
                 materialized_state: None,
             }),
             8 => Model::ClientMqtt(CreateClientMqtt {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -738,10 +753,10 @@ mod tests {
                 }],
             }),
             9 => Model::Junction(CreateJunction {
-                name: g.ident(),
-                from: ProcessorInputs::new(vec![g.ident(), g.ident(), g.ident()], Vec::new()),
-                output_routes: flushed_outputs(g.ident()),
-                branched_by: processor_branched_by(g.ident()),
+                name: g.name(),
+                from: ProcessorInputs::new(vec![g.name(), g.name(), g.name()], Vec::new()),
+                output_routes: flushed_outputs(g.name()),
+                branched_by: processor_branched_by(g.name()),
                 mode: if g.bool() {
                     AckMode::Attached
                 } else {
@@ -751,12 +766,12 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             10 => Model::Deduplicator(CreateDeduplicator {
-                name: g.ident(),
-                from: ProcessorInputs::single(g.ident()),
-                output_routes: flushed_outputs(g.ident()),
-                branched_by: processor_branched_by(g.ident()),
+                name: g.name(),
+                from: ProcessorInputs::single(g.name()),
+                output_routes: flushed_outputs(g.name()),
+                branched_by: processor_branched_by(g.name()),
                 deduplicate_on: vec![nervix_models::Expression::Field(
-                    nervix_models::FieldReference::bare(g.ident()),
+                    nervix_models::FieldReference::bare(g.name()),
                 )],
                 max_time: "10m".to_string(),
                 mode: if g.bool() {
@@ -768,7 +783,7 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             11 => Model::ClientPrometheus(CreateClientPrometheus {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -776,13 +791,13 @@ mod tests {
                 }],
             }),
             12 => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: IngestSource::RedisPubSub {
-                    client: g.ident(),
-                    channel: g.ident(),
+                    client: g.name(),
+                    channel: g.name(),
                     mode: RedisPubSubIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Drop,
                 },
@@ -792,14 +807,14 @@ mod tests {
             13 => {
                 if g.bool() {
                     Model::Ingestor(CreateIngestor {
-                        name: g.ident(),
-                        output_routes: flushed_ingestor_outputs(g.ident()),
-                        decode_using_codec: g.ident(),
+                        name: g.name(),
+                        output_routes: flushed_ingestor_outputs(g.name()),
+                        decode_using_codec: g.name(),
                         timestamp_source: None,
                         source: IngestSource::Mqtt {
-                            client: g.ident(),
+                            client: g.name(),
                             topic: g.ident().as_str().to_string(),
-                            instances: 1,
+                            instances: nonzero!(1u64),
                             mode: MqttIngestMode::NoAckSequential {
                                 session: MqttSession::Clean,
                                 qos: MqttQos::AtMostOnce,
@@ -811,12 +826,12 @@ mod tests {
                     })
                 } else if g.bool() {
                     Model::Ingestor(CreateIngestor {
-                        name: g.ident(),
-                        output_routes: flushed_ingestor_outputs(g.ident()),
-                        decode_using_codec: g.ident(),
+                        name: g.name(),
+                        output_routes: flushed_ingestor_outputs(g.name()),
+                        decode_using_codec: g.name(),
                         timestamp_source: None,
                         source: IngestSource::Prometheus {
-                            client: g.ident(),
+                            client: g.name(),
                             query: r#"label_replace(vector(42.5), "source", "local", "", "")"#
                                 .to_string(),
                             every: "15s".to_string(),
@@ -829,22 +844,22 @@ mod tests {
                     let (sink, publishing_mode) = match g.next_u8() % 3 {
                         0 => (
                             EmitSink::Kafka {
-                                client: g.ident(),
-                                topic: g.ident(),
+                                client: g.name(),
+                                topic: g.name(),
                             },
                             emitter_publishing_mode(),
                         ),
                         1 => (
                             EmitSink::Pulsar {
-                                client: g.ident(),
-                                topic: g.ident(),
+                                client: g.name(),
+                                topic: g.name(),
                             },
                             emitter_publishing_mode(),
                         ),
                         _ => (
                             EmitSink::Mqtt {
-                                client: g.ident(),
-                                topic: g.ident(),
+                                client: g.name(),
+                                topic: g.name(),
                             },
                             EmitterPublishingMode::MqttQos0 {
                                 retry_policy: emitter_retry_policy(),
@@ -853,13 +868,15 @@ mod tests {
                     };
 
                     Model::Emitter(CreateEmitter {
-                        name: g.ident(),
-                        from: ProcessorInputs::single(g.ident()),
-                        encode_using_codec: Some(g.ident()),
+                        name: g.name(),
+                        from: ProcessorInputs::single(g.name()),
+                        encode_using_codec: Some(g.name()),
                         sink: Box::new(sink),
                         publishing_mode,
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
+                        flush_policy: FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        },
                         mode: if g.bool() {
                             AckMode::Attached
                         } else {
@@ -872,14 +889,14 @@ mod tests {
                 }
             }
             14 => Model::Endpoint(CreateEndpoint {
-                name: g.ident(),
-                on_vhost: g.ident(),
+                name: g.name(),
+                on_vhost: g.name(),
                 path: "/ws".to_string(),
                 endpoint_type: EndpointType::Websockets,
                 signaling_protocol: None,
             }),
             15 => Model::ClientNats(CreateClientNats {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![KafkaConfigEntry {
                     key: "addr".to_string(),
@@ -887,7 +904,7 @@ mod tests {
                 }],
             }),
             16 => Model::ClientZeroMq(CreateClientZeroMq {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -901,7 +918,7 @@ mod tests {
                 ],
             }),
             17 => Model::ClientSqs(CreateClientSqs {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -915,13 +932,15 @@ mod tests {
                 ],
             }),
             18 => Model::Emitter(CreateEmitter {
-                name: g.ident(),
-                from: ProcessorInputs::single(g.ident()),
-                encode_using_codec: Some(g.ident()),
-                sink: Box::new(EmitSink::ZeroMq { client: g.ident() }),
+                name: g.name(),
+                from: ProcessorInputs::single(g.name()),
+                encode_using_codec: Some(g.name()),
+                sink: Box::new(EmitSink::ZeroMq { client: g.name() }),
                 publishing_mode: emitter_publishing_mode(),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 mode: if g.bool() {
                     AckMode::Attached
                 } else {
@@ -932,12 +951,12 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             19 => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: IngestSource::ZeroMq {
-                    client: g.ident(),
+                    client: g.name(),
                     mode: ZeroMqIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Suspend,
                 },
@@ -945,16 +964,18 @@ mod tests {
                 filter_where: None,
             }),
             20 => Model::Emitter(CreateEmitter {
-                name: g.ident(),
-                from: ProcessorInputs::single(g.ident()),
-                encode_using_codec: Some(g.ident()),
+                name: g.name(),
+                from: ProcessorInputs::single(g.name()),
+                encode_using_codec: Some(g.name()),
                 sink: Box::new(EmitSink::Nats {
-                    client: g.ident(),
-                    subject: g.ident(),
+                    client: g.name(),
+                    subject: g.name(),
                 }),
                 publishing_mode: emitter_publishing_mode(),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
+                flush_policy: FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
                 mode: if g.bool() {
                     AckMode::Attached
                 } else {
@@ -965,15 +986,15 @@ mod tests {
                 materialized_state: Vec::new(),
             }),
             21 => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: IngestSource::Nats {
-                    client: g.ident(),
-                    subject: g.ident(),
-                    queue_group: g.ident(),
-                    instances: g.bounded_u64(1, 10),
+                    client: g.name(),
+                    subject: g.name(),
+                    queue_group: g.name(),
+                    instances: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(10u64)),
                     mode: NatsIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Drop,
                 },
@@ -981,18 +1002,18 @@ mod tests {
                 filter_where: None,
             }),
             22 => {
-                let from_relay = ModelIdentifier::try_from("source").expect("valid identifier");
+                let from_relay = RelayName::try_from("source").expect("valid relay name");
                 let error_condition = r#"input.level = "error""#;
                 let warn_condition = r#"input.level = "warn""#;
                 Model::Reingestor(nervix_models::CreateReingestor {
-                    name: g.ident(),
+                    name: g.name(),
                     from: ProcessorInputs::single(from_relay),
                     output_routes: ProcessorOutputs::new(vec![
-                        flushed_output(g.ident(), Some(format!("WHERE {error_condition}")))
+                        flushed_output(g.name(), Some(format!("WHERE {error_condition}")))
                             .with_branch(OutputBranch::Unbranched),
-                        flushed_output(g.ident(), Some(format!("WHERE {warn_condition}")))
+                        flushed_output(g.name(), Some(format!("WHERE {warn_condition}")))
                             .with_branch(OutputBranch::Unbranched),
-                        flushed_output(g.ident(), None).with_branch(OutputBranch::Unbranched),
+                        flushed_output(g.name(), None).with_branch(OutputBranch::Unbranched),
                     ]),
                     mode: if g.bool() {
                         AckMode::Attached
@@ -1004,7 +1025,7 @@ mod tests {
                 })
             }
             23 => Model::ClientS3(CreateClientS3 {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1018,7 +1039,7 @@ mod tests {
                 ],
             }),
             24 => Model::ClientGcs(CreateClientGcs {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1032,7 +1053,7 @@ mod tests {
                 ],
             }),
             26 => Model::ClientAzureBlob(CreateClientAzureBlob {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1046,7 +1067,7 @@ mod tests {
                 ],
             }),
             27 => Model::ClientIcebergRest(CreateClientIcebergRest {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     KafkaConfigEntry {
@@ -1060,7 +1081,7 @@ mod tests {
                 ],
             }),
             28 => Model::SignalingProtocol(CreateSignalingProtocol {
-                name: g.ident(),
+                name: g.name(),
                 format: if g.bool() {
                     g.choose(&[
                         SignalingWireFormat::Json,
@@ -1072,7 +1093,7 @@ mod tests {
                     ])
                 } else {
                     SignalingWireFormat::Protobuf(SignalingProtobufConfig {
-                        resource: g.ident(),
+                        resource: g.name(),
                         resource_version: if g.bool() {
                             Some(g.bounded_u64(1, 8))
                         } else {
@@ -1123,7 +1144,7 @@ mod tests {
                 },
             }),
             29 => Model::ClientSyslog(CreateClientSyslog {
-                name: g.ident(),
+                name: g.name(),
                 mount: None,
                 config: vec![
                     ClientConfigEntry {
@@ -1137,13 +1158,13 @@ mod tests {
                 ],
             }),
             _ => Model::Ingestor(CreateIngestor {
-                name: g.ident(),
-                output_routes: flushed_ingestor_outputs(g.ident()),
-                decode_using_codec: g.ident(),
+                name: g.name(),
+                output_routes: flushed_ingestor_outputs(g.name()),
+                decode_using_codec: g.name(),
                 timestamp_source: None,
                 source: if g.bool() {
                     IngestSource::Endpoint {
-                        endpoint: g.ident(),
+                        endpoint: g.name(),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
@@ -1151,9 +1172,9 @@ mod tests {
                     }
                 } else {
                     IngestSource::Sqs {
-                        client: g.ident(),
-                        queue: g.ident(),
-                        instances: 1,
+                        client: g.name(),
+                        queue: g.name(),
+                        instances: nonzero!(1u64),
                         mode: SqsIngestMode::AckSequential {
                             timeout: format!("{}s", g.bounded_u64(1, 300)),
                             retry_policy: RetryPolicy {
@@ -1223,7 +1244,19 @@ mod tests {
             ("CREATE INGESTOR i FROM MQTT c TOPIC t QOS ", "mqtt_qos"),
             (
                 "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES ",
-                "integer_literal",
+                "max_instances",
+            ),
+            (
+                "CREATE RELAY r SCHEMA s UNBRANCHED CAPACITY ",
+                "relay_capacity",
+            ),
+            (
+                "CREATE PLACEMENT p FROM a TO b REQUIRE COLOCATION RANK ",
+                "placement_rank",
+            ),
+            (
+                "CREATE WASM PROCESSOR w FROM r USING RESOURCE res FILE 'g.wasm' MAX FUEL ",
+                "max_fuel",
             ),
         ] {
             let suggestions = suggest_statement(input, input.len());
@@ -1584,7 +1617,9 @@ mod tests {
             parsed,
             Statement::Drop(DropModel {
                 kind: ModelKind::Schema,
-                name: ModelIdentifier::try_from("event_schema").expect("valid identifier"),
+                name: ModelName::from(
+                    &SchemaName::try_from("event_schema").expect("valid schema name")
+                ),
             })
         );
     }
@@ -1596,8 +1631,10 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::AlterRelay(AlterRelay {
-                relay: ModelIdentifier::try_from("notifications").expect("valid identifier"),
-                operations: vec![AlterRelayOperation::SetCapacity { capacity: 32 }],
+                relay: RelayName::try_from("notifications").expect("valid relay name"),
+                operations: vec![AlterRelayOperation::SetCapacity {
+                    capacity: nonzero!(32usize)
+                }],
             })
         );
     }
@@ -1619,7 +1656,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DropNode(DropNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1630,7 +1667,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::CordonNode(CordonNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1641,7 +1678,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::UncordonNode(UncordonNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1652,7 +1689,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DrainNode(DrainNode {
-                node_id: "node-2".to_string(),
+                node_id: ClusterNodeName::parse("node-2").expect("valid name"),
             })
         );
     }
@@ -1664,7 +1701,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeResource(nervix_models::DescribeResource {
-                identifier: ModelIdentifier::parse("fraud_model").expect("valid identifier"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
                 version: Some(7),
             })
         );
@@ -1677,7 +1714,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeResource(nervix_models::DescribeResource {
-                identifier: ModelIdentifier::parse("fraud_model").expect("valid identifier"),
+                identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
                 version: None,
             })
         );
@@ -1714,7 +1751,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeIngestor(nervix_models::DescribeIngestor {
-                ingestor: ModelIdentifier::parse("kafka_notifications").expect("valid identifier"),
+                ingestor: IngestorName::parse("kafka_notifications").expect("valid name"),
             })
         );
     }
@@ -1726,8 +1763,8 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeEndpoint(nervix_models::DescribeEndpoint {
-                name: ModelIdentifier::parse("http_notifications_endpoint")
-                    .expect("valid identifier"),
+                name: EndpointName::parse("http_notifications_endpoint")
+                    .expect("valid endpoint name"),
             })
         );
     }
@@ -1739,9 +1776,9 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeRelay(DescribeRelay {
-                relay: ModelIdentifier::parse("notifications").expect("valid identifier"),
+                relay: RelayName::parse("notifications").expect("valid name"),
                 bindings: vec![SubscriptionBinding {
-                    field: ModelIdentifier::parse("user_id").expect("valid identifier"),
+                    field: FieldName::parse("user_id").expect("valid name"),
                     value: SubscriptionLiteral::Number("42".to_string()),
                 }],
             })
@@ -1755,7 +1792,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeDeduplicator(nervix_models::DescribeDeduplicator {
-                name: ModelIdentifier::parse("dedup_txns").expect("valid identifier"),
+                name: DeduplicatorName::parse("dedup_txns").expect("valid name"),
             })
         );
     }
@@ -1767,7 +1804,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeJunction(nervix_models::DescribeJunction {
-                name: ModelIdentifier::parse("route_notifications").expect("valid identifier"),
+                name: JunctionName::parse("route_notifications").expect("valid name"),
             })
         );
     }
@@ -1779,7 +1816,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeReingestor(nervix_models::DescribeReingestor {
-                name: ModelIdentifier::parse("repartition").expect("valid identifier"),
+                name: ReingestorName::parse("repartition").expect("valid name"),
             })
         );
     }
@@ -1791,7 +1828,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeCorrelator(nervix_models::DescribeCorrelator {
-                name: ModelIdentifier::parse("correlate_profiles").expect("valid identifier"),
+                name: CorrelatorName::parse("correlate_profiles").expect("valid name"),
             })
         );
     }
@@ -1803,7 +1840,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeReorderer(nervix_models::DescribeReorderer {
-                name: ModelIdentifier::parse("order_notifications").expect("valid identifier"),
+                name: ReordererName::parse("order_notifications").expect("valid name"),
             })
         );
     }
@@ -1814,7 +1851,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeEmitter(nervix_models::DescribeEmitter {
-                name: ModelIdentifier::parse("kafka_out").expect("valid identifier"),
+                name: EmitterName::parse("kafka_out").expect("valid name"),
             })
         );
     }
@@ -1826,7 +1863,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeWindowProcessor(nervix_models::DescribeWindowProcessor {
-                name: ModelIdentifier::parse("latency_window").expect("valid identifier"),
+                name: WindowProcessorName::parse("latency_window").expect("valid name"),
             })
         );
     }
@@ -1838,7 +1875,7 @@ mod tests {
         assert_eq!(
             parsed,
             Statement::DescribeWasmProcessor(nervix_models::DescribeWasmProcessor {
-                name: ModelIdentifier::parse("filter_even").expect("valid identifier"),
+                name: WasmProcessorName::parse("filter_even").expect("valid name"),
             })
         );
     }
@@ -1857,7 +1894,7 @@ mod tests {
             parsed,
             Statement::CreateResource(nervix_models::CreateStatement::new(
                 nervix_models::CreateResource {
-                    identifier: ModelIdentifier::parse("fraud_model").expect("valid identifier"),
+                    identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
                 },
                 false,
             ))
@@ -1930,9 +1967,8 @@ mod tests {
             processor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "IMMEDIATE"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Immediate
         );
         let canonical = processor
             .to_canonical_nspl()
@@ -1960,9 +1996,11 @@ mod tests {
             reingestor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
     }
 
@@ -1993,9 +2031,11 @@ mod tests {
             reingestor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
         assert_eq!(
             reingestor.filter_where,
@@ -2031,9 +2071,11 @@ mod tests {
             reingestor.output_routes.routes[0]
                 .flush_policy
                 .as_ref()
-                .expect("output flush policy should parse")
-                .flush_each,
-            "100ms"
+                .expect("output flush policy should parse"),
+            &FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string()
+            }
         );
         assert!(!output.construction.assignments.is_empty());
         assert!(output.construction.where_clause.is_some());
@@ -2247,273 +2289,130 @@ mod tests {
         assert!(!suggestions.contains(&"ref:client".to_string()));
     }
 
-    #[test]
-    fn canonical_roundtrip_schema() {
-        let input = r#"
+    #[rstest]
+    #[case::schema(
+        r#"
             CREATE SCHEMA notification (
                 user_id U32,
                 created_at DATETIME,
                 payload STRING
             );
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_wire_schema() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::wire_schema(
+        r#"
             CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
                 user_id integer,
                 created_at string,
                 payload object
             );
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_schema() {
-        let parsed = parse_statement(
-            "ALTER SCHEMA events ADD FIELD note STRING OPTIONAL SENSITIVE, RENAME FIELD id TO \
+        "#,
+        None,
+        &[]
+    )]
+    #[case::alter_schema(
+        "ALTER SCHEMA events ADD FIELD note STRING OPTIONAL SENSITIVE, RENAME FIELD id TO \
              event_id, ALTER FIELD event_id SET TYPE I64, ALTER FIELD event_id DROP OPTIONAL, \
              ALTER FIELD note DROP SENSITIVE;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterSchema(alter) = parsed else {
-            panic!("expected ALTER SCHEMA");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterSchema(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_wire_schema() {
-        let parsed = parse_statement(
-            "ALTER WIRE AVRO SCHEMA payload ADD FIELD note STRING OPTIONAL, ALTER FIELD id SET \
+        None,
+        &[]
+    )]
+    #[case::alter_wire_schema(
+        "ALTER WIRE AVRO SCHEMA payload ADD FIELD note STRING OPTIONAL, ALTER FIELD id SET \
              TYPE LONG, ALTER FIELD note DROP OPTIONAL;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterWireAvroSchema(alter) = parsed else {
-            panic!("expected ALTER WIRE SCHEMA");
-        };
-
-        let canonical = nervix_models::alter_avro_wire_schema_to_canonical_nspl(&alter)
-            .expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterWireAvroSchema(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_wire_schema_mode() {
-        let parsed = parse_statement("ALTER WIRE JSON SCHEMA payload MODE LOOSE;")
-            .expect("parse should succeed");
-        let Statement::AlterWireJsonSchema(alter) = parsed else {
-            panic!("expected wire-schema mode ALTER");
-        };
-
-        let canonical = nervix_models::alter_json_wire_schema_to_canonical_nspl(&alter)
-            .expect("must render canonical");
-        assert_eq!(canonical, "ALTER WIRE JSON SCHEMA payload MODE LOOSE;");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterWireJsonSchema(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_relay() {
-        let parsed = parse_statement(
-            "ALTER RELAY notifications SET CAPACITY 8, SET SCHEMA event_v2, SET BRANCHED BY \
+        None,
+        &[]
+    )]
+    #[case::alter_wire_schema_mode(
+        "ALTER WIRE JSON SCHEMA payload MODE LOOSE;",
+        Some("ALTER WIRE JSON SCHEMA payload MODE LOOSE;"),
+        &[]
+    )]
+    #[case::alter_relay(
+        "ALTER RELAY notifications SET CAPACITY 8, SET SCHEMA event_v2, SET BRANCHED BY \
              by_tenant, SET MATERIALIZED STATE LAST BY TIMESTAMP;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterRelay(alter) = parsed else {
-            panic!("expected ALTER RELAY");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterRelay(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_junction() {
-        let parsed = parse_statement(
-            "ALTER JUNCTION route_events ADD FROM incoming_b WHERE input.kind = 'event', SET \
+        None,
+        &[]
+    )]
+    #[case::alter_junction(
+        "ALTER JUNCTION route_events ADD FROM incoming_b WHERE input.kind = 'event', SET \
              COLLECT FOR 10ms MAX BATCH SIZE 1MiB, SET FILTER WHERE input.kind != '', ADD \
              MATERIALIZED STATE profiles REQUIRED WAIT, ADD ROUTE TO projected INHERIT ALL FLUSH \
              IMMEDIATE ON MESSAGE ERROR SEND TO errors SET code = error.code, SET DETACHED;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterJunction(alter) = parsed else {
-            panic!("expected ALTER JUNCTION");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterJunction(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_deduplicator() {
-        let parsed = parse_statement(
-            "ALTER DEDUPLICATOR dedup_events ADD FROM incoming_b WHERE input.active, SET \
+        None,
+        &[]
+    )]
+    #[case::alter_deduplicator(
+        "ALTER DEDUPLICATOR dedup_events ADD FROM incoming_b WHERE input.active, SET \
              DEDUPLICATE ON concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO \
              audit INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterDeduplicator(alter) = parsed else {
-            panic!("expected ALTER DEDUPLICATOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterDeduplicator(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_reorderer() {
-        let parsed = parse_statement(
-            "ALTER REORDERER order_events ADD FROM incoming_b WHERE input.active, SET BY \
+        None,
+        &[]
+    )]
+    #[case::alter_reorderer(
+        "ALTER REORDERER order_events ADD FROM incoming_b WHERE input.active, SET BY \
              concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO audit INHERIT \
              ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterReorderer(alter) = parsed else {
-            panic!("expected ALTER REORDERER");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterReorderer(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_emitter() {
-        let parsed = parse_statement(
-            "ALTER EMITTER event_sink SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms \
+        None,
+        &[]
+    )]
+    #[case::alter_emitter(
+        "ALTER EMITTER event_sink SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms \
              MAX 30s, SET CLIENT sink_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
              BATCH SIZE 1MiB, SET DETACHED, SET FLUSH IMMEDIATE;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterEmitter(alter) = parsed else {
-            panic!("expected ALTER EMITTER");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterEmitter(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_ingestor() {
-        let parsed = parse_statement(
-            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON \
+        None,
+        &[]
+    )]
+    #[case::alter_ingestor(
+        "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON \
              QUIESCE BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
              occurred_at, SET FILTER WHERE input.active, REPLACE ROUTE TO events INHERIT ALL \
              UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterIngestor(alter) = parsed else {
-            panic!("expected ALTER INGESTOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterIngestor(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_reingestor() {
-        let parsed = parse_statement(
-            "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
+        None,
+        &[]
+    )]
+    #[case::alter_reingestor(
+        "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
              WHERE concat(input.tenant, ',') != '', SET DETACHED, REPLACE ROUTE TO outgoing \
              INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterReingestor(alter) = parsed else {
-            panic!("expected ALTER REINGESTOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterReingestor(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_alter_generator() {
-        let parsed = parse_statement(
-            "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
+        None,
+        &[]
+    )]
+    #[case::alter_generator(
+        "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
              UNBRANCHED, REPLACE ROUTE TO outgoing SET value = relay_state.state_v2.value FLUSH \
              IMMEDIATE ON MESSAGE ERROR LOG;",
-        )
-        .expect("parse should succeed");
-        let Statement::AlterGenerator(alter) = parsed else {
-            panic!("expected ALTER GENERATOR");
-        };
-
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterGenerator(alter), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_transport() {
-        let input = r#"
+        None,
+        &[]
+    )]
+    #[case::transport(
+        r#"
             CREATE CLIENT kafka_main
               TYPE KAFKA
               CONFIG {
                 'bootstrap.servers' = 'host1:9092,host2:9092',
                 'enable.auto.commit' = true
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_http_client() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::http_client(
+        r#"
             CREATE CLIENT http_main
               TYPE HTTP
               CONFIG {
                 'endpoint' = 'https://api.example.com/events',
                 'method' = 'POST'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_otel_client() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::otel_client(
+        r#"
             CREATE CLIENT otel_main
               TYPE OTEL
               CONFIG {
@@ -2523,170 +2422,99 @@ mod tests {
                 'compression' = 'gzip',
                 'timeout_ms' = 5000
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_rabbitmq_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::rabbitmq_transport(
+        r#"
             CREATE CLIENT rabbit_main
               TYPE RABBITMQ
               CONFIG {
                 'addr' = 'amqp://guest:guest@localhost:5672/%2f',
                 'connection_name' = 'nervix-rabbit'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_websockets_client() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::websockets_client(
+        r#"
             CREATE CLIENT ws_main
               TYPE WEBSOCKETS
               CONFIG {
                 'endpoint' = 'wss://api.example.com/ws',
                 'subprotocol' = 'notifications'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_redis_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::redis_transport(
+        r#"
             CREATE CLIENT redis_main
               TYPE REDIS
+              POOL SIZE MIN 1 MAX 4
               CONFIG {
                 'addr' = 'redis://127.0.0.1:6379/',
                 'read_timeout_ms' = 5000
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_mqtt_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::mqtt_transport(
+        r#"
             CREATE CLIENT mqtt_main
               TYPE MQTT
               CONFIG {
                 'addr' = 'mqtt://127.0.0.1:1883',
                 'client_id' = 'nervix-mqtt'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_prometheus_transport() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::prometheus_transport(
+        r#"
             CREATE CLIENT prom_main
               TYPE PROMETHEUS
               CONFIG {
                 'addr' = 'http://127.0.0.1:9090'
               };
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_vhost() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::vhost(
+        r#"
             CREATE VHOST my_vhost api.example.com, foo-bar.localhost WITH TLS tls_bundle VERSION 3;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_endpoint() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::endpoint(
+        r#"
             CREATE ENDPOINT my_ws_endpoint
                 ON edge
                 PATH '/ws'
                 TYPE WEBSOCKETS;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_http_endpoint() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::http_endpoint(
+        r#"
             CREATE ENDPOINT my_http_endpoint
                 ON edge
                 PATH '/ingest'
                 TYPE HTTP;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_ingestor() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::ingestor(
+        r#"
             CREATE INGESTOR kafka_notifications
                 FROM
                     KAFKA kafka_main
@@ -2700,20 +2528,12 @@ mod tests {
                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                     ON MESSAGE ERROR LOG
                 ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_prometheus_ingestor() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::prometheus_ingestor(
+        r#"
             CREATE INGESTOR prom_samples
                 FROM PROMETHEUS prom_main
                 QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
@@ -2724,35 +2544,19 @@ mod tests {
                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                     ON MESSAGE ERROR LOG
                 ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_stream() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::stream(
+        r#"
             CREATE RELAY p99_latency SCHEMA notification_schema UNBRANCHED;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_wasm_processor_preserves_exact_limits() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::wasm_processor_preserves_exact_limits(
+        r#"
             CREATE WASM PROCESSOR normalize_events
                 FROM events
                 USING RESOURCE normalizer VERSION 1
@@ -2762,41 +2566,24 @@ mod tests {
                 UNBRANCHED
                 TO normalized_events ON MESSAGE ERROR LOG
                 ON GLOBAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        assert!(canonical.contains("MAX FUEL 1000000\n  MAX MEMORY 64MiB"));
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_junction() {
-        let input = r#"
+        "#,
+        None,
+        &["MAX FUEL 1000000\n  MAX MEMORY 64MiB"]
+    )]
+    #[case::junction(
+        r#"
             CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
                 COLLECT FOR 25ms MAX BATCH SIZE 2MiB
                 BRANCHED BY tenant
                 TO ss10 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_correlator_input_collection() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::correlator_input_collection(
+        r#"
             CREATE CORRELATOR correlate
                 LEFT FROM left_current, left_archive
                 COLLECT FOR 10ms
@@ -2811,20 +2598,12 @@ mod tests {
                     SET id = left.id
                     FLUSH IMMEDIATE
                     ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_preserves_conditional_surface_forms() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::preserves_conditional_surface_forms(
+        r#"
             CREATE JUNCTION conditional
                 FROM source
                 UNBRANCHED
@@ -2841,23 +2620,16 @@ mod tests {
                         END
                     FLUSH IMMEDIATE
                     ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        assert!(canonical.contains("IF input.active THEN 1 ELSE 0 END"));
-        assert!(canonical.contains("CASE input.kind WHEN"));
-        assert!(canonical.contains("CASE WHEN input.active THEN 1 END"));
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_deduplicator() {
-        let input = r#"
+        "#,
+        None,
+        &[
+            "IF input.active THEN 1 ELSE 0 END",
+            "CASE input.kind WHEN",
+            "CASE WHEN input.active THEN 1 END",
+        ]
+    )]
+    #[case::deduplicator(
+        r#"
             CREATE DEDUPLICATOR dedup_txns
                 FROM ss1
                 DEDUPLICATE ON input.transaction_id
@@ -2865,20 +2637,12 @@ mod tests {
                 BRANCHED BY tenant
                 TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_expression_string_spanning_lines() {
-        let input = "
+        "#,
+        None,
+        &[]
+    )]
+    #[case::expression_string_spanning_lines(
+        "
             CREATE DEDUPLICATOR dedup_txns
                 FROM ss1
                 DEDUPLICATE ON input.transaction_id
@@ -2887,20 +2651,12 @@ mod tests {
                 TO ss2 INHERIT ALL WHERE note = $s$line\nbreak$s$
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        ";
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_codec_with_multiline_jaq_program() {
-        let input = r#"
+        ",
+        None,
+        &[]
+    )]
+    #[case::codec_with_multiline_jaq_program(
+        r#"
             CREATE CODEC binance_ws_event_codec
                 FROM JSON
                 TO SCHEMA binance_ws_event
@@ -2908,20 +2664,12 @@ mod tests {
                     event_type: .e,
                     price: (if .e == "aggTrade" then .p else null end)
                 }$jaq$;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_preserves_float_literal_types() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::preserves_float_literal_types(
+        r#"
             CREATE DEDUPLICATOR dedup_txns
                 FROM ss1
                 DEDUPLICATE ON input.transaction_id
@@ -2930,94 +2678,72 @@ mod tests {
                 TO ss2 INHERIT ALL WHERE battery_pct < 15.0 AND score >= 80.0
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 COLLECT FOR 50ms
                 TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_pulsar_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::pulsar_emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 TO PULSAR pulsar_main TOPIC topic MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s
                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_rabbitmq_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::rabbitmq_emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 TO RABBITMQ broker1 QUEUE outbox MODE ACK SEQUENTIAL ACK TIMEOUT 30s
                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
-        let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
-        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
-        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
-    }
-
-    #[test]
-    fn canonical_roundtrip_redis_emitter() {
-        let input = r#"
+        "#,
+        None,
+        &[]
+    )]
+    #[case::redis_emitter(
+        r#"
             CREATE EMITTER emit
                 FROM p99
                 TO REDIS PUBSUB broker1 CHANNEL outbox MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
+        "#,
+        None,
+        &[]
+    )]
+    fn canonical_statements_roundtrip(
+        #[case] input: &str,
+        #[case] expected_canonical: Option<&str>,
+        #[case] expected_fragments: &[&str],
+    ) {
         let parsed = parse_statement(input).expect("parse should succeed");
-        let Statement::Create(parsed) = parsed else {
-            panic!("expected create statement");
-        };
         let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        if let Some(expected_canonical) = expected_canonical {
+            assert_eq!(canonical, expected_canonical);
+        }
+        for expected_fragment in expected_fragments {
+            assert!(canonical.contains(expected_fragment));
+        }
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::Create(parsed), reparsed);
+        assert_eq!(parsed, reparsed);
     }
 
     #[test]

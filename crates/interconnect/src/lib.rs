@@ -1,76 +1,288 @@
+//! The authenticated HTTP/2 transport between Nervix nodes.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Mutual TLS, class-isolated HTTP/2 pools, bounded rkyv messages, flow control,
+//!   deadlines, relay transfer admission, reconciliation, and cancellation.
+//! - **Depends on.** Execution admission and the vocabulary carried by internal operations.
+//! - **Must not know.** Runtime graphs, schedules, or the semantic outcome of an operation.
+
 use std::{
-    hash::RandomState,
+    collections::{BTreeMap, BTreeSet},
     io,
     net::SocketAddr,
-    path::Path,
-    sync::{Arc as StdArc, OnceLock},
+    sync::OnceLock,
     time::Duration,
 };
 
-use dashmap::DashMap;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use error_stack::Report;
+use meticulous::OptionExt as _;
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
-    Domain, DomainTick, Identifier, ModelKind, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
-    SubscriptionBinding, Timestamp,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, DomainClockProgress,
+    DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind, ModelName, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
+    SubscriptionBinding,
 };
-use rand_core::OsRng;
+use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
-use rustls::{
-    ClientConfig, RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
-    server::WebPkiClientVerifier,
-};
-use rustls_pki_types::pem::{Error as PemError, PemObject};
+use strum::{FromRepr, IntoStaticStr};
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
-    time::{Instant, MissedTickBehavior, interval, sleep, sleep_until},
-};
-use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{debug, warn};
-use triomphe::Arc;
+use tokio::sync::mpsc;
 
-const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const DEFAULT_SEND_QUEUE_CAPACITY: usize = 1024;
+mod connection;
+mod identity;
+mod request;
+mod wire;
+
+pub use connection::{IncomingByteStream, RelayAdmission, RelayCancellationGuard};
+pub use identity::TlsConfigBundle;
+pub use request::{
+    HandlerRegistrationError, InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure,
+    RequestContext, RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
+};
+use request::{RequestEnvelope, RequestState, ResponseEnvelope};
+
+const DEFAULT_MAX_PEERS: usize = 64;
+const DEFAULT_MAX_CONNECTIONS: usize = 768;
+const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 32;
 const DEFAULT_INCOMING_QUEUE_CAPACITY: usize = 1024;
-const DEFAULT_RECONNECT_BACKOFF_MS: u64 = 200;
-const PING_INTERVAL: Duration = Duration::from_millis(500);
-const PING_TIMEOUT: Duration = Duration::from_secs(1);
-const WIRE_TAG_INTRODUCTION: u8 = 1;
-const WIRE_TAG_PING: u8 = 2;
-const WIRE_TAG_RELAY_PAYLOAD: u8 = 3;
-const WIRE_TAG_ACK: u8 = 4;
-const WIRE_TAG_CONTROL: u8 = 5;
+const DEFAULT_STREAM_WINDOW_BYTES: u32 = 64 * 1024;
+const DEFAULT_CONNECTION_WINDOW_BYTES: u32 = 256 * 1024;
+const DEFAULT_MAX_HEADER_BYTES: u32 = 16 * 1024;
+const DEFAULT_CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
+const DEFAULT_MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const RELAY_GRANT_LIFETIME: Duration = Duration::from_secs(5);
+pub(crate) const RKYV_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
+
+/// The independent connection pools that isolate internal traffic classes.
+#[derive(
+    Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+pub enum PoolClass {
+    Management,
+    Commands,
+    Replication,
+    Relay,
+    Bulk,
+}
+
+impl PoolClass {
+    pub const ALL: [Self; 5] = [
+        Self::Management,
+        Self::Commands,
+        Self::Replication,
+        Self::Relay,
+        Self::Bulk,
+    ];
+
+    pub(crate) const PRECONNECTED: [Self; 4] = [
+        Self::Management,
+        Self::Commands,
+        Self::Replication,
+        Self::Relay,
+    ];
+
+    pub(crate) const fn is_preconnected(self) -> bool {
+        matches!(
+            self,
+            Self::Management | Self::Commands | Self::Replication | Self::Relay
+        )
+    }
+
+    pub(crate) fn preconnected_connections_per_peer() -> usize {
+        let mut connections = 0usize;
+        for class in Self::PRECONNECTED {
+            connections = connections
+                .checked_add(class.connections_per_peer())
+                .assured("the fixed set of preconnected pool slots fits in usize");
+        }
+        connections
+    }
+
+    pub const fn connections_per_peer(self) -> usize {
+        match self {
+            Self::Relay => 2,
+            Self::Management | Self::Commands | Self::Replication | Self::Bulk => 1,
+        }
+    }
+
+    pub const fn stream_slots_per_connection(self) -> usize {
+        match self {
+            Self::Management | Self::Relay => 64,
+            Self::Commands => 32,
+            Self::Replication => 1,
+            Self::Bulk => 4,
+        }
+    }
+
+    pub(crate) const fn memory_class(self) -> MemoryClass {
+        match self {
+            Self::Management => MemoryClass::Management,
+            Self::Commands | Self::Replication => MemoryClass::Commands,
+            Self::Relay => MemoryClass::Relay,
+            Self::Bulk => MemoryClass::Bulk,
+        }
+    }
+
+    pub(crate) const fn cpu_class(self) -> CpuClass {
+        match self {
+            Self::Management | Self::Commands | Self::Replication => CpuClass::Control,
+            Self::Relay => CpuClass::Data,
+            Self::Bulk => CpuClass::Bulk,
+        }
+    }
+
+    pub(crate) fn payload_limit(self, executor: &Executor) -> u64 {
+        match self {
+            Self::Management => executor.limits().management_event_bytes.as_u64(),
+            Self::Commands | Self::Replication => executor.limits().command_bytes.as_u64(),
+            Self::Relay => executor.limits().relay_encoded_bytes.as_u64(),
+            Self::Bulk => executor
+                .limits()
+                .bulk_chunk_bytes
+                .as_u64()
+                .checked_add(RKYV_RECORD_OVERHEAD_BYTES)
+                .assured("the bulk application limit leaves room inside a u64 for rkyv metadata"),
+        }
+    }
+
+    pub(crate) fn control_body_limit(self, executor: &Executor) -> u64 {
+        if self == Self::Bulk {
+            return executor
+                .limits()
+                .bulk_chunk_bytes
+                .as_u64()
+                .checked_add(2 * RKYV_RECORD_OVERHEAD_BYTES)
+                .assured(
+                    "the bulk application limit leaves room inside a u64 for nested rkyv metadata",
+                );
+        }
+        self.payload_limit(executor)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TransportOptions {
+    pub max_peers: usize,
     pub max_connections: usize,
-    pub reconnect_backoff: Duration,
-    pub send_queue_capacity: usize,
+    pub max_concurrent_handshakes: usize,
     pub incoming_queue_capacity: usize,
-    pub max_frame_bytes: usize,
+    pub initial_stream_window_bytes: u32,
+    pub initial_connection_window_bytes: u32,
+    pub max_header_bytes: u32,
+    pub connection_setup_timeout: Duration,
+    pub request_timeout: Duration,
+    pub progress_timeout: Duration,
+    pub reconnect_backoff: Duration,
+    pub max_reconnect_backoff: Duration,
+    pub shutdown_drain_timeout: Duration,
 }
 
 impl Default for TransportOptions {
     fn default() -> Self {
         Self {
-            max_connections: 32,
-            reconnect_backoff: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_MS),
-            send_queue_capacity: DEFAULT_SEND_QUEUE_CAPACITY,
+            max_peers: DEFAULT_MAX_PEERS,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_concurrent_handshakes: DEFAULT_MAX_CONCURRENT_HANDSHAKES,
             incoming_queue_capacity: DEFAULT_INCOMING_QUEUE_CAPACITY,
-            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            initial_stream_window_bytes: DEFAULT_STREAM_WINDOW_BYTES,
+            initial_connection_window_bytes: DEFAULT_CONNECTION_WINDOW_BYTES,
+            max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
+            connection_setup_timeout: DEFAULT_CONNECTION_SETUP_TIMEOUT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            progress_timeout: DEFAULT_PROGRESS_TIMEOUT,
+            reconnect_backoff: DEFAULT_RECONNECT_BACKOFF,
+            max_reconnect_backoff: DEFAULT_MAX_RECONNECT_BACKOFF,
+            shutdown_drain_timeout: DEFAULT_SHUTDOWN_DRAIN_TIMEOUT,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TransportMode {
-    Plain,
-    Tls,
+impl TransportOptions {
+    pub(crate) fn validate(&self) -> Result<(), TransportError> {
+        let nonzero = [
+            (self.max_peers, "max_peers"),
+            (self.max_connections, "max_connections"),
+            (self.max_concurrent_handshakes, "max_concurrent_handshakes"),
+            (self.incoming_queue_capacity, "incoming_queue_capacity"),
+        ];
+        for (value, name) in nonzero {
+            if value == 0 {
+                return Err(TransportError::InvalidOptions {
+                    reason: format!("{name} must be greater than zero"),
+                });
+            }
+        }
+        if self.initial_stream_window_bytes == 0
+            || self.initial_connection_window_bytes == 0
+            || self.max_header_bytes == 0
+        {
+            return Err(TransportError::InvalidOptions {
+                reason: "HTTP/2 windows and header limit must be greater than zero".to_string(),
+            });
+        }
+        let preconnected_connections = self
+            .max_peers
+            .checked_mul(PoolClass::preconnected_connections_per_peer())
+            .ok_or_else(|| TransportError::InvalidOptions {
+                reason: "max_peers cannot be represented for every preconnected pool slot"
+                    .to_string(),
+            })?;
+        let preconnected_connections =
+            preconnected_connections.checked_mul(2).ok_or_else(|| {
+                TransportError::InvalidOptions {
+                    reason: "max_peers cannot be represented as inbound and outbound preconnected \
+                             pools"
+                        .to_string(),
+                }
+            })?;
+        if self.max_connections <= preconnected_connections {
+            return Err(TransportError::InvalidOptions {
+                reason: "max_connections must reserve inbound and outbound management, command, \
+                         replication, and relay capacity for every peer and at least one \
+                         on-demand connection"
+                    .to_string(),
+            });
+        }
+        if self.connection_setup_timeout.is_zero()
+            || self.request_timeout.is_zero()
+            || self.progress_timeout.is_zero()
+            || self.reconnect_backoff.is_zero()
+            || self.shutdown_drain_timeout.is_zero()
+        {
+            return Err(TransportError::InvalidOptions {
+                reason: "transport deadlines must be greater than zero".to_string(),
+            });
+        }
+        if self.max_reconnect_backoff < self.reconnect_backoff {
+            return Err(TransportError::InvalidOptions {
+                reason: "max_reconnect_backoff must not be below reconnect_backoff".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One advertised address and the certificate name expected there.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PeerTarget {
+    pub addr: SocketAddr,
+    pub server_name: String,
+}
+
+impl PeerTarget {
+    pub fn new(addr: SocketAddr, server_name: impl Into<String>) -> Self {
+        Self {
+            addr,
+            server_name: server_name.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,86 +294,84 @@ pub enum Envelope {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelayPayload {
+    pub delivery: RelayDelivery,
     pub kind: RelayPayloadKind,
-    pub domain: Domain,
-    pub relay: Identifier,
+    pub domain: DomainName,
+    pub relay: RelayName,
     pub key: Option<Vec<RemoteRuntimeField>>,
-    pub batch_ipc: Vec<u8>,
+    /// The batch's Arrow IPC body, encoded once and shared. Every destination in a fanout and
+    /// every retry of one delivery carries this same allocation, charged once, and writes a slice
+    /// of it to its socket.
+    pub batch_ipc: ChargedBytes,
     pub metadata: Vec<RemoteRuntimeRecordMetadata>,
     pub acks: Vec<Option<RemoteAckRegistration>>,
+    pub admission: Option<RemoteAckRegistration>,
+}
+
+/// The stable position of one relay batch in its sender-owned logical channel.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct RelayDelivery {
+    pub channel_incarnation: [u8; 16],
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RelayAdmissionStatus {
+    Reserved,
+    BodyReceived,
+    Admitted,
+    Rejected(String),
+    Cancelled,
+    Retired,
+    Unknown,
+    Indeterminate,
+}
+
+impl RelayAdmissionStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Admitted | Self::Rejected(_) | Self::Cancelled | Self::Retired
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayAdmissionDecision {
+    Admitted,
+    Cancelled,
+}
+
+#[derive(
+    Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 pub enum RelayPayloadKind {
     Routed,
     SubscriptionFanout,
-}
-
-impl RelayPayloadKind {
-    fn wire_tag(self) -> u8 {
-        match self {
-            Self::Routed => 1,
-            Self::SubscriptionFanout => 2,
-        }
-    }
-
-    fn from_wire_tag(tag: u8) -> Result<Self, TransportError> {
-        match tag {
-            1 => Ok(Self::Routed),
-            2 => Ok(Self::SubscriptionFanout),
-            _ => Err(TransportError::Decode(format!(
-                "unknown relay payload kind tag {tag}"
-            ))),
-        }
-    }
+    Ingress,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum ControlEnvelope {
     Terminate,
-    DomainClockStart(DomainClockStart),
-    DomainClockStop(DomainClockStop),
-    DomainTick(DomainTickEnvelope),
-    StateSyncRequest(StateSyncRequest),
-    StateSyncResponse(StateSyncResponse),
+    DomainClockProgress(DomainClockProgressEnvelope),
     StateReplicationAck(StateReplicationAck),
-    DescribeIngestorRequest(DescribeIngestorRequest),
-    DescribeIngestorResponse(DescribeIngestorResponse),
-    DataflowNodeStatusRequest(DataflowNodeStatusRequest),
-    DataflowNodeStatusResponse(DataflowNodeStatusResponse),
-    DomainDrainStatusRequest(DomainDrainStatusRequest),
-    DomainDrainStatusResponse(DomainDrainStatusResponse),
-    EntityGateRequest(EntityGateRequest),
-    EntityGateResponse(EntityGateResponse),
-    EntityDrainStatusRequest(EntityDrainStatusRequest),
-    EntityDrainStatusResponse(EntityDrainStatusResponse),
-    EntityGateReleaseRequest(EntityGateReleaseRequest),
-    EntityGateReleaseResponse(EntityGateReleaseResponse),
-    DescribeMetricsRequest(DescribeMetricsRequest),
-    DescribeMetricsResponse(DescribeMetricsResponse),
-    DescribeRelayRequest(DescribeRelayRequest),
-    DescribeRelayResponse(DescribeRelayResponse),
-    DescribeLookupRequest(DescribeLookupRequest),
-    DescribeLookupResponse(DescribeLookupResponse),
-    LookupRequest(LookupRequest),
-    LookupResponse(LookupResponse),
-    SubscriptionInterestVisibilityRequest(SubscriptionInterestVisibilityRequest),
-    SubscriptionInterestVisibilityResponse(SubscriptionInterestVisibilityResponse),
+    StateCheckpointAvailable(StateCheckpointAvailable),
+    Request(RequestEnvelope),
+    Response(ResponseEnvelope),
     RuntimeErrorEvent(RuntimeErrorEvent),
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionInterestVisibilityRequest {
-    pub correlation_id: u64,
-    pub subscriber_node_id: String,
-    pub domain: Domain,
-    pub relay: Identifier,
+    pub subscriber: ClusterNodeIdentity,
+    pub domain: DomainName,
+    pub relay: RelayName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionInterestVisibilityResponse {
-    pub correlation_id: u64,
-    pub visible: bool,
+    pub result: Result<(), String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,28 +380,34 @@ pub struct RuntimeErrorEvent {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DomainClockStart {
-    pub domain_id: Domain,
-    pub owner_node_id: String,
-    pub wall_started_at: Timestamp,
-    pub logical_start: Timestamp,
-    pub time_rate: String,
+pub struct DomainClockProgressEnvelope {
+    pub domain_id: DomainName,
+    pub progress: DomainClockProgress,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DomainClockStop {
-    pub domain_id: Domain,
+macro_rules! declare_runtime_state_kinds {
+    ($($Kind:ident = $tag:literal,)+) => {
+        /// The kinds of runtime state a node persists, and the byte each one occupies in a
+        /// storage key.
+        #[derive(
+            Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash, FromRepr,
+        )]
+        #[repr(u8)]
+        pub enum RuntimeStateKind {
+            $($Kind = $tag,)+
+        }
+
+        impl From<RuntimeStateKind> for u8 {
+            fn from(value: RuntimeStateKind) -> Self {
+                match value {
+                    $(RuntimeStateKind::$Kind => $tag,)+
+                }
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DomainTickEnvelope {
-    pub domain_id: Domain,
-    pub tick: DomainTick,
-}
-
-#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum RuntimeStateKind {
+declare_runtime_state_kinds! {
     BranchAggregated = 0,
     Correlator = 1,
     Deduplicator = 2,
@@ -204,10 +420,10 @@ pub enum RuntimeStateKind {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct StatePlacementEnvelope {
-    pub domain: Domain,
+    pub domain: DomainName,
     pub state: RuntimeStateKind,
     pub kind: ModelKind,
-    pub identifier: Identifier,
+    pub identifier: ModelName,
     pub schema_fingerprint: [u8; 32],
     pub branch_key: Option<Vec<RemoteRuntimeField>>,
 }
@@ -221,14 +437,12 @@ pub struct StateSnapshotEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct StateSyncRequest {
-    pub correlation_id: u64,
     pub placement: StatePlacementEnvelope,
-    pub after_lsm: u64,
+    pub after_lsm: Option<u64>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateSyncResponse {
-    pub correlation_id: u64,
     pub result: Result<Option<StateSnapshotEnvelope>, String>,
 }
 
@@ -236,6 +450,110 @@ pub struct StateSyncResponse {
 pub struct StateReplicationAck {
     pub placement: StatePlacementEnvelope,
     pub lsm: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct StateCheckpointAvailable {
+    pub placement: StatePlacementEnvelope,
+    pub lsm: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct OwnershipHandoffCheckpoint {
+    pub placement: StatePlacementEnvelope,
+    pub snapshot: StateSnapshotEnvelope,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CaptureOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct PrepareOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+    pub checkpoints: Vec<OwnershipHandoffCheckpoint>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfirmOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrepareForcedOwnershipRecoveryRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForcedOwnershipRecoveryPreparation {
+    pub state_recovery: OwnershipStateRecoveryOutcome,
+    pub resets: Vec<OwnershipStateReset>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+pub enum OwnershipHandoffFailure {
+    #[error("{reason}")]
+    Rejected { reason: String },
+}
+
+impl OwnershipHandoffFailure {
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self::Rejected {
+            reason: reason.into(),
+        }
+    }
+}
+
+pub type OwnershipHandoffResponse<T> = Result<T, OwnershipHandoffFailure>;
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivateOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub source: ClusterNodeName,
+    pub destination: ClusterNodeName,
+    pub source_incarnation: ClusterNodeIncarnation,
+    pub destination_incarnation: ClusterNodeIncarnation,
+    pub domain: DomainName,
+    pub entity: NodeRef,
+    pub base_schedule_fingerprint: [u8; 32],
+    pub target_schedule_fingerprint: [u8; 32],
+    pub activation_budget: Duration,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscardOwnershipHandoffStateRequest {
+    pub operation_id: String,
+    pub domain: DomainName,
+    pub entity: NodeRef,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,15 +593,13 @@ pub struct DataflowNodeStatusEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataflowNodeStatusRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
     pub kind: ModelKind,
-    pub name: Identifier,
+    pub name: ModelName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataflowNodeStatusResponse {
-    pub correlation_id: u64,
     pub result: Result<DataflowNodeStatusEnvelope, String>,
 }
 
@@ -296,7 +612,8 @@ pub struct DomainDrainStatusEnvelope {
     pub emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
 }
 
-#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum EmitterPublishingDrainStateEnvelope {
     AwaitingConfirmation,
     RetryingInfrastructure,
@@ -305,17 +622,13 @@ pub enum EmitterPublishingDrainStateEnvelope {
 
 impl EmitterPublishingDrainStateEnvelope {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AwaitingConfirmation => "awaiting_confirmation",
-            Self::RetryingInfrastructure => "retrying_infrastructure",
-            Self::RetryingIcebergCommit => "retrying_iceberg_commit",
-        }
+        self.into()
     }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmitterPublishingDrainStatusEnvelope {
-    pub emitter: Identifier,
+    pub emitter: EmitterName,
     pub state: EmitterPublishingDrainStateEnvelope,
     pub pending_messages: u64,
     pub retry_backoff_millis: Option<u64>,
@@ -324,36 +637,42 @@ pub struct EmitterPublishingDrainStatusEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainDrainStatusRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainDrainStatusResponse {
-    pub correlation_id: u64,
     pub result: Result<DomainDrainStatusEnvelope, String>,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EntityReference {
-    pub kind: ModelKind,
-    pub identifier: Identifier,
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EntityGatePurpose {
+    ModelAlteration,
+    OwnershipHandoff,
+}
+
+impl EntityGatePurpose {
+    pub const fn operation_name(self) -> &'static str {
+        match self {
+            Self::ModelAlteration => "model alteration",
+            Self::OwnershipHandoff => "ownership handoff",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateRequest {
-    pub correlation_id: u64,
     pub operation_id: u64,
-    pub domain: Domain,
-    pub relays: Vec<Identifier>,
-    pub affected_entities: Vec<EntityReference>,
+    pub domain: DomainName,
+    pub relays: Vec<RelayName>,
+    pub affected_entities: Vec<NodeRef>,
+    pub purpose: EntityGatePurpose,
     pub deadline_millis: u64,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateResponse {
-    pub correlation_id: u64,
     pub result: Result<(), String>,
 }
 
@@ -361,47 +680,43 @@ pub struct EntityGateResponse {
 pub struct EntityDrainStatusEnvelope {
     pub buffered_relay_batches: u64,
     pub node_work_items: u64,
+    pub outstanding_acks: u64,
     pub emitter_publishing: Vec<EmitterPublishingDrainStatusEnvelope>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDrainStatusRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
-    pub relays: Vec<Identifier>,
-    pub affected_entities: Vec<EntityReference>,
+    pub domain: DomainName,
+    pub relays: Vec<RelayName>,
+    pub affected_entities: Vec<NodeRef>,
+    pub purpose: EntityGatePurpose,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDrainStatusResponse {
-    pub correlation_id: u64,
     pub result: Result<EntityDrainStatusEnvelope, String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateReleaseRequest {
-    pub correlation_id: u64,
     pub operation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateReleaseResponse {
-    pub correlation_id: u64,
     pub result: Result<(), String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeMetricsRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
+    pub domain: DomainName,
     pub kind: ModelKind,
-    pub name: Identifier,
+    pub name: ModelName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeMetricsResponse {
-    pub correlation_id: u64,
     pub result: Result<DescribeMetricsEnvelope, String>,
 }
 
@@ -413,155 +728,383 @@ pub struct DescribeMetricsEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeIngestorRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
-    pub name: Identifier,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DescribeIngestorResponse {
-    pub correlation_id: u64,
-    pub result: Result<IngestorDescribeEnvelope, String>,
+    pub domain: DomainName,
+    pub name: IngestorName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeRelayRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
-    pub relay: Identifier,
+    pub domain: DomainName,
+    pub relay: RelayName,
     pub bindings: Vec<SubscriptionBinding>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeRelayResponse {
-    pub correlation_id: u64,
     pub result: Result<bool, String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LookupDescribeEnvelope {
-    pub resource: Identifier,
+    pub resource: ResourceName,
     pub resource_version: u64,
     pub path: String,
-    pub decode_using_codec: Identifier,
-    pub key_field: Identifier,
+    pub decode_using_codec: CodecName,
+    pub key_field: FieldName,
     pub entry_count: u64,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeLookupRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
-    pub name: Identifier,
+    pub domain: DomainName,
+    pub name: LookupName,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeLookupResponse {
-    pub correlation_id: u64,
     pub result: Result<LookupDescribeEnvelope, String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LookupRequest {
-    pub correlation_id: u64,
-    pub domain: Domain,
-    pub name: Identifier,
+    pub domain: DomainName,
+    pub name: LookupName,
     pub key: String,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct LookupResponse {
-    pub correlation_id: u64,
     pub result: Result<Option<Vec<u8>>, String>,
 }
 
-#[derive(Debug, Clone)]
+impl InterconnectRequest for StateSyncRequest {
+    type Response = StateSyncResponse;
+
+    const NAME: &'static str = "state_sync";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectRequest for DataflowNodeStatusRequest {
+    type Response = DataflowNodeStatusResponse;
+
+    const NAME: &'static str = "dataflow_node_status";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
+impl InterconnectRequest for DomainDrainStatusRequest {
+    type Response = DomainDrainStatusResponse;
+
+    const NAME: &'static str = "domain_drain_status";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
+impl InterconnectRequest for EntityGateRequest {
+    type Response = EntityGateResponse;
+
+    const NAME: &'static str = "entity_gate";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
+impl InterconnectRequest for EntityDrainStatusRequest {
+    type Response = EntityDrainStatusResponse;
+
+    const NAME: &'static str = "entity_drain_status";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
+impl InterconnectRequest for EntityGateReleaseRequest {
+    type Response = EntityGateReleaseResponse;
+
+    const NAME: &'static str = "entity_gate_release";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
+impl InterconnectRequest for DescribeMetricsRequest {
+    type Response = DescribeMetricsResponse;
+
+    const NAME: &'static str = "describe_metrics";
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectRequest for DescribeRelayRequest {
+    type Response = DescribeRelayResponse;
+
+    const NAME: &'static str = "describe_relay";
+    const TIMEOUT: Duration = Duration::from_secs(1);
+}
+
+impl InterconnectRequest for DescribeLookupRequest {
+    type Response = DescribeLookupResponse;
+
+    const NAME: &'static str = "describe_lookup";
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectRequest for LookupRequest {
+    type Response = LookupResponse;
+
+    const NAME: &'static str = "lookup";
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
+    type Response = SubscriptionInterestVisibilityResponse;
+
+    const NAME: &'static str = "subscription_interest_visibility";
+    const CLASS: PoolClass = PoolClass::Management;
+    // Gossip convergence can keep this request open, so it must not occupy capacity reserved for
+    // short liveness probes.
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
+    // This request spans gossip convergence during membership changes. Target departure and node
+    // shutdown cancel it independently, so the deadline is only the bound for a live but
+    // non-converging cluster.
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+#[derive(Debug)]
 pub struct ReceivedEnvelope {
     pub peer_addr: SocketAddr,
-    pub peer_node_id: String,
+    pub peer_node_id: ClusterNodeName,
     pub envelope: Envelope,
-    pub reply: ConnectionHandle,
+    pub relay_admission: Option<RelayAdmission>,
+    _decoded: Option<Reservation>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConnectionHandle {
-    peer_addr: SocketAddr,
-    tx: mpsc::Sender<Envelope>,
-}
-
-impl ConnectionHandle {
-    pub async fn send(&self, envelope: Envelope) -> Result<(), TransportError> {
-        self.tx
-            .send(envelope)
-            .await
-            .map_err(|_| TransportError::Closed(self.peer_addr))
+impl ReceivedEnvelope {
+    pub(crate) fn new(
+        peer_addr: SocketAddr,
+        peer_node_id: ClusterNodeName,
+        envelope: Envelope,
+        decoded: Option<Reservation>,
+    ) -> Self {
+        Self {
+            peer_addr,
+            peer_node_id,
+            envelope,
+            relay_admission: None,
+            _decoded: decoded,
+        }
     }
 
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
+    pub(crate) fn new_relay(
+        peer_addr: SocketAddr,
+        peer_node_id: ClusterNodeName,
+        payload: RelayPayload,
+        relay_admission: RelayAdmission,
+    ) -> Self {
+        Self {
+            peer_addr,
+            peer_node_id,
+            envelope: Envelope::RelayPayload(payload),
+            relay_admission: Some(relay_admission),
+            _decoded: None,
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct Transport {
-    inner: Arc<TransportInner>,
+    pub(crate) inner: connection::TransportState,
 }
 
-struct TransportInner {
-    mode: TransportMode,
-    client_config: Option<StdArc<ClientConfig>>,
-    server_config: Option<StdArc<ServerConfig>>,
-    identity: LocalIdentity,
-    peer_verifier: PeerVerifier,
-    options: TransportOptions,
-    local_addr: SocketAddr,
-    incoming_tx: mpsc::Sender<ReceivedEnvelope>,
-    outbound: DashMap<ConnectionKey, ConnectionHandle, RandomState>,
-    outbound_state: DashMap<ConnectionKey, ConnectionState, RandomState>,
-    connected_peers: DashMap<String, usize, RandomState>,
-    outbound_permits: StdArc<Semaphore>,
-    shutdown: CancellationToken,
-    tasks: TaskTracker,
+impl Transport {
+    pub async fn bind(
+        listen_addr: SocketAddr,
+        advertised_host: impl Into<String>,
+        cluster_id: impl Into<String>,
+        node_id: ClusterNodeName,
+        tls: TlsConfigBundle,
+        options: TransportOptions,
+        executor: Executor,
+    ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
+        let (inner, incoming) = connection::TransportState::bind(
+            listen_addr,
+            advertised_host.into(),
+            cluster_id.into(),
+            node_id,
+            tls,
+            options,
+            executor,
+        )
+        .await?;
+        Ok((Self { inner }, incoming))
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.inner.local_addr()
+    }
+
+    pub fn node_id(&self) -> &ClusterNodeName {
+        self.inner.node_id()
+    }
+
+    /// Send one operation. Its semantic type selects the pool; callers cannot select a class.
+    pub async fn send(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        envelope: Envelope,
+    ) -> Result<(), TransportError> {
+        self.inner.send(peer_node_id, envelope).await
+    }
+
+    pub async fn cancel_relay(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        delivery: RelayDelivery,
+    ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
+        self.inner.cancel_relay(peer_node_id, delivery).await
+    }
+
+    pub async fn relay_admission_status(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        delivery: RelayDelivery,
+    ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
+        self.inner
+            .relay_admission_status(peer_node_id, delivery)
+            .await
+    }
+
+    pub fn relay_cancellation_guard(
+        &self,
+        peer_node_id: ClusterNodeName,
+        delivery: RelayDelivery,
+    ) -> RelayCancellationGuard {
+        RelayCancellationGuard::new(self.inner.clone(), peer_node_id, delivery)
+    }
+
+    pub fn replace_outbound_targets(
+        &self,
+        targets: &BTreeMap<ClusterNodeName, BTreeSet<PeerTarget>>,
+    ) {
+        self.inner.replace_outbound_targets(targets);
+    }
+
+    /// Authenticate an endpoint whose node identity is not known yet, then add its pool target.
+    /// Bootstrap discovery uses the identity in the peer certificate as the result.
+    pub async fn bootstrap_target(
+        &self,
+        target: PeerTarget,
+    ) -> Result<ClusterNodeName, TransportError> {
+        self.inner.bootstrap_target(target).await
+    }
+
+    /// Add one discovered target. Every pool connection still verifies that its certificate names
+    /// `node_id` and its endpoint before the target becomes usable.
+    pub fn register_outbound_target(
+        &self,
+        node_id: ClusterNodeName,
+        target: PeerTarget,
+    ) -> Result<(), TransportError> {
+        self.inner.register_outbound_target(node_id, target)
+    }
+
+    /// Reports whether every outbound pool except bulk is ready for node traffic.
+    pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
+        self.inner.is_connected_to(node_id)
+    }
+
+    pub async fn active_outbound_connections(&self) -> usize {
+        self.inner.active_outbound_connections()
+    }
+
+    pub async fn replace_tls(&self, tls: TlsConfigBundle) -> Result<(), TransportError> {
+        self.inner.replace_tls(tls).await
+    }
+
+    pub async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct ConnectionKey {
-    addr: SocketAddr,
-    server_name: String,
-    mode: TransportMode,
+impl Envelope {
+    pub(crate) fn pool_class(&self) -> PoolClass {
+        match self {
+            Self::RelayPayload(_) => PoolClass::Relay,
+            Self::Ack(_) => PoolClass::Management,
+            Self::Control(control) => control.pool_class(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConnectionState {
-    Connecting,
-    Connected,
-    Disconnected,
+impl ControlEnvelope {
+    pub(crate) fn pool_class(&self) -> PoolClass {
+        match self {
+            Self::DomainClockProgress(_) | Self::RuntimeErrorEvent(_) => PoolClass::Management,
+            Self::StateReplicationAck(_) | Self::StateCheckpointAvailable(_) => {
+                PoolClass::Replication
+            }
+            Self::Request(request) => request.class,
+            Self::Response(response) => response.class,
+            Self::Terminate => PoolClass::Commands,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("invalid transport options: {reason}")]
+    InvalidOptions { reason: String },
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("tls error: {0}")]
     Tls(#[from] rustls::Error),
-    #[error("invalid dns name '{0}'")]
+    #[error("HTTP/2 error: {0}")]
+    Http2(#[from] h2::Error),
+    #[error("invalid DNS or IP server name '{0}'")]
     InvalidServerName(String),
     #[error("wire encode failed: {0}")]
     Encode(String),
     #[error("wire decode failed: {0}")]
     Decode(String),
-    #[error("frame exceeds maximum size: {size} > {limit}")]
-    FrameTooLarge { size: usize, limit: usize },
-    #[error("connection pool exhausted")]
+    #[error("HTTP/2 request construction failed: {0}")]
+    Http(String),
+    #[error("payload exceeds its {class:?} limit: {size} > {limit}")]
+    PayloadTooLarge {
+        class: PoolClass,
+        size: u64,
+        limit: u64,
+    },
+    #[error("interconnect connection capacity is exhausted")]
     PoolExhausted,
+    #[error("connection setup with {peer} timed out after {timeout:?}")]
+    ConnectionSetupTimeout { peer: SocketAddr, timeout: Duration },
+    #[error("request to node '{peer}' timed out after {timeout:?}")]
+    RequestTimeout {
+        peer: ClusterNodeName,
+        timeout: Duration,
+    },
+    #[error("body stream made no progress for {timeout:?}")]
+    ProgressTimeout { timeout: Duration },
     #[error("transport is shutting down")]
     ShuttingDown,
     #[error("connection to {0} is closed")]
     Closed(SocketAddr),
     #[error("peer handshake is invalid: {0}")]
     InvalidHandshake(String),
-    #[error("tls mode requires tls configuration")]
-    MissingTlsConfig,
+    #[error("peer returned HTTP status {status}: {message}")]
+    RemoteRejected { status: u16, message: String },
+    #[error("the application ingress queue is full")]
+    IncomingQueueFull,
+    #[error("relay transfer grant was refused: {0}")]
+    RelayGrant(String),
+    #[error("relay delivery was cancelled before runtime admission")]
+    RelayCancelled,
+    #[error("relay delivery outcome is indeterminate after a peer process epoch change")]
+    RelayIndeterminate,
+    #[error("relay delivery was rejected before runtime admission: {0}")]
+    RelayRejected(String),
 }
 
 #[derive(Debug, Error)]
@@ -574,1311 +1117,69 @@ pub enum TlsConfigError {
     MissingCertificate(String),
     #[error("missing private key in {0}")]
     MissingPrivateKey(String),
-}
-
-#[derive(Clone)]
-pub struct LocalIdentity {
-    node_id: String,
-    signing_key: SigningKey,
-}
-
-type PeerKeyResolver = dyn Fn(&str) -> Option<VerifyingKey> + Send + Sync;
-
-impl std::fmt::Debug for LocalIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalIdentity")
-            .field("node_id", &self.node_id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl LocalIdentity {
-    pub fn generate(node_id: impl Into<String>) -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
-        Self {
-            node_id: node_id.into(),
-            signing_key,
-        }
-    }
-
-    pub fn node_id(&self) -> &str {
-        &self.node_id
-    }
-
-    pub fn public_key(&self) -> VerifyingKey {
-        self.signing_key.verifying_key()
-    }
-
-    fn signed_introduction(&self) -> SignedIntroduction {
-        let signature = self.signing_key.sign(&introduction_message(&self.node_id));
-        SignedIntroduction {
-            node_id: self.node_id.clone(),
-            signature: signature.to_bytes(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct PeerVerifier {
-    resolver: Arc<Box<PeerKeyResolver>>,
-}
-
-impl std::fmt::Debug for PeerVerifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PeerVerifier").finish_non_exhaustive()
-    }
-}
-
-impl PeerVerifier {
-    pub fn new(resolver: impl Fn(&str) -> Option<VerifyingKey> + Send + Sync + 'static) -> Self {
-        Self {
-            resolver: Arc::new(Box::new(resolver)),
-        }
-    }
-
-    fn resolve(&self, node_id: &str) -> Option<VerifyingKey> {
-        (self.resolver)(node_id)
-    }
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-struct SignedIntroduction {
-    node_id: String,
-    signature: [u8; 64],
-}
-
-impl SignedIntroduction {
-    fn verify(&self, verifier: &PeerVerifier) -> Result<String, TransportError> {
-        let public_key = verifier.resolve(&self.node_id).ok_or_else(|| {
-            TransportError::InvalidHandshake(format!(
-                "no public key available for node '{}'",
-                self.node_id
-            ))
-        })?;
-        let signature = Signature::from_bytes(&self.signature);
-        public_key
-            .verify(&introduction_message(&self.node_id), &signature)
-            .map_err(|err| TransportError::InvalidHandshake(err.to_string()))?;
-        Ok(self.node_id.clone())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum WireEnvelope {
-    Introduction(SignedIntroduction),
-    Ping,
-    Payload(Envelope),
-}
-
-impl Transport {
-    pub async fn bind(
-        listen_addr: SocketAddr,
-        mode: TransportMode,
-        tls: Option<TlsConfigBundle>,
-        identity: LocalIdentity,
-        peer_verifier: PeerVerifier,
-        options: TransportOptions,
-    ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
-        install_rustls_crypto_provider();
-
-        let listener = TcpListener::bind(listen_addr).await?;
-        let local_addr = listener.local_addr()?;
-        let (incoming_tx, incoming_rx) = mpsc::channel(options.incoming_queue_capacity);
-
-        let (client_config, server_config) = match tls {
-            Some(tls) => (Some(tls.client_config), Some(tls.server_config)),
-            None => (None, None),
-        };
-        let inner = Arc::new(TransportInner {
-            mode,
-            client_config,
-            server_config,
-            identity,
-            peer_verifier,
-            options: options.clone(),
-            local_addr,
-            incoming_tx,
-            outbound: DashMap::default(),
-            outbound_state: DashMap::default(),
-            connected_peers: DashMap::default(),
-            outbound_permits: StdArc::new(Semaphore::new(options.max_connections)),
-            shutdown: CancellationToken::new(),
-            tasks: TaskTracker::new(),
-        });
-
-        spawn_accept_loop(inner.clone(), listener);
-
-        Ok((Self { inner }, incoming_rx))
-    }
-
-    pub fn local_addr(&self) -> SocketAddr {
-        self.inner.local_addr
-    }
-
-    pub fn node_id(&self) -> &str {
-        self.inner.identity.node_id()
-    }
-
-    pub async fn send(
-        &self,
-        target: SocketAddr,
-        server_name: &str,
-        mode: TransportMode,
-        envelope: Envelope,
-    ) -> Result<(), TransportError> {
-        let handle = self.connection_for(target, server_name, mode).await?;
-        handle.send(envelope).await
-    }
-
-    pub async fn connection_for(
-        &self,
-        target: SocketAddr,
-        server_name: &str,
-        mode: TransportMode,
-    ) -> Result<ConnectionHandle, TransportError> {
-        if self.inner.shutdown.is_cancelled() {
-            return Err(TransportError::ShuttingDown);
-        }
-
-        let key = ConnectionKey {
-            addr: target,
-            server_name: server_name.to_string(),
-            mode,
-        };
-        if let Some(existing) = self
-            .inner
-            .outbound
-            .get(&key)
-            .map(|entry| entry.value().clone())
-        {
-            return Ok(existing);
-        }
-
-        let permit = self
-            .inner
-            .outbound_permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| TransportError::PoolExhausted)?;
-        let (tx, rx) = mpsc::channel(self.inner.options.send_queue_capacity);
-        let handle = ConnectionHandle {
-            peer_addr: target,
-            tx,
-        };
-
-        let io_stream = connect_outbound_stream(&self.inner, &key).await?;
-
-        if let Some(existing) = self
-            .inner
-            .outbound
-            .get(&key)
-            .map(|entry| entry.value().clone())
-        {
-            return Ok(existing);
-        }
-        self.inner.outbound.insert(key.clone(), handle.clone());
-        self.inner
-            .outbound_state
-            .insert(key.clone(), ConnectionState::Connecting);
-
-        spawn_outbound_connection(self.inner.clone(), key, rx, permit, io_stream);
-
-        Ok(handle)
-    }
-
-    pub async fn active_outbound_connections(&self) -> usize {
-        self.inner.outbound.len()
-    }
-
-    pub fn is_connected_to(&self, node_id: &str) -> bool {
-        self.inner
-            .connected_peers
-            .get(node_id)
-            .map(|count| *count)
-            .unwrap_or_default()
-            > 0
-    }
-
-    pub async fn shutdown(&self) {
-        self.inner.shutdown.cancel();
-        self.inner.tasks.close();
-        self.inner.tasks.wait().await;
-        self.inner.outbound.clear();
-        self.inner.outbound_state.clear();
-        self.inner.connected_peers.clear();
-    }
-}
-
-fn spawn_accept_loop(inner: Arc<TransportInner>, listener: TcpListener) {
-    let shutdown = inner.shutdown.clone();
-    let tasks = inner.tasks.clone();
-    tasks.spawn(async move {
-        loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                accepted = listener.accept() => {
-                    let Ok((stream, peer_addr)) = accepted else {
-                        if !shutdown.is_cancelled() {
-                            warn!("interconnect accept failed");
-                        }
-                        continue;
-                    };
-                    if let Err(err) = configure_socket(&stream) {
-                        warn!(?err, %peer_addr, "failed to configure accepted interconnect socket");
-                        continue;
-                    }
-                    let inner = inner.clone();
-                    let tasks = inner.tasks.clone();
-                    tasks.spawn(async move {
-                        match accept_inbound_stream(&inner, stream, peer_addr).await {
-                            Ok(io_stream) => {
-                                let (tx, mut rx) =
-                                    mpsc::channel(inner.options.send_queue_capacity);
-                                let handle = ConnectionHandle { peer_addr, tx };
-                                let mut pending = None;
-                                if let Err(err) = run_connection_loop(
-                                    inner,
-                                    peer_addr,
-                                    handle,
-                                    None,
-                                    &mut rx,
-                                    io_stream,
-                                    &mut pending,
-                                )
-                                .await
-                                {
-                                    debug!(?err, %peer_addr, "inbound interconnect connection closed");
-                                }
-                            }
-                            Err(err) => {
-                                warn!(?err, %peer_addr, "failed to accept interconnect connection");
-                            }
-                        }
-                    });
-                }
-            }
-        }
-    });
-}
-
-fn spawn_outbound_connection(
-    inner: Arc<TransportInner>,
-    key: ConnectionKey,
-    rx: mpsc::Receiver<Envelope>,
-    permit: OwnedSemaphorePermit,
-    initial_stream: BoxedIo,
-) {
-    let shutdown = inner.shutdown.clone();
-    let tasks = inner.tasks.clone();
-    tasks.spawn(async move {
-        run_outbound_connection(inner.clone(), key.clone(), rx, shutdown, initial_stream).await;
-        inner.outbound.remove(&key);
-        inner.outbound_state.remove(&key);
-        drop(permit);
-    });
-}
-
-async fn run_outbound_connection(
-    inner: Arc<TransportInner>,
-    key: ConnectionKey,
-    mut rx: mpsc::Receiver<Envelope>,
-    shutdown: CancellationToken,
-    initial_stream: BoxedIo,
-) {
-    let mut pending = None;
-    let mut current_stream = Some(initial_stream);
-
-    loop {
-        tokio::task::consume_budget().await;
-        if shutdown.is_cancelled() {
-            return;
-        }
-
-        let io_stream = if let Some(stream) = current_stream.take() {
-            stream
-        } else {
-            match connect_outbound_stream(&inner, &key).await {
-                Ok(next_stream) => {
-                    inner
-                        .outbound_state
-                        .insert(key.clone(), ConnectionState::Connecting);
-                    next_stream
-                }
-                Err(connect_err) => {
-                    inner
-                        .outbound_state
-                        .insert(key.clone(), ConnectionState::Disconnected);
-                    debug!(?connect_err, target = %key.addr, "outbound interconnect reconnect failed");
-                    sleep(inner.options.reconnect_backoff).await;
-                    continue;
-                }
-            }
-        };
-
-        let handle = ConnectionHandle {
-            peer_addr: key.addr,
-            tx: {
-                let Some(existing) = inner.outbound.get(&key) else {
-                    return;
-                };
-                existing.tx.clone()
-            },
-        };
-
-        if let Err(err) = run_connection_loop(
-            inner.clone(),
-            key.addr,
-            handle,
-            Some(key.clone()),
-            &mut rx,
-            io_stream,
-            &mut pending,
-        )
-        .await
-        {
-            inner
-                .outbound_state
-                .insert(key.clone(), ConnectionState::Disconnected);
-            debug!(?err, target = %key.addr, "outbound interconnect connection closed");
-            if shutdown.is_cancelled() {
-                return;
-            }
-            sleep(inner.options.reconnect_backoff).await;
-        } else {
-            return;
-        }
-    }
-}
-
-type BoxedIo = Box<dyn AsyncReadWrite>;
-
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
-
-async fn accept_inbound_stream(
-    inner: &Arc<TransportInner>,
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-) -> Result<BoxedIo, TransportError> {
-    match inner.mode {
-        TransportMode::Plain => Ok(Box::new(stream)),
-        TransportMode::Tls => {
-            let acceptor = TlsAcceptor::from(
-                inner
-                    .server_config
-                    .clone()
-                    .ok_or(TransportError::MissingTlsConfig)?,
-            );
-            acceptor
-                .accept(stream)
-                .await
-                .map(|stream| Box::new(stream) as BoxedIo)
-                .map_err(|err| {
-                    warn!(?err, %peer_addr, "failed to accept interconnect tls connection");
-                    TransportError::Io(io::Error::other(err.to_string()))
-                })
-        }
-    }
-}
-
-async fn connect_outbound_stream(
-    inner: &Arc<TransportInner>,
-    key: &ConnectionKey,
-) -> Result<BoxedIo, TransportError> {
-    let tcp = TcpStream::connect(key.addr).await.map_err(|err| {
-        debug!(?err, target = %key.addr, "outbound interconnect connect failed");
-        TransportError::Io(err)
-    })?;
-    configure_socket(&tcp)?;
-
-    match key.mode {
-        TransportMode::Plain => Ok(Box::new(tcp)),
-        TransportMode::Tls => {
-            let server_name = ServerName::try_from(key.server_name.clone())
-                .map_err(|_| TransportError::InvalidServerName(key.server_name.clone()))?;
-            let connector = TlsConnector::from(
-                inner
-                    .client_config
-                    .clone()
-                    .ok_or(TransportError::MissingTlsConfig)?,
-            );
-            connector
-                .connect(server_name, tcp)
-                .await
-                .map(|stream| Box::new(stream) as BoxedIo)
-                .map_err(|err| {
-                    debug!(?err, target = %key.addr, "outbound interconnect tls connect failed");
-                    TransportError::Io(io::Error::other(err.to_string()))
-                })
-        }
-    }
-}
-
-async fn run_connection_loop(
-    inner: Arc<TransportInner>,
-    peer_addr: SocketAddr,
-    reply_handle: ConnectionHandle,
-    outbound_key: Option<ConnectionKey>,
-    rx: &mut mpsc::Receiver<Envelope>,
-    io_stream: BoxedIo,
-    retry_payload: &mut Option<Envelope>,
-) -> Result<(), TransportError> {
-    let mut pending = retry_payload.take().map(WireEnvelope::Payload);
-    let result = async {
-        let (mut reader, mut writer) = tokio::io::split(io_stream);
-        let mut keepalive = interval(PING_INTERVAL);
-        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_ping_at = Instant::now();
-        write_wire_envelope(
-            &mut writer,
-            &WireEnvelope::Introduction(inner.identity.signed_introduction()),
-        )
-        .await?;
-        let peer_node_id = read_and_verify_introduction(
-            &mut reader,
-            inner.options.max_frame_bytes,
-            &inner.peer_verifier,
-        )
-        .await?;
-        if let Some(outbound_key) = outbound_key.as_ref() {
-            inner
-                .outbound_state
-                .insert(outbound_key.clone(), ConnectionState::Connected);
-        }
-        register_connected_peer(&inner, &peer_node_id);
-
-        let result = async {
-            loop {
-                tokio::task::consume_budget().await;
-                let ping_deadline = last_ping_at + PING_TIMEOUT;
-                tokio::select! {
-                    biased;
-                    _ = inner.shutdown.cancelled() => break Ok(()),
-                    result = read_wire_envelope(&mut reader, inner.options.max_frame_bytes) => {
-                        match result? {
-                            WireEnvelope::Introduction(_) => {
-                                break Err(TransportError::InvalidHandshake(
-                                    "received duplicate introduction".to_string(),
-                                ));
-                            }
-                            WireEnvelope::Ping => {
-                                last_ping_at = Instant::now();
-                            }
-                            WireEnvelope::Payload(envelope) => {
-                                last_ping_at = Instant::now();
-                                inner
-                                    .incoming_tx
-                                    .send(ReceivedEnvelope {
-                                        peer_addr,
-                                        peer_node_id: peer_node_id.clone(),
-                                        envelope,
-                                        reply: reply_handle.clone(),
-                                    })
-                                    .await
-                                    .map_err(|_| TransportError::ShuttingDown)?;
-                            }
-                        }
-                    }
-                    _ = sleep_until(ping_deadline) => {
-                        break Err(TransportError::Closed(peer_addr));
-                    }
-                    _ = keepalive.tick(), if pending.is_none() => {
-                        pending = Some(WireEnvelope::Ping);
-                    }
-                    maybe_envelope = rx.recv(), if pending.is_none() => {
-                        match maybe_envelope {
-                            Some(envelope) => pending = Some(WireEnvelope::Payload(envelope)),
-                            None => break Ok(()),
-                        }
-                    }
-                    result = async {
-                        let Some(envelope) = pending.as_ref() else {
-                            return Ok(());
-                        };
-                        write_wire_envelope(&mut writer, envelope).await
-                    }, if pending.is_some() => {
-                        result?;
-                        pending = None;
-                    }
-                }
-            }
-        }
-        .await;
-        unregister_connected_peer(&inner, &peer_node_id);
-        result
-    }
-    .await;
-    if let Some(WireEnvelope::Payload(payload)) = pending {
-        *retry_payload = Some(payload);
-    }
-    result
-}
-
-fn register_connected_peer(inner: &TransportInner, peer_node_id: &str) {
-    inner
-        .connected_peers
-        .entry(peer_node_id.to_string())
-        .and_modify(|count| *count += 1)
-        .or_insert(1);
-}
-
-fn unregister_connected_peer(inner: &TransportInner, peer_node_id: &str) {
-    let Some(mut count) = inner.connected_peers.get_mut(peer_node_id) else {
-        return;
-    };
-    if *count <= 1 {
-        drop(count);
-        inner.connected_peers.remove(peer_node_id);
-    } else {
-        *count -= 1;
-    }
-}
-
-fn configure_socket(stream: &TcpStream) -> io::Result<()> {
-    stream.set_nodelay(true)
-}
-
-async fn write_wire_envelope<W>(
-    writer: &mut W,
-    envelope: &WireEnvelope,
-) -> Result<(), TransportError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let bytes = encode_wire_envelope(envelope)?;
-    writer
-        .write_u32(bytes.len() as u32)
-        .await
-        .map_err(TransportError::Io)?;
-    writer.write_all(&bytes).await.map_err(TransportError::Io)?;
-    writer.flush().await.map_err(TransportError::Io)
-}
-
-async fn read_wire_envelope<R>(
-    reader: &mut R,
-    max_frame_bytes: usize,
-) -> Result<WireEnvelope, TransportError>
-where
-    R: AsyncRead + Unpin,
-{
-    let frame_size = reader.read_u32().await.map_err(TransportError::Io)? as usize;
-    if frame_size > max_frame_bytes {
-        return Err(TransportError::FrameTooLarge {
-            size: frame_size,
-            limit: max_frame_bytes,
-        });
-    }
-    let mut bytes = vec![0u8; frame_size];
-    reader
-        .read_exact(&mut bytes)
-        .await
-        .map_err(TransportError::Io)?;
-    decode_wire_envelope(&bytes)
-}
-
-async fn read_and_verify_introduction<R>(
-    reader: &mut R,
-    max_frame_bytes: usize,
-    verifier: &PeerVerifier,
-) -> Result<String, TransportError>
-where
-    R: AsyncRead + Unpin,
-{
-    match read_wire_envelope(reader, max_frame_bytes).await? {
-        WireEnvelope::Introduction(intro) => intro.verify(verifier),
-        WireEnvelope::Ping => Err(TransportError::InvalidHandshake(
-            "first message must be an introduction".to_string(),
-        )),
-        WireEnvelope::Payload(_) => Err(TransportError::InvalidHandshake(
-            "first message must be an introduction".to_string(),
-        )),
-    }
-}
-
-fn encode_wire_envelope(envelope: &WireEnvelope) -> Result<Vec<u8>, TransportError> {
-    match envelope {
-        WireEnvelope::Introduction(intro) => {
-            let mut bytes = vec![WIRE_TAG_INTRODUCTION];
-            bytes.extend(
-                rkyv::to_bytes::<rkyv::rancor::Error>(intro)
-                    .map(|value| value.to_vec())
-                    .map_err(|err| TransportError::Encode(err.to_string()))?,
-            );
-            Ok(bytes)
-        }
-        WireEnvelope::Ping => Ok(vec![WIRE_TAG_PING]),
-        WireEnvelope::Payload(Envelope::RelayPayload(payload)) => {
-            let mut bytes = vec![WIRE_TAG_RELAY_PAYLOAD];
-            encode_stream_payload(payload, &mut bytes)?;
-            Ok(bytes)
-        }
-        WireEnvelope::Payload(Envelope::Ack(ack)) => {
-            let mut bytes = vec![WIRE_TAG_ACK];
-            bytes.extend(
-                rkyv::to_bytes::<rkyv::rancor::Error>(ack)
-                    .map(|value| value.to_vec())
-                    .map_err(|err| TransportError::Encode(err.to_string()))?,
-            );
-            Ok(bytes)
-        }
-        WireEnvelope::Payload(Envelope::Control(control)) => {
-            let mut bytes = vec![WIRE_TAG_CONTROL];
-            bytes.extend(
-                rkyv::to_bytes::<rkyv::rancor::Error>(control)
-                    .map(|value| value.to_vec())
-                    .map_err(|err| TransportError::Encode(err.to_string()))?,
-            );
-            Ok(bytes)
-        }
-    }
-}
-
-fn decode_wire_envelope(bytes: &[u8]) -> Result<WireEnvelope, TransportError> {
-    let Some((&tag, payload)) = bytes.split_first() else {
-        return Err(TransportError::Decode("wire frame is empty".to_string()));
-    };
-    match tag {
-        WIRE_TAG_INTRODUCTION => {
-            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-            aligned.extend_from_slice(payload);
-            let introduction =
-                rkyv::from_bytes::<SignedIntroduction, rkyv::rancor::Error>(&aligned)
-                    .map_err(|err| TransportError::Decode(err.to_string()))?;
-            Ok(WireEnvelope::Introduction(introduction))
-        }
-        WIRE_TAG_PING => {
-            if !payload.is_empty() {
-                return Err(TransportError::Decode(
-                    "ping wire frame must not contain payload".to_string(),
-                ));
-            }
-            Ok(WireEnvelope::Ping)
-        }
-        WIRE_TAG_RELAY_PAYLOAD => Ok(WireEnvelope::Payload(Envelope::RelayPayload(
-            decode_stream_payload(payload)?,
-        ))),
-        WIRE_TAG_ACK => {
-            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-            aligned.extend_from_slice(payload);
-            let ack = rkyv::from_bytes::<RemoteAckResolution, rkyv::rancor::Error>(&aligned)
-                .map_err(|err| TransportError::Decode(err.to_string()))?;
-            Ok(WireEnvelope::Payload(Envelope::Ack(ack)))
-        }
-        WIRE_TAG_CONTROL => {
-            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-            aligned.extend_from_slice(payload);
-            let control = rkyv::from_bytes::<ControlEnvelope, rkyv::rancor::Error>(&aligned)
-                .map_err(|err| TransportError::Decode(err.to_string()))?;
-            Ok(WireEnvelope::Payload(Envelope::Control(control)))
-        }
-        _ => Err(TransportError::Decode(format!(
-            "unknown wire envelope tag {tag}"
-        ))),
-    }
-}
-
-fn encode_stream_payload(
-    payload: &RelayPayload,
-    bytes: &mut Vec<u8>,
-) -> Result<(), TransportError> {
-    bytes.push(payload.kind.wire_tag());
-    encode_string(bytes, payload.domain.as_str())?;
-    encode_string(bytes, payload.relay.as_str())?;
-    encode_branch_key(bytes, &payload.key)?;
-    encode_len(bytes, payload.metadata.len())?;
-    for metadata in &payload.metadata {
-        bytes.extend_from_slice(
-            &metadata
-                .ingested_at_low_watermark
-                .unix_nanos()
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(
-            &metadata
-                .ingested_at_high_watermark
-                .unix_nanos()
-                .to_be_bytes(),
-        );
-    }
-    encode_len(bytes, payload.acks.len())?;
-    for ack in &payload.acks {
-        match ack {
-            Some(ack) => {
-                bytes.push(1);
-                bytes.extend_from_slice(&ack.ack_id.to_be_bytes());
-                encode_string(bytes, ack.reply_node_id.as_str())?;
-            }
-            None => bytes.push(0),
-        }
-    }
-    encode_bytes(bytes, &payload.batch_ipc)?;
-    Ok(())
-}
-
-fn decode_stream_payload(bytes: &[u8]) -> Result<RelayPayload, TransportError> {
-    let mut cursor = WireCursor::new(bytes);
-    let kind = RelayPayloadKind::from_wire_tag(cursor.read_u8()?)?;
-    let domain_raw = cursor.read_string()?;
-    let relay_raw = cursor.read_string()?;
-    let key = cursor.read_branch_key()?;
-    let metadata_count = cursor.read_len()?;
-    let mut metadata = Vec::with_capacity(metadata_count);
-    for _ in 0..metadata_count {
-        metadata.push(RemoteRuntimeRecordMetadata {
-            ingested_at_low_watermark: Timestamp::from_unix_nanos(cursor.read_i64()?),
-            ingested_at_high_watermark: Timestamp::from_unix_nanos(cursor.read_i64()?),
-        });
-    }
-    let ack_count = cursor.read_len()?;
-    let mut acks = Vec::with_capacity(ack_count);
-    for _ in 0..ack_count {
-        match cursor.read_u8()? {
-            0 => acks.push(None),
-            1 => {
-                let ack_id = cursor.read_u64()?;
-                let reply_node_id = cursor.read_string()?;
-                acks.push(Some(RemoteAckRegistration {
-                    ack_id,
-                    reply_node_id,
-                }));
-            }
-            flag => {
-                return Err(TransportError::Decode(format!(
-                    "invalid relay ack presence flag {flag}"
-                )));
-            }
-        }
-    }
-    let batch_ipc = cursor.read_bytes()?.to_vec();
-    cursor.finish()?;
-    let domain = Domain::try_from(domain_raw.as_str()).map_err(|error| {
-        TransportError::Decode(format!("invalid domain '{domain_raw}': {error}"))
-    })?;
-    let relay = Identifier::try_from(relay_raw.as_str()).map_err(|error| {
-        TransportError::Decode(format!("invalid relay identifier '{relay_raw}': {error}"))
-    })?;
-    Ok(RelayPayload {
-        kind,
-        domain,
-        relay,
-        key,
-        batch_ipc,
-        metadata,
-        acks,
-    })
-}
-
-fn encode_len(bytes: &mut Vec<u8>, len: usize) -> Result<(), TransportError> {
-    let len = u32::try_from(len)
-        .map_err(|_| TransportError::Encode(format!("length {len} exceeds u32::MAX")))?;
-    bytes.extend_from_slice(&len.to_be_bytes());
-    Ok(())
-}
-
-fn encode_branch_key(
-    bytes: &mut Vec<u8>,
-    key: &Option<Vec<RemoteRuntimeField>>,
-) -> Result<(), TransportError> {
-    let Some(fields) = key else {
-        bytes.push(0);
-        return Ok(());
-    };
-    if fields.is_empty() {
-        return Err(TransportError::Encode(
-            "branch key must contain at least one field".to_string(),
-        ));
-    }
-    bytes.push(1);
-    encode_len(bytes, fields.len())?;
-    for field in fields {
-        encode_string(bytes, field.name.as_str())?;
-        encode_remote_value(bytes, &field.value)?;
-    }
-    Ok(())
-}
-
-fn encode_remote_value(
-    bytes: &mut Vec<u8>,
-    value: &RemoteRuntimeValue,
-) -> Result<(), TransportError> {
-    match value {
-        RemoteRuntimeValue::U8(value) => {
-            bytes.push(0);
-            bytes.push(*value);
-        }
-        RemoteRuntimeValue::I8(value) => {
-            bytes.push(1);
-            bytes.push(value.to_be_bytes()[0]);
-        }
-        RemoteRuntimeValue::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::I16(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::U32(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::I32(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::U64(value) => {
-            bytes.push(6);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::I64(value) => {
-            bytes.push(7);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeValue::Bool(value) => {
-            bytes.push(8);
-            bytes.push(u8::from(*value));
-        }
-        RemoteRuntimeValue::String(value) => {
-            bytes.push(9);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeValue::Datetime(value) => {
-            bytes.push(10);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeValue::F32(value) => {
-            bytes.push(11);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeValue::F64(value) => {
-            bytes.push(12);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeValue::Array(values) => {
-            bytes.push(13);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-        RemoteRuntimeValue::Vec(values) => {
-            bytes.push(14);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn encode_remote_element_value(
-    bytes: &mut Vec<u8>,
-    value: &RemoteRuntimeElementValue,
-) -> Result<(), TransportError> {
-    match value {
-        RemoteRuntimeElementValue::U8(value) => {
-            bytes.push(0);
-            bytes.push(*value);
-        }
-        RemoteRuntimeElementValue::I8(value) => {
-            bytes.push(1);
-            bytes.push(value.to_be_bytes()[0]);
-        }
-        RemoteRuntimeElementValue::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::I16(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::U32(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::I32(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::U64(value) => {
-            bytes.push(6);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::I64(value) => {
-            bytes.push(7);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        RemoteRuntimeElementValue::Bool(value) => {
-            bytes.push(8);
-            bytes.push(u8::from(*value));
-        }
-        RemoteRuntimeElementValue::String(value) => {
-            bytes.push(9);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeElementValue::Datetime(value) => {
-            bytes.push(10);
-            encode_string(bytes, value)?;
-        }
-        RemoteRuntimeElementValue::F32(value) => {
-            bytes.push(11);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeElementValue::F64(value) => {
-            bytes.push(12);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        RemoteRuntimeElementValue::Array(values) => {
-            bytes.push(13);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-        RemoteRuntimeElementValue::Vec(values) => {
-            bytes.push(14);
-            encode_len(bytes, values.len())?;
-            for value in values {
-                encode_remote_element_value(bytes, value)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn encode_bytes(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), TransportError> {
-    encode_len(bytes, value.len())?;
-    bytes.extend_from_slice(value);
-    Ok(())
-}
-
-fn encode_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), TransportError> {
-    encode_bytes(bytes, value.as_bytes())
-}
-
-struct WireCursor<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> WireCursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn read_u8(&mut self) -> Result<u8, TransportError> {
-        let bytes = self.read_exact(1)?;
-        Ok(bytes[0])
-    }
-
-    fn read_i8(&mut self) -> Result<i8, TransportError> {
-        Ok(i8::from_be_bytes([self.read_u8()?]))
-    }
-
-    fn read_u16(&mut self) -> Result<u16, TransportError> {
-        let bytes = self.read_exact(2)?;
-        let mut raw = [0u8; 2];
-        raw.copy_from_slice(bytes);
-        Ok(u16::from_be_bytes(raw))
-    }
-
-    fn read_i16(&mut self) -> Result<i16, TransportError> {
-        let bytes = self.read_exact(2)?;
-        let mut raw = [0u8; 2];
-        raw.copy_from_slice(bytes);
-        Ok(i16::from_be_bytes(raw))
-    }
-
-    fn read_u32(&mut self) -> Result<u32, TransportError> {
-        let bytes = self.read_exact(4)?;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(bytes);
-        Ok(u32::from_be_bytes(raw))
-    }
-
-    fn read_i32(&mut self) -> Result<i32, TransportError> {
-        let bytes = self.read_exact(4)?;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(bytes);
-        Ok(i32::from_be_bytes(raw))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, TransportError> {
-        let bytes = self.read_exact(8)?;
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(bytes);
-        Ok(u64::from_be_bytes(raw))
-    }
-
-    fn read_i64(&mut self) -> Result<i64, TransportError> {
-        let bytes = self.read_exact(8)?;
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(bytes);
-        Ok(i64::from_be_bytes(raw))
-    }
-
-    fn read_f32(&mut self) -> Result<f32, TransportError> {
-        Ok(f32::from_bits(self.read_u32()?))
-    }
-
-    fn read_f64(&mut self) -> Result<f64, TransportError> {
-        Ok(f64::from_bits(self.read_u64()?))
-    }
-
-    fn read_len(&mut self) -> Result<usize, TransportError> {
-        usize::try_from(self.read_u32()?)
-            .map_err(|_| TransportError::Decode("wire length does not fit usize".to_string()))
-    }
-
-    fn read_bytes(&mut self) -> Result<&'a [u8], TransportError> {
-        let len = self.read_len()?;
-        self.read_exact(len)
-    }
-
-    fn read_string(&mut self) -> Result<String, TransportError> {
-        let bytes = self.read_bytes()?;
-        String::from_utf8(bytes.to_vec()).map_err(|error| {
-            TransportError::Decode(format!("invalid utf-8 in wire frame: {error}"))
-        })
-    }
-
-    fn read_branch_key(&mut self) -> Result<Option<Vec<RemoteRuntimeField>>, TransportError> {
-        match self.read_u8()? {
-            0 => Ok(None),
-            1 => {
-                let len = self.read_len()?;
-                if len == 0 {
-                    return Err(TransportError::Decode(
-                        "branch key must contain at least one field".to_string(),
-                    ));
-                }
-                let mut fields = Vec::with_capacity(len);
-                for _ in 0..len {
-                    fields.push(RemoteRuntimeField {
-                        name: self.read_string()?,
-                        value: self.read_remote_value()?,
-                    });
-                }
-                Ok(Some(fields))
-            }
-            flag => Err(TransportError::Decode(format!(
-                "invalid branch key presence flag {flag}"
-            ))),
-        }
-    }
-
-    fn read_remote_value(&mut self) -> Result<RemoteRuntimeValue, TransportError> {
-        match self.read_u8()? {
-            0 => Ok(RemoteRuntimeValue::U8(self.read_u8()?)),
-            1 => Ok(RemoteRuntimeValue::I8(self.read_i8()?)),
-            2 => Ok(RemoteRuntimeValue::U16(self.read_u16()?)),
-            3 => Ok(RemoteRuntimeValue::I16(self.read_i16()?)),
-            4 => Ok(RemoteRuntimeValue::U32(self.read_u32()?)),
-            5 => Ok(RemoteRuntimeValue::I32(self.read_i32()?)),
-            6 => Ok(RemoteRuntimeValue::U64(self.read_u64()?)),
-            7 => Ok(RemoteRuntimeValue::I64(self.read_i64()?)),
-            8 => match self.read_u8()? {
-                0 => Ok(RemoteRuntimeValue::Bool(false)),
-                1 => Ok(RemoteRuntimeValue::Bool(true)),
-                value => Err(TransportError::Decode(format!(
-                    "invalid bool value {value} in branch key"
-                ))),
-            },
-            9 => Ok(RemoteRuntimeValue::String(self.read_string()?)),
-            10 => Ok(RemoteRuntimeValue::Datetime(self.read_string()?)),
-            11 => Ok(RemoteRuntimeValue::F32(self.read_f32()?)),
-            12 => Ok(RemoteRuntimeValue::F64(self.read_f64()?)),
-            13 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeValue::Array(values))
-            }
-            14 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeValue::Vec(values))
-            }
-            tag => Err(TransportError::Decode(format!(
-                "unknown branch key value tag {tag}"
-            ))),
-        }
-    }
-
-    fn read_remote_element_value(&mut self) -> Result<RemoteRuntimeElementValue, TransportError> {
-        match self.read_u8()? {
-            0 => Ok(RemoteRuntimeElementValue::U8(self.read_u8()?)),
-            1 => Ok(RemoteRuntimeElementValue::I8(self.read_i8()?)),
-            2 => Ok(RemoteRuntimeElementValue::U16(self.read_u16()?)),
-            3 => Ok(RemoteRuntimeElementValue::I16(self.read_i16()?)),
-            4 => Ok(RemoteRuntimeElementValue::U32(self.read_u32()?)),
-            5 => Ok(RemoteRuntimeElementValue::I32(self.read_i32()?)),
-            6 => Ok(RemoteRuntimeElementValue::U64(self.read_u64()?)),
-            7 => Ok(RemoteRuntimeElementValue::I64(self.read_i64()?)),
-            8 => match self.read_u8()? {
-                0 => Ok(RemoteRuntimeElementValue::Bool(false)),
-                1 => Ok(RemoteRuntimeElementValue::Bool(true)),
-                value => Err(TransportError::Decode(format!(
-                    "invalid bool value {value} in branch key element"
-                ))),
-            },
-            9 => Ok(RemoteRuntimeElementValue::String(self.read_string()?)),
-            10 => Ok(RemoteRuntimeElementValue::Datetime(self.read_string()?)),
-            11 => Ok(RemoteRuntimeElementValue::F32(self.read_f32()?)),
-            12 => Ok(RemoteRuntimeElementValue::F64(self.read_f64()?)),
-            13 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeElementValue::Array(values))
-            }
-            14 => {
-                let len = self.read_len()?;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    values.push(self.read_remote_element_value()?);
-                }
-                Ok(RemoteRuntimeElementValue::Vec(values))
-            }
-            tag => Err(TransportError::Decode(format!(
-                "unknown branch key element value tag {tag}"
-            ))),
-        }
-    }
-
-    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], TransportError> {
-        let Some(end) = self.offset.checked_add(len) else {
-            return Err(TransportError::Decode(
-                "wire frame length overflow".to_string(),
-            ));
-        };
-        if end > self.bytes.len() {
-            return Err(TransportError::Decode(
-                "wire frame ended unexpectedly".to_string(),
-            ));
-        }
-        let slice = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(slice)
-    }
-
-    fn finish(&self) -> Result<(), TransportError> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(TransportError::Decode(
-                "wire frame contained trailing bytes".to_string(),
-            ))
-        }
-    }
-}
-
-fn introduction_message(node_id: &str) -> Vec<u8> {
-    let mut data = Vec::with_capacity(4 + node_id.len());
-    data.extend_from_slice(&(node_id.len() as u32).to_be_bytes());
-    data.extend_from_slice(node_id.as_bytes());
-    data
+    #[error("certificate is invalid: {0}")]
+    InvalidCertificate(String),
+    #[error("certificate has no subjectAltName extension")]
+    MissingSubjectAlternativeName,
+    #[error("certificate has no nervix cluster/node URI SAN")]
+    MissingIdentityUri,
+    #[error("certificate has more than one nervix cluster/node URI SAN")]
+    MultipleIdentityUris,
+    #[error("certificate has an invalid identity URI '{uri}': {reason}")]
+    InvalidIdentityUri { uri: String, reason: String },
+    #[error("certificate cluster identity is '{actual}', expected '{expected}'")]
+    ClusterIdentityMismatch { expected: String, actual: String },
+    #[error("certificate node identity is '{actual}', expected '{expected}'")]
+    NodeIdentityMismatch {
+        expected: ClusterNodeName,
+        actual: ClusterNodeName,
+    },
+    #[error("certificate does not identify advertised endpoint '{endpoint}'")]
+    EndpointIdentityMismatch { endpoint: String },
+    #[error("certificate contains an invalid IP subject alternative name")]
+    InvalidEndpointSan,
+    #[error("certificate has expired")]
+    Expired,
+    #[error("certificate is not valid yet")]
+    NotYetValid,
 }
 
 pub fn install_rustls_crypto_provider() {
     static PROVIDER: OnceLock<()> = OnceLock::new();
     PROVIDER.get_or_init(|| {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .discarded(
+                "a provider the host installed first is the one this transport would have \
+                 installed",
+            );
     });
-}
-
-#[derive(Clone)]
-pub struct TlsConfigBundle {
-    client_config: StdArc<ClientConfig>,
-    server_config: StdArc<ServerConfig>,
-}
-
-impl TlsConfigBundle {
-    pub fn from_pem_files(
-        ca_cert_path: impl AsRef<Path>,
-        cert_path: impl AsRef<Path>,
-        key_path: impl AsRef<Path>,
-    ) -> Result<Self, TlsConfigError> {
-        install_rustls_crypto_provider();
-
-        let ca_certs = load_certificates(ca_cert_path.as_ref())?;
-        let cert_chain = load_certificates(cert_path.as_ref())?;
-        let private_key = load_private_key(key_path.as_ref())?;
-
-        let mut roots = RootCertStore::empty();
-        for cert in ca_certs {
-            roots.add(cert)?;
-        }
-
-        let client_config = ClientConfig::builder()
-            .with_root_certificates(roots.clone())
-            .with_client_auth_cert(cert_chain.clone(), private_key.clone_key())?;
-
-        let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
-            .build()
-            .map_err(|err| TlsConfigError::Io(io::Error::other(err.to_string())))?;
-        let server_config = ServerConfig::builder()
-            .with_client_cert_verifier(verifier)
-            .with_single_cert(cert_chain, private_key)?;
-
-        Ok(Self {
-            client_config: StdArc::new(client_config),
-            server_config: StdArc::new(server_config),
-        })
-    }
-}
-
-fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {
-    let certs = CertificateDer::pem_file_iter(path)
-        .map_err(map_pem_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(map_pem_error)?;
-    if certs.is_empty() {
-        return Err(TlsConfigError::MissingCertificate(
-            path.display().to_string(),
-        ));
-    }
-    Ok(certs)
-}
-
-fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsConfigError> {
-    match PrivateKeyDer::from_pem_file(path) {
-        Ok(key) => Ok(key),
-        Err(PemError::NoItemsFound) => Err(TlsConfigError::MissingPrivateKey(
-            path.display().to_string(),
-        )),
-        Err(err) => Err(map_pem_error(err)),
-    }
-}
-
-fn map_pem_error(err: PemError) -> TlsConfigError {
-    match err {
-        PemError::NoItemsFound => TlsConfigError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "no PEM items found",
-        )),
-        PemError::Io(err) => TlsConfigError::Io(err),
-        other => TlsConfigError::Io(io::Error::new(io::ErrorKind::InvalidData, other)),
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind, path::PathBuf, process::Command};
+    use std::{
+        path::PathBuf,
+        process::Command,
+        sync::{
+            Arc as StdArc, OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
-    use ahash::HashMap;
-    use nervix_models::{Domain, Identifier};
-    use tokio::time::timeout;
+    use futures_util::FutureExt as _;
+    use meticulous::ResultExt as _;
+    use nervix_execution::{CpuClass, MemoryClass};
+    use nervix_models::RemoteAckOutcome;
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose, SanType,
+    };
+    use tempfile::{TempDir, tempdir};
+    use tokio::{
+        sync::{Notify, watch},
+        time::{Instant, timeout, timeout_at},
+    };
 
     use super::*;
 
@@ -1888,663 +1189,1803 @@ mod tests {
             .join(name)
     }
 
-    fn ensure_dev_tls_assets() {
-        static DEV_TLS_READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        DEV_TLS_READY.get_or_init(|| {
+    fn test_tls() -> TlsConfigBundle {
+        static GENERATED: OnceLock<()> = OnceLock::new();
+        GENERATED.get_or_init(|| {
             let status = Command::new("bash")
                 .arg("scripts/generate_dev_tls.sh")
                 .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
                 .status()
-                .expect("dev tls generation command should run");
-            assert!(
-                status.success(),
-                "dev tls generation should succeed: {status}"
-            );
+                .expect("dev TLS generation command should run");
+            assert!(status.success(), "dev TLS generation should succeed");
         });
-    }
-
-    fn test_tls() -> TlsConfigBundle {
-        ensure_dev_tls_assets();
         TlsConfigBundle::from_pem_files(
             tls_path("ca.pem"),
             tls_path("node.pem"),
             tls_path("node-key.pem"),
         )
-        .expect("test tls should load")
+        .expect("test TLS should load")
     }
 
-    fn test_identity(node_id: &str) -> LocalIdentity {
-        LocalIdentity::generate(node_id)
+    struct TestCertificateAuthority {
+        _directory: TempDir,
+        certificate: rcgen::Certificate,
+        key: KeyPair,
+        path: PathBuf,
     }
 
-    fn verifier_for(identities: &[&LocalIdentity]) -> PeerVerifier {
-        let keys = Arc::new(
-            identities
-                .iter()
-                .map(|identity| (identity.node_id().to_string(), identity.public_key()))
-                .collect::<HashMap<_, _>>(),
-        );
-        PeerVerifier::new(move |node_id| keys.get(node_id).copied())
-    }
+    impl TestCertificateAuthority {
+        fn new() -> Self {
+            let directory = tempdir().expect("test certificate directory should be created");
+            let mut params = CertificateParams::default();
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params.key_usages = vec![
+                KeyUsagePurpose::DigitalSignature,
+                KeyUsagePurpose::KeyCertSign,
+                KeyUsagePurpose::CrlSign,
+            ];
+            let key = KeyPair::generate().expect("test CA key should be generated");
+            let certificate = params
+                .self_signed(&key)
+                .expect("test CA certificate should be generated");
+            let path = directory.path().join("ca.pem");
+            std::fs::write(&path, certificate.pem())
+                .expect("test CA certificate should be written");
+            Self {
+                _directory: directory,
+                certificate,
+                key,
+                path,
+            }
+        }
 
-    async fn recv_one(rx: &mut mpsc::Receiver<ReceivedEnvelope>) -> ReceivedEnvelope {
-        timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out waiting for envelope")
-            .expect("incoming channel closed")
-    }
-
-    fn dummy_stream_payload(stream: &str) -> RelayPayload {
-        RelayPayload {
-            kind: RelayPayloadKind::Routed,
-            domain: Domain::try_from("test").expect("valid domain"),
-            relay: Identifier::try_from(stream).expect("valid identifier"),
-            key: None,
-            batch_ipc: vec![1, 2, 3, 4],
-            metadata: vec![RemoteRuntimeRecordMetadata {
-                ingested_at_low_watermark: Timestamp::from_unix_nanos(1),
-                ingested_at_high_watermark: Timestamp::from_unix_nanos(2),
-            }],
-            acks: vec![None],
+        fn issue(&self, cluster: &str, node: &ClusterNodeName) -> TlsConfigBundle {
+            let mut params = CertificateParams::new(vec!["localhost".to_string()])
+                .expect("test endpoint SAN should be valid");
+            params.subject_alt_names.push(SanType::URI(
+                format!("nervix://cluster/{cluster}/node/{node}")
+                    .try_into()
+                    .expect("test identity URI should be valid"),
+            ));
+            params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+            params.extended_key_usages = vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+            let key = KeyPair::generate().expect("test node key should be generated");
+            let certificate = params
+                .signed_by(&key, &self.certificate, &self.key)
+                .expect("test node certificate should be signed");
+            let certificate_path = self
+                ._directory
+                .path()
+                .join(format!("{node}-certificate.pem"));
+            let key_path = self._directory.path().join(format!("{node}-key.pem"));
+            std::fs::write(&certificate_path, certificate.pem())
+                .expect("test node certificate should be written");
+            std::fs::write(&key_path, key.serialize_pem())
+                .expect("test node key should be written");
+            TlsConfigBundle::from_pem_files(&self.path, certificate_path, key_path)
+                .expect("test node TLS identity should load")
         }
     }
 
-    #[test]
-    fn relay_payload_branch_key_roundtrips_native_fields() {
-        let mut payload = dummy_stream_payload("orders");
-        payload.key = Some(vec![
-            RemoteRuntimeField {
-                name: "tenant".to_string(),
-                value: RemoteRuntimeValue::String("acme".to_string()),
-            },
-            RemoteRuntimeField {
-                name: "user_id".to_string(),
-                value: RemoteRuntimeValue::U32(42),
-            },
-        ]);
-
-        let mut bytes = Vec::new();
-        encode_stream_payload(&payload, &mut bytes).expect("payload should encode");
-        let decoded = decode_stream_payload(&bytes).expect("payload should decode");
-
-        assert_eq!(decoded, payload);
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct EchoRequest {
+        value: String,
     }
 
-    #[test]
-    fn relay_payload_without_branch_key_roundtrips_as_absent() {
-        let payload = dummy_stream_payload("orders");
-        let mut bytes = Vec::new();
-        encode_stream_payload(&payload, &mut bytes).expect("payload should encode");
-        let decoded = decode_stream_payload(&bytes).expect("payload should decode");
-
-        assert_eq!(decoded.key, None);
-        assert_eq!(decoded, payload);
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct EchoResponse {
+        value: String,
+        peer: ClusterNodeName,
+        advertised_host: String,
     }
 
-    #[test]
-    fn relay_payload_empty_branch_key_is_rejected() {
-        let mut bytes = Vec::new();
-        let error = encode_branch_key(&mut bytes, &Some(Vec::new()))
-            .expect_err("empty branch key must be rejected");
+    impl InterconnectRequest for EchoRequest {
+        type Response = EchoResponse;
 
-        assert!(error.to_string().contains("at least one field"));
+        const NAME: &'static str = "test_echo";
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BlockingBulkRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct BlockingBulkResponse;
+
+    impl InterconnectRequest for BlockingBulkRequest {
+        type Response = BlockingBulkResponse;
+
+        const NAME: &'static str = "test_blocking_bulk";
+        const CLASS: PoolClass = PoolClass::Bulk;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct ReplicationRequest {
+        wait: bool,
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct ReplicationResponse;
+
+    impl InterconnectRequest for ReplicationRequest {
+        type Response = ReplicationResponse;
+
+        const NAME: &'static str = "test_replication";
+        const CLASS: PoolClass = PoolClass::Replication;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct ManagementRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct ManagementResponse;
+
+    impl InterconnectRequest for ManagementRequest {
+        type Response = ManagementResponse;
+
+        const NAME: &'static str = "test_management";
+        const CLASS: PoolClass = PoolClass::Management;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BlockingManagementRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct BlockingManagementResponse;
+
+    impl InterconnectRequest for BlockingManagementRequest {
+        type Response = BlockingManagementResponse;
+
+        const NAME: &'static str = "test_blocking_management";
+        const CLASS: PoolClass = PoolClass::Management;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct CancellationRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct CancellationResponse;
+
+    impl InterconnectRequest for CancellationRequest {
+        type Response = CancellationResponse;
+
+        const NAME: &'static str = "test_cancellation";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BlockingDiscoveryRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct BlockingDiscoveryResponse;
+
+    impl InterconnectRequest for BlockingDiscoveryRequest {
+        type Response = BlockingDiscoveryResponse;
+
+        const NAME: &'static str = "test_blocking_discovery";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct BlockingProgressRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct BlockingProgressResponse;
+
+    const LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS: u64 = 30;
+    const LIVENESS_QUOTA_REQUEST_TIMEOUT_MULTIPLIER: u64 = 2;
+    const LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = match LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS
+        .checked_mul(LIVENESS_QUOTA_REQUEST_TIMEOUT_MULTIPLIER)
+    {
+        Some(seconds) => seconds,
+        None => panic!("the fixed liveness quota test deadlines fit in u64"),
+    };
+    const LIVENESS_QUOTA_EVENT_FAILSAFE: Duration =
+        Duration::from_secs(LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS);
+    const LIVENESS_QUOTA_REQUEST_TIMEOUT: Duration =
+        Duration::from_secs(LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS);
+    const _: () = assert!(
+        LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS > LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS,
+        "blocked progress requests must remain active throughout the liveness observation"
+    );
+
+    impl InterconnectRequest for BlockingProgressRequest {
+        type Response = BlockingProgressResponse;
+
+        const NAME: &'static str = "test_blocking_progress";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+        const TIMEOUT: Duration = LIVENESS_QUOTA_REQUEST_TIMEOUT;
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct LivenessRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct LivenessResponse;
+
+    impl InterconnectRequest for LivenessRequest {
+        type Response = LivenessResponse;
+
+        const NAME: &'static str = "test_liveness";
+        const CLASS: PoolClass = PoolClass::Management;
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
+        const TIMEOUT: Duration = LIVENESS_QUOTA_REQUEST_TIMEOUT;
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct HangingRequest;
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct HangingResponse;
+
+    impl InterconnectRequest for HangingRequest {
+        type Response = HangingResponse;
+
+        const NAME: &'static str = "test_hanging";
+        const TIMEOUT: Duration = Duration::from_secs(30);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct ResourceStreamRequest;
+
+    impl InterconnectStreamRequest for ResourceStreamRequest {
+        const NAME: &'static str = "test_resource_stream";
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    #[derive(Debug, Archive, Serialize, Deserialize)]
+    struct SnapshotStreamRequest;
+
+    impl InterconnectStreamRequest for SnapshotStreamRequest {
+        const NAME: &'static str = "test_snapshot_stream";
+        const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+    }
+
+    struct ConnectedTransports {
+        _authority: TestCertificateAuthority,
+        transport_a: Transport,
+        transport_b: Transport,
+        node_a: ClusterNodeName,
+        node_b: ClusterNodeName,
+        _incoming_a: mpsc::Receiver<ReceivedEnvelope>,
+        incoming_b: mpsc::Receiver<ReceivedEnvelope>,
+    }
+
+    async fn connected_transports() -> ConnectedTransports {
+        connected_transports_with_options(TransportOptions::default()).await
+    }
+
+    async fn connected_transports_with_options(options: TransportOptions) -> ConnectedTransports {
+        let transports = bound_transports_with_options(options).await;
+        transports
+            .transport_a
+            .register_outbound_target(
+                transports.node_b.clone(),
+                PeerTarget::new(transports.transport_b.local_addr(), "localhost"),
+            )
+            .expect("authenticated test target should register");
+        transports
+    }
+
+    async fn bound_transports_with_options(options: TransportOptions) -> ConnectedTransports {
+        let authority = TestCertificateAuthority::new();
+        let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
+        let node_b = ClusterNodeName::parse("node-b").expect("test node name should be valid");
+        let (transport_a, incoming_a) = Transport::bind(
+            "127.0.0.1:0".parse().expect("test address should be valid"),
+            "localhost",
+            "test-cluster",
+            node_a.clone(),
+            authority.issue("test-cluster", &node_a),
+            options.clone(),
+            Executor::default(),
+        )
+        .await
+        .expect("first test transport should bind");
+        let (transport_b, incoming_b) = Transport::bind(
+            "127.0.0.1:0".parse().expect("test address should be valid"),
+            "localhost",
+            "test-cluster",
+            node_b.clone(),
+            authority.issue("test-cluster", &node_b),
+            options,
+            Executor::default(),
+        )
+        .await
+        .expect("second test transport should bind");
+        let live_nodes = BTreeSet::from([node_a.clone(), node_b.clone()]);
+        transport_a.replace_live_nodes(&live_nodes);
+        transport_b.replace_live_nodes(&live_nodes);
+        ConnectedTransports {
+            _authority: authority,
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: incoming_a,
+            incoming_b,
+        }
     }
 
     #[tokio::test]
-    async fn bidirectional_send_and_receive_roundtrips() {
-        let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let (transport_a, mut incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a.clone(),
-            verifier_for(&[&identity_b]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport a");
-        let (transport_b, mut incoming_b) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b.clone(),
-            verifier_for(&[&identity_a]),
-            options,
-        )
-        .await
-        .expect("bind transport b");
+    async fn send_waits_for_a_target_registered_after_the_operation_starts() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            mut incoming_b,
+            ..
+        } = bound_transports_with_options(TransportOptions::default()).await;
+        let mut send =
+            Box::pin(transport_a.send(&node_b, Envelope::Control(ControlEnvelope::Terminate)));
 
+        assert!(
+            send.as_mut().now_or_never().is_none(),
+            "send should await the transport's target notification"
+        );
         transport_a
-            .send(
-                transport_b.local_addr(),
-                "localhost",
-                TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("orders")),
+            .register_outbound_target(
+                node_b.clone(),
+                PeerTarget::new(transport_b.local_addr(), "localhost"),
             )
-            .await
-            .expect("send a->b");
+            .expect("authenticated test target should register");
 
-        let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, "node-a");
-        assert_eq!(
-            first.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("orders"))
-        );
-
-        first
-            .reply
-            .send(Envelope::RelayPayload(dummy_stream_payload("orders")))
-            .await
-            .expect("reply b->a");
-
-        let second = recv_one(&mut incoming_a).await;
-        assert_eq!(second.peer_node_id, "node-b");
-        assert_eq!(
-            second.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("orders"))
-        );
+        send.await.expect("control delivery should succeed");
+        let received = incoming_b
+            .recv()
+            .now_or_never()
+            .expect("the control is queued before the successful response")
+            .expect("the peer's incoming queue should remain open");
+        assert!(matches!(
+            received.envelope,
+            Envelope::Control(ControlEnvelope::Terminate)
+        ));
 
         transport_a.shutdown().await;
         transport_b.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn outbound_pool_reuses_connections() {
-        let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let (transport_a, _incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a.clone(),
-            verifier_for(&[&identity_b]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport a");
-        let (transport_b, mut incoming_b) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b.clone(),
-            verifier_for(&[&identity_a]),
-            options,
-        )
-        .await
-        .expect("bind transport b");
+    #[test]
+    fn internal_tls_negotiates_only_http2() {
+        let tls = test_tls();
 
-        for _ in 1..=2 {
-            transport_a
-                .send(
-                    transport_b.local_addr(),
-                    "localhost",
-                    TransportMode::Tls,
-                    Envelope::RelayPayload(dummy_stream_payload("metrics")),
-                )
-                .await
-                .expect("send");
-        }
-
-        let _ = recv_one(&mut incoming_b).await;
-        let _ = recv_one(&mut incoming_b).await;
-        assert_eq!(transport_a.active_outbound_connections().await, 1);
-
-        transport_a.shutdown().await;
-        transport_b.shutdown().await;
+        assert_eq!(tls.client_config.alpn_protocols, [b"h2".to_vec()]);
+        assert_eq!(tls.server_config.alpn_protocols, [b"h2".to_vec()]);
     }
 
-    #[tokio::test]
-    async fn connection_for_reuses_disconnected_outbound_handle() {
-        let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let (transport_a, _incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a.clone(),
-            verifier_for(&[&identity_b]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport a");
-        let (transport_b, mut incoming_b) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b.clone(),
-            verifier_for(&[&identity_a]),
-            options,
-        )
-        .await
-        .expect("bind transport b");
-
-        transport_a
-            .send(
-                transport_b.local_addr(),
-                "localhost",
-                TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("metrics")),
-            )
-            .await
-            .expect("initial send");
-        let _ = recv_one(&mut incoming_b).await;
-
-        let key = ConnectionKey {
-            addr: transport_b.local_addr(),
-            server_name: "localhost".to_string(),
-            mode: TransportMode::Tls,
+    #[test]
+    fn connection_limit_reserves_both_preconnected_directions() {
+        let mut options = TransportOptions {
+            max_peers: 2,
+            max_connections: 20,
+            ..TransportOptions::default()
         };
-        transport_a
-            .inner
-            .outbound_state
-            .insert(key.clone(), ConnectionState::Disconnected);
+        assert!(matches!(
+            options.validate(),
+            Err(TransportError::InvalidOptions { .. })
+        ));
 
-        let handle = transport_a
-            .connection_for(transport_b.local_addr(), "localhost", TransportMode::Tls)
-            .await
-            .expect("disconnected handle should still be reusable");
-        handle
-            .send(Envelope::RelayPayload(dummy_stream_payload("metrics")))
-            .await
-            .expect("queued send should succeed");
+        options.max_connections = 21;
+        options
+            .validate()
+            .expect("one on-demand connection should fit after both preconnected directions");
+    }
 
-        transport_a.shutdown().await;
-        transport_b.shutdown().await;
+    #[test]
+    fn relay_acknowledgements_use_the_management_pool() {
+        let envelope = Envelope::Ack(RemoteAckResolution {
+            ack_id: 1,
+            outcome: RemoteAckOutcome::Ack,
+        });
+
+        assert_eq!(envelope.pool_class(), PoolClass::Management);
     }
 
     #[tokio::test]
-    async fn both_peers_observe_active_connection() {
-        let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let (transport_a, _incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a.clone(),
-            verifier_for(&[&identity_b]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport a");
-        let (transport_b, mut incoming_b) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b.clone(),
-            verifier_for(&[&identity_a]),
-            options,
-        )
-        .await
-        .expect("bind transport b");
+    async fn connection_binding_drives_response_flow_control() {
+        let options = TransportOptions {
+            initial_stream_window_bytes: 1,
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports_with_options(options).await;
 
-        transport_a
-            .send(
-                transport_b.local_addr(),
-                "localhost",
-                TransportMode::Tls,
-                Envelope::Control(ControlEnvelope::Terminate),
-            )
-            .await
-            .expect("send should establish connection");
-
-        let _ = recv_one(&mut incoming_b).await;
-
-        timeout(Duration::from_secs(5), async {
+        timeout(Duration::from_secs(2), async {
             loop {
-                if transport_a.is_connected_to("node-b") && transport_b.is_connected_to("node-a") {
+                tokio::task::consume_budget().await;
+                if transport_a.is_connected_to(&node_b) {
                     break;
                 }
-                sleep(Duration::from_millis(50)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("both peers should observe the connection");
+        .expect("binding responses should advance beyond the one-byte stream window");
 
         transport_a.shutdown().await;
         transport_b.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn outbound_pool_respects_max_connections() {
-        let options = TransportOptions {
-            max_connections: 1,
-            ..TransportOptions::default()
-        };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let identity_c = test_identity("node-c");
-        let (transport_a, _incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a.clone(),
-            verifier_for(&[&identity_b, &identity_c]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport a");
-        let (transport_b, _incoming_b) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b.clone(),
-            verifier_for(&[&identity_a]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport b");
-        let (transport_c, _incoming_c) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_c.clone(),
-            verifier_for(&[&identity_a]),
-            options,
-        )
-        .await
-        .expect("bind transport c");
+    #[test]
+    fn certificate_binds_cluster_node_and_endpoint() {
+        let tls = test_tls();
+        let node = ClusterNodeName::parse("node-1").expect("valid node name");
 
-        transport_a
-            .send(
-                transport_b.local_addr(),
-                "localhost",
-                TransportMode::Tls,
-                Envelope::Control(ControlEnvelope::Terminate),
-            )
-            .await
-            .expect("first send should acquire pool slot");
-
-        let err = transport_a
-            .send(
-                transport_c.local_addr(),
-                "localhost",
-                TransportMode::Tls,
-                Envelope::Control(ControlEnvelope::Terminate),
-            )
-            .await
-            .expect_err("second distinct target should exceed pool");
-        assert!(matches!(err, TransportError::PoolExhausted));
-
-        transport_a.shutdown().await;
-        transport_b.shutdown().await;
-        transport_c.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn outbound_connection_reconnects_after_peer_restart() {
-        let options = TransportOptions {
-            reconnect_backoff: Duration::from_millis(100),
-            ..TransportOptions::default()
-        };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let (transport_a, _incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a.clone(),
-            verifier_for(&[&identity_b]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport a");
-        let (transport_b, mut incoming_b) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b.clone(),
-            verifier_for(&[&identity_a]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport b");
-        let target = transport_b.local_addr();
-
-        transport_a
-            .send(
-                target,
-                "localhost",
-                TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("reconnect")),
-            )
-            .await
-            .expect("initial send");
-        let first = recv_one(&mut incoming_b).await;
-        assert_eq!(first.peer_node_id, "node-a");
-        assert_eq!(
-            first.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect"))
-        );
-
-        transport_b.shutdown().await;
-
-        let send_fut = transport_a.send(
-            target,
-            "localhost",
-            TransportMode::Tls,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect")),
-        );
-
-        let (transport_b2, mut incoming_b2) = Transport::bind(
-            target,
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b.clone(),
-            verifier_for(&[&identity_a]),
-            options,
-        )
-        .await
-        .expect("restart transport b");
-
-        send_fut.await.expect("queued send should succeed");
-        let second = recv_one(&mut incoming_b2).await;
-        assert_eq!(second.peer_node_id, "node-a");
-        assert_eq!(
-            second.envelope,
-            Envelope::RelayPayload(dummy_stream_payload("reconnect"))
-        );
-
-        transport_a.shutdown().await;
-        transport_b2.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn connection_failure_retains_pending_payload_for_reconnect() {
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let (incoming_tx, _incoming_rx) = mpsc::channel(1);
-        let inner = Arc::new(TransportInner {
-            mode: TransportMode::Plain,
-            client_config: None,
-            server_config: None,
-            identity: identity_a,
-            peer_verifier: verifier_for(&[&identity_b]),
-            options: TransportOptions::default(),
-            local_addr: "127.0.0.1:0".parse().unwrap(),
-            incoming_tx,
-            outbound: DashMap::default(),
-            outbound_state: DashMap::default(),
-            connected_peers: DashMap::default(),
-            outbound_permits: StdArc::new(Semaphore::new(1)),
-            shutdown: CancellationToken::new(),
-            tasks: TaskTracker::new(),
-        });
-        let (client_io, mut peer_io) = tokio::io::duplex(64 * 1024);
-        let peer_task = tokio::spawn(async move {
-            let introduction = read_wire_envelope(&mut peer_io, DEFAULT_MAX_FRAME_BYTES)
-                .await
-                .expect("read client introduction");
-            assert!(matches!(introduction, WireEnvelope::Introduction(_)));
-            write_wire_envelope(
-                &mut peer_io,
-                &WireEnvelope::Introduction(identity_b.signed_introduction()),
-            )
-            .await
-            .expect("write peer introduction");
-        });
-        let peer_addr = "127.0.0.1:12345".parse().unwrap();
-        let (reply_tx, _reply_rx) = mpsc::channel(1);
-        let reply_handle = ConnectionHandle {
-            peer_addr,
-            tx: reply_tx,
-        };
-        let (_send_tx, mut send_rx) = mpsc::channel(1);
-        let expected = Envelope::RelayPayload(dummy_stream_payload("retry"));
-        let mut retry_payload = Some(expected.clone());
-
-        run_connection_loop(
-            inner.clone(),
-            peer_addr,
-            reply_handle,
-            None,
-            &mut send_rx,
-            Box::new(client_io),
-            &mut retry_payload,
-        )
-        .await
-        .expect_err("peer disconnect should fail the connection");
-        peer_task.await.expect("peer task should complete");
-
-        assert_eq!(retry_payload, Some(expected));
+        tls.certificate
+            .validate_local("default", &node, "localhost")
+            .expect("certificate identity should match");
         assert!(
-            inner.connected_peers.is_empty(),
-            "failed connection must unregister its connected peer"
+            tls.certificate
+                .validate_local("another-cluster", &node, "localhost")
+                .is_err()
         );
     }
 
     #[tokio::test]
-    async fn invalid_signature_closes_connection() {
-        let options = TransportOptions {
-            reconnect_backoff: Duration::from_millis(50),
-            ..TransportOptions::default()
-        };
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let wrong_public = SigningKey::generate(&mut OsRng).verifying_key();
-        let (transport_a, _incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a,
-            verifier_for(&[&identity_b]),
-            options.clone(),
-        )
-        .await
-        .expect("bind transport a");
-        let (transport_b, mut incoming_b) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_b,
-            PeerVerifier::new(move |node_id| {
-                if node_id == "node-a" {
-                    Some(wrong_public)
-                } else {
-                    None
+    async fn typed_rkyv_requests_reuse_an_authenticated_http2_pool() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            ..
+        } = connected_transports().await;
+        transport_b
+            .register_handler::<EchoRequest, _, _>(|context, request| async move {
+                EchoResponse {
+                    value: request.value,
+                    peer: context.peer_node_id().clone(),
+                    advertised_host: context.peer_advertised_host().to_string(),
                 }
-            }),
-            options,
-        )
-        .await
-        .expect("bind transport b");
-
-        transport_a
-            .send(
-                transport_b.local_addr(),
-                "localhost",
-                TransportMode::Tls,
-                Envelope::RelayPayload(dummy_stream_payload("auth")),
-            )
-            .await
-            .expect("enqueue send");
-
-        let result = timeout(Duration::from_millis(500), incoming_b.recv()).await;
-        assert!(
-            result.is_err(),
-            "peer should reject invalid signature before delivery"
-        );
-
-        transport_a.shutdown().await;
-        transport_b.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn peer_that_stops_sending_pings_is_disconnected() {
-        let options = TransportOptions::default();
-        let identity_a = test_identity("node-a");
-        let identity_b = test_identity("node-b");
-        let (transport_a, _incoming_a) = Transport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            TransportMode::Tls,
-            Some(test_tls()),
-            identity_a.clone(),
-            verifier_for(&[&identity_b]),
-            options,
-        )
-        .await
-        .expect("bind transport a");
-
-        let key = ConnectionKey {
-            addr: transport_a.local_addr(),
-            server_name: "localhost".to_string(),
-            mode: TransportMode::Tls,
-        };
-        let inner = Arc::new(TransportInner {
-            mode: TransportMode::Tls,
-            client_config: Some(test_tls().client_config.clone()),
-            server_config: None,
-            identity: identity_b.clone(),
-            peer_verifier: verifier_for(&[&identity_a]),
-            options: TransportOptions::default(),
-            local_addr: "127.0.0.1:0".parse().unwrap(),
-            incoming_tx: mpsc::channel(1).0,
-            outbound: DashMap::default(),
-            outbound_state: DashMap::default(),
-            connected_peers: DashMap::default(),
-            outbound_permits: StdArc::new(Semaphore::new(1)),
-            shutdown: CancellationToken::new(),
-            tasks: TaskTracker::new(),
-        });
-        let tls_stream = connect_outbound_stream(&inner, &key)
-            .await
-            .expect("connect raw tls relay");
-        let (mut reader, mut writer) = tokio::io::split(tls_stream);
-
-        write_wire_envelope(
-            &mut writer,
-            &WireEnvelope::Introduction(identity_b.signed_introduction()),
-        )
-        .await
-        .expect("send introduction");
-        let peer = read_and_verify_introduction(
-            &mut reader,
-            DEFAULT_MAX_FRAME_BYTES,
-            &verifier_for(&[&identity_a]),
-        )
-        .await
-        .expect("read server introduction");
-        assert_eq!(peer, "node-a");
+            })
+            .expect("echo handler should register");
 
         timeout(Duration::from_secs(5), async {
             loop {
-                match read_wire_envelope(&mut reader, DEFAULT_MAX_FRAME_BYTES).await {
-                    Ok(WireEnvelope::Ping) => {}
-                    Ok(other) => panic!("unexpected frame before disconnect: {other:?}"),
-                    Err(TransportError::Io(err)) if err.kind() == ErrorKind::UnexpectedEof => {
-                        break;
-                    }
-                    Err(err) => panic!("unexpected read error: {err:?}"),
+                tokio::task::consume_budget().await;
+                if transport_a.is_connected_to(&node_b) {
+                    break;
                 }
+                tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("timed out waiting for ping timeout disconnect");
+        .expect("the target should become ready");
+        assert_eq!(
+            transport_a.active_outbound_connections().await,
+            5,
+            "readiness must include management, command, replication, and both relay connections"
+        );
+
+        for value in ["first", "second"] {
+            let response = transport_a
+                .request(
+                    &node_b,
+                    EchoRequest {
+                        value: value.to_string(),
+                    },
+                )
+                .await
+                .expect("typed request should cross the interconnect");
+            assert_eq!(
+                response,
+                EchoResponse {
+                    value: value.to_string(),
+                    peer: node_a.clone(),
+                    advertised_host: "localhost".to_string(),
+                }
+            );
+        }
+        assert_eq!(transport_a.active_outbound_connections().await, 5);
 
         transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let release = watch::channel(false).0;
+        let resource_executor = Executor::default();
+        transport_b
+            .register_stream_handler::<ResourceStreamRequest, _, _>({
+                let release = release.clone();
+                move |_context, _request| {
+                    let mut release = release.subscribe();
+                    let executor = resource_executor.clone();
+                    async move {
+                        let chunk = executor
+                            .charge_owned(MemoryClass::Bulk, b"resource".to_vec())
+                            .await
+                            .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                        let chunks = futures_util::stream::once(async move {
+                            if !*release.borrow() {
+                                release
+                                    .changed()
+                                    .await
+                                    .expect("the release sender lives through the test");
+                            }
+                            Ok(chunk)
+                        });
+                        Ok(StreamingResponse::new(8, chunks))
+                    }
+                }
+            })
+            .expect("resource stream handler should register");
+        let snapshot_executor = Executor::default();
+        transport_b
+            .register_stream_handler::<SnapshotStreamRequest, _, _>(move |_context, _request| {
+                let executor = snapshot_executor.clone();
+                async move {
+                    let chunk = executor
+                        .charge_owned(MemoryClass::Bulk, b"snapshot".to_vec())
+                        .await
+                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                    Ok(StreamingResponse::new(
+                        8,
+                        futures_util::stream::iter([Ok(chunk)]),
+                    ))
+                }
+            })
+            .expect("snapshot stream handler should register");
+        timeout(Duration::from_secs(5), async {
+            while !transport_a.is_connected_to(&node_b) {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the target should become ready");
+
+        let mut first = transport_a
+            .request_stream(&node_b, ResourceStreamRequest)
+            .await
+            .expect("first resource stream should open");
+        let mut second = transport_a
+            .request_stream(&node_b, ResourceStreamRequest)
+            .await
+            .expect("second resource stream should open");
+        let mut snapshot = timeout(
+            Duration::from_secs(1),
+            transport_a.request_stream(&node_b, SnapshotStreamRequest),
+        )
+        .await
+        .expect("resource streams must not occupy the snapshot slot")
+        .expect("snapshot stream should open");
+        let snapshot_chunk = snapshot
+            .next_chunk()
+            .await
+            .expect("snapshot chunk should be readable")
+            .expect("snapshot stream should contain one chunk");
+        assert_eq!(snapshot_chunk.as_ref(), b"snapshot");
+        assert!(
+            snapshot
+                .next_chunk()
+                .await
+                .expect("snapshot completion should be readable")
+                .is_none()
+        );
+
+        release.send_replace(true);
+        for resource in [&mut first, &mut second] {
+            let chunk = resource
+                .next_chunk()
+                .await
+                .expect("resource chunk should be readable")
+                .expect("resource stream should contain one chunk");
+            assert_eq!(chunk.as_ref(), b"resource");
+            assert!(
+                resource
+                    .next_chunk()
+                    .await
+                    .expect("resource completion should be readable")
+                    .is_none()
+            );
+        }
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
+        let options = TransportOptions {
+            progress_timeout: Duration::from_millis(50),
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports_with_options(options).await;
+        transport_b
+            .register_stream_handler::<ResourceStreamRequest, _, _>(|_context, _request| async {
+                Ok(StreamingResponse::new(
+                    1,
+                    futures_util::stream::pending::<Result<ChargedBytes, StreamHandlerError>>(),
+                ))
+            })
+            .expect("resource stream handler should register");
+        timeout(Duration::from_secs(5), async {
+            while !transport_a.is_connected_to(&node_b) {
+                tokio::task::consume_budget().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the target should become ready");
+
+        let mut response = transport_a
+            .request_stream(&node_b, ResourceStreamRequest)
+            .await
+            .expect("stream response headers should arrive");
+        let error = timeout(Duration::from_secs(1), response.next_chunk())
+            .await
+            .expect("the stalled response should honor its progress timeout")
+            .expect_err("a stalled response must fail");
+        assert!(matches!(
+            error.current_context(),
+            RequestError::Stream { .. }
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(Notify::new());
+        let release = StdArc::new(Notify::new());
+        transport_b
+            .register_handler::<ReplicationRequest, _, _>({
+                let started = StdArc::clone(&started);
+                let release = StdArc::clone(&release);
+                move |_context, request| {
+                    let started = StdArc::clone(&started);
+                    let release = StdArc::clone(&release);
+                    async move {
+                        if request.wait {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        ReplicationResponse
+                    }
+                }
+            })
+            .expect("replication handler should register");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if transport_a.is_connected_to(&node_b) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the target should become ready");
+
+        let first_requester = transport_a.clone();
+        let first_target = node_b.clone();
+        let first = tokio::spawn(async move {
+            first_requester
+                .request(&first_target, ReplicationRequest { wait: true })
+                .await
+        });
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the first replication request should hold the only stream slot");
+
+        let second_requester = transport_a.clone();
+        let second_target = node_b.clone();
+        let second_started = StdArc::new(Notify::new());
+        let second_started_in_task = StdArc::clone(&second_started);
+        let second = tokio::spawn(async move {
+            second_started_in_task.notify_one();
+            second_requester
+                .request(&second_target, ReplicationRequest { wait: false })
+                .await
+        });
+        second_started.notified().await;
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        timeout(Duration::from_secs(2), async {
+            first
+                .await
+                .expect("first replication request task should join")
+                .expect("first replication request should succeed");
+            second
+                .await
+                .expect("second replication request task should join")
+                .expect("queued replication request should wake and succeed");
+        })
+        .await
+        .expect("queued replication work should advance without connection churn");
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_work_does_not_block_the_management_pool() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(Notify::new());
+        let release = StdArc::new(Notify::new());
+        transport_b
+            .register_handler::<BlockingBulkRequest, _, _>({
+                let started = StdArc::clone(&started);
+                let release = StdArc::clone(&release);
+                move |_context, _request| {
+                    let started = StdArc::clone(&started);
+                    let release = StdArc::clone(&release);
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        BlockingBulkResponse
+                    }
+                }
+            })
+            .expect("bulk handler should register");
+        transport_b
+            .register_handler::<ManagementRequest, _, _>(|_context, _request| async move {
+                ManagementResponse
+            })
+            .expect("management handler should register");
+
+        let requester = transport_a.clone();
+        let bulk_target = node_b.clone();
+        let bulk =
+            tokio::spawn(async move { requester.request(&bulk_target, BlockingBulkRequest).await });
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("bulk handler should start");
+        let management = timeout(
+            Duration::from_secs(2),
+            transport_a.request(&node_b, ManagementRequest),
+        )
+        .await
+        .expect("management request should not wait for bulk work")
+        .expect("management request should succeed");
+        assert_eq!(management, ManagementResponse);
+        release.notify_one();
+        assert_eq!(
+            bulk.await
+                .expect("bulk request task should join")
+                .expect("bulk request should succeed"),
+            BlockingBulkResponse
+        );
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn slow_management_work_cannot_consume_cancellation_streams() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(AtomicUsize::new(0));
+        let (release, release_rx) = watch::channel(false);
+        transport_b
+            .register_handler::<BlockingManagementRequest, _, _>({
+                let started = StdArc::clone(&started);
+                let release_rx = release_rx.clone();
+                move |_context, _request| {
+                    let started = StdArc::clone(&started);
+                    let mut release_rx = release_rx.clone();
+                    async move {
+                        started.fetch_add(1, Ordering::AcqRel);
+                        release_rx
+                            .wait_for(|released| *released)
+                            .await
+                            .expect("test release sender should remain open");
+                        BlockingManagementResponse
+                    }
+                }
+            })
+            .expect("blocking management handler should register");
+        transport_b
+            .register_handler::<CancellationRequest, _, _>(|_context, _request| async move {
+                CancellationResponse
+            })
+            .expect("cancellation handler should register");
+
+        let mut blocked = Vec::new();
+        for _ in 0..connection::MANAGEMENT_SHARED_STREAMS {
+            let requester = transport_a.clone();
+            let target = node_b.clone();
+            blocked.push(tokio::spawn(async move {
+                requester.request(&target, BlockingManagementRequest).await
+            }));
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::task::consume_budget().await;
+                if started.load(Ordering::Acquire) == connection::MANAGEMENT_SHARED_STREAMS {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all shared management streams should become occupied");
+
+        assert_eq!(
+            timeout(
+                Duration::from_secs(2),
+                transport_a.request(&node_b, CancellationRequest),
+            )
+            .await
+            .expect("cancellation must retain a physical management stream")
+            .expect("cancellation request should succeed"),
+            CancellationResponse
+        );
+
+        release.send_replace(true);
+        for request in blocked {
+            request
+                .await
+                .expect("blocking management request should join")
+                .expect("blocking management request should finish after release");
+        }
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[path = "progress.rs"]
+    mod progress;
+
+    #[tokio::test]
+    async fn discovery_subquota_cannot_crowd_out_management_requests() {
+        let options = TransportOptions {
+            incoming_queue_capacity: 1,
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            _authority: authority,
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports_with_options(options.clone()).await;
+        let node_c = ClusterNodeName::parse("node-c").expect("test node name should be valid");
+        let (transport_c, _incoming_c) = Transport::bind(
+            "127.0.0.1:0".parse().expect("test address should be valid"),
+            "localhost",
+            "test-cluster",
+            node_c.clone(),
+            authority.issue("test-cluster", &node_c),
+            options,
+            Executor::default(),
+        )
+        .await
+        .expect("third test transport should bind");
+        transport_c
+            .register_outbound_target(
+                node_b.clone(),
+                PeerTarget::new(transport_b.local_addr(), "localhost"),
+            )
+            .expect("third test transport should register its authenticated target");
+        let started = StdArc::new(Notify::new());
+        let release = StdArc::new(Notify::new());
+        transport_b
+            .register_handler::<BlockingDiscoveryRequest, _, _>({
+                let started = StdArc::clone(&started);
+                let release = StdArc::clone(&release);
+                move |_context, _request| {
+                    let started = StdArc::clone(&started);
+                    let release = StdArc::clone(&release);
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        BlockingDiscoveryResponse
+                    }
+                }
+            })
+            .expect("discovery handler should register");
+        transport_b
+            .register_handler::<ManagementRequest, _, _>(|_context, _request| async move {
+                ManagementResponse
+            })
+            .expect("management handler should register");
+
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        let discovery =
+            tokio::spawn(async move { requester.request(&target, BlockingDiscoveryRequest).await });
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the first discovery handler should start");
+
+        let error = transport_a
+            .request_with_timeout(
+                &node_b,
+                BlockingDiscoveryRequest,
+                Duration::from_millis(250),
+            )
+            .await
+            .expect_err("the discovery subquota should reject excess work");
+        assert!(matches!(
+            error.current_context(),
+            RequestError::AdmissionFull {
+                request,
+                subquota: RequestSubquota::Discovery,
+            } if request == &BlockingDiscoveryRequest::NAME
+        ));
+
+        let error = transport_c
+            .request_with_timeout(
+                &node_b,
+                BlockingDiscoveryRequest,
+                Duration::from_millis(250),
+            )
+            .await
+            .expect_err("the receiver should reject discovery beyond its subquota");
+        assert!(matches!(
+            error.current_context(),
+            RequestError::RemoteRejected {
+                failure: RemoteRequestFailure::AdmissionFull {
+                    subquota: RequestSubquota::Discovery,
+                },
+                ..
+            }
+        ));
+
+        let management = transport_c
+            .request(&node_b, ManagementRequest)
+            .await
+            .expect("reserved management capacity should remain available");
+        assert_eq!(management, ManagementResponse);
+
+        release.notify_waiters();
+        assert_eq!(
+            discovery
+                .await
+                .expect("discovery request task should join")
+                .expect("the admitted discovery request should succeed"),
+            BlockingDiscoveryResponse
+        );
+        transport_a.shutdown().await;
+        transport_c.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
+        let options = TransportOptions {
+            incoming_queue_capacity: 1,
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: mut incoming_a,
+            mut incoming_b,
+            ..
+        } = connected_transports_with_options(options).await;
+        transport_b
+            .register_outbound_target(
+                node_a.clone(),
+                PeerTarget::new(transport_a.local_addr(), "localhost"),
+            )
+            .expect("the response target should register");
+        let payload = |ack_id, sequence, reply_node_id| RelayPayload {
+            delivery: RelayDelivery {
+                channel_incarnation: [1; 16],
+                sequence,
+            },
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id,
+                reply_node_id,
+            }),
+        };
+
+        let error = transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(0, 0, node_b.clone())),
+            )
+            .await
+            .expect_err("the authenticated sender must own the declared admission reply");
+        assert!(matches!(
+            error,
+            TransportError::RemoteRejected { status: 403, .. }
+        ));
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(1, 0, node_a.clone())),
+            )
+            .await
+            .expect("the first relay should consume the sole terminal slot");
+        let first = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the first relay should enter the application queue")
+            .expect("the application queue should remain open");
+
+        let error = transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(2, 1, node_a.clone())),
+            )
+            .await
+            .expect_err("a second grant must wait until the first terminal outcome is sent");
+        assert!(matches!(
+            error,
+            TransportError::RemoteRejected { status: 429, .. }
+        ));
+
+        drop(first);
+        transport_b
+            .send(
+                &node_a,
+                Envelope::Ack(RemoteAckResolution {
+                    ack_id: 1,
+                    outcome: RemoteAckOutcome::Ack,
+                }),
+            )
+            .await
+            .expect("the first relay terminal outcome should be sent");
+        let _terminal = timeout(Duration::from_secs(2), incoming_a.recv())
+            .await
+            .expect("the terminal outcome should enter the sender application queue")
+            .expect("the sender application queue should remain open");
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(payload(2, 1, node_a.clone())),
+            )
+            .await
+            .expect("the next relay grant should fit after the terminal outcome");
+
+        timeout(Duration::from_secs(1), async {
+            transport_a.shutdown().await;
+            transport_b.shutdown().await;
+        })
+        .await
+        .expect("redeemed grant expiry work should not delay transport shutdown");
+    }
+
+    #[tokio::test]
+    async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
+        let options = TransportOptions {
+            incoming_queue_capacity: 1,
+            ..TransportOptions::default()
+        };
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: mut incoming_a,
+            mut incoming_b,
+            ..
+        } = connected_transports_with_options(options).await;
+        transport_b
+            .register_outbound_target(
+                node_a.clone(),
+                PeerTarget::new(transport_a.local_addr(), "localhost"),
+            )
+            .expect("the response target should register");
+        transport_b
+            .send(&node_a, Envelope::Control(ControlEnvelope::Terminate))
+            .await
+            .expect("the general message should fill the sender application queue");
+
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery: RelayDelivery {
+                        channel_incarnation: [11; 16],
+                        sequence: 0,
+                    },
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 52,
+                        reply_node_id: node_a.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the receiver application queue")
+            .expect("the receiver application queue should remain open");
+        assert_eq!(
+            received
+                .relay_admission
+                .expect("a relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Admitted
+        );
+
+        let outcome_sender = transport_b.clone();
+        let outcome_target = node_a.clone();
+        let mut outcome_task = tokio::spawn(async move {
+            outcome_sender
+                .send(
+                    &outcome_target,
+                    Envelope::Ack(RemoteAckResolution {
+                        ack_id: 52,
+                        outcome: RemoteAckOutcome::Ack,
+                    }),
+                )
+                .await
+        });
+        assert!(
+            timeout(Duration::from_millis(100), &mut outcome_task)
+                .await
+                .is_err(),
+            "a terminal outcome should wait while the general application queue is full"
+        );
+        let queued = incoming_a
+            .recv()
+            .await
+            .expect("the sender application queue should contain the general message");
+        assert!(matches!(
+            queued.envelope,
+            Envelope::Control(ControlEnvelope::Terminate)
+        ));
+        outcome_task
+            .await
+            .expect("the terminal outcome task should join")
+            .expect("the terminal outcome should send after capacity becomes available");
+        let outcome = incoming_a
+            .recv()
+            .await
+            .expect("the terminal outcome must remain queued for the application");
+        assert!(matches!(
+            outcome.envelope,
+            Envelope::Ack(RemoteAckResolution {
+                ack_id: 52,
+                outcome: RemoteAckOutcome::Ack,
+            })
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: _,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [6; 16],
+            sequence: 0,
+        };
+
+        assert_eq!(
+            transport_a
+                .cancel_relay(&node_b, delivery)
+                .await
+                .expect("relay cancellation should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+
+        let error = transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery,
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 40,
+                        reply_node_id: node_a,
+                    }),
+                }),
+            )
+            .await
+            .expect_err("a confirmed cancellation must fence a later grant");
+        assert!(matches!(error, TransportError::RelayCancelled));
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "a delivery cancelled before its grant must never enter the application queue"
+        );
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_relay_admission_can_never_reach_runtime() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: _,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [7; 16],
+            sequence: 0,
+        };
+        let payload = RelayPayload {
+            delivery,
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 41,
+                reply_node_id: node_a.clone(),
+            }),
+        };
+
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload.clone()))
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the application queue")
+            .expect("the application queue should remain open");
+
+        assert_eq!(
+            transport_a
+                .relay_admission_status(&node_b, delivery)
+                .await
+                .expect("relay status should be answered"),
+            RelayAdmissionStatus::BodyReceived
+        );
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload.clone()))
+            .await
+            .expect("a same-epoch retry should reconcile the received body");
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "reconciliation must not enqueue the same delivery twice"
+        );
+
+        assert_eq!(
+            transport_a
+                .cancel_relay(&node_b, delivery)
+                .await
+                .expect("relay cancellation should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+        assert_eq!(
+            received
+                .relay_admission
+                .expect("a relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Cancelled
+        );
+        assert_eq!(
+            transport_a
+                .relay_admission_status(&node_b, delivery)
+                .await
+                .expect("relay status should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+
+        let error = transport_a
+            .send(&node_b, Envelope::RelayPayload(payload))
+            .await
+            .expect_err("a cancelled delivery identity must remain fenced");
+        assert!(matches!(error, TransportError::RelayCancelled));
+        let next_delivery = RelayDelivery {
+            channel_incarnation: [7; 16],
+            sequence: 1,
+        };
+        let next_payload = RelayPayload {
+            delivery: next_delivery,
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 42,
+                reply_node_id: node_a.clone(),
+            }),
+        };
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(next_payload))
+            .await
+            .expect("the next channel sequence should reach the receiver");
+        let next_received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the next relay body should enter the application queue")
+            .expect("the application queue should remain open");
+        assert_eq!(
+            transport_a
+                .cancel_relay(&node_b, next_delivery)
+                .await
+                .expect("the next relay cancellation should be answered"),
+            RelayAdmissionStatus::Cancelled
+        );
+        assert_eq!(
+            next_received
+                .relay_admission
+                .expect("the next relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Cancelled
+        );
+
+        let retired_payload = RelayPayload {
+            delivery: RelayDelivery {
+                channel_incarnation: [7; 16],
+                sequence: 0,
+            },
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 43,
+                reply_node_id: node_a.clone(),
+            }),
+        };
+        let error = transport_a
+            .send(&node_b, Envelope::RelayPayload(retired_payload.clone()))
+            .await
+            .expect_err("a delivery below the reconciled watermark is indeterminate");
+        assert!(matches!(error, TransportError::RelayIndeterminate));
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "a cancelled relay delivery must not enter the application queue again"
+        );
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: mut incoming_a,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [10; 16],
+            sequence: 0,
+        };
+        let payload = RelayPayload {
+            delivery,
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("test").expect("test domain should be valid"),
+            relay: RelayName::parse("relay").expect("test relay should be valid"),
+            key: None,
+            batch_ipc: Executor::default()
+                .try_charge_owned(MemoryClass::Relay, vec![1])
+                .expect("the test relay body should fit its budget"),
+            metadata: Vec::new(),
+            acks: Vec::new(),
+            admission: Some(RemoteAckRegistration {
+                ack_id: 44,
+                reply_node_id: node_a,
+            }),
+        };
+
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload.clone()))
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let received = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the application queue")
+            .expect("the application queue should remain open");
+        assert_eq!(
+            received
+                .relay_admission
+                .expect("a relay body must carry its reserved admission")
+                .admit(),
+            RelayAdmissionDecision::Admitted
+        );
+
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload))
+            .await
+            .expect("a same-epoch retry should reconcile the admitted delivery");
+        assert!(
+            timeout(Duration::from_millis(100), incoming_b.recv())
+                .await
+                .is_err(),
+            "an admitted relay retry must not enter the application queue twice"
+        );
+        let outcome = timeout(Duration::from_secs(2), incoming_a.recv())
+            .await
+            .expect("the reconciled admission should return its terminal outcome")
+            .expect("the sender application queue should remain open");
+        assert!(matches!(
+            outcome.envelope,
+            Envelope::Ack(RemoteAckResolution {
+                ack_id: 44,
+                outcome: RemoteAckOutcome::Ack,
+            })
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
+        let ConnectedTransports {
+            _authority: authority,
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: _,
+            mut incoming_b,
+        } = connected_transports().await;
+        let delivery = RelayDelivery {
+            channel_incarnation: [8; 16],
+            sequence: 0,
+        };
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery,
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 45,
+                        reply_node_id: node_a.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the unresolved relay should reach the receiver process");
+        let unresolved = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the unresolved relay should enter the application queue")
+            .expect("the application queue should remain open");
+
+        transport_b.shutdown().await;
+        drop(unresolved);
+        let (replacement_b, _replacement_incoming) = Transport::bind(
+            "127.0.0.1:0".parse().expect("test address should be valid"),
+            "localhost",
+            "test-cluster",
+            node_b.clone(),
+            authority.issue("test-cluster", &node_b),
+            TransportOptions::default(),
+            Executor::default(),
+        )
+        .await
+        .expect("the replacement receiver process should bind");
+        replacement_b.replace_live_nodes(&BTreeSet::from([node_a, node_b.clone()]));
+        transport_a
+            .register_outbound_target(
+                node_b.clone(),
+                PeerTarget::new(replacement_b.local_addr(), "localhost"),
+            )
+            .expect("the replacement receiver target should register");
+
+        assert_eq!(
+            timeout(
+                Duration::from_secs(5),
+                transport_a.relay_admission_status(&node_b, delivery),
+            )
+            .await
+            .expect("the sender should reconnect to the replacement process")
+            .expect("the replacement process should answer relay status"),
+            RelayAdmissionStatus::Indeterminate
+        );
+
+        transport_a.shutdown().await;
+        replacement_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_relay_work_reports_progress_before_runtime_admission() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            _incoming_a: mut incoming_a,
+            mut incoming_b,
+            ..
+        } = connected_transports().await;
+        transport_b
+            .register_outbound_target(
+                node_a.clone(),
+                PeerTarget::new(transport_a.local_addr(), "localhost"),
+            )
+            .expect("the progress response target should register");
+        transport_a
+            .send(
+                &node_b,
+                Envelope::RelayPayload(RelayPayload {
+                    delivery: RelayDelivery {
+                        channel_incarnation: [9; 16],
+                        sequence: 0,
+                    },
+                    kind: RelayPayloadKind::Routed,
+                    domain: DomainName::parse("test").expect("test domain should be valid"),
+                    relay: RelayName::parse("relay").expect("test relay should be valid"),
+                    key: None,
+                    batch_ipc: Executor::default()
+                        .try_charge_owned(MemoryClass::Relay, vec![1])
+                        .expect("the test relay body should fit its budget"),
+                    metadata: Vec::new(),
+                    acks: Vec::new(),
+                    admission: Some(RemoteAckRegistration {
+                        ack_id: 51,
+                        reply_node_id: node_a.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the relay body should reach the receiver admission queue");
+        let _reserved = timeout(Duration::from_secs(2), incoming_b.recv())
+            .await
+            .expect("the relay body should enter the application queue")
+            .expect("the application queue should remain open");
+
+        let progress = timeout(Duration::from_secs(1), incoming_a.recv())
+            .await
+            .expect("reserved relay work should report queue-time progress")
+            .expect("the sender application queue should remain open");
+        assert!(matches!(
+            progress.envelope,
+            Envelope::Ack(RemoteAckResolution {
+                ack_id: 51,
+                outcome: RemoteAckOutcome::Alive,
+            })
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejects_a_certificate_from_another_cluster() {
+        let authority = TestCertificateAuthority::new();
+        let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
+        let node_b = ClusterNodeName::parse("node-b").expect("test node name should be valid");
+        let (transport_a, _incoming_a) = Transport::bind(
+            "127.0.0.1:0".parse().expect("test address should be valid"),
+            "localhost",
+            "cluster-a",
+            node_a.clone(),
+            authority.issue("cluster-a", &node_a),
+            TransportOptions::default(),
+            Executor::default(),
+        )
+        .await
+        .expect("first test transport should bind");
+        let (transport_b, _incoming_b) = Transport::bind(
+            "127.0.0.1:0".parse().expect("test address should be valid"),
+            "localhost",
+            "cluster-b",
+            node_b.clone(),
+            authority.issue("cluster-b", &node_b),
+            TransportOptions::default(),
+            Executor::default(),
+        )
+        .await
+        .expect("second test transport should bind");
+
+        let error = transport_a
+            .bootstrap_target(PeerTarget::new(transport_b.local_addr(), "localhost"))
+            .await
+            .expect_err("a peer certificate from another cluster must be rejected");
+        assert!(matches!(error, TransportError::InvalidHandshake(_)));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_rkyv_is_rejected_before_dispatch() {
+        let executor = Executor::default();
+        let bytes = executor
+            .try_charge_owned(MemoryClass::Commands, vec![0xff; 32])
+            .expect("test payload should fit the command budget");
+
+        let result = wire::decode_rkyv::<ControlEnvelope>(
+            &executor,
+            MemoryClass::Commands,
+            CpuClass::Control,
+            bytes,
+        )
+        .await;
+
+        assert!(matches!(result, Err(TransportError::Decode(_))));
+    }
+
+    #[tokio::test]
+    async fn membership_removal_cancels_an_active_request() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_a,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(Notify::new());
+        transport_b
+            .register_handler::<HangingRequest, _, _>({
+                let started = StdArc::clone(&started);
+                move |_context, _request| {
+                    let started = StdArc::clone(&started);
+                    async move {
+                        started.notify_one();
+                        std::future::pending().await
+                    }
+                }
+            })
+            .expect("hanging handler should register");
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("hanging request should reach its handler");
+
+        transport_a.replace_live_nodes(&BTreeSet::from([node_a]));
+        let error = timeout(Duration::from_secs(2), request)
+            .await
+            .expect("membership removal should cancel the request")
+            .expect("request task should join")
+            .expect_err("request should report target departure");
+        assert!(matches!(
+            error.current_context(),
+            RequestError::TargetLeft { node, request }
+                if node == &node_b && request == &HangingRequest::NAME
+        ));
+
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_active_request() {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let started = StdArc::new(Notify::new());
+        transport_b
+            .register_handler::<HangingRequest, _, _>({
+                let started = StdArc::clone(&started);
+                move |_context, _request| {
+                    let started = StdArc::clone(&started);
+                    async move {
+                        started.notify_one();
+                        std::future::pending().await
+                    }
+                }
+            })
+            .expect("hanging handler should register");
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("hanging request should reach its handler");
+
+        timeout(Duration::from_secs(2), transport_a.shutdown())
+            .await
+            .expect("transport shutdown should respect its drain bound");
+        let error = timeout(Duration::from_secs(2), request)
+            .await
+            .expect("shutdown should cancel the request")
+            .expect("request task should join")
+            .expect_err("request should report shutdown");
+        assert!(matches!(
+            error.current_context(),
+            RequestError::ShuttingDown { node, request }
+                if node == &node_b && request == &HangingRequest::NAME
+        ));
+
+        transport_b.shutdown().await;
     }
 }

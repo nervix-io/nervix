@@ -23,9 +23,7 @@ impl SentryEmitter {
         client: &CreateClientSentry,
         resolved: Option<&ResolvedClientConfig>,
     ) -> EmitterRuntimeResult<Self> {
-        let config = resolved
-            .map(|config| config.entries.as_slice())
-            .unwrap_or(client.config.as_slice());
+        let config = client_config_entries(resolved, client.config.as_slice());
         let dsn = emitter_config_value(config, "dsn", || {
             "missing Sentry client config key 'dsn'".to_string()
         })?
@@ -61,8 +59,8 @@ impl SentryEmitter {
 
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
-            let body = match Self::encode_envelope(&record.payload) {
+            let position = record.position();
+            let body = match Self::encode_envelope(&record.payload, record.execution_now) {
                 Ok(body) => body,
                 Err(error) => {
                     outcome.reject(position, emitter_error_message(&error));
@@ -105,7 +103,7 @@ impl SentryEmitter {
                     .headers()
                     .get(SENTRY_RATE_LIMITS_HEADER)
                     .and_then(|value| value.to_str().ok()),
-                chrono::Utc::now(),
+                crate::runtime::physical_time::actual_utc_now().into_datetime(),
             );
             let error = format!("Sentry envelope request returned HTTP status {status}");
             outcome.fail(match retry_delay {
@@ -131,38 +129,54 @@ impl SentryEmitter {
         sentry_rate_limits: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Option<Duration> {
-        let retry_after = retry_after.and_then(|value| {
-            value
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-                .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-                .or_else(|| {
-                    chrono::DateTime::parse_from_rfc2822(value.trim())
-                        .ok()
-                        .and_then(|deadline| {
-                            deadline
-                                .with_timezone(&chrono::Utc)
-                                .signed_duration_since(now)
-                                .to_std()
-                                .ok()
-                        })
-                })
-        });
-        let sentry_rate_limits = sentry_rate_limits.and_then(|value| {
-            value
-                .split(',')
-                .filter_map(|quota| quota.trim().split(':').next())
-                .filter_map(|seconds| seconds.trim().parse::<f64>().ok())
-                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-                .filter_map(|seconds| Duration::try_from_secs_f64(seconds).ok())
-                .max()
-        });
+        let retry_after = if let Some(value) = retry_after {
+            let value = value.trim();
+            if let Ok(seconds) = value.parse::<f64>()
+                && seconds.is_finite()
+                && seconds >= 0.0
+                && let Ok(delay) = Duration::try_from_secs_f64(seconds)
+            {
+                Some(delay)
+            } else if let Ok(deadline) = chrono::DateTime::parse_from_rfc2822(value) {
+                deadline
+                    .with_timezone(&chrono::Utc)
+                    .signed_duration_since(now)
+                    .to_std()
+                    .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let sentry_rate_limits = if let Some(value) = sentry_rate_limits {
+            let mut longest: Option<Duration> = None;
+            for quota in value.split(',') {
+                let Some(seconds) = quota.trim().split(':').next() else {
+                    continue;
+                };
+                let Ok(seconds) = seconds.trim().parse::<f64>() else {
+                    continue;
+                };
+                if !seconds.is_finite() || seconds < 0.0 {
+                    continue;
+                }
+                let Ok(delay) = Duration::try_from_secs_f64(seconds) else {
+                    continue;
+                };
+                longest = Some(match longest {
+                    Some(current) => current.max(delay),
+                    None => delay,
+                });
+            }
+            longest
+        } else {
+            None
+        };
         retry_after.into_iter().chain(sentry_rate_limits).max()
     }
 
-    fn encode_envelope(payload: &[u8]) -> EmitterRuntimeResult<Vec<u8>> {
+    fn encode_envelope(payload: &[u8], execution_now: Timestamp) -> EmitterRuntimeResult<Vec<u8>> {
         let mut event = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(
             payload,
         )
@@ -189,19 +203,10 @@ impl SentryEmitter {
             .entry("platform".to_string())
             .or_insert_with(|| serde_json::Value::String("other".to_string()));
         if !event.contains_key("timestamp") {
-            let normalized = serde_json::to_value(&parsed).map_err(|error| {
-                emitter_report(
-                    EmitterRuntimeError::EncodeBatch,
-                    format!("failed to normalize Sentry event: {error}"),
-                )
-            })?;
-            let timestamp = normalized.get("timestamp").cloned().ok_or_else(|| {
-                emitter_report(
-                    EmitterRuntimeError::EncodeBatch,
-                    "normalized Sentry event omitted its timestamp",
-                )
-            })?;
-            event.insert("timestamp".to_string(), timestamp);
+            event.insert(
+                "timestamp".to_string(),
+                serde_json::Value::String(execution_now.as_datetime().to_rfc3339()),
+            );
         }
 
         let event = serde_json::to_vec(&event).map_err(|error| {
@@ -242,8 +247,10 @@ mod tests {
 
     #[test]
     fn envelope_preserves_event_fields_and_adds_protocol_defaults() {
+        let execution_now = Timestamp::from_unix_nanos(946_684_800_000_000_000);
         let envelope = SentryEmitter::encode_envelope(
             br#"{"message":"failed","environment":"test","future":{"nested":true}}"#,
+            execution_now,
         )
         .expect("event should encode");
         let mut lines = envelope.split(|byte| *byte == b'\n');
@@ -258,8 +265,25 @@ mod tests {
         assert_eq!(item_header["type"], "event");
         assert_eq!(item_header["length"], event_bytes.len());
         assert_eq!(event["platform"], "other");
-        assert!(event.get("timestamp").is_some());
+        assert_eq!(event["timestamp"], execution_now.as_datetime().to_rfc3339());
         assert_eq!(event["future"]["nested"], true);
+    }
+
+    #[test]
+    fn envelope_preserves_an_explicit_event_timestamp() {
+        let envelope = SentryEmitter::encode_envelope(
+            br#"{"message":"failed","timestamp":"2010-05-06T07:08:09Z"}"#,
+            Timestamp::from_unix_nanos(946_684_800_000_000_000),
+        )
+        .expect("event should encode");
+        let event_bytes = envelope
+            .split(|byte| *byte == b'\n')
+            .nth(2)
+            .expect("envelope must contain an event payload");
+        let event: serde_json::Value =
+            serde_json::from_slice(event_bytes).expect("event payload must be JSON");
+
+        assert_eq!(event["timestamp"], "2010-05-06T07:08:09Z");
     }
 
     #[test]

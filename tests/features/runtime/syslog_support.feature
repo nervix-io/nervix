@@ -167,6 +167,8 @@ Feature: Syslog support
     When node "node-3" is stopped
     And node "node-3" is started
     Then node "node-1" eventually reports interconnect to "node-3" as "connected"
+    And node "node-3" eventually reports interconnect to "node-1" as "connected"
+    And node "node-3" eventually reports interconnect to "node-2" as "connected"
     And node "node-3" eventually forwards Syslog UDP message "after-node-restart" at "{{syslog_ingest_addr}}" to the observed endpoint
     When node "node-4" is added to the cluster
     Then node "node-1" eventually reports interconnect to "node-4" as "connected"

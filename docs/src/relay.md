@@ -1,6 +1,8 @@
 # Streams And State
 
-`RELAY` declares a named connection between Nervix runtime nodes.
+`RELAY` declares a named, schedulable runtime node between producers and consumers. Every relay
+has one primary owner. Only that owner instantiates the relay buffer, concrete branch presence,
+relay metrics, subscription fan-out, and optional materialized state.
 
 ```nspl
 CREATE IF NOT EXISTS RELAY notifications
@@ -46,24 +48,27 @@ state when it is not configured is an error. The registry validates the complete
 so schema or branching changes must be submitted in the same transaction as every dependent model
 change needed to make the candidate graph valid.
 
-Capacity changes are dynamically applied to a running domain without replacing relay fan-outs or
-their buffered batches. Schema and branching changes use domain pause because Arrow schemas and
+Capacity changes are dynamically applied to a running domain without replacing the owner buffer
+or its buffered batches. Schema and branching changes use domain pause because Arrow schemas and
 branch identity are compiled into producers and consumers. Materialized-state add/drop uses entity
-pause: Nervix gates and drains the relay, changes materializer membership, advances the
-materializer epoch observed by branch runtimes, and releases the gate. Adding state therefore has
-no interval in which post-commit records can bypass materialization. Dropping state purges the
-relay's in-memory and persisted materialized records before flow resumes.
+pause: Nervix gates and drains the relay, changes the relay's state-replica membership without
+replacing its owner buffer, advances the state epoch observed by readers, and releases the gate.
+Adding state therefore has no interval in which post-commit records can bypass materialization.
+Dropping state purges the relay's in-memory and persisted materialized records before flow resumes.
 
 An ingestor or reingestor uses `BRANCHED BY <branch>` to compute the branch key for each record. When records for a key arrive, Nervix uses a branch instance for that key. A branch instance is the runtime execution path for one concrete key.
 
-Inside a branch, records move through relay instances. Each relay instance has:
+Inside a branch, records retain their key while moving through the relay owner. Each concrete relay
+branch has:
 
 - the declared `RELAY` name it belongs to
 - a branch identity
 - a schema
 - buffering behavior
 
-Processing node state also belongs to the branch. That gives each group independent deduplicator history, reorder buffers, window accumulators, materialized entries, and branch-local relay buffers.
+Processing node state also belongs to the branch. That gives each group independent deduplicator
+history, reorder buffers, window accumulators, and materialized entries. Relay buffering is owned
+once per declared relay and may contain interleaved batches from several concrete branches.
 
 Runtime branch rules:
 
@@ -95,19 +100,34 @@ Operationally that means:
 - window processors keep branch-local online aggregate state and construct each route through
   aggregate expressions in ordered `SET` assignments
 - batches remain branch-local until a `REINGESTOR` or `EMITTER` boundary changes the routing behavior
-- inter-node relay transport serializes those batches with Arrow IPC, so the batch stays Arrow-native over the network too
+- a producer on a nonowner cluster node serializes a batch once and holds one fixed ingress slot
+  until the owner admits it into the relay buffer
+- the owner serializes an admitted batch once for each remote consuming cluster node; every local
+  runtime consumer on that node shares the delivery, and a session subscription on the same node
+  piggybacks on it
 
 Lookup and state-replication control paths are separate from this relay payload model. The Arrow batch path applies to relay movement inside the data plane.
 
-Relay batches and their per-row ACK metadata are hot-path runtime data. They are not persisted as relay state, and ACK guards/tokens/maps are never part of runtime snapshots. Materialized relay state, when enabled, is a separate execution node state snapshot of selected record values.
+Relay batches and their per-row ACK metadata are hot-path runtime data. They are not persisted or
+replicated, and ACK guards, tokens, and maps are never part of runtime snapshots. Materialized
+state, when enabled, is the only replicated part of the relay; it is not a second runtime node.
 
 ## Capacity
 
-`CAPACITY <n>` controls the relay buffer size for the relay runtime. For
-branched relays, the capacity applies to each concrete branch-local relay
-instance. It is an active backpressure boundary: if downstream runtime
-consumers such as reingestors, emitters, or branch processors cannot drain a
-relay quickly enough, upstream dispatch waits once the relay buffer is full.
+`CAPACITY <n>` controls the single buffer on the relay owner. It is one cluster-wide
+backpressure boundary, not a per-producer, per-consumer, or per-branch capacity. If downstream
+runtime consumers cannot drain the relay quickly enough, upstream dispatch waits once the owner
+buffer and the fixed dispatch slots leading to it are occupied.
+
+At most the following batches can be admitted or in dispatch for one relay:
+
+- `CAPACITY` batches in the owner buffer;
+- one batch from each producer cluster node to the owner; and
+- one batch from the owner to each remote consuming cluster node.
+
+The owner has no additional inbound queue. A producer's slot is released only after the owner has
+admitted that batch. A consumer-node slot is released only after that node has admitted its batch.
+These fixed slots do not scale with the number of runtime consumers or subscriptions on a node.
 
 The capacity can be changed after creation:
 
@@ -115,16 +135,15 @@ The capacity can be changed after creation:
 ALTER RELAY notifications SET CAPACITY 5;
 ```
 
-The updated capacity is persisted in the relay definition and applied to active
-runtime fan-outs for the relay, including fan-outs used by existing concrete
-branches of a branched relay. Existing subscriptions and runtime consumers
-remain attached while the fan-out buffers are resized.
+The updated capacity is persisted in the relay definition and applied in place to the active owner
+buffer. Existing concrete branches, subscriptions, runtime consumers, and dispatch slots remain
+attached.
 
 Increasing capacity is applied in place without reducing buffered data. When
 capacity is shrunk below the current buffered depth, the active fan-out keeps its
 existing physical buffer until receivers drain it far enough to apply the new
-capacity without discarding in-memory batches. Publishers continue to observe
-relay backpressure while the resize is pending.
+capacity without discarding in-memory batches. Publishers continue to observe relay backpressure
+while the resize is pending. The one-batch producer and consumer dispatch slots never resize.
 
 Small capacities are useful in tests and tiny examples, but high-throughput
 graphs should use capacities large enough to absorb several flush intervals of
@@ -138,7 +157,7 @@ TTL is a branch contract, not a relay-local setting. `CREATE BRANCH` declares `T
 
 TTL controls:
 
-- concrete branch-local relay expiration in memory
+- concrete relay-branch presence on the owner
 - materialized-state cleanup when the relay is materialized
 - downstream processor state cleanup for the same concrete branch
 
@@ -146,7 +165,10 @@ Expiration semantics:
 
 - paced domains use domain logical time
 - unpaced domains use wall clock time
-- every relay and processor in the same branch tree uses the branch root's TTL and expires together
+- every relay owner and processor using the branch applies that branch's TTL to its own
+  branch-local runtime state
+- relay TTL and `MAX INSTANCES ... EVICT LRU` are enforced once by the relay owner across all
+  producers in the cluster
 
 ## Materialized State
 
@@ -165,7 +187,7 @@ Current semantics:
 - a branch grouped by nothing has one root entry
 - Nervix keeps the latest full record per branch group according to record metadata watermarks
 - materialized state is persisted to Fjall
-- persisted snapshots are replicated to runtime followers
+- persisted snapshots are replicated to scheduler-selected state replicas
 - when a concrete branch-local relay expires, Nervix deletes the matching materialized entry and replicates that deletion
 
 Because watermark and timestamp metadata travel alongside rows inside relay batches, batching does not change `LAST BY TIMESTAMP` semantics. Materialized state still compares records using the preserved runtime metadata for each row.
@@ -179,11 +201,19 @@ Operational notes:
 
 Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator declares exactly one materialized relay with `USING MATERIALIZED STATE <relay>` and reads it through `relay_state.<relay>.<field>`.
 
-`SHOW RELAY <relay> MATERIALIZED STATE` includes the scheduled materializer owner and replicas before the materialized entries or empty-state message. This matches the placement visibility exposed by other state-holding runtime nodes.
+`SHOW RELAY <relay> MATERIALIZED STATE` reports `kind: RELAY`, the relay owner, and its
+scheduler-selected state replicas before the materialized entries or empty-state message.
 
-`DESCRIBE RELAY <relay>` reports the logical relay definition, including schema, branch selection, capacity, materialized-state marker, and relay buffer-utilization metrics when available. Traffic metrics are reported on the producing or consuming runtime node edge instead of on the relay itself.
+`DESCRIBE RELAY <relay>` reports the owner and state replicas immediately after `kind: RELAY`, then
+the logical definition and owner buffer-utilization metrics. An ordinary relay reports
+`replicas: -`. Traffic metrics remain on the producing or consuming runtime-node edge.
 
-`DESCRIBE RELAY <relay> WHERE (...)` includes branch-local relay existence and buffer metrics for the matching concrete branch when metrics exist. These summaries are part of runtime state and are preserved through snapshot replication and node drain. Prometheus uses a separate live registry and exports aggregate relay metrics without branch labels; see [Metrics And Observability](metrics-and-observability.md).
+`DESCRIBE RELAY <relay> WHERE (...)` is answered only by the current relay owner and reports
+owner-authoritative concrete-branch existence and buffer metrics. Relay presence and metrics are
+not replicated. A planned owner move drains admitted work before cutover; an owner failure loses
+buffered batches, presence, and relay metrics. Materialized records survive when a current state
+replica can become owner. Prometheus exports aggregate relay metrics without branch-key labels;
+see [Metrics And Observability](metrics-and-observability.md).
 
 ## Other Replicated Runtime State
 

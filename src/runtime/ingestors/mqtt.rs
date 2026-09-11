@@ -1,3 +1,5 @@
+use std::{borrow::Cow, num::NonZeroU64};
+
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, Event, Incoming, MqttOptions, Publish, QoS,
     SessionMode, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
@@ -9,6 +11,9 @@ use super::super::*;
 pub(in crate::runtime) struct MqttIngestor;
 
 const MQTT_INSTANCE_PLACEHOLDER: &str = "{{instance}}";
+/// Why a caller that keeps running discards what [`MqttIngestor::flush_collector`] returns.
+const FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE: &str =
+    "flush_collector reported this failure to the runtime event bus";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::runtime) struct MqttIngestorAddr {
@@ -20,15 +25,14 @@ pub(in crate::runtime) struct MqttIngestorAddr {
 #[derive(Clone)]
 struct MqttTaskContext {
     runtime: Runtime,
-    domain: Domain,
-    ingestor: Identifier,
+    domain: DomainName,
+    ingestor: IngestorName,
     error_policies: ErrorPolicies,
     timestamp_source: Option<IngestTimestampSource>,
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
-    events: broadcast::Sender<RuntimeEvent>,
+    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     quiesce: Arc<IngestorQuiesceControl>,
 }
 
@@ -38,9 +42,13 @@ struct MqttClientSettings {
     manual_acks: bool,
 }
 
-struct MqttBatchEntry {
-    publish: Publish,
-    record: RuntimeRecordBatch,
+/// One MQTT poll group: the publishes it collected and the ingest group they decoded into.
+///
+/// The publishes are kept because an acknowledged group acknowledges them one by one, and because
+/// a replay decodes them again into the group it replays into.
+struct MqttPollGroup {
+    publishes: Vec<Publish>,
+    decoded: IngestRouteCollector,
 }
 
 enum MqttNextPublish {
@@ -60,33 +68,25 @@ enum MqttSubscriptionState {
 impl MqttIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
-        domain: &Domain,
-        client: CreateClientMqtt,
-        ingestor: CreateIngestor,
+        plan: MqttIngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        let key = RuntimeKey::new(domain.clone(), ingestor.name.clone());
-        if runtime.ingestors.contains_key(&key) {
+        let MqttIngestorStartPlan {
+            ingestor,
+            client,
+            topic,
+            instances,
+            mode,
+        } = plan;
+        let domain = &ingestor.domain;
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if runtime.inner.ingestors.contains_key(&key) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
             });
         }
 
-        let (topic, instances, mode) = match &ingestor.source {
-            IngestSource::Mqtt {
-                topic,
-                instances,
-                mode,
-                ..
-            } => (topic.clone(), *instances, mode.clone()),
-            _ => {
-                return Err(RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: "expected MQTT ingestor source".to_string(),
-                });
-            }
-        };
         let ack_timeout = match &mode {
             MqttIngestMode::AckParallel { timeout, .. }
             | MqttIngestMode::AckSequential { timeout, .. } => {
@@ -142,7 +142,7 @@ impl MqttIngestor {
                     "stopped mqtt ingestor"
                 );
             });
-            runtime.ingestors.insert(
+            runtime.inner.ingestors.insert(
                 key,
                 IngestorRuntime::Background {
                     shutdown: shutdown_tx,
@@ -163,17 +163,19 @@ impl MqttIngestor {
         let codec = dependencies.codec;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
-            .expect("scheduled MQTT ingestor must have quiesce control");
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
 
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances as usize);
+        let mut tasks = Vec::with_capacity(instances.get().arch_into());
         let subscribe_filter = Self::subscribe_filter(&topic, domain, &ingestor.name);
         let settings = MqttClientSettings {
             session: mode.session(),
             manual_acks: mode.is_ack(),
         };
 
-        for instance_idx in 0..instances {
+        for instance_idx in 0..instances.get() {
             let mut shutdown_rx = shutdown_tx.subscribe();
             let task_context = MqttTaskContext {
                 runtime: runtime.clone(),
@@ -187,7 +189,6 @@ impl MqttIngestor {
                 filter_where: filter_where.clone(),
                 codec: codec.clone(),
                 branched_senders: branched_senders.clone(),
-                events: runtime.events.clone(),
                 quiesce: quiesce.clone(),
             };
             let task_topic = topic.clone();
@@ -237,8 +238,9 @@ impl MqttIngestor {
                     }
                     if task_context
                         .runtime
-                        .ingestor_faults
-                        .is_failed(&task_context.ingestor)
+                        .inner
+                        .fault_injection
+                        .ingestor_is_failed(&task_context.ingestor)
                     {
                         continue;
                     }
@@ -356,13 +358,13 @@ impl MqttIngestor {
                                 })
                                 .await
                             {
-                                let _ = task_context.events.send(RuntimeEvent::Error(format!(
+                                task_context.runtime.events().report_error(format!(
                                     "failed to dispatch buffered mqtt payload for ingestor '{}' \
                                      in domain '{}': {}",
                                     task_context.ingestor.as_str(),
                                     task_context.domain.as_str(),
                                     error
-                                )));
+                                ));
                             }
                             continue;
                         }
@@ -381,23 +383,27 @@ impl MqttIngestor {
                         {
                             MqttNextPublish::Publish(publish) => *publish,
                             MqttNextPublish::Flush => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 continue;
                             }
                             MqttNextPublish::Shutdown => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 break 'outer;
                             }
                             MqttNextPublish::Reconnect => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 break;
                             }
                             MqttNextPublish::Suspend => {
-                                let _ = Self::flush_collector(&task_context, &mut ingest_collector)
-                                    .await;
+                                Self::flush_collector(&task_context, &mut ingest_collector)
+                                    .await
+                                    .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
                                 break;
                             }
                         };
@@ -430,7 +436,10 @@ impl MqttIngestor {
                                     &client_handle,
                                     &mut shutdown_rx,
                                     publish,
-                                    task_ack_timeout.expect("ack timeout must exist"),
+                                    task_ack_timeout.verified(
+                                        "this branch runs only for an ACK mode, and every ACK \
+                                         mode parses a timeout above",
+                                    ),
                                     task_retry_policy,
                                     &mut backoff,
                                 )
@@ -440,19 +449,27 @@ impl MqttIngestor {
                                 }
                             }
                             MqttIngestMode::AckParallel { max, .. } => {
-                                let mut batch =
-                                    match Self::decode_publish(&task_context, publish).await {
-                                        Some(entry) => vec![entry],
-                                        None => {
-                                            if !backoff.wait(&mut shutdown_rx).await {
-                                                break 'outer;
-                                            }
-                                            break;
-                                        }
-                                    };
+                                // The poll group is one ingest group, so every publish it collects
+                                // decodes into the same record builder.
+                                let mut collector = IngestRouteCollector::new(
+                                    IngestMetadataKind::Headers,
+                                    addressable_count(*max).get(),
+                                );
+                                if !Self::decode_publish(&task_context, &mut collector, &publish)
+                                    .await
+                                {
+                                    if !backoff.wait(&mut shutdown_rx).await {
+                                        break 'outer;
+                                    }
+                                    break;
+                                }
+                                let mut publishes = vec![publish];
                                 let deadline = Instant::now()
-                                    + task_batch_timeout.expect("batch timeout must exist");
-                                while batch.len() < (*max as usize).max(1) {
+                                    + task_batch_timeout.verified(
+                                        "this branch runs only for the parallel ACK mode, which \
+                                         parses a batch timeout above",
+                                    );
+                                while publishes.len() < addressable_count(*max).get() {
                                     tokio::task::consume_budget().await;
                                     tokio::select! {
                                         _ = sleep_until(deadline) => break,
@@ -468,8 +485,8 @@ impl MqttIngestor {
                                                     ).await else {
                                                         continue;
                                                     };
-                                                    if let Some(entry) = Self::decode_publish(&task_context, publish).await {
-                                                        batch.push(entry);
+                                                    if Self::decode_publish(&task_context, &mut collector, &publish).await {
+                                                        publishes.push(publish);
                                                     } else {
                                                         if !backoff.wait(&mut shutdown_rx).await {
                                                             break 'outer;
@@ -489,8 +506,14 @@ impl MqttIngestor {
                                     &task_context,
                                     &client_handle,
                                     &mut shutdown_rx,
-                                    batch,
-                                    task_ack_timeout.expect("ack timeout must exist"),
+                                    MqttPollGroup {
+                                        publishes,
+                                        decoded: collector,
+                                    },
+                                    task_ack_timeout.verified(
+                                        "this branch runs only for an ACK mode, and every ACK \
+                                         mode parses a timeout above",
+                                    ),
                                     task_retry_policy,
                                     &mut backoff,
                                 )
@@ -524,7 +547,7 @@ impl MqttIngestor {
             tasks.push(task);
         }
 
-        runtime.ingestors.insert(
+        runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
@@ -602,12 +625,12 @@ impl MqttIngestor {
                                 return MqttSubscriptionState::Ready;
                             }
                             let error = format!("mqtt subscribe failed: {suback:?}");
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                            context.runtime.events().report_error(format!(
                                 "failed to subscribe mqtt source for ingestor '{}' in domain '{}': {}",
                                 context.ingestor.as_str(),
                                 context.domain.as_str(),
                                 error
-                            )));
+                            ));
                             warn!(
                                 domain = context.domain.as_str(),
                                 ingestor = context.ingestor.as_str(),
@@ -623,12 +646,12 @@ impl MqttIngestor {
                         }
                         Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                         Err(error) => {
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                            context.runtime.events().report_error(format!(
                                 "failed to subscribe mqtt source for ingestor '{}' in domain '{}': {}",
                                 context.ingestor.as_str(),
                                 context.domain.as_str(),
                                 error
-                            )));
+                            ));
                             warn!(
                                 domain = context.domain.as_str(),
                                 ingestor = context.ingestor.as_str(),
@@ -682,12 +705,12 @@ impl MqttIngestor {
                         }
                         Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                         Err(error) => {
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                            context.runtime.events().report_error(format!(
                                 "failed to receive mqtt message for ingestor '{}' in domain '{}': {}",
                                 context.ingestor.as_str(),
                                 context.domain.as_str(),
                                 error
-                            )));
+                            ));
                             warn!(
                                 domain = context.domain.as_str(),
                                 ingestor = context.ingestor.as_str(),
@@ -716,7 +739,7 @@ impl MqttIngestor {
     ) -> Option<Publish> {
         let payload = BufferedIngestPayload::new(
             publish.payload.as_ref(),
-            BufferedIngestMetadata::Headers(IngestHeaders::new()),
+            BufferedIngestMetadata::without_headers(),
         );
         match context.quiesce.intake(instance_idx, payload, false) {
             IngestorQuiesceIntake::Dispatch(_) => Some(publish),
@@ -727,13 +750,13 @@ impl MqttIngestor {
                         &context.ingestor,
                         format!("mqtt quiesce acknowledgement failed: {error}"),
                     );
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
+                    context.runtime.events().report_error(format!(
                         "failed to acknowledge mqtt payload under quiesce for ingestor '{}' in \
                          domain '{}': {}",
                         context.ingestor.as_str(),
                         context.domain.as_str(),
                         error
-                    )));
+                    ));
                 }
                 None
             }
@@ -746,20 +769,20 @@ impl MqttIngestor {
         publish: Publish,
         collector: &mut IngestRouteCollector,
     ) {
-        let Some(entry) = Self::decode_publish(context, publish).await else {
+        if !Self::decode_publish(context, collector, &publish).await {
             return;
-        };
-        if let Err(error) =
-            Self::dispatch_entry(context, entry.record, AckSet::empty(), collector).await
-        {
-            let _ = context.events.send(RuntimeEvent::Error(format!(
+        }
+        if let Err(error) = Self::dispatch_entry(context, AckSet::empty(), collector).await {
+            context.runtime.events().report_error(format!(
                 "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                 context.ingestor.as_str(),
                 context.domain.as_str(),
                 error
-            )));
+            ));
         } else if collector.len() >= INGEST_GROUP_MAX_ROWS {
-            let _ = Self::flush_collector(context, collector).await;
+            Self::flush_collector(context, collector)
+                .await
+                .discarded(FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE);
         }
     }
 
@@ -772,17 +795,19 @@ impl MqttIngestor {
         retry_policy: ParsedRetryPolicy,
         backoff: &mut RuntimeReconnectBackoff,
     ) -> bool {
-        let Some(entry) = Self::decode_publish(context, publish).await else {
-            return backoff.wait(shutdown_rx).await;
-        };
         loop {
             tokio::task::consume_budget().await;
-            let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
-            // One acknowledged message is one group.
+            // One acknowledged message is one group, and a replay decodes into the group it
+            // replays into.
             let mut collector = IngestRouteCollector::new(IngestMetadataKind::Headers, 1);
+            if !Self::decode_publish(context, &mut collector, &publish).await {
+                return backoff.wait(shutdown_rx).await;
+            }
+            let (acks, completion) = context
+                .runtime
+                .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
             let dispatch_result = Self::dispatch_entry(
                 context,
-                entry.record.clone(),
                 if !context.branched_senders.is_empty() {
                     acks.attached()
                 } else {
@@ -792,30 +817,30 @@ impl MqttIngestor {
             )
             .await;
             let flush_result = Self::flush_collector(context, &mut collector).await;
-            let dispatched = dispatch_result
-                .and(flush_result)
-                .map(|()| true)
-                .unwrap_or_else(|error| {
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
+            let dispatched = match dispatch_result.and(flush_result) {
+                Ok(()) => true,
+                Err(error) => {
+                    context.runtime.events().report_error(format!(
                         "failed to dispatch message for ingestor '{}' in domain '{}': {}",
                         context.ingestor.as_str(),
                         context.domain.as_str(),
                         error
-                    )));
+                    ));
                     false
-                });
+                }
+            };
             if dispatched {
                 acks.ack_success();
                 match Runtime::await_ack_completion(shutdown_rx, completion, ack_timeout).await {
                     Some(AckOutcome::Ack) => {
-                        if let Err(error) = client_handle.ack(&entry.publish).await {
-                            let _ = context.events.send(RuntimeEvent::Error(format!(
+                        if let Err(error) = client_handle.ack(&publish).await {
+                            context.runtime.events().report_error(format!(
                                 "failed to acknowledge mqtt message for ingestor '{}' in domain \
                                  '{}': {}",
                                 context.ingestor.as_str(),
                                 context.domain.as_str(),
                                 error
-                            )));
+                            ));
                             if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
                                 return false;
                             }
@@ -825,12 +850,12 @@ impl MqttIngestor {
                         }
                     }
                     Some(AckOutcome::NoAck(error)) => {
-                        let _ = context.events.send(RuntimeEvent::Error(format!(
+                        context.runtime.events().report_error(format!(
                             "mqtt ack chain failed for ingestor '{}' in domain '{}': {}",
                             context.ingestor.as_str(),
                             context.domain.as_str(),
                             error
-                        )));
+                        ));
                         if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
                             return false;
                         }
@@ -840,7 +865,7 @@ impl MqttIngestor {
             } else {
                 context.runtime.handle_general_error_for_acks(
                     &context.domain,
-                    "ingestor",
+                    ModelKind::Ingestor,
                     &context.ingestor,
                     &context.error_policies,
                     std::iter::once(&acks),
@@ -857,48 +882,44 @@ impl MqttIngestor {
         context: &MqttTaskContext,
         client_handle: &AsyncClient,
         shutdown_rx: &mut watch::Receiver<bool>,
-        batch: Vec<MqttBatchEntry>,
+        group: MqttPollGroup,
         ack_timeout: Duration,
         retry_policy: ParsedRetryPolicy,
         backoff: &mut RuntimeReconnectBackoff,
     ) -> bool {
-        let mut publishes = Vec::with_capacity(batch.len());
-        let mut initial_records = Vec::with_capacity(batch.len());
-        for entry in batch {
-            publishes.push(entry.publish);
-            initial_records.push(entry.record);
-        }
-        let mut initial_records = Some(initial_records);
+        let MqttPollGroup { publishes, decoded } = group;
+        // The collection loop already decoded this batch once; a replay decodes it again, into
+        // the group it replays into.
+        let mut decoded = Some(decoded);
         'retry: loop {
             tokio::task::consume_budget().await;
-            let records = if let Some(records) = initial_records.take() {
-                records
-            } else {
-                let mut records = Vec::with_capacity(publishes.len());
-                for publish in &publishes {
-                    tokio::task::consume_budget().await;
-                    let Some(record) = Self::decode_publish_record(context, publish).await else {
-                        if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
-                            return false;
+            let mut collector = match decoded.take() {
+                Some(collector) => collector,
+                None => {
+                    let mut collector =
+                        IngestRouteCollector::new(IngestMetadataKind::Headers, publishes.len());
+                    for publish in &publishes {
+                        tokio::task::consume_budget().await;
+                        if !Self::decode_publish(context, &mut collector, publish).await {
+                            if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
+                                return false;
+                            }
+                            continue 'retry;
                         }
-                        continue 'retry;
-                    };
-                    records.push(record);
+                    }
+                    collector
                 }
-                records
             };
-            let mut completions = Vec::with_capacity(records.len());
+            let mut completions = Vec::with_capacity(publishes.len());
             let mut batch_failure = None::<String>;
-            // The poll group is one ingest group.
-            let mut collector =
-                IngestRouteCollector::new(IngestMetadataKind::Headers, records.len());
 
-            for record in records {
+            for _ in &publishes {
                 tokio::task::consume_budget().await;
-                let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
-                let dispatched = Self::dispatch_entry(
+                let (acks, completion) = context
+                    .runtime
+                    .tracked_ingestor_ack_root(&context.domain, &context.ingestor);
+                let dispatch_result = Self::dispatch_entry(
                     context,
-                    record,
                     if !context.branched_senders.is_empty() {
                         acks.attached()
                     } else {
@@ -906,30 +927,35 @@ impl MqttIngestor {
                     },
                     &mut collector,
                 )
-                .await
-                .map(|()| true)
-                .unwrap_or_else(|error| {
-                    let _ = context.events.send(RuntimeEvent::Error(format!(
-                        "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                        context.ingestor.as_str(),
-                        context.domain.as_str(),
-                        error
-                    )));
-                    false
-                });
+                .await;
+                let dispatched = match dispatch_result {
+                    Ok(()) => true,
+                    Err(error) => {
+                        context.runtime.events().report_error(format!(
+                            "failed to dispatch message for ingestor '{}' in domain '{}': {}",
+                            context.ingestor.as_str(),
+                            context.domain.as_str(),
+                            error
+                        ));
+                        false
+                    }
+                };
                 if dispatched {
                     acks.ack_success();
                     completions.push(completion);
                 } else {
                     context.runtime.handle_general_error_for_acks(
                         &context.domain,
-                        "ingestor",
+                        ModelKind::Ingestor,
                         &context.ingestor,
                         &context.error_policies,
                         std::iter::once(&acks),
                         "mqtt runtime dispatch failed".to_string(),
                     );
                     batch_failure = Some("mqtt runtime dispatch failed".to_string());
+                    // The rest of the poll group is replayed rather than flushed, so its rows
+                    // leave the group with the message that failed.
+                    collector.discard_undispatched_rows();
                     break;
                 }
             }
@@ -954,12 +980,12 @@ impl MqttIngestor {
             }
 
             if let Some(error) = batch_failure {
-                let _ = context.events.send(RuntimeEvent::Error(format!(
+                context.runtime.events().report_error(format!(
                     "mqtt ack batch failed for ingestor '{}' in domain '{}': {}",
                     context.ingestor.as_str(),
                     context.domain.as_str(),
                     error
-                )));
+                ));
                 if !Self::wait_retry(shutdown_rx, retry_policy, backoff).await {
                     return false;
                 }
@@ -968,13 +994,13 @@ impl MqttIngestor {
                 for publish in &publishes {
                     if let Err(error) = client_handle.ack(publish).await {
                         ack_failure = Some(error.to_string());
-                        let _ = context.events.send(RuntimeEvent::Error(format!(
+                        context.runtime.events().report_error(format!(
                             "failed to acknowledge mqtt message for ingestor '{}' in domain '{}': \
                              {}",
                             context.ingestor.as_str(),
                             context.domain.as_str(),
                             error
-                        )));
+                        ));
                         break;
                     }
                 }
@@ -1005,15 +1031,13 @@ impl MqttIngestor {
         }
     }
 
-    async fn decode_publish(context: &MqttTaskContext, publish: Publish) -> Option<MqttBatchEntry> {
-        let record = Self::decode_publish_record(context, &publish).await?;
-        Some(MqttBatchEntry { publish, record })
-    }
-
-    async fn decode_publish_record(
+    /// Decodes one publish as one row of `collector`'s ingest group, reporting a payload the
+    /// codec rejects and answering whether the row joined the group.
+    async fn decode_publish(
         context: &MqttTaskContext,
+        collector: &mut IngestRouteCollector,
         publish: &Publish,
-    ) -> Option<RuntimeRecordBatch> {
+    ) -> bool {
         let key = publish.topic.clone();
         let payload = publish.payload.as_ref();
 
@@ -1026,29 +1050,31 @@ impl MqttIngestor {
             "received mqtt message"
         );
 
-        match decode_ingested_payload(context.codec.clone(), payload).await {
-            Ok(record) => Some(record),
+        match collector
+            .decode_payload(&context.codec, Cow::Borrowed(payload))
+            .await
+        {
+            Ok(()) => true,
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(format!(
+                context.runtime.events().report_error(format!(
                     "failed to decode message for ingestor '{}' in domain '{}': {}",
                     context.ingestor.as_str(),
                     context.domain.as_str(),
                     error
-                )));
+                ));
                 warn!(
                     domain = context.domain.as_str(),
                     ingestor = context.ingestor.as_str(),
                     error = %error,
                     "failed to decode mqtt message"
                 );
-                None
+                false
             }
         }
     }
 
     async fn dispatch_entry(
         context: &MqttTaskContext,
-        record: RuntimeRecordBatch,
         acks: AckSet,
         collector: &mut IngestRouteCollector,
     ) -> Result<(), String> {
@@ -1061,7 +1087,6 @@ impl MqttIngestor {
                 timestamp_source: context.timestamp_source.as_ref(),
                 output_routes: &context.output_routes,
                 filter_where: context.filter_where.as_ref(),
-                records: vec![record],
                 metadata: &[IngestMetadataRow::Headers {
                     headers: &NoIngestHeaders,
                 }],
@@ -1071,6 +1096,11 @@ impl MqttIngestor {
             .await
     }
 
+    /// Flushes the collector and reports a failure to the runtime event bus.
+    ///
+    /// The runtime has already routed every per-message failure through the ingestor's error
+    /// policy, so what this adds is the summary. A caller that keeps running discards the returned
+    /// result and names [`FLUSH_COLLECTOR_REPORTS_ITS_OWN_FAILURE`] as its reason.
     async fn flush_collector(
         context: &MqttTaskContext,
         collector: &mut IngestRouteCollector,
@@ -1085,12 +1115,12 @@ impl MqttIngestor {
             )
             .await;
         if let Err(error) = &result {
-            let _ = context.events.send(RuntimeEvent::Error(format!(
+            context.runtime.events().report_error(format!(
                 "failed to flush messages for ingestor '{}' in domain '{}': {}",
                 context.ingestor.as_str(),
                 context.domain.as_str(),
                 error
-            )));
+            ));
         }
         result
     }
@@ -1102,17 +1132,17 @@ impl MqttIngestor {
         }
     }
 
-    fn subscribe_filter(topic: &str, domain: &Domain, ingestor: &Identifier) -> String {
+    fn subscribe_filter(topic: &str, domain: &DomainName, ingestor: &IngestorName) -> String {
         format!("$share/{}~{}/{topic}", domain.as_str(), ingestor.as_str())
     }
 
     #[cfg(test)]
-    pub(in crate::runtime) fn client_from_client(
-        client: &CreateClientMqtt,
+    pub(in crate::runtime) fn client_from_config_for_test(
+        config: &[ClientConfigEntry],
         default_client_id: &str,
     ) -> Result<(AsyncClient, rumqttc::EventLoop), String> {
         Self::client_from_config(
-            &client.config,
+            config,
             default_client_id,
             &MqttClientSettings {
                 session: MqttSession::Clean,
@@ -1129,9 +1159,10 @@ impl MqttIngestor {
         let addr = client_config_value(config, "addr", || {
             "missing MQTT client config key 'addr'".to_string()
         })?;
-        let client_id = optional_client_config_value(config, "client_id")
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| default_client_id.to_string());
+        let client_id = match optional_client_config_value(config, "client_id") {
+            Some(client_id) => client_id.to_owned(),
+            None => default_client_id.to_string(),
+        };
 
         let mqtt_addr = Self::parse_addr(&addr)?;
         let mut options = MqttOptions::new(client_id, (mqtt_addr.host, mqtt_addr.port));
@@ -1186,13 +1217,14 @@ impl MqttIngestor {
     fn client_id_template(
         config: &[nervix_models::ClientConfigEntry],
         default_client_id: &str,
-        instances: u64,
+        instances: NonZeroU64,
     ) -> Result<String, String> {
         let configured = optional_client_config_value(config, "client_id");
-        if instances <= 1 {
-            return Ok(configured
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| default_client_id.to_string()));
+        if instances == NonZeroU64::MIN {
+            return Ok(match configured {
+                Some(client_id) => client_id.to_owned(),
+                None => default_client_id.to_string(),
+            });
         }
         let Some(client_id) = configured else {
             return Err(format!(
@@ -1221,15 +1253,15 @@ impl MqttIngestor {
                 url.scheme()
             ));
         };
-        let host = url
-            .host()
-            .map(|host| match host {
-                Host::Domain(domain) => domain.to_string(),
-                Host::Ipv4(addr) => addr.to_string(),
-                Host::Ipv6(addr) => addr.to_string(),
-            })
-            .filter(|host| !host.is_empty())
-            .ok_or_else(|| format!("missing host in MQTT addr '{addr}'"))?;
+        let host = match url.host() {
+            Some(Host::Domain(domain)) => domain.to_string(),
+            Some(Host::Ipv4(address)) => address.to_string(),
+            Some(Host::Ipv6(address)) => address.to_string(),
+            None => String::new(),
+        };
+        if host.is_empty() {
+            return Err(format!("missing host in MQTT addr '{addr}'"));
+        }
         let port = url
             .port()
             .ok_or_else(|| format!("missing port in MQTT addr '{addr}'"))?;
@@ -1239,10 +1271,14 @@ impl MqttIngestor {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{ClientConfigEntry, MqttSession};
+    use std::time::Duration;
+
+    use nervix_models::{ClientConfigEntry, CreateClientMqtt, MqttSession};
+    use nonzero_ext::nonzero;
     use rumqttc::BrokerSessionResumePolicy;
 
-    use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor};
+    use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor, MqttIngestorAddr};
+    use crate::runtime::{ParsedRetryPolicy, named, next_retry_delay};
 
     fn config_with_client_id(client_id: &str) -> Vec<ClientConfigEntry> {
         vec![ClientConfigEntry {
@@ -1281,9 +1317,12 @@ mod tests {
 
     #[test]
     fn multi_instance_mqtt_client_id_requires_instance_template() {
-        let error =
-            MqttIngestor::client_id_template(&config_with_client_id("fixed-client"), "fallback", 2)
-                .expect_err("fixed multi-instance client_id must be rejected");
+        let error = MqttIngestor::client_id_template(
+            &config_with_client_id("fixed-client"),
+            "fallback",
+            nonzero!(2u64),
+        )
+        .expect_err("fixed multi-instance client_id must be rejected");
 
         assert_eq!(
             error,
@@ -1297,7 +1336,7 @@ mod tests {
         let template = MqttIngestor::client_id_template(
             &config_with_client_id("templated-{{instance}}"),
             "fallback",
-            2,
+            nonzero!(2u64),
         )
         .expect("templated multi-instance client_id must be accepted");
 
@@ -1309,9 +1348,108 @@ mod tests {
 
     #[test]
     fn single_instance_mqtt_client_id_uses_default_when_omitted() {
-        let template = MqttIngestor::client_id_template(&[], "fallback", 1)
+        let template = MqttIngestor::client_id_template(&[], "fallback", nonzero!(1u64))
             .expect("single-instance default client_id must be accepted");
 
         assert_eq!(template, "fallback");
+    }
+
+    #[test]
+    fn parse_mqtt_addr_handles_valid_and_invalid_inputs() {
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtt://user:pass@broker.example.com:1883/topic")
+                .expect("must parse"),
+            MqttIngestorAddr {
+                host: "broker.example.com".to_string(),
+                port: 1883,
+                tls: false,
+            }
+        );
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtts://broker.example.com:8883").expect("must parse"),
+            MqttIngestorAddr {
+                host: "broker.example.com".to_string(),
+                port: 8883,
+                tls: true,
+            }
+        );
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtt://[2001:db8::1]:1883/topic").expect("must parse"),
+            MqttIngestorAddr {
+                host: "2001:db8::1".to_string(),
+                port: 1883,
+                tls: false,
+            }
+        );
+        assert_eq!(
+            MqttIngestor::parse_addr("mqtt://broker.example.com:1883?keep_alive=30")
+                .expect("must parse"),
+            MqttIngestorAddr {
+                host: "broker.example.com".to_string(),
+                port: 1883,
+                tls: false,
+            }
+        );
+        assert!(MqttIngestor::parse_addr("http://broker.example.com:1883").is_err());
+        assert!(MqttIngestor::parse_addr("mqtt://broker.example.com").is_err());
+        assert!(MqttIngestor::parse_addr("mqtt://:1883").is_err());
+    }
+
+    #[test]
+    fn mqtt_client_builder_uses_configured_or_default_client_id() {
+        let client = CreateClientMqtt {
+            name: named("mqtt_main"),
+            mount: None,
+            config: vec![nervix_models::ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "mqtt://broker.example.com:1883".to_string(),
+            }],
+        };
+
+        MqttIngestor::client_from_config_for_test(&client.config, "default-client")
+            .expect("must build client from default id");
+
+        let client_with_id = CreateClientMqtt {
+            name: named("mqtt_main"),
+            mount: None,
+            config: vec![
+                nervix_models::ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: "mqtt://broker.example.com:1883".to_string(),
+                },
+                nervix_models::ClientConfigEntry {
+                    key: "client_id".to_string(),
+                    value: "explicit-client".to_string(),
+                },
+            ],
+        };
+
+        MqttIngestor::client_from_config_for_test(&client_with_id.config, "default-client")
+            .expect("must build client from explicit id");
+    }
+
+    #[test]
+    fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
+        let err = MqttIngestor::client_from_config_for_test(
+            &CreateClientMqtt {
+                name: named("mqtt_main"),
+                mount: None,
+                config: vec![],
+            }
+            .config,
+            "default-client",
+        )
+        .err()
+        .expect("missing mqtt addr");
+        assert!(err.contains("missing MQTT client config key 'addr'"));
+
+        let policy = ParsedRetryPolicy {
+            backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(10),
+        };
+        assert_eq!(
+            next_retry_delay(Duration::MAX, policy),
+            Duration::from_secs(10)
+        );
     }
 }

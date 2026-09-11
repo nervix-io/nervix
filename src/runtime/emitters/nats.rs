@@ -11,14 +11,27 @@ use async_nats::{
     message::OutboundMessage,
 };
 use futures_util::{FutureExt, SinkExt};
+use nervix_models::SubjectName;
 
 use super::*;
 
 pub(in crate::runtime) struct NatsEmitter {
     client: Option<NatsClient>,
-    jetstream: Option<NatsJetStream>,
-    mode: NatsPublishingMode,
+    delivery: NatsDelivery,
     subject: Subject,
+}
+
+/// How this emitter publishes, together with whatever that way of publishing needs.
+///
+/// A JetStream context exists only for `MODE ACK`, so pairing the context with the mode that
+/// requires it means the publish path reads one value instead of matching a mode and then hoping
+/// the separately stored context agrees with it.
+enum NatsDelivery {
+    Core,
+    JetStream {
+        context: Box<NatsJetStream>,
+        confirmation: AckConfirmation,
+    },
 }
 
 type NatsConfirmation =
@@ -34,35 +47,32 @@ impl NatsEmitter {
     pub(in crate::runtime) async fn new(
         client: &CreateClientNats,
         resolved: Option<&ResolvedClientConfig>,
-        subject: &Identifier,
+        subject: &SubjectName,
         mode: NatsPublishingMode,
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterRuntimeResult<Self> {
         let client = Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
+            client_config_entries(resolved, client.config.as_slice()),
             retry_policy,
         )
         .await?;
-        let jetstream = match mode {
-            NatsPublishingMode::Core => None,
-            NatsPublishingMode::JetStream {
-                max_in_flight,
-                timeout,
-            } => Some(
-                async_nats::jetstream::ContextBuilder::new()
-                    .timeout(timeout)
-                    .ack_timeout(timeout)
-                    .max_ack_inflight(max_in_flight)
-                    .backpressure_on_inflight(true)
-                    .build(client.clone()),
-            ),
+        let delivery = match mode {
+            NatsPublishingMode::Core => NatsDelivery::Core,
+            NatsPublishingMode::JetStream(confirmation) => NatsDelivery::JetStream {
+                context: Box::new(
+                    async_nats::jetstream::ContextBuilder::new()
+                        .timeout(confirmation.timeout)
+                        .ack_timeout(confirmation.timeout)
+                        .max_ack_inflight(confirmation.max_in_flight.get())
+                        .backpressure_on_inflight(true)
+                        .build(client.clone()),
+                ),
+                confirmation,
+            },
         };
         Ok(Self {
             client: Some(client),
-            jetstream,
-            mode,
+            delivery,
             subject: Subject::from(subject.as_str().to_string()),
         })
     }
@@ -117,15 +127,20 @@ impl NatsEmitter {
         attempts: usize,
         connected_once: bool,
     ) -> Duration {
-        if !connected_once && attempts <= 1 {
+        // The client counts reconnect attempts from one. The first attempt after a connection
+        // that never succeeded retries immediately; from the first delayed attempt onward each
+        // further attempt doubles the configured backoff.
+        let first_delayed_attempt = if connected_once { 1 } else { 2 };
+        let Some(retries) = attempts.checked_sub(first_delayed_attempt) else {
             return Duration::ZERO;
-        }
-        let retries = attempts.saturating_sub(if connected_once { 1 } else { 2 });
+        };
         let mut delay = policy.backoff;
         for _ in 0..retries {
             if delay >= policy.max_backoff {
                 return policy.max_backoff;
             }
+            // Saturation is the policy here: the backoff doubles until it reaches the configured
+            // ceiling and stays there, so a doubling that leaves `Duration` clamps to it too.
             delay = delay.saturating_mul(2).min(policy.max_backoff);
         }
         delay
@@ -135,9 +150,15 @@ impl NatsEmitter {
         &self,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
-        match self.mode {
-            NatsPublishingMode::Core => self.publish_core(records).await,
-            NatsPublishingMode::JetStream { .. } => self.publish_jetstream(records).await,
+        match &self.delivery {
+            NatsDelivery::Core => self.publish_core(records).await,
+            NatsDelivery::JetStream {
+                context,
+                confirmation,
+            } => {
+                self.publish_jetstream(context, *confirmation, records)
+                    .await
+            }
         }
     }
 
@@ -154,7 +175,7 @@ impl NatsEmitter {
         let mut queued = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let headers = if record.headers.is_empty() {
                 None
             } else {
@@ -188,28 +209,19 @@ impl NatsEmitter {
 
     async fn publish_jetstream(
         &self,
+        jetstream: &NatsJetStream,
+        AckConfirmation {
+            max_in_flight,
+            timeout,
+        }: AckConfirmation,
         records: Vec<EncodedBrokerRecord>,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
-        let Some(jetstream) = self.jetstream.as_ref() else {
-            outcome.fail(
-                Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized NATS JetStream context"),
-            );
-            return outcome;
-        };
-        let NatsPublishingMode::JetStream {
-            max_in_flight,
-            timeout,
-        } = self.mode
-        else {
-            unreachable!("JetStream publish requires JetStream mode");
-        };
         outcome.delivered.reserve(records.len());
         let mut pending: VecDeque<PendingNatsConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let position = (record.batch_index, record.row_index);
+            let position = record.position();
             let publish = async {
                 if record.headers.is_empty() {
                     jetstream
@@ -242,7 +254,7 @@ impl NatsEmitter {
                 deadline: Instant::now() + timeout,
                 confirmation: Box::pin(confirmation.into_future()),
             });
-            if pending.len() >= max_in_flight
+            if pending.len() >= max_in_flight.get()
                 && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
             {
                 outcome.fail(error);
@@ -311,6 +323,13 @@ impl NatsEmitter {
         }
     }
 
+    /// Collects the records behind the oldest one whose confirmation already resolved.
+    ///
+    /// The caller reached here because the oldest record failed or timed out, and it is about to
+    /// return that failure for the whole publish. Records behind it that already succeeded or were
+    /// individually rejected are recorded so the retry does not send them again. Anything else is
+    /// deliberately left in neither list: its failure is the same infrastructure failure the
+    /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingNatsConfirmation>,
         outcome: &mut PerRecordPublishOutcome,
@@ -324,9 +343,10 @@ impl NatsEmitter {
                 index += 1;
                 continue;
             };
-            let confirmation = pending
-                .remove(index)
-                .expect("ready NATS confirmation must remain in the window");
+            let confirmation = pending.remove(index).verified(
+                "the index came from scanning this same pending window, which nothing else \
+                 removes from",
+            );
             match result {
                 Ok(_ack) => outcome.deliver(confirmation.position),
                 Err(error) if Self::is_jetstream_record_rejection(&error) => outcome.reject(

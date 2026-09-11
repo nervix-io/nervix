@@ -50,3 +50,49 @@ impl<'a> HttpClientConfig<'a> {
         Ok(builder)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::{ClientConfigEntry, CreateClientPrometheus};
+
+    use super::*;
+    use crate::runtime::{ingestors, named};
+
+    #[test]
+    fn http_and_prometheus_clients_validate_timeout_configuration() {
+        let client = HttpClientConfig::new(
+            &[ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "250".to_string(),
+            }],
+            "HTTP",
+        )
+        .build();
+        assert!(client.is_ok());
+
+        let err = HttpClientConfig::new(
+            &[ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "oops".to_string(),
+            }],
+            "HTTP",
+        )
+        .build()
+        .expect_err("invalid timeout");
+        assert!(err.contains("invalid HTTP timeout_ms 'oops'"));
+
+        let err = ingestors::prometheus::PrometheusIngestor::client_from_config_for_test(
+            &CreateClientPrometheus {
+                name: named("prom"),
+                mount: None,
+                config: vec![ClientConfigEntry {
+                    key: "timeout_ms".to_string(),
+                    value: "oops".to_string(),
+                }],
+            }
+            .config,
+        )
+        .expect_err("invalid prometheus timeout");
+        assert!(err.contains("Prometheus timeout_ms"));
+    }
+}

@@ -1,4 +1,5 @@
 [package]
+description = "The Models and vocabulary of Nervix: NSPL statements, validated names, timestamps, branch keys and node references"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-models"
@@ -8,9 +9,15 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+ahash-compile-time = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
+humantime = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
+meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
+nonzero_ext = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
 sorted-vec = { workspace = true, features = ["serde"] }

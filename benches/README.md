@@ -89,6 +89,16 @@ Vector's `batch.timeout_secs`, `batch.max_bytes`, and `end_every_period_ms` from
 settings. Vector measures its native maximum before serialization, while Nervix limits an Arrow
 batch, so reports retain the native values and should not imply byte-for-byte equivalence.
 
+`kafka-filter-map` also exposes `ingestor_mode`, the ingestor's whole `MODE` clause, so the same
+graph can be measured under acknowledgement instead of the `NO_ACK PARALLEL` default. The clause
+contains spaces, so quote it twice when overriding it through a `just` recipe — the outer quotes
+are consumed by the shell and the inner ones survive into the recipe:
+
+```bash
+just benchmark-ab main 5 kafka-filter-map \
+  --parameter "'ingestor_mode=ACK PARALLEL MAX 1024 BATCH TIMEOUT 10ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s'"
+```
+
 `kafka-dedup-window` matches its two implementations on the same drop rate and the same aggregate,
 not on identical internals. Vector's `dedupe` evicts by cache size where Nervix expires by
 `MAX TIME`, and Vector's `reduce` closes on a period where a Nervix window closes on whichever of

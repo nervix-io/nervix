@@ -21,6 +21,23 @@ docker network create nervix
 docker pull "$NERVIX_IMAGE"
 ```
 
+Provision a CA and one certificate/key pair per node under `./tls` before starting the containers:
+
+```text
+tls/ca.pem
+tls/node-1.pem
+tls/node-1-key.pem
+tls/node-2.pem
+tls/node-2-key.pem
+tls/node-3.pem
+tls/node-3-key.pem
+```
+
+Each node certificate must permit TLS server and client authentication. It must contain its Docker
+hostname (`nervix-1`, `nervix-2`, or `nervix-3`) as a DNS SAN and exactly one identity URI matching
+its configured cluster and node, such as `nervix://cluster/nervix-docker/node/node-1`. Sign all
+three certificates with the CA in `ca.pem`.
+
 Start the bootstrap node:
 
 ```bash
@@ -30,6 +47,9 @@ docker run --detach \
   --network nervix \
   --restart unless-stopped \
   --volume nervix-node-1-data:/var/lib/nervix \
+  --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
+  --volume "$PWD/tls/node-1.pem:/etc/nervix/interconnect/node.pem:ro" \
+  --volume "$PWD/tls/node-1-key.pem:/etc/nervix/interconnect/node-key.pem:ro" \
   --publish 47391:47391 \
   --publish 47421:47420 \
   --publish 9091:9090 \
@@ -40,12 +60,11 @@ docker run --detach \
   --env NERVIX_OBSERVABILITY_LISTEN_ADDR=0.0.0.0:9090 \
   --env NERVIX_CLUSTER_ID=nervix-docker \
   --env NERVIX_NODE_ID=node-1 \
-  --env NERVIX_CLUSTER_LISTEN_ADDR=0.0.0.0:47392 \
-  --env NERVIX_CLUSTER_ADVERTISE_ADDR=nervix-1:47392 \
-  --env NERVIX_CLUSTER_API_LISTEN_ADDR=0.0.0.0:47393 \
-  --env NERVIX_CLUSTER_API_ADVERTISE_ADDR=nervix-1:47393 \
   --env NERVIX_INTERCONNECT_LISTEN_ADDR=0.0.0.0:47395 \
   --env NERVIX_INTERCONNECT_ADVERTISE_ADDR=nervix-1:47395 \
+  --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
+  --env NERVIX_INTERCONNECT_TLS_CERT=/etc/nervix/interconnect/node.pem \
+  --env NERVIX_INTERCONNECT_TLS_KEY=/etc/nervix/interconnect/node-key.pem \
   --env NERVIX_REPLICA_COUNT=3 \
   --env NERVIX_ALLOW_BOOTSTRAP=true \
   --env NERVIX_INIT_DEFAULT_USER_PASSWORD \
@@ -62,6 +81,9 @@ docker run --detach \
   --network nervix \
   --restart unless-stopped \
   --volume nervix-node-2-data:/var/lib/nervix \
+  --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
+  --volume "$PWD/tls/node-2.pem:/etc/nervix/interconnect/node.pem:ro" \
+  --volume "$PWD/tls/node-2-key.pem:/etc/nervix/interconnect/node-key.pem:ro" \
   --publish 47392:47391 \
   --publish 47422:47420 \
   --publish 9092:9090 \
@@ -72,14 +94,13 @@ docker run --detach \
   --env NERVIX_OBSERVABILITY_LISTEN_ADDR=0.0.0.0:9090 \
   --env NERVIX_CLUSTER_ID=nervix-docker \
   --env NERVIX_NODE_ID=node-2 \
-  --env NERVIX_CLUSTER_LISTEN_ADDR=0.0.0.0:47392 \
-  --env NERVIX_CLUSTER_ADVERTISE_ADDR=nervix-2:47392 \
-  --env NERVIX_CLUSTER_API_LISTEN_ADDR=0.0.0.0:47393 \
-  --env NERVIX_CLUSTER_API_ADVERTISE_ADDR=nervix-2:47393 \
   --env NERVIX_INTERCONNECT_LISTEN_ADDR=0.0.0.0:47395 \
   --env NERVIX_INTERCONNECT_ADVERTISE_ADDR=nervix-2:47395 \
+  --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
+  --env NERVIX_INTERCONNECT_TLS_CERT=/etc/nervix/interconnect/node.pem \
+  --env NERVIX_INTERCONNECT_TLS_KEY=/etc/nervix/interconnect/node-key.pem \
   --env NERVIX_REPLICA_COUNT=3 \
-  --env NERVIX_CLUSTER_BOOTSTRAP_HOST=nervix-1:47392 \
+  --env NERVIX_CLUSTER_BOOTSTRAP_HOST=nervix-1:47395 \
   "$NERVIX_IMAGE"
 
 docker run --detach \
@@ -88,6 +109,9 @@ docker run --detach \
   --network nervix \
   --restart unless-stopped \
   --volume nervix-node-3-data:/var/lib/nervix \
+  --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
+  --volume "$PWD/tls/node-3.pem:/etc/nervix/interconnect/node.pem:ro" \
+  --volume "$PWD/tls/node-3-key.pem:/etc/nervix/interconnect/node-key.pem:ro" \
   --publish 47393:47391 \
   --publish 47423:47420 \
   --publish 9093:9090 \
@@ -98,14 +122,13 @@ docker run --detach \
   --env NERVIX_OBSERVABILITY_LISTEN_ADDR=0.0.0.0:9090 \
   --env NERVIX_CLUSTER_ID=nervix-docker \
   --env NERVIX_NODE_ID=node-3 \
-  --env NERVIX_CLUSTER_LISTEN_ADDR=0.0.0.0:47392 \
-  --env NERVIX_CLUSTER_ADVERTISE_ADDR=nervix-3:47392 \
-  --env NERVIX_CLUSTER_API_LISTEN_ADDR=0.0.0.0:47393 \
-  --env NERVIX_CLUSTER_API_ADVERTISE_ADDR=nervix-3:47393 \
   --env NERVIX_INTERCONNECT_LISTEN_ADDR=0.0.0.0:47395 \
   --env NERVIX_INTERCONNECT_ADVERTISE_ADDR=nervix-3:47395 \
+  --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
+  --env NERVIX_INTERCONNECT_TLS_CERT=/etc/nervix/interconnect/node.pem \
+  --env NERVIX_INTERCONNECT_TLS_KEY=/etc/nervix/interconnect/node-key.pem \
   --env NERVIX_REPLICA_COUNT=3 \
-  --env NERVIX_CLUSTER_BOOTSTRAP_HOST=nervix-1:47392 \
+  --env NERVIX_CLUSTER_BOOTSTRAP_HOST=nervix-1:47395 \
   "$NERVIX_IMAGE"
 ```
 
@@ -151,9 +174,10 @@ x-nervix-common: &nervix-common
     NERVIX_WEB_CONSOLE_LISTEN_ADDR: 0.0.0.0:47420
     NERVIX_OBSERVABILITY_LISTEN_ADDR: 0.0.0.0:9090
     NERVIX_CLUSTER_ID: nervix-docker
-    NERVIX_CLUSTER_LISTEN_ADDR: 0.0.0.0:47392
-    NERVIX_CLUSTER_API_LISTEN_ADDR: 0.0.0.0:47393
     NERVIX_INTERCONNECT_LISTEN_ADDR: 0.0.0.0:47395
+    NERVIX_INTERCONNECT_TLS_CA: /etc/nervix/interconnect/ca.pem
+    NERVIX_INTERCONNECT_TLS_CERT: /etc/nervix/interconnect/node.pem
+    NERVIX_INTERCONNECT_TLS_KEY: /etc/nervix/interconnect/node-key.pem
     NERVIX_REPLICA_COUNT: "3"
   networks:
     - nervix
@@ -167,8 +191,6 @@ services:
       NERVIX_NODE_ID: node-1
       NERVIX_GRPC_ADVERTISE_ADDR: 127.0.0.1:47391
       NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: 127.0.0.1:47421
-      NERVIX_CLUSTER_ADVERTISE_ADDR: nervix-1:47392
-      NERVIX_CLUSTER_API_ADVERTISE_ADDR: nervix-1:47393
       NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-1:47395
       NERVIX_ALLOW_BOOTSTRAP: "true"
       NERVIX_INIT_DEFAULT_USER_PASSWORD: ${NERVIX_INIT_DEFAULT_USER_PASSWORD:?set NERVIX_INIT_DEFAULT_USER_PASSWORD}
@@ -178,6 +200,9 @@ services:
       - "9091:9090"
     volumes:
       - nervix-node-1-data:/var/lib/nervix
+      - ./tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ./tls/node-1.pem:/etc/nervix/interconnect/node.pem:ro
+      - ./tls/node-1-key.pem:/etc/nervix/interconnect/node-key.pem:ro
 
   nervix-2:
     <<: *nervix-common
@@ -189,16 +214,17 @@ services:
       NERVIX_NODE_ID: node-2
       NERVIX_GRPC_ADVERTISE_ADDR: 127.0.0.1:47392
       NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: 127.0.0.1:47422
-      NERVIX_CLUSTER_ADVERTISE_ADDR: nervix-2:47392
-      NERVIX_CLUSTER_API_ADVERTISE_ADDR: nervix-2:47393
       NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-2:47395
-      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-1:47392
+      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-1:47395
     ports:
       - "47392:47391"
       - "47422:47420"
       - "9092:9090"
     volumes:
       - nervix-node-2-data:/var/lib/nervix
+      - ./tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ./tls/node-2.pem:/etc/nervix/interconnect/node.pem:ro
+      - ./tls/node-2-key.pem:/etc/nervix/interconnect/node-key.pem:ro
 
   nervix-3:
     <<: *nervix-common
@@ -210,16 +236,17 @@ services:
       NERVIX_NODE_ID: node-3
       NERVIX_GRPC_ADVERTISE_ADDR: 127.0.0.1:47393
       NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: 127.0.0.1:47423
-      NERVIX_CLUSTER_ADVERTISE_ADDR: nervix-3:47392
-      NERVIX_CLUSTER_API_ADVERTISE_ADDR: nervix-3:47393
       NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-3:47395
-      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-1:47392
+      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-1:47395
     ports:
       - "47393:47391"
       - "47423:47420"
       - "9093:9090"
     volumes:
       - nervix-node-3-data:/var/lib/nervix
+      - ./tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ./tls/node-3.pem:/etc/nervix/interconnect/node.pem:ro
+      - ./tls/node-3-key.pem:/etc/nervix/interconnect/node-key.pem:ro
 
 networks:
   nervix:

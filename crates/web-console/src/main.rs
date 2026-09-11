@@ -10,15 +10,18 @@ use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
 use leptos::{ev, mount::mount_to_body, prelude::*};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
     DataflowStatistics,
 };
-use nervix_models::Statement;
+use nervix_models::{ClusterNodeName, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
+use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_web_console::graph::{
     graph_layout_edge, graph_layout_item,
     layout::{GroupRegion, Layout, Rect},
@@ -175,7 +178,7 @@ struct ResourceVersionView {
     manifest_checksum: Option<String>,
     file_count: Option<String>,
     total_bytes: Option<String>,
-    created_by_node: Option<String>,
+    created_by_node: Option<ClusterNodeName>,
     created_at: Option<String>,
     files: Vec<ResourceFileView>,
 }
@@ -297,12 +300,14 @@ fn App() -> impl IntoView {
     };
     let active_entities = move || {
         let active_id = active_domain_name();
-        domain_snapshots
+        let snapshot = domain_snapshots
             .get()
             .into_iter()
-            .find(|snapshot| snapshot.domain == active_id)
-            .map(|snapshot| snapshot.entities)
-            .unwrap_or_default()
+            .find(|snapshot| snapshot.domain == active_id);
+        match snapshot {
+            Some(snapshot) => snapshot.entities,
+            None => Vec::new(),
+        }
     };
     let active_domain_session = web_console_session.clone();
     Effect::new(move |_| {
@@ -316,7 +321,9 @@ fn App() -> impl IntoView {
         };
         let queued = QueuedRequest::SetActiveDomain { request };
         if let Some(request_tx) = active_domain_session.request_tx.get_untracked() {
-            let _ = request_tx.unbounded_send(queued);
+            request_tx
+                .unbounded_send(queued)
+                .means_shutdown("web console session");
         }
     });
     let suggestion_session = web_console_session.clone();
@@ -325,7 +332,8 @@ fn App() -> impl IntoView {
             suggestions.set(Vec::new());
             return;
         }
-        let cursor = value.len() as u32;
+        let cursor = u32::try_from(value.len())
+            .assured("WebAssembly linear memory limits input lengths to u32");
         let request = nervix_proto::SessionRequest {
             request: Some(nervix_proto::session_request::Request::Suggest(
                 nervix_proto::SuggestRequest {
@@ -465,6 +473,8 @@ fn App() -> impl IntoView {
             return;
         };
         let title = subscription_tab_title(&relay, &filter);
+        // Bounded by the subscription tabs the operator has open in this console, and the tab
+        // strip renders them in this order.
         if let Some(existing) = subscription_tabs.get_untracked().into_iter().find(|tab| {
             tab.domain == domain
                 && tab.relay == relay
@@ -548,7 +558,9 @@ fn App() -> impl IntoView {
             )),
         };
         if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked() {
-            let _ = request_tx.unbounded_send(QueuedRequest::SubscriptionStop { request });
+            request_tx
+                .unbounded_send(QueuedRequest::SubscriptionStop { request })
+                .means_shutdown("web console session");
         }
     };
 
@@ -733,26 +745,27 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
                         let mut resend_pending_after_connect = !pending_requests.is_empty();
                         let mut waiting_for_transaction_attach = false;
                         if transaction_is_active(transaction_status.get_untracked()) {
-                            let existing_attach = pending_requests.front().and_then(|pending| {
-                                let PendingRequest::AttachTransaction { request } = pending else {
-                                    return None;
-                                };
-                                Some(request.clone())
-                            });
-                            let had_existing_attach = existing_attach.is_some();
-                            let request = existing_attach.unwrap_or_else(|| {
-                                let id = transaction_status
-                                    .get_untracked()
-                                    .map(|status| status.id)
-                                    .unwrap_or_default();
-                                nervix_proto::SessionRequest {
-                                    request: Some(
-                                        nervix_proto::session_request::Request::AttachTransaction(
-                                            nervix_proto::AttachTransactionRequest { id },
-                                        ),
-                                    ),
+                            let (request, had_existing_attach) = match pending_requests.front() {
+                                Some(PendingRequest::AttachTransaction { request }) => {
+                                    (request.clone(), true)
                                 }
-                            });
+                                _ => {
+                                    let id = match transaction_status.get_untracked() {
+                                        Some(status) => status.id,
+                                        None => String::new(),
+                                    };
+                                    (
+                                        nervix_proto::SessionRequest {
+                                            request: Some(
+                                                nervix_proto::session_request::Request::AttachTransaction(
+                                                    nervix_proto::AttachTransactionRequest { id },
+                                                ),
+                                            ),
+                                        },
+                                        false,
+                                    )
+                                }
+                            };
                             if socket
                                 .send(WebSocketMessage::Bytes(request.encode_to_vec()))
                                 .await
@@ -967,15 +980,28 @@ async fn wait_for_websocket_open(socket: &WebSocket) {
 async fn wait_for_websocket_reconnect(delay: Duration) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                &resolve,
-                delay.as_millis().min(i32::MAX as u128) as i32,
-            );
+            window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    &resolve,
+                    i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
+                )
+                .discarded(
+                    "a timer the browser refuses to schedule leaves the promise pending until the \
+                     caller is dropped",
+                );
         } else {
-            let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
+            resolve.call0(&wasm_bindgen::JsValue::UNDEFINED).discarded(
+                "a resolve callback that throws leaves the promise pending until the caller is \
+                 dropped",
+            );
         }
     });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .discarded(
+            "the wait is over either way: this promise carries no value and rejects only if the \
+             timer threw",
+        );
 }
 
 async fn send_pending_websocket_commands(
@@ -999,6 +1025,12 @@ async fn send_pending_websocket_commands(
     true
 }
 
+/// The session token the console was opened with, or `None` when the page carries none.
+///
+/// The console runs in a browser it does not control, so every step here can legitimately come up
+/// empty: a document rendered without a window, a location the URL grammar does not accept, and an
+/// address with no `auth` query all mean the same thing to the caller, which is that the console
+/// has to ask the operator to sign in.
 fn web_console_auth_token_from_location() -> Option<String> {
     let href = web_sys::window()?.location().href().ok()?;
     let url = Url::parse(&href).ok()?;
@@ -1006,6 +1038,11 @@ fn web_console_auth_token_from_location() -> Option<String> {
         .find_map(|(key, value)| (key == "auth").then(|| value.into_owned()))
 }
 
+/// The session websocket address derived from the page's own location.
+///
+/// A browser that refuses to hand over its protocol or host leaves the console with no address to
+/// connect to, which is why absence is the answer rather than a failure: the caller retries once
+/// the document is ready.
 fn web_console_websocket_url(auth_token: &str) -> Option<String> {
     let location = web_sys::window()?.location();
     let protocol = match location.protocol().ok()?.as_str() {
@@ -1019,6 +1056,8 @@ fn web_console_websocket_url(auth_token: &str) -> Option<String> {
     ))
 }
 
+/// The origin the console makes its HTTP requests against, or `None` before the document has a
+/// readable location.
 fn web_console_http_base_url() -> Option<String> {
     let location = web_sys::window()?.location();
     let protocol = location.protocol().ok()?;
@@ -1026,6 +1065,10 @@ fn web_console_http_base_url() -> Option<String> {
     Some(format!("{protocol}//{host}"))
 }
 
+/// The session websocket address for an explicitly configured base URL.
+///
+/// `None` says the base URL is not one a session can be opened on: it is not a URL, or its scheme
+/// has no websocket counterpart. The caller falls back to the page's own location.
 fn web_console_websocket_url_from_base(base_url: &str, auth_token: &str) -> Option<String> {
     let mut url = Url::parse(base_url).ok()?;
     let websocket_scheme = match url.scheme() {
@@ -1143,7 +1186,9 @@ fn handle_session_response(
                     .map(|status| status.id)
                     .filter(|id| !id.is_empty())
             {
-                pending_requests.push_front(pending.take().expect("pending was checked above"));
+                pending_requests.push_front(pending.take().verified(
+                    "the condition above matched on this same pending request being present",
+                ));
                 return SessionResponseAction::ReattachTransaction { id };
             }
             let pending = pending;
@@ -1475,26 +1520,22 @@ fn resource_detail_from_result(result: nervix_proto::CommandResult) -> ResourceD
     }
     let versions = parse_resource_versions_from_describe(&result.message);
     let versions = if versions.is_empty() {
-        result
+        let listed = result
             .message
             .lines()
-            .find_map(|line| line.strip_prefix("versions: "))
-            .map(|versions| {
-                if versions == "(none)" {
-                    Vec::new()
-                } else {
-                    versions
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|version| !version.is_empty())
-                        .map(|version| ResourceVersionView {
-                            version: version.to_string(),
-                            ..Default::default()
-                        })
-                        .collect()
-                }
-            })
-            .unwrap_or_default()
+            .find_map(|line| line.strip_prefix("versions: "));
+        match listed {
+            Some("(none)") | None => Vec::new(),
+            Some(listed) => listed
+                .split(',')
+                .map(str::trim)
+                .filter(|version| !version.is_empty())
+                .map(|version| ResourceVersionView {
+                    version: version.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+        }
     } else {
         versions
     };
@@ -1543,7 +1584,7 @@ fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
             "manifest_checksum" => manifest_checksum = Some(value.to_string()),
             "file_count" => file_count = Some(value.to_string()),
             "total_bytes" => total_bytes = Some(value.to_string()),
-            "created_by_node" => created_by_node = Some(value.to_string()),
+            "created_by_node" => created_by_node = ClusterNodeName::parse(value).ok(),
             "created_at" => created_at = Some(value.to_string()),
             _ => {}
         }
@@ -1633,6 +1674,10 @@ fn resource_file_summary(file: &ResourceFileView) -> String {
     parts.join(" | ")
 }
 
+/// The domain the first `CREATE DOMAIN` in `query` declares, or `None` when there is none.
+///
+/// The query is whatever the operator has typed so far, so text that does not parse is the
+/// ordinary case rather than a failure; it simply names no domain yet.
 fn first_created_domain_from_query(query: &str) -> Option<String> {
     parse_client_statements(query)
         .ok()?
@@ -1657,8 +1702,10 @@ fn is_domainless_server_command(command: &str) -> bool {
 }
 
 fn diagnostic_line(query: &str, diagnostic: nervix_proto::Diagnostic) -> TermLine {
-    let span_start = diagnostic.span_start as usize;
-    let span_end = diagnostic.span_end as usize;
+    let span_start = usize::try_from(diagnostic.span_start)
+        .assured("supported browser and test targets have at least 32-bit pointers");
+    let span_end = usize::try_from(diagnostic.span_end)
+        .assured("supported browser and test targets have at least 32-bit pointers");
     if span_start < span_end && span_end <= query.len() {
         TermLine::output(format!(
             "- {} at {}..{}: {}",
@@ -1723,24 +1770,22 @@ fn Header(
                             .is_some_and(|domain| domain.status.eq_ignore_ascii_case("RUNNING"))
                         type="button"
                         disabled=move || websocket_state.get() != ConsoleConnectionState::Connected
-                        title=move || selected_domain()
-                            .map(|domain| {
-                                domain_state_hint(
-                                    &domain.status,
-                                    websocket_state.get() == ConsoleConnectionState::Connected,
-                                )
-                                .to_string()
-                            })
-                            .unwrap_or_else(|| "Domain lifecycle".to_string())
-                        aria-label=move || selected_domain()
-                            .map(|domain| {
-                                domain_state_hint(
-                                    &domain.status,
-                                    websocket_state.get() == ConsoleConnectionState::Connected,
-                                )
-                                .to_string()
-                            })
-                            .unwrap_or_else(|| "Domain lifecycle".to_string())
+                        title=move || match selected_domain() {
+                            Some(domain) => domain_state_hint(
+                                &domain.status,
+                                websocket_state.get() == ConsoleConnectionState::Connected,
+                            )
+                            .to_string(),
+                            None => "Domain lifecycle".to_string(),
+                        }
+                        aria-label=move || match selected_domain() {
+                            Some(domain) => domain_state_hint(
+                                &domain.status,
+                                websocket_state.get() == ConsoleConnectionState::Connected,
+                            )
+                            .to_string(),
+                            None => "Domain lifecycle".to_string(),
+                        }
                         on:click=move |_| {
                             if websocket_state.get_untracked() != ConsoleConnectionState::Connected {
                                 return;
@@ -1760,16 +1805,14 @@ fn Header(
                             <SidebarIcon kind="stop" />
                         </Show>
                         <span class="domain-state-hint" aria-hidden="true">
-                            {move || selected_domain()
-                                .map(|domain| {
-                                    domain_state_hint(
-                                        &domain.status,
-                                        websocket_state.get() == ConsoleConnectionState::Connected,
-                                    )
-                                    .to_string()
-                                })
-                                .unwrap_or_else(|| "Domain lifecycle".to_string())
-                            }
+                            {move || match selected_domain() {
+                                Some(domain) => domain_state_hint(
+                                    &domain.status,
+                                    websocket_state.get() == ConsoleConnectionState::Connected,
+                                )
+                                .to_string(),
+                                None => "Domain lifecycle".to_string(),
+                            }}
                         </span>
                     </button>
                 </Show>
@@ -1871,13 +1914,14 @@ fn Sidebar(
             .get()
             .into_iter()
             .find(|domain| Some(domain.id.clone()) == active);
-        found.or_else(|| {
-            active.map(|id| DomainView {
+        match found {
+            Some(domain) => Some(domain),
+            None => active.map(|id| DomainView {
                 id,
                 mode: "UNKNOWN".to_string(),
                 status: "UNKNOWN".to_string(),
-            })
-        })
+            }),
+        }
     };
     view! {
         <aside class="sidebar">
@@ -1890,26 +1934,22 @@ fn Sidebar(
                 >
                     <span class="status-dot"></span>
                     <span>{move || {
-                        selected_domain()
-                            .map(|domain| domain.id)
-                            .unwrap_or_else(|| {
-                                if domains_loaded.get() {
-                                    "no domain".to_string()
-                                } else {
-                                    "loading domains".to_string()
-                                }
-                            })
+                        if let Some(domain) = selected_domain() {
+                            domain.id
+                        } else if domains_loaded.get() {
+                            "no domain".to_string()
+                        } else {
+                            "loading domains".to_string()
+                        }
                     }}</span>
                     <span class="domain-mode">{move || {
-                        selected_domain()
-                            .map(|domain| domain.mode)
-                            .unwrap_or_else(|| {
-                                if domains_loaded.get() {
-                                    "NONE".to_string()
-                                } else {
-                                    "WAIT".to_string()
-                                }
-                            })
+                        if let Some(domain) = selected_domain() {
+                            domain.mode
+                        } else if domains_loaded.get() {
+                            "NONE".to_string()
+                        } else {
+                            "WAIT".to_string()
+                        }
                     }}</span>
                     <span class="chevron">{move || if domain_open.get() { "⌃" } else { "⌄" }}</span>
                 </button>
@@ -1960,12 +2000,24 @@ fn Sidebar(
                         <SidebarIcon kind="branch" />
                         "live snapshot"
                     </span>
-                    <strong>{move || selected_domain().map(|domain| domain.status).unwrap_or_else(|| "WAITING".to_string())}</strong>
+                    <strong>{move || match selected_domain() {
+                        Some(domain) => domain.status,
+                        None => "WAITING".to_string(),
+                    }}</strong>
                 </div>
                 <div class="summary-metrics">
-                    <MetricMini value=move || active_graph().map(|graph| graph.statistics.messages_rate()).unwrap_or_else(|| "0".to_string()) label="msgs/s" />
-                    <MetricMini value=move || active_graph().map(|graph| graph.statistics.bytes_rate()).unwrap_or_else(|| "0B".to_string()) label="bytes/s" />
-                    <MetricMini value=move || active_graph().map(|graph| graph.statistics.batches_rate()).unwrap_or_else(|| "0".to_string()) label="batches" />
+                    <MetricMini value=move || match active_graph() {
+                        Some(graph) => graph.statistics.messages_rate(),
+                        None => "0".to_string(),
+                    } label="msgs/s" />
+                    <MetricMini value=move || match active_graph() {
+                        Some(graph) => graph.statistics.bytes_rate(),
+                        None => "0B".to_string(),
+                    } label="bytes/s" />
+                    <MetricMini value=move || match active_graph() {
+                        Some(graph) => graph.statistics.batches_rate(),
+                        None => "0".to_string(),
+                    } label="batches" />
                 </div>
             </div>
             <nav class="nav-list" aria-label="Console entities">
@@ -2180,7 +2232,8 @@ fn request_resource_describe(
         )),
     };
     if let Some(tx) = request_tx.get_untracked() {
-        let _ = tx.unbounded_send(QueuedRequest::ResourceDescribe { resource, request });
+        tx.unbounded_send(QueuedRequest::ResourceDescribe { resource, request })
+            .means_shutdown("web console session");
     }
 }
 
@@ -2279,7 +2332,11 @@ fn ResourceDialog(
                         disabled=move || uploading.get()
                         on:click=move |_| {
                             if let Some(input) = directory_input.get() {
-                                let _ = input.set_attribute("webkitdirectory", "");
+                                input.set_attribute("webkitdirectory", "")
+                                .discarded(
+                                    "a browser that rejects the attribute opens a file picker \
+                                     instead of a directory picker",
+                                );
                                 input.click();
                             }
                         }
@@ -2295,12 +2352,10 @@ fn ResourceDialog(
                     <div class="resource-version-title">
                         <span>"Versions"</span>
                         <strong>{move || {
-                            details
-                                .get()
-                                .get(&resource())
-                                .map(|detail| detail.versions.len())
-                                .unwrap_or(0)
-                                .to_string()
+                            match details.get().get(&resource()) {
+                                Some(detail) => detail.versions.len().to_string(),
+                                None => "0".to_string(),
+                            }
                         }}</strong>
                     </div>
                     <Show
@@ -2314,11 +2369,10 @@ fn ResourceDialog(
                             view! {
                                 <div class="resource-empty">
                                     {move || {
-                                        details
-                                            .get()
-                                            .get(&resource())
-                                            .map(|detail| detail.status.clone())
-                                            .unwrap_or_else(|| "loading".to_string())
+                                        match details.get().get(&resource()) {
+                                            Some(detail) => detail.status.clone(),
+                                            None => "loading".to_string(),
+                                        }
                                     }}
                                 </div>
                             }
@@ -2326,11 +2380,10 @@ fn ResourceDialog(
                     >
                         <For
                             each=move || {
-                                details
-                                    .get()
-                                    .get(&resource())
-                                    .map(|detail| detail.versions.clone())
-                                    .unwrap_or_default()
+                                match details.get().get(&resource()) {
+                                    Some(detail) => detail.versions.clone(),
+                                    None => Vec::new(),
+                                }
                             }
                             key=|version| version.version.clone()
                             children=|version| {
@@ -2372,7 +2425,7 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
     event
         .target()
         .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-        .expect("upload input event target must be an input")
+        .verified("this handler is only bound to the upload input element")
 }
 
 async fn upload_resource_files(
@@ -2410,10 +2463,18 @@ async fn upload_resource_files(
         }
     }
     input.set_value("");
+    let Some(window) = web_sys::window() else {
+        return "failed to access browser upload identity source".to_string();
+    };
+    let Ok(crypto) = window.crypto() else {
+        return "failed to access browser upload identity source".to_string();
+    };
+    let upload_identity = crypto.random_uuid();
     let url = web_console_resource_upload_url(
         upload_base_url.as_deref(),
         &resource,
         &domain,
+        &upload_identity,
         auth_token.as_deref(),
     );
     match gloo_net::http::Request::post(&url).body(form) {
@@ -2439,15 +2500,18 @@ fn web_console_resource_upload_url(
     base_url: Option<&str>,
     resource: &str,
     domain: &str,
+    upload_identity: &str,
     auth_token: Option<&str>,
 ) -> String {
-    let auth_query = auth_token
-        .map(|token| format!("&auth={}", encode_query_component(token)))
-        .unwrap_or_default();
+    let auth_query = match auth_token {
+        Some(token) => format!("&auth={}", encode_query_component(token)),
+        None => String::new(),
+    };
     let query = format!(
-        "resource={}&domain={}{}",
+        "resource={}&domain={}&upload_identity={}{}",
         encode_query_component(resource),
         encode_query_component(domain),
+        encode_query_component(upload_identity),
         auth_query
     );
     let path = format!("/console/resources/upload?{query}");
@@ -2464,10 +2528,12 @@ fn web_console_resource_upload_url(
 }
 
 fn file_relative_path(file: &web_sys::File) -> String {
-    js_sys::Reflect::get(file, &wasm_bindgen::JsValue::from_str("webkitRelativePath"))
-        .ok()
-        .and_then(|value| value.as_string())
-        .unwrap_or_default()
+    let Ok(value) =
+        js_sys::Reflect::get(file, &wasm_bindgen::JsValue::from_str("webkitRelativePath"))
+    else {
+        return String::new();
+    };
+    value.as_string().unwrap_or_default()
 }
 
 fn encode_query_component(value: &str) -> String {
@@ -2546,39 +2612,51 @@ fn SidebarIcon(kind: &'static str) -> impl IntoView {
     }
 }
 
-fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<(String, String, DataflowEdgeKind)> {
-    let hit = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| {
-            document.element_from_point(event.client_x() as f32, event.client_y() as f32)
-        })
-        .and_then(graph_edge_hit_from_element)
-        .or_else(|| {
-            event
-                .target()
-                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-                .and_then(graph_edge_hit_from_element)
-        })?;
+/// The edge a click landed on, named the way the graph identifies it.
+struct GraphEdgeFocusRequest {
+    source: String,
+    target: String,
+    kind: DataflowEdgeKind,
+}
+
+fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<GraphEdgeFocusRequest> {
+    let pointer_hit = if let Some(window) = web_sys::window()
+        && let Some(document) = window.document()
+        && let Some(element) = document.element_from_point(
+            event.client_x().approx_into(),
+            event.client_y().approx_into(),
+        ) {
+        graph_edge_hit_from_element(element)
+    } else {
+        None
+    };
+    let hit = if let Some(hit) = pointer_hit {
+        hit
+    } else {
+        let target = event.target()?;
+        let Ok(element) = target.dyn_into::<web_sys::Element>() else {
+            return None;
+        };
+        graph_edge_hit_from_element(element)?
+    };
     let source = hit.get_attribute("data-source")?;
     let target = hit.get_attribute("data-target")?;
     let kind = graph_edge_kind_from_label(hit.get_attribute("data-kind")?.as_str())?;
-    Some((source, target, kind))
+    Some(GraphEdgeFocusRequest {
+        source,
+        target,
+        kind,
+    })
 }
 
 fn graph_edge_hit_from_element(element: web_sys::Element) -> Option<web_sys::Element> {
-    element
-        .closest(".graph-edge-hit")
-        .ok()
-        .flatten()
-        .or_else(|| {
-            element
-                .closest(".graph-edge-group")
-                .ok()
-                .flatten()?
-                .query_selector(".graph-edge-hit")
-                .ok()
-                .flatten()
-        })
+    if let Ok(Some(hit)) = element.closest(".graph-edge-hit") {
+        return Some(hit);
+    }
+    let Ok(Some(group)) = element.closest(".graph-edge-group") else {
+        return None;
+    };
+    group.query_selector(".graph-edge-hit").unwrap_or_default()
 }
 
 fn graph_edge_kind_from_label(label: &str) -> Option<DataflowEdgeKind> {
@@ -2630,14 +2708,19 @@ fn GraphPanel(
             if topology_key_state.get_untracked().as_ref() != Some(&next_key) {
                 topology_key_state.set(Some(next_key));
                 topology_graph_state.set(Some(graph.clone()));
-                topology_render_count.update(|count| *count = count.saturating_add(1));
+                topology_render_count.update(|count| {
+                    *count = count
+                        .checked_add(1)
+                        .assured("a console session cannot render 2^64 topologies");
+                });
             }
+            current_graph_state.set(next_graph);
         } else {
+            // `Show` removes the graph branch reactively. Keep its last values alive until that
+            // unmount finishes so outgoing child computations cannot observe an impossible gap.
             topology_key_state.set(None);
-            topology_graph_state.set(None);
         }
         snapshot_observed_at.set(js_sys::Date::now());
-        current_graph_state.set(next_graph);
     });
     let freshness_interval = set_interval_with_handle(
         move || freshness_now.set(js_sys::Date::now()),
@@ -2657,34 +2740,42 @@ fn GraphPanel(
     };
     let visible_topology_graph = move || {
         let selected_domain = active_domain.get().unwrap_or_default();
-        topology_graph_state
-            .get()
-            .filter(|graph| graph.id == selected_domain)
-            .or_else(&visible_graph)
+        match topology_graph_state.get() {
+            Some(graph) if graph.id == selected_domain => Some(graph),
+            _ => visible_graph(),
+        }
     };
-    let current_graph =
-        move || visible_graph().expect("graph view must exist when graph is visible");
-    let current_topology_graph =
-        move || visible_topology_graph().expect("graph topology must exist when graph is visible");
+    let current_graph = move || {
+        current_graph_state.get().verified(
+            "the mounted graph branch retains its last graph until reactive unmount completes",
+        )
+    };
+    let current_topology_graph = move || {
+        topology_graph_state.get().verified(
+            "the mounted graph branch retains its last topology until reactive unmount completes",
+        )
+    };
     let active_graph_search = move || {
         let query = graph_search.get().trim().to_ascii_lowercase();
         (query.chars().count() >= 2).then_some(query)
     };
     let domain_lifecycle = move || {
         let selected_domain = active_domain.get().unwrap_or_default();
-        domains
+        let domain = domains
             .get()
             .into_iter()
-            .find(|domain| domain.id == selected_domain)
-            .map(|domain| domain.lifecycle_label())
-            .unwrap_or("STOPPED")
+            .find(|domain| domain.id == selected_domain);
+        match domain {
+            Some(domain) => domain.lifecycle_label(),
+            None => "STOPPED",
+        }
     };
     let graph_freshness = move || {
         if websocket_state.get() != ConsoleConnectionState::Connected {
             return "OFFLINE";
         }
         let age = freshness_now.get() - snapshot_observed_at.get();
-        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis() as f64 {
+        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis().approx_into::<f64>() {
             "LIVE"
         } else {
             "STALE"
@@ -2721,9 +2812,10 @@ fn GraphPanel(
             focus_graph_bounds(&graph, graph.canvas_bounds(), GRAPH_FIT_MAX_ZOOM);
         }
     };
-    let focus_graph_edge = move |source: String, target: String, kind: DataflowEdgeKind| {
+    let focus_graph_edge = move |request: GraphEdgeFocusRequest| {
         let graph = current_topology_graph();
-        let Some(bounds) = graph.edge_focus_bounds(&source, &target, kind) else {
+        let Some(bounds) = graph.edge_focus_bounds(&request.source, &request.target, request.kind)
+        else {
             return;
         };
         focus_graph_bounds(&graph, bounds, GRAPH_MAX_ZOOM);
@@ -2772,7 +2864,10 @@ fn GraphPanel(
                     <SidebarIcon kind="branch" />
                     <strong>"Execution Graph"</strong>
                     <span class="graph-chevron">"›"</span>
-                    <span>{move || visible_graph().map(|graph| graph.id).unwrap_or_else(|| "unavailable".to_string())}</span>
+                    <span>{move || match visible_graph() {
+                        Some(graph) => graph.id,
+                        None => "unavailable".to_string(),
+                    }}</span>
                     <span class="pill warn" data-lifecycle=domain_lifecycle>{domain_lifecycle}</span>
                     <span class="pill waiting" data-freshness=graph_freshness><i></i>{graph_freshness}</span>
                 </div>
@@ -2788,11 +2883,12 @@ fn GraphPanel(
                         />
                         <span class="graph-search-count">
                             {move || {
-                                let graph = visible_topology_graph();
-                                active_graph_search()
-                                    .zip(graph)
-                                    .map(|(query, graph)| graph.search_result_count(&query).to_string())
-                                    .unwrap_or_default()
+                                match (active_graph_search(), visible_topology_graph()) {
+                                    (Some(query), Some(graph)) => {
+                                        graph.search_result_count(&query).to_string()
+                                    }
+                                    _ => String::new(),
+                                }
                             }}
                         </span>
                         <button
@@ -2825,7 +2921,13 @@ fn GraphPanel(
                                 graph_pan_y.set(0.0);
                             }
                         >
-                            {move || format!("{}%", (graph_zoom.get() * 100.0).round() as i32)}
+                            {move || {
+                                let percent: i32 = (graph_zoom.get() * 100.0)
+                                    .round()
+                                    .checked_approx_into()
+                                    .unwrap_or(i32::MAX);
+                                format!("{percent}%")
+                            }}
                         </button>
                         <button
                             type="button"
@@ -2915,10 +3017,10 @@ fn GraphPanel(
                         graph_hover.set(None);
                     }
                     on:click=move |event: ev::MouseEvent| {
-                        if let Some((source, target, kind)) = graph_edge_focus_request(&event) {
+                        if let Some(request) = graph_edge_focus_request(&event) {
                             event.prevent_default();
                             event.stop_propagation();
-                            focus_graph_edge(source, target, kind);
+                            focus_graph_edge(request);
                         }
                     }
                 >
@@ -2973,10 +3075,10 @@ fn GraphPanel(
                             aria-hidden="true"
                             focusable="false"
                             on:click:capture=move |event: ev::MouseEvent| {
-                                if let Some((source, target, kind)) = graph_edge_focus_request(&event) {
+                                if let Some(request) = graph_edge_focus_request(&event) {
                                     event.prevent_default();
                                     event.stop_propagation();
-                                    focus_graph_edge(source, target, kind);
+                                    focus_graph_edge(request);
                                 }
                             }
                         >
@@ -3054,11 +3156,11 @@ fn GraphPanel(
                                                 .is_some_and(|hover| hover.emphasises_edge(&emphasis_edge))
                                         }
                                         on:mouseenter=move |_| {
-                                            graph_hover.set(Some(GraphHover::Edge(
-                                                hover_source.clone(),
-                                                hover_target.clone(),
+                                            graph_hover.set(Some(GraphHover::Edge {
+                                                source: hover_source.clone(),
+                                                target: hover_target.clone(),
                                                 kind,
-                                            )));
+                                            }));
                                         }
                                         on:mouseleave=move |_| graph_hover.set(None)
                                     >
@@ -3137,17 +3239,7 @@ fn GraphPanel(
                             }} />
                         </div>
                         <div class="graph-hit-layer" aria-label="Execution graph interactions">
-                            <For each={move || current_graph().relays.clone()} key=|relay| {
-                                (
-                                    relay.id.clone(),
-                                    relay.rect_key(),
-                                    relay.label.clone(),
-                                    relay.statistics.relay_buffer_capacity,
-                                    relay.statistics.relay_buffer_len_p50.map(f64::to_bits),
-                                    relay.statistics.relay_buffer_len_p90.map(f64::to_bits),
-                                    relay.statistics.relay_buffer_len_p99.map(f64::to_bits),
-                                )
-                            } children={move |relay| {
+                            <For each={move || current_graph().relays.clone()} key=GraphViewRelayKey::of children={move |relay| {
                             let click_relay = relay.clone();
                             let relay_label = relay.label.clone();
                             let relay_title = relay.buffer_summary();
@@ -3262,17 +3354,7 @@ fn GraphPanel(
                                     </Show>
                                 }
                             }} />
-                            <For each={move || current_graph().nodes.clone()} key=|node| {
-                                (
-                                    node.id.clone(),
-                                    node.rect_key(),
-                                    node.label.clone(),
-                                    node.detail_label().to_string(),
-                                    node.status,
-                                    node.status_detail.clone(),
-                                    node.reconnect_wait_millis,
-                                )
-                            } children={move |node| {
+                            <For each={move || current_graph().nodes.clone()} key=GraphViewNodeKey::of children={move |node| {
                             let class_node = node.clone();
                             let click_node = node.clone();
                             let detail = node.detail_label().to_string();
@@ -3315,7 +3397,10 @@ fn GraphPanel(
                                             .to_string()
                                     }
                                     data-status-detail=node.status_detail.clone().unwrap_or_default()
-                                    data-reconnect-wait-ms=node.reconnect_wait_millis.map(|value| value.to_string()).unwrap_or_default()
+                                    data-reconnect-wait-ms=match node.reconnect_wait_millis {
+                                        Some(value) => value.to_string(),
+                                        None => String::new(),
+                                    }
                                     on:mouseenter=move |_| graph_hover.set(Some(GraphHover::Item(hover_id.clone())))
                                     on:mouseleave=move |_| graph_hover.set(None)
                                     on:click=move |_| {
@@ -3349,15 +3434,23 @@ fn GraphPanel(
                         on:click=|event| event.stop_propagation()
                     >
                         <header>
-                            <span>{move || selected_action_target.get().map(|target| target.kind).unwrap_or_default()}</span>
-                            <strong>{move || selected_action_target.get().map(|target| target.name).unwrap_or_default()}</strong>
+                            <span>{move || match selected_action_target.get() {
+                                Some(target) => target.kind,
+                                None => "",
+                            }}</span>
+                            <strong>{move || match selected_action_target.get() {
+                                Some(target) => target.name,
+                                None => String::new(),
+                            }}</strong>
                         </header>
                         <div class="graph-action-list">
                             <Show when=move || selected_action_target.get().and_then(|target| target.describe_command).is_some() fallback=|| ()>
                                 <button
                                     type="button"
                                     on:click=move |_| {
-                                        if let Some(command) = selected_action_target.get().and_then(|target| target.describe_command) {
+                                        if let Some(target) = selected_action_target.get()
+                                            && let Some(command) = target.describe_command
+                                        {
                                             run_command(Some(command));
                                             selected_action_target.set(None);
                                         }
@@ -3381,7 +3474,9 @@ fn GraphPanel(
                                 <button
                                     type="button"
                                     on:click=move |_| {
-                                        if let Some(relay) = selected_action_target.get().and_then(|target| target.relay) {
+                                        if let Some(target) = selected_action_target.get()
+                                            && let Some(relay) = target.relay
+                                        {
                                             selected_relay.set(Some(relay));
                                             subscribe_filter.set(String::new());
                                             sample_rate.set(0);
@@ -3408,15 +3503,24 @@ fn GraphPanel(
                         <header class="subscribe-head">
                             <span class="live-dot"></span>
                             <span>"SUBSCRIBE"</span>
-                            <strong>{move || selected_relay.get().map(|relay| relay.label).unwrap_or_default()}</strong>
+                            <strong>{move || match selected_relay.get() {
+                                Some(relay) => relay.label,
+                                None => String::new(),
+                            }}</strong>
                         </header>
                         <div class="subscribe-block">
                             <p>
                                 "SCHEMA"
-                                <em>{move || selected_relay.get().and_then(|relay| relay.schema).unwrap_or_default()}</em>
+                                <em>{move || match selected_relay.get() {
+                                    Some(relay) => relay.schema.unwrap_or_default(),
+                                    None => String::new(),
+                                }}</em>
                             </p>
                             <For
-                                each=move || selected_relay.get().map(|relay| relay.schema_fields).unwrap_or_default()
+                                each=move || match selected_relay.get() {
+                                    Some(relay) => relay.schema_fields,
+                                    None => Vec::new(),
+                                }
                                 key=|field| field.name.clone()
                                 children={move |field| {
                                     let subscribe_filter = subscribe_filter;
@@ -3503,11 +3607,15 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
         return view! { <span class="node-reconnect-timer empty"></span> }.into_any();
     };
     let started_at = js_sys::Date::now();
-    let deadline = started_at + wait_millis as f64;
+    let deadline = started_at + wait_millis.approx_into::<f64>();
     let remaining = RwSignal::new(wait_millis);
     let interval = set_interval_with_handle(
         move || {
-            let millis = (deadline - js_sys::Date::now()).max(0.0).round() as u64;
+            let millis = (deadline - js_sys::Date::now())
+                .max(0.0)
+                .round()
+                .checked_approx_into()
+                .unwrap_or(u64::MAX);
             remaining.set(millis);
         },
         Duration::from_millis(100),
@@ -3520,8 +3628,8 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
     });
     let label = move || format_timer_millis(remaining.get());
     let progress_style = move || {
-        let remaining = remaining.get() as f64;
-        let total = wait_millis.max(1) as f64;
+        let remaining = remaining.get().approx_into::<f64>();
+        let total = wait_millis.max(1).approx_into::<f64>();
         let progress = (1.0 - remaining / total).clamp(0.0, 1.0);
         format!("--timer-progress: {:.3};", progress)
     };
@@ -3536,7 +3644,7 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
 
 fn format_timer_millis(millis: u64) -> String {
     if millis >= 1_000 {
-        format!("{:.1}s", millis as f64 / 1_000.0)
+        format!("{:.1}s", millis.approx_into::<f64>() / 1_000.0)
     } else {
         format!("{millis}ms")
     }
@@ -3594,18 +3702,25 @@ fn BranchDetailsDialog(
                 <header class="subscribe-head">
                     <span class="live-dot"></span>
                     <span>"BRANCH"</span>
-                    <strong>{move || selected_group().map(|group| group.branch).unwrap_or_default()}</strong>
+                    <strong>{move || match selected_group() {
+                        Some(group) => group.branch,
+                        None => String::new(),
+                    }}</strong>
                 </header>
                 <div class="subscribe-block">
                     <p>"BRANCH KEY"</p>
                     <div class="schema-row">
                         <span>"schema"</span>
-                        <em>{move || selected_group().map(|group| group.key_schema).unwrap_or_default()}</em>
+                        <em>{move || match selected_group() {
+                            Some(group) => group.key_schema,
+                            None => String::new(),
+                        }}</em>
                     </div>
                     <For
-                        each=move || selected_group()
-                            .map(|group| group.key_fields)
-                            .unwrap_or_default()
+                        each=move || match selected_group() {
+                            Some(group) => group.key_fields,
+                            None => Vec::new(),
+                        }
                         key=|field| field.clone()
                         children=|field| {
                             view! {
@@ -3621,9 +3736,10 @@ fn BranchDetailsDialog(
                     <p>"BRANCH STATISTICS"</p>
                     <div class="schema-row">
                         <span>"active branches"</span>
-                        <em>{move || selected_group()
-                            .map(|group| group.active_branches.to_string())
-                            .unwrap_or_else(|| "0".to_string())}</em>
+                        <em>{move || match selected_group() {
+                            Some(group) => group.active_branches.to_string(),
+                            None => "0".to_string(),
+                        }}</em>
                     </div>
                 </div>
                 <footer class="subscribe-actions">
@@ -3665,12 +3781,14 @@ fn ReplPanel(
         let Some(tab_id) = active_subscription_tab.get() else {
             return (None, terminal_lines.get());
         };
-        let lines = subscription_tabs
+        let tab = subscription_tabs
             .get()
             .into_iter()
-            .find(|tab| tab.id == tab_id)
-            .map(|tab| tab.lines)
-            .unwrap_or_default();
+            .find(|tab| tab.id == tab_id);
+        let lines = match tab {
+            Some(tab) => tab.lines,
+            None => Vec::new(),
+        };
         (Some(tab_id), lines)
     };
     let repl_active = move || active_subscription_tab.get().is_none();
@@ -3785,10 +3903,10 @@ fn ReplPanel(
             </div>
             <form class="prompt-row" class:hidden=move || !repl_active() on:submit=move |event| {
                 event.prevent_default();
-                let command = input_ref
-                    .get_untracked()
-                    .map(|input| input.value())
-                    .unwrap_or_else(|| input.get_untracked());
+                let command = match input_ref.get_untracked() {
+                    Some(element) => element.value(),
+                    None => input.get_untracked(),
+                };
                 completion_cycle.set(None);
                 command_history.update(|history| history.push(command.as_str()));
                 input.set(command.clone());
@@ -3823,14 +3941,14 @@ fn ReplPanel(
                             event.prevent_default();
                             let suggestion_items = suggestions();
                             if !suggestion_items.is_empty() {
-                                let source = completion_cycle
-                                    .get_untracked()
-                                    .map(|cycle| cycle.source)
-                                    .unwrap_or_else(|| input.get_untracked());
-                                let index = completion_cycle
-                                    .get_untracked()
-                                    .map(|cycle| cycle.next_index % suggestion_items.len())
-                                    .unwrap_or(0);
+                                let source = match completion_cycle.get_untracked() {
+                                    Some(cycle) => cycle.source,
+                                    None => input.get_untracked(),
+                                };
+                                let index = match completion_cycle.get_untracked() {
+                                    Some(cycle) => cycle.next_index % suggestion_items.len(),
+                                    None => 0,
+                                };
                                 input.set(apply_completion(&source, &suggestion_items[index]));
                                 completion_cycle.set(Some(CompletionCycle {
                                     source,
@@ -3841,10 +3959,10 @@ fn ReplPanel(
                             }
                         } else if event.key() == "ArrowUp" {
                             event.prevent_default();
-                            let current = input_ref
-                                .get_untracked()
-                                .map(|input| input.value())
-                                .unwrap_or_else(|| input.get_untracked());
+                            let current = match input_ref.get_untracked() {
+                                Some(element) => element.value(),
+                                None => input.get_untracked(),
+                            };
                             completion_cycle.set(None);
                             let mut command = None;
                             command_history.update(|history| {
@@ -3867,10 +3985,10 @@ fn ReplPanel(
                             }
                         } else if event.key() == "Enter" && (event.meta_key() || event.ctrl_key()) {
                             event.prevent_default();
-                            let command = input_ref
-                                .get_untracked()
-                                .map(|input| input.value())
-                                .unwrap_or_else(|| input.get_untracked());
+                            let command = match input_ref.get_untracked() {
+                                Some(element) => element.value(),
+                                None => input.get_untracked(),
+                            };
                             completion_cycle.set(None);
                             command_history.update(|history| history.push(command.as_str()));
                             input.set(command.clone());
@@ -3914,6 +4032,7 @@ impl CommandHistory {
             return None;
         }
         let next_position = if let Some(position) = self.position {
+            // Stepping back from the oldest entry stays on it.
             position.saturating_sub(1)
         } else {
             self.draft = current;
@@ -4061,8 +4180,12 @@ impl GraphView {
             .into_iter()
             .map(|edge| {
                 let route = routes.get(&(edge.source.as_str(), edge.target.as_str()));
+                let points = match route {
+                    Some(route) => route.points.clone(),
+                    None => Vec::new(),
+                };
                 GraphViewEdge {
-                    points: route.map(|route| route.points.clone()).unwrap_or_default(),
+                    points,
                     badge: route.and_then(|route| route.badge),
                     feedback: route.is_some_and(|route| route.feedback),
                     source: edge.source,
@@ -4120,11 +4243,14 @@ impl GraphView {
         target: &str,
         kind: DataflowEdgeKind,
     ) -> GraphStatistics {
-        self.edges
+        let edge = self
+            .edges
             .iter()
-            .find(|edge| edge.source == source && edge.target == target && edge.kind == kind)
-            .map(|edge| edge.statistics)
-            .unwrap_or_default()
+            .find(|edge| edge.source == source && edge.target == target && edge.kind == kind);
+        match edge {
+            Some(edge) => edge.statistics,
+            None => GraphStatistics::default(),
+        }
     }
 
     fn edge_focus_bounds(
@@ -4396,6 +4522,33 @@ struct GraphViewNode {
     branches: Vec<GraphBranchStatistics>,
 }
 
+/// Everything a drawn node card shows. The hit layer re-renders a card exactly when one of these
+/// changes, so a node that only gains statistics keeps its element.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GraphViewNodeKey {
+    id: String,
+    rect: Rect,
+    label: String,
+    detail: String,
+    status: DataflowNodeStatus,
+    status_detail: Option<String>,
+    reconnect_wait_millis: Option<u64>,
+}
+
+impl GraphViewNodeKey {
+    fn of(node: &GraphViewNode) -> Self {
+        Self {
+            id: node.id.clone(),
+            rect: node.rect,
+            label: node.label.clone(),
+            detail: node.detail_label().to_string(),
+            status: node.status,
+            status_detail: node.status_detail.clone(),
+            reconnect_wait_millis: node.reconnect_wait_millis,
+        }
+    }
+}
+
 impl GraphViewNode {
     fn hit_class(&self) -> &'static str {
         match (self.kind, self.status) {
@@ -4403,6 +4556,12 @@ impl GraphViewNode {
             (NodeKind::Ingestor, DataflowNodeStatus::Ok) => "node-hit ingestor status-ok",
             (NodeKind::Processor, DataflowNodeStatus::Ok) => "node-hit processor status-ok",
             (NodeKind::Emitter, DataflowNodeStatus::Ok) => "node-hit emitter status-ok",
+            (NodeKind::Client, DataflowNodeStatus::Waiting) => "node-hit client status-waiting",
+            (NodeKind::Ingestor, DataflowNodeStatus::Waiting) => "node-hit ingestor status-waiting",
+            (NodeKind::Processor, DataflowNodeStatus::Waiting) => {
+                "node-hit processor status-waiting"
+            }
+            (NodeKind::Emitter, DataflowNodeStatus::Waiting) => "node-hit emitter status-waiting",
             (NodeKind::Client, DataflowNodeStatus::Error) => "node-hit client status-error",
             (NodeKind::Ingestor, DataflowNodeStatus::Error) => "node-hit ingestor status-error",
             (NodeKind::Processor, DataflowNodeStatus::Error) => "node-hit processor status-error",
@@ -4424,17 +4583,13 @@ impl GraphViewNode {
     const fn status_label(&self) -> &'static str {
         match self.status {
             DataflowNodeStatus::Ok => "OK",
+            DataflowNodeStatus::Waiting => "WAITING",
             DataflowNodeStatus::Error => "ERROR",
         }
     }
 
     fn kind_label(&self) -> String {
         self.role.kind().as_ref().to_string()
-    }
-
-    /// The drawn rectangle as a keyable value, so a card is re-rendered exactly when it moves.
-    const fn rect_key(&self) -> (i32, i32, i32, i32) {
-        rect_key(self.rect)
     }
 
     /// The caption drawn on the card: the transport for a connector, the processor for a
@@ -4474,11 +4629,10 @@ impl GraphViewNode {
     }
 
     fn branch_summary(&self) -> String {
-        let status = self
-            .status_detail
-            .as_ref()
-            .map(|detail| format!("status: {}\n{detail}", self.status_label()))
-            .unwrap_or_else(|| format!("status: {}", self.status_label()));
+        let status = match &self.status_detail {
+            Some(detail) => format!("status: {}\n{detail}", self.status_label()),
+            None => format!("status: {}", self.status_label()),
+        };
         if self.branches.is_empty() {
             return format!("{status}\nno branch statistics");
         }
@@ -4592,11 +4746,34 @@ impl From<DataflowSchemaField> for GraphSchemaField {
     }
 }
 
-impl GraphViewRelay {
-    const fn rect_key(&self) -> (i32, i32, i32, i32) {
-        rect_key(self.rect)
-    }
+/// Everything a drawn relay card shows, including the buffer percentages its meter renders. The
+/// float percentiles are keyed by their bit pattern because they are compared, never ordered.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GraphViewRelayKey {
+    id: String,
+    rect: Rect,
+    label: String,
+    buffer_capacity: Option<u64>,
+    buffer_len_p50: Option<u64>,
+    buffer_len_p90: Option<u64>,
+    buffer_len_p99: Option<u64>,
+}
 
+impl GraphViewRelayKey {
+    fn of(relay: &GraphViewRelay) -> Self {
+        Self {
+            id: relay.id.clone(),
+            rect: relay.rect,
+            label: relay.label.clone(),
+            buffer_capacity: relay.statistics.relay_buffer_capacity,
+            buffer_len_p50: relay.statistics.relay_buffer_len_p50.map(f64::to_bits),
+            buffer_len_p90: relay.statistics.relay_buffer_len_p90.map(f64::to_bits),
+            buffer_len_p99: relay.statistics.relay_buffer_len_p99.map(f64::to_bits),
+        }
+    }
+}
+
+impl GraphViewRelay {
     fn hit_style(&self) -> String {
         format!(
             "{} --relay-buffer-p50: {:.2}%; --relay-buffer-p90: {:.2}%; --relay-buffer-p99: \
@@ -4642,14 +4819,14 @@ impl GraphViewRelay {
             return 0.0;
         }
         let value = value.unwrap_or(0.0);
-        (value / capacity as f64 * 100.0).clamp(0.0, 100.0)
+        (value / capacity.approx_into::<f64>() * 100.0).clamp(0.0, 100.0)
     }
 
     fn buffer_capacity_data(&self) -> String {
-        self.statistics
-            .relay_buffer_capacity
-            .map(|value| value.to_string())
-            .unwrap_or_default()
+        match self.statistics.relay_buffer_capacity {
+            Some(value) => value.to_string(),
+            None => String::new(),
+        }
     }
 
     fn buffer_p50_data(&self) -> String {
@@ -4724,12 +4901,14 @@ impl GraphBranchGroup {
 
         Self {
             branch: region.branch.clone(),
-            key_schema: identity
-                .map(|branch| branch.key_schema.clone())
-                .unwrap_or_default(),
-            key_fields: identity
-                .map(|branch| branch.key_fields.clone())
-                .unwrap_or_default(),
+            key_schema: match identity {
+                Some(branch) => branch.key_schema.clone(),
+                None => String::new(),
+            },
+            key_fields: match identity {
+                Some(branch) => branch.key_fields.clone(),
+                None => Vec::new(),
+            },
             outline: region.outline(),
             header: region.header_anchor(),
             active_branches: active.len(),
@@ -4743,12 +4922,15 @@ impl GraphBranchGroup {
     /// The outline weight, which grows with the number of live branches so a busy group reads as
     /// heavier than a quiet one.
     fn outline_stroke_width(&self) -> String {
-        let count = self.active_branches.min(8) as f64;
+        let count = self.active_branches.min(8).approx_into::<f64>();
         format!("{:.2}", 1.0 + count * 0.35)
     }
 
     fn header_style(&self) -> String {
-        self.header.map(graph_position_style).unwrap_or_default()
+        match self.header {
+            Some(header) => graph_position_style(header),
+            None => String::new(),
+        }
     }
 
     /// The line under the branch name: its key fields, then how many branches are live.
@@ -4883,7 +5065,10 @@ impl GraphViewEdge {
                 current.0, current.1, exit.0, exit.1
             ));
         }
-        let end = self.points.last().expect("non-empty points checked above");
+        let end = self
+            .points
+            .last()
+            .verified("the empty-points branch above already returned");
         path.push_str(&format!(" L{} {}", end.0, end.1));
         path
     }
@@ -4931,9 +5116,10 @@ impl GraphViewEdge {
     }
 
     fn input_side_data(&self) -> String {
-        self.input_side
-            .map(|side| side.as_ref().to_string())
-            .unwrap_or_default()
+        match self.input_side {
+            Some(side) => side.as_ref().to_string(),
+            None => String::new(),
+        }
     }
 
     fn metric_summary(&self) -> String {
@@ -5156,23 +5342,29 @@ struct GraphDrag {
 #[derive(Clone, PartialEq, Eq)]
 enum GraphHover {
     Item(String),
-    Edge(String, String, DataflowEdgeKind),
+    Edge {
+        source: String,
+        target: String,
+        kind: DataflowEdgeKind,
+    },
 }
 
 impl GraphHover {
     fn emphasises_item(&self, id: &str) -> bool {
         match self {
             Self::Item(hovered) => hovered == id,
-            Self::Edge(source, target, _) => source == id || target == id,
+            Self::Edge { source, target, .. } => source == id || target == id,
         }
     }
 
     fn emphasises_edge(&self, edge: &GraphViewEdge) -> bool {
         match self {
             Self::Item(hovered) => *hovered == edge.source || *hovered == edge.target,
-            Self::Edge(source, target, kind) => {
-                *source == edge.source && *target == edge.target && *kind == edge.kind
-            }
+            Self::Edge {
+                source,
+                target,
+                kind,
+            } => *source == edge.source && *target == edge.target && *kind == edge.kind,
         }
     }
 }
@@ -5182,11 +5374,6 @@ fn graph_position_style(rect: Rect) -> String {
         "left: {}px; top: {}px; width: {}px; height: {}px;",
         rect.x, rect.y, rect.width, rect.height
     )
-}
-
-/// A rectangle reduced to the hashable tuple keyed views compare.
-const fn rect_key(rect: Rect) -> (i32, i32, i32, i32) {
-    (rect.x, rect.y, rect.width, rect.height)
 }
 
 #[derive(Clone)]
@@ -5265,7 +5452,7 @@ mod tests {
         let lines = command_result_lines(
             nervix_proto::CommandResult {
                 success: true,
-                kind: nervix_proto::CommandResultKind::Ok as i32,
+                kind: i32::from(nervix_proto::CommandResultKind::Ok),
                 ..Default::default()
             },
             "CREATE DOMAIN quiet",
@@ -5279,7 +5466,7 @@ mod tests {
         let previous = nervix_proto::TransactionStatus {
             id: "tx-1".to_string(),
             domain: "tenant".to_string(),
-            state: nervix_proto::TransactionState::Open as i32,
+            state: i32::from(nervix_proto::TransactionState::Open),
             pending_count: 1,
             completed_count: 0,
             total_count: 1,
@@ -5300,7 +5487,7 @@ mod tests {
         ));
 
         let mut committing = previous.clone();
-        committing.state = nervix_proto::TransactionState::Committing as i32;
+        committing.state = i32::from(nervix_proto::TransactionState::Committing);
         assert!(transaction_operation_was_observed(
             Some(&previous),
             Some(&committing)
@@ -5823,11 +6010,11 @@ mod tests {
         assert!(hover.emphasises_edge(first));
         assert!(!hover.emphasises_edge(second));
 
-        let hover = GraphHover::Edge(
-            "relay:telemetry".to_string(),
-            "emitter:redis".to_string(),
-            DataflowEdgeKind::Data,
-        );
+        let hover = GraphHover::Edge {
+            source: "relay:telemetry".to_string(),
+            target: "emitter:redis".to_string(),
+            kind: DataflowEdgeKind::Data,
+        };
         assert!(hover.emphasises_item("relay:telemetry"));
         assert!(hover.emphasises_item("emitter:redis"));
         assert!(!hover.emphasises_item("ingestor:mqtt"));

@@ -1,10 +1,12 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::DescribeDomain;
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input,
+        suggest_from, tok,
     },
 };
 
@@ -25,12 +27,16 @@ pub fn parse_describe_domain_tokens(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn parse_describe_domain(input: &str) -> Result<DescribeDomain, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     parse_describe_domain_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }

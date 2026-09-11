@@ -1,3 +1,13 @@
+//! The node's memory-pressure supervisor.
+//!
+//! Layer: control plane.
+//!
+//! - **Owns.** Sampling the allocator, the high and low watermark state machine between them, and
+//!   pausing and resuming ingestion across the node as that state changes.
+//! - **Depends on.** The runtime handle it pauses, and jemalloc's statistics.
+//! - **Must not know.** Which ingestors exist, what they are connected to, or what a message is. It
+//!   watches one number and applies one decision through the runtime's own control.
+
 use std::time::Duration;
 
 use thiserror::Error;

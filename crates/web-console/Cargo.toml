@@ -1,4 +1,5 @@
 [package]
+description = "The Nervix web console"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-web-console"
@@ -15,16 +16,20 @@ futures-util = { workspace = true }
 gloo-net = { workspace = true, features = ["http", "websocket"] }
 js-sys = { workspace = true }
 leptos = { workspace = true }
+meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-proto = { workspace = true }
+nervix-recovery = { workspace = true }
 prost = { workspace = true }
 url = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
   "Blob",
+  "Crypto",
   "Document",
   "Element",
   "File",

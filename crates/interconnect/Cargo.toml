@@ -1,4 +1,5 @@
 [package]
+description = "Authenticated node-to-node HTTP/2 pools for Nervix clusters"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-interconnect"
@@ -9,20 +10,35 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true }
+arch-into = { workspace = true }
+bytes = { workspace = true }
 dashmap = { workspace = true }
-ed25519-dalek = { workspace = true }
+error-stack = { workspace = true }
+fastrand = { workspace = true }
 futures-util = { workspace = true }
+h2 = { workspace = true }
+http = { workspace = true }
+meticulous = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
+nervix-recovery = { workspace = true }
+parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
 rand_core = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 triomphe = { workspace = true }
+url = { workspace = true }
+x509-parser = { workspace = true }
 
 [dev-dependencies]
+rcgen = { workspace = true }
 tempfile = { workspace = true }
+ubyte = { workspace = true }

@@ -16,14 +16,6 @@ spec:
       port: 47391
       targetPort: grpc
       protocol: TCP
-    - name: gossip
-      port: 47392
-      targetPort: gossip
-      protocol: UDP
-    - name: cluster-api
-      port: 47393
-      targetPort: cluster-api
-      protocol: TCP
     - name: interconnect
       port: 47395
       targetPort: interconnect
@@ -57,14 +49,6 @@ spec:
     - name: grpc
       port: 47391
       targetPort: grpc
-      protocol: TCP
-    - name: cluster-api
-      port: 47393
-      targetPort: cluster-api
-      protocol: TCP
-    - name: interconnect
-      port: 47395
-      targetPort: interconnect
       protocol: TCP
     - name: http
       port: 8080
@@ -175,6 +159,78 @@ spec:
       nodePort: 31093
       protocol: TCP
 ---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-node-1-interconnect
+  namespace: nervix
+spec:
+  secretName: nervix-node-1-interconnect-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - nervix-0.nervix-headless.nervix.svc.cluster.local
+  uris:
+    - nervix://cluster/nervix-kube/node/node-1
+  usages:
+    - server auth
+    - client auth
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-node-2-interconnect
+  namespace: nervix
+spec:
+  secretName: nervix-node-2-interconnect-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - nervix-1.nervix-headless.nervix.svc.cluster.local
+  uris:
+    - nervix://cluster/nervix-kube/node/node-2
+  usages:
+    - server auth
+    - client auth
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-node-3-interconnect
+  namespace: nervix
+spec:
+  secretName: nervix-node-3-interconnect-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - nervix-2.nervix-headless.nervix.svc.cluster.local
+  uris:
+    - nervix://cluster/nervix-kube/node/node-3
+  usages:
+    - server auth
+    - client auth
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -200,6 +256,34 @@ spec:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
       terminationGracePeriodSeconds: 30
+      volumes:
+        - name: interconnect-tls
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: nervix-node-1-interconnect-tls
+                  items:
+                    - key: ca.crt
+                      path: ca.pem
+                    - key: tls.crt
+                      path: node-1/tls.crt
+                    - key: tls.key
+                      path: node-1/tls.key
+              - secret:
+                  name: nervix-node-2-interconnect-tls
+                  items:
+                    - key: tls.crt
+                      path: node-2/tls.crt
+                    - key: tls.key
+                      path: node-2/tls.key
+              - secret:
+                  name: nervix-node-3-interconnect-tls
+                  items:
+                    - key: tls.crt
+                      path: node-3/tls.crt
+                    - key: tls.key
+                      path: node-3/tls.key
       containers:
         - name: nervix
           image: ghcr.io/nervix-io/nervix:20260505051615-debian
@@ -221,7 +305,7 @@ spec:
               if [ "${ordinal}" = "0" ]; then
                 bootstrap_args="--allow-bootstrap"
               else
-                bootstrap_args="--cluster-bootstrap-host nervix-0.nervix-headless.${POD_NAMESPACE}.svc.cluster.local:47392"
+                bootstrap_args="--cluster-bootstrap-host nervix-0.nervix-headless.${POD_NAMESPACE}.svc.cluster.local:47395"
               fi
 
               exec /usr/local/bin/nervix-server \
@@ -233,14 +317,11 @@ spec:
                 --observability-listen-addr 0.0.0.0:9090 \
                 --cluster-id nervix-kube \
                 --node-id "${node_id}" \
-                --cluster-listen-addr 0.0.0.0:47392 \
-                --cluster-advertise-addr "${pod_fqdn}:47392" \
-                --cluster-api-mode http \
-                --cluster-api-listen-addr 0.0.0.0:47393 \
-                --cluster-api-advertise-addr "${pod_fqdn}:47393" \
-                --interconnect-mode http \
                 --interconnect-listen-addr 0.0.0.0:47395 \
                 --interconnect-advertise-addr "${pod_fqdn}:47395" \
+                --interconnect-tls-ca /etc/nervix/interconnect/ca.pem \
+                --interconnect-tls-cert "/etc/nervix/interconnect/${node_id}/tls.crt" \
+                --interconnect-tls-key "/etc/nervix/interconnect/${node_id}/tls.key" \
                 --replica-count 3 \
                 --db-path /var/lib/nervix/db \
                 ${bootstrap_args}
@@ -258,12 +339,6 @@ spec:
           ports:
             - name: grpc
               containerPort: 47391
-              protocol: TCP
-            - name: gossip
-              containerPort: 47392
-              protocol: UDP
-            - name: cluster-api
-              containerPort: 47393
               protocol: TCP
             - name: interconnect
               containerPort: 47395
@@ -304,6 +379,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/nervix
+            - name: interconnect-tls
+              mountPath: /etc/nervix/interconnect
+              readOnly: true
   volumeClaimTemplates:
     - metadata:
         name: data

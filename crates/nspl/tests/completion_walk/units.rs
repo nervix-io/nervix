@@ -113,7 +113,7 @@ fn classify_covers_every_label_shape() {
         Some(SuggestionClass::Keyword)
     );
     assert_eq!(
-        SuggestionClass::classify("ROTO_0_11"),
+        SuggestionClass::classify("ROTO_0_13"),
         Some(SuggestionClass::Keyword)
     );
     assert_eq!(

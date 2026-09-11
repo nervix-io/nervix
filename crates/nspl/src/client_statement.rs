@@ -1,21 +1,23 @@
 use std::ops::Range;
 
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
-    CanonicalNsplError, CreateSubscription, DeleteSubscription, Domain, Statement, UploadResource,
+    CanonicalNsplError, CreateSubscription, DeleteSubscription, DomainName, Statement,
+    UploadResource,
 };
 
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, completion_context, domain_name, into_parse_error, kw,
-        lex_input, suggestions_from_errors, tok,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        domain_name, into_parse_error, kw, lex_input, suggestions_from_errors, tok,
     },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientStatement {
-    UseDomain(Domain),
+    UseDomain(DomainName),
     ListDomains,
     BeginTransaction,
     CommitTransaction,
@@ -91,7 +93,7 @@ impl ParsedClientStatement {
 }
 
 pub fn use_domain_parser<'src>()
--> impl Parser<'src, &'src [Token], Domain, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], DomainName, extra::Err<ParseError<'src>>> + Clone {
     kw(Keyword::Use)
         .ignore_then(domain_name())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -140,8 +142,12 @@ pub fn client_command_parser<'src>()
     ))
 }
 
-pub fn parse_use_domain(input: &str) -> Result<Domain, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+pub fn parse_use_domain(input: &str) -> Result<DomainName, ParseFromSourceError> {
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = use_domain_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -155,7 +161,7 @@ pub fn parse_use_domain(input: &str) -> Result<Domain, ParseFromSourceError> {
     }
     Ok(out
         .into_output()
-        .expect("successful parse must have output"))
+        .verified("has_errors returned false above, so this parse produced output"))
 }
 
 pub fn parse_upload_resource_query(input: &str) -> Result<UploadResource, ParseFromSourceError> {
@@ -163,14 +169,18 @@ pub fn parse_upload_resource_query(input: &str) -> Result<UploadResource, ParseF
 }
 
 pub fn parse_client_statement(input: &str) -> Result<ClientStatement, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = client_command_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
         return Ok(out
             .into_output()
-            .expect("successful parse must have output"));
+            .verified("has_errors returned false above, so this parse produced output"));
     }
     let client_errors = out.into_errors();
     if starts_with_client_command_keyword(&tokens) {
@@ -198,7 +208,7 @@ pub fn parse_client_statements(input: &str) -> Result<Vec<ClientStatement>, Pars
 pub fn parse_client_statement_sources(
     input: &str,
 ) -> Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
-    let (_, spanned_tokens, _) = lex_input(input)?;
+    let LexedInput { spanned_tokens, .. } = lex_input(input)?;
     let mut statements = Vec::new();
     let mut segment_start: Option<usize> = None;
 
@@ -218,9 +228,10 @@ pub fn parse_client_statement_sources(
     }
 
     if let Some(start) = segment_start {
-        let end = spanned_tokens
-            .last()
-            .map_or(input.len(), |token| token.span.end);
+        let end = match spanned_tokens.last() {
+            Some(token) => token.span.end,
+            None => input.len(),
+        };
         statements.push(ParsedClientStatement {
             span: start..end,
             statement: parse_client_statement(&input[start..])?,
@@ -281,9 +292,8 @@ fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let (_, _, tokens) = match lex_input(&source) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
 
     if starts_with_server_command_keyword(&tokens) {
@@ -343,11 +353,11 @@ mod tests {
     fn parses_use_domain() {
         assert_eq!(
             parse_use_domain("USE prod;").expect("parse should succeed"),
-            Domain::try_from("prod").expect("valid domain")
+            DomainName::try_from("prod").expect("valid domain")
         );
         assert_eq!(
             parse_use_domain(" use tenant_a ; ").expect("parse should succeed"),
-            Domain::try_from("tenant_a").expect("valid domain")
+            DomainName::try_from("tenant_a").expect("valid domain")
         );
         assert!(parse_use_domain("USE two words;").is_err());
     }
@@ -461,12 +471,10 @@ mod tests {
                     create.body.as_ref()
             {
                 for output in window_processor.output_routes.outputs() {
-                    crate::window_processor::aggregate::lower_window_assignments(
-                        &output.construction,
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!("{name} window aggregate should lower: {error}")
-                    });
+                    nervix_vm::window::lower_window_assignments(&output.construction)
+                        .unwrap_or_else(|error| {
+                            panic!("{name} window aggregate should lower: {error}")
+                        });
                 }
             }
         }

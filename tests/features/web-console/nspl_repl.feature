@@ -315,7 +315,7 @@ Feature: Web console NSPL REPL
     Then selector ".resource-dialog" contains "console_bundle"
     And selector ".resource-dialog" contains "VERSIONS"
     When selector ".resource-dialog .file-upload-input" uploads resource directory "console_upload_dir"
-    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    Then selector ".resource-upload-status" contains "published resource version 1"
     And selector ".resource-version-list" contains "version 1"
     And selector ".resource-version-list" contains "2 files"
     And selector ".resource-version-list" contains "nested"
@@ -1333,7 +1333,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY normal_telemetry SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT telemetry_ingress ON edge PATH '/telemetry' TYPE HTTP;
-      CREATE CLIENT redis_alerts TYPE REDIS CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE INGESTOR http_telemetry
+      CREATE CLIENT redis_alerts TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE INGESTOR http_telemetry
         FROM ENDPOINT telemetry_ingress MODE NO_ACK SEQUENTIAL
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TO telemetry_by_site
@@ -1524,7 +1524,6 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "rr1"
     And selector ".relay-hit" contains "rr1"
     And selector ".node-hit" does not contain "rr1"
-    And selector ".graph-hit-layer" does not contain "materializer"
     And selector ".graph-hit-layer" contains "source_txns_endpoint"
     And selector ".graph-hit-layer" contains "state_txns_endpoint"
     And selector ".graph-hit-layer" contains "ENDPOINT"

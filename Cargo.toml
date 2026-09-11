@@ -1,5 +1,6 @@
 [package]
 build = "build.rs"
+description = "The Nervix server: registry, runtime, control plane and the session, HTTP and cluster edges"
 edition.workspace = true
 name = "nervix-server"
 version.workspace = true
@@ -16,15 +17,16 @@ path = "src/main.rs"
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
-# Test-only feature used by the standard test recipes for random multinode scheduling and to lower
-# intentionally expensive password hashing parameters.
-testing = []
+# Test-only feature used by the standard test recipes for fault injection, random multinode
+# scheduling, and lower intentionally expensive password hashing parameters.
+testing = ["nervix-consensus/testing"]
 
 [dependencies]
 ahash = { workspace = true }
 anyhow = { workspace = true }
 apache-avro = { workspace = true }
 arc-swap = { workspace = true }
+arch-into = { workspace = true }
 argon2 = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
@@ -43,6 +45,7 @@ aws-sdk-sqs = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 base64 = { workspace = true }
+bb8 = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chitchat = { workspace = true }
@@ -52,7 +55,6 @@ clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 clickhouse = { workspace = true, features = ["inserter", "chrono"] }
 dashmap = { workspace = true }
-ed25519-dalek = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
@@ -79,21 +81,26 @@ jaq-fmts = { workspace = true }
 jaq-json = { workspace = true, features = ["serde"] }
 jaq-std = { workspace = true }
 lapin = { workspace = true }
+meticulous = { workspace = true }
 mongodb = { workspace = true }
 multer = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
+nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 nervix-proto = { workspace = true, features = ["client", "server"] }
+nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
+nonzero_ext = { workspace = true }
 opendal = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
@@ -161,14 +168,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
+sqlx = { workspace = true }
 storekey = { workspace = true }
+strum = { workspace = true }
+tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
-tokio-postgres-rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
@@ -194,11 +202,14 @@ nervix-client-core = { workspace = true }
 nervix-test-environment = { workspace = true }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
+rstest = { workspace = true }
 tempfile = { workspace = true }
+trybuild = { workspace = true }
 
 [[test]]
 harness = false
 name = "scenarios"
+required-features = ["testing"]
 
 [[bench]]
 harness = false
@@ -208,10 +219,12 @@ required-features = ["benchmarks"]
 [workspace]
 members = [
   ".",
+  "crates/approx-into",
   "crates/benchmark",
   "crates/client-core",
   "crates/consensus",
   "crates/dataflow-graph",
+  "crates/execution",
   "crates/expiry-map",
   "crates/interconnect",
   "crates/nervix-wasm",
@@ -224,6 +237,7 @@ members = [
   "crates/nspl-format",
   "crates/models",
   "crates/proto",
+  "crates/recovery",
   "crates/test-environment",
   "crates/nervix-cli",
 ]
@@ -234,6 +248,7 @@ license-file = "LICENSE.md"
 version = "0.1.0-dev"
 
 [workspace.lints.clippy]
+as-conversions = "deny"
 disallowed-types = "deny"
 
 [workspace.dependencies]
@@ -245,6 +260,7 @@ ahash-compile-time = { package = "ahash", version = "0.8", default-features = fa
 anyhow = "1"
 apache-avro = "0.21.0"
 arc-swap = "1.9.1"
+arch-into = { version = "0.0.1-alpha.5", features = ["no-arch-32"] }
 argon2 = "0.5"
 ariadne = "0.5"
 arrow-arith = "58"
@@ -277,6 +293,7 @@ aws-sdk-sqs = { version = "1.76", default-features = false, features = [
 ] }
 aws-smithy-http-client = "1.1.12"
 base64 = "0.22"
+bb8 = "0.9.1"
 blake3 = "1"
 bolero = "0.13"
 byte-unit = "5.2"
@@ -292,7 +309,6 @@ console_error_panic_hook = "0.1"
 criterion = "0.5"
 cucumber = "0.22"
 dashmap = "6"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
 error-stack = "0.5"
 fastrand = "2.4.1"
 fjall = "3.0.4"
@@ -303,7 +319,9 @@ futures-channel = "0.3"
 futures-util = "0.3"
 gloo-net = "0.7"
 governor = "0.10.4"
+h2 = "0.4"
 hdrhistogram = "7.5.4"
+http = "1"
 http-body-util = "0.1"
 humantime = "2"
 hyper = "1"
@@ -317,6 +335,7 @@ iceberg-storage-opendal = { version = "0.10", features = [
   "opendal-azdls",
 ] }
 ignore = "0.4.33"
+imbl = { version = "7.0.2", features = ["serde", "triomphe"] }
 indexmap = "2"
 intrusive-collections = "0.10.3"
 jaq-core = "3"
@@ -329,6 +348,10 @@ leptos = { version = "0.8.19", features = ["csr"] }
 libc = "0.2"
 loom = "0.7"
 md5 = "0.8"
+# `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
+# trait implementations but not on the trait declarations, so the feature fails every release build
+# with E0046 rather than only the builds that call `todo()`.
+meticulous = "0.2.0-pre.2"
 # MongoDB 3.6 exposes an explicit AWS-LC backend; its TLS defaults select another provider.
 mongodb = { version = "3.6.0", default-features = false, features = [
   "compat-3-0-0",
@@ -337,9 +360,11 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 ] }
 multer = "3"
 mysql_async = "0.36.2"
+nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
+nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
@@ -347,11 +372,15 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
+nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
+# Compile-time checked non-zero literals, so a constant that must not be zero is rejected by the
+# compiler rather than by a runtime guard.
+nonzero_ext = "0.3"
 # Match the pinned Iceberg revision to avoid duplicate, incompatible OpenDAL APIs.
 opendal = { version = "0.56.0", features = [
   "services-s3",
@@ -374,6 +403,7 @@ otel-tonic = { package = "tonic", version = "0.14", features = [
 ] }
 otel-tonic-types = { package = "tonic-types", version = "0.14" }
 parking_lot = "0.12"
+percent-encoding = "2"
 # Match Iceberg's Arrow 58 major so RecordBatch and writer types are identical.
 parquet = { version = "58", features = ["async"] }
 petgraph = "0.8"
@@ -401,6 +431,7 @@ rcgen = { version = "0.13", default-features = false, features = [
 rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "aws-lc", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
+  "bb8",
   "tokio-comp",
   "tls-rustls",
   "tokio-rustls-comp",
@@ -408,9 +439,13 @@ redis = { version = "1.1.0", default-features = false, features = [
 reedline = "0.36"
 regex = "1"
 reqwest = "0.13"
-rkyv = "0.8"
-roto = "0.12"
+rkyv = { version = "0.8", features = ["indexmap-2"] }
+# The fork raises Roto's Cranelift floor from 0.127 to 0.136, which carries the x86_64 JIT fixes
+# the workspace previously supplied by patching Cranelift itself.
+# https://codeberg.org/glebpom/roto/src/branch/cranelift-upgrade-0.136
+roto = { branch = "cranelift-upgrade-0.136", git = "https://codeberg.org/glebpom/roto.git", version = "0.12" }
 rpassword = "7"
+rstest = "0.26.1"
 # This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.
 rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
   "use-rustls-aws-lc",
@@ -431,8 +466,14 @@ serde_bytes = "0.11"
 serde_json = "1.0.149"
 simd-json = "0.17.0"
 sorted-vec = "0.8"
+sqlx = { version = "0.9", default-features = false, features = [
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls-aws-lc-rs",
+] }
 storekey = "0.5"
 strum = "0.26"
+tar = "0.4"
 tempfile = "3"
 testcontainers = { version = "0.27.3", default-features = false, features = [
   "aws-lc-rs",
@@ -444,9 +485,7 @@ thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
-tokio-postgres = "0.7"
 # 0.14 adds explicit AWS-LC support; the previous 0.13 line depended on Ring.
-tokio-postgres-rustls = { version = "0.14", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26"
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
@@ -459,6 +498,7 @@ tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = "0.3"
 triomphe = "0.1"
+trybuild = "1.0"
 typed-builder = "0.20"
 ubyte = "0.10.4"
 upon = { version = "0.10", default-features = false, features = ["serde"] }
@@ -477,16 +517,13 @@ wasmtime = { version = "48.0.0", default-features = false, features = [
 ] }
 web-sys = "0.3"
 webpki-roots = "1"
+x509-parser = "0.18"
 zeromq = "0.4"
 
 [patch.crates-io]
 # The archived 2.0.1 release triggers Rust's future-incompatibility lint; this is the focused fix
 # from https://github.com/GnomedDev/proc-macro-error-2/pull/14.
 proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
-# https://github.com/bytecodealliance/wasmtime/pull/13975 and https://github.com/glebpom/wasmtime/pull/1
-cranelift = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
-cranelift-codegen = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
-cranelift-jit = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 
 [profile.release]
 panic = "unwind"

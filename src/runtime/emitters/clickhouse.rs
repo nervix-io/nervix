@@ -3,6 +3,7 @@ use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
 };
+use nervix_models::TableName;
 
 use super::*;
 
@@ -44,17 +45,17 @@ impl ClickHouseWriteError {
     }
 
     fn record_reason(&self) -> String {
-        self.record_error_name().map_or_else(
-            || "ClickHouse rejected record".to_string(),
-            |name| format!("ClickHouse rejected record with {name}"),
-        )
+        match self.record_error_name() {
+            Some(name) => format!("ClickHouse rejected record with {name}"),
+            None => "ClickHouse rejected record".to_string(),
+        }
     }
 
     fn into_report(self) -> Report<EmitterRuntimeError> {
-        let reason = self.record_error_name().map_or_else(
-            || "ClickHouse insert request failed".to_string(),
-            |name| format!("ClickHouse insert request failed with {name}"),
-        );
+        let reason = match self.record_error_name() {
+            Some(name) => format!("ClickHouse insert request failed with {name}"),
+            None => "ClickHouse insert request failed".to_string(),
+        };
         Report::new(EmitterRuntimeError::PublishBatch).attach_printable(reason)
     }
 }
@@ -67,11 +68,10 @@ impl ClickHouseEmitter {
         values: &[ClickHouseValueMapping],
         input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
-        let (client, request_timeout) = match Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        ) {
+        let (client, request_timeout) = match Self::client_from_config(client_config_entries(
+            resolved,
+            client.config.as_slice(),
+        )) {
             Ok((client, request_timeout)) => (Some(client), request_timeout),
             Err(error) => {
                 context.report_init_error("clickhouse", &emitter_error_message(&error));
@@ -87,7 +87,7 @@ impl ClickHouseEmitter {
         ) {
             Ok(program) => Some(program),
             Err(error) => {
-                let _ = context.events.send(RuntimeEvent::Error(error.to_string()));
+                context.runtime.events().report_error(error.to_string());
                 warn!(
                     domain = context.domain.as_str(),
                     emitter = context.emitter.as_str(),
@@ -211,10 +211,11 @@ impl ClickHouseEmitter {
     pub(super) async fn publish_pending_chunks(
         &self,
         batch_index: usize,
-        table: &Identifier,
+        table: &TableName,
         values: &[ClickHouseValueMapping],
         batch: &RelayRecordBatch,
         pending_chunks: &[Vec<usize>],
+        execution_now: Timestamp,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
         if pending_chunks.is_empty() {
@@ -227,8 +228,7 @@ impl ClickHouseEmitter {
             );
             return outcome;
         };
-        let lines = match Self::batch_json_lines(program, values, batch, current_timestamp()).await
-        {
+        let lines = match Self::batch_json_lines(program, values, batch, execution_now).await {
             Ok(lines) => lines,
             Err(error) => {
                 outcome.fail(error);
@@ -252,17 +252,23 @@ impl ClickHouseEmitter {
             let chunk_lines = match chunk
                 .iter()
                 .map(|row| {
-                    lines
-                        .get(*row)
-                        .and_then(|line| line.as_ref().ok())
-                        .map(String::as_str)
-                        .ok_or_else(|| {
-                            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    let Some(line) = lines.get(*row) else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
                                 "clickhouse pending row {row} has no mapped line in batch with {} \
                                  rows",
                                 lines.len()
-                            ))
-                        })
+                            )));
+                    };
+                    let Ok(line) = line else {
+                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
+                            .attach_printable(format!(
+                                "clickhouse pending row {row} has no mapped line in batch with {} \
+                                 rows",
+                                lines.len()
+                            )));
+                    };
+                    Ok(line.as_str())
                 })
                 .collect::<EmitterRuntimeResult<Vec<_>>>()
             {
@@ -285,27 +291,29 @@ impl ClickHouseEmitter {
             {
                 Ok(()) => {
                     for row in chunk {
-                        outcome.deliver((batch_index, *row));
+                        outcome.deliver(BrokerRecordPosition {
+                            batch_index,
+                            row_index: *row,
+                        });
                     }
                 }
                 Err(error) if error.is_record_error() && chunk.len() > 1 => {
                     for row in chunk {
                         tokio::task::consume_budget().await;
-                        let Some(line) = lines
-                            .get(*row)
-                            .and_then(|line| line.as_ref().ok())
-                            .map(String::as_str)
-                        else {
-                            outcome.fail(
-                                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(
-                                    format!(
-                                        "clickhouse pending row {row} is outside mapped batch \
-                                         with {} rows",
-                                        lines.len()
+                        let line = match lines.get(*row) {
+                            Some(Ok(line)) => line.as_str(),
+                            Some(Err(_)) | None => {
+                                outcome.fail(
+                                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(
+                                        format!(
+                                            "clickhouse pending row {row} is outside mapped batch \
+                                             with {} rows",
+                                            lines.len()
+                                        ),
                                     ),
-                                ),
-                            );
-                            return outcome;
+                                );
+                                return outcome;
+                            }
                         };
                         match await_emitter_confirmation(
                             &request_acks,
@@ -318,9 +326,18 @@ impl ClickHouseEmitter {
                         )
                         .await
                         {
-                            Ok(()) => outcome.deliver((batch_index, *row)),
+                            Ok(()) => outcome.deliver(BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            }),
                             Err(error) if error.is_record_error() => {
-                                outcome.reject((batch_index, *row), error.record_reason());
+                                outcome.reject(
+                                    BrokerRecordPosition {
+                                        batch_index,
+                                        row_index: *row,
+                                    },
+                                    error.record_reason(),
+                                );
                             }
                             Err(error) => {
                                 outcome.fail(error.into_report());
@@ -331,7 +348,13 @@ impl ClickHouseEmitter {
                 }
                 Err(error) if error.is_record_error() => {
                     if let Some(row) = chunk.first() {
-                        outcome.reject((batch_index, *row), error.record_reason());
+                        outcome.reject(
+                            BrokerRecordPosition {
+                                batch_index,
+                                row_index: *row,
+                            },
+                            error.record_reason(),
+                        );
                     }
                 }
                 Err(error) => {
@@ -351,6 +374,9 @@ impl ClickHouseEmitter {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::ClientConfigEntry;
+    use tokio::time::Duration;
+
     use super::*;
 
     fn client_config(
@@ -462,5 +488,25 @@ mod tests {
             matches!(result.0, ClickHouseError::TimedOut),
             "unexpected ClickHouse insert error: {result:?}"
         );
+    }
+
+    #[test]
+    fn clickhouse_client_config_validates_tls_ca_file() {
+        let error = match emitters::clickhouse::ClickHouseEmitter::client_from_config(&[
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "https://127.0.0.1:8124".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: "/tmp/nervix-missing-clickhouse-ca.pem".to_string(),
+            },
+        ]) {
+            Ok(_) => panic!("missing ClickHouse TLS CA should fail"),
+            Err(error) => error,
+        };
+        let error = format!("{error:?}");
+
+        assert!(error.contains("TLS CA certificate"));
     }
 }

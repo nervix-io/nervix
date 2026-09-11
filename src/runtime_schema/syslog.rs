@@ -4,12 +4,10 @@ use arrow_array::{
     builder::{StringBuilder, TimestampNanosecondBuilder, UInt8Builder},
 };
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
+use meticulous::OptionExt as _;
 use nervix_models::{CreateCodec, ParseAsType};
 
-use super::{
-    ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatch,
-    RuntimeRecordBatchBuilder,
-};
+use super::{ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatchBuilder};
 
 const DEFAULT_PRIORITY: u8 = 13;
 
@@ -74,11 +72,15 @@ pub(super) fn validate_compiled_schema(
 pub(super) fn decode(
     codec: &CompiledCodec,
     payload: &[u8],
-) -> Result<RuntimeRecordBatch, CodecError> {
-    let end = payload
+    builder: &mut RuntimeRecordBatchBuilder,
+) -> Result<(), CodecError> {
+    let last_kept = payload
         .iter()
-        .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'))
-        .map_or(0, |index| index + 1);
+        .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'));
+    let end = match last_kept {
+        Some(index) => index + 1,
+        None => 0,
+    };
     let payload = &payload[..end];
     if payload.is_empty() {
         return Err(decode_error(
@@ -88,13 +90,13 @@ pub(super) fn decode(
     }
     let payload = std::str::from_utf8(payload)
         .map_err(|error| decode_error(codec, format!("payload is not valid UTF-8: {error}")))?;
-    let (priority, body, has_priority) = split_priority(payload);
-    let parsed = if has_priority && looks_like_rfc5424(body) {
-        parse_rfc5424(codec, priority, body)?
+    let split = split_priority(payload);
+    let parsed = if split.has_priority && looks_like_rfc5424(split.body) {
+        parse_rfc5424(codec, split.priority, split.body)?
     } else {
-        parse_rfc3164(codec, priority, body)?
+        parse_rfc3164(codec, split.priority, split.body)?
     };
-    build_batch(codec, &parsed)
+    append_row(codec, &parsed, builder)
 }
 
 pub(super) fn encode_row(row: &ArrowCodecRow<'_>, payload: &mut Vec<u8>) -> Result<(), CodecError> {
@@ -133,10 +135,10 @@ pub(super) fn encode_row(row: &ArrowCodecRow<'_>, payload: &mut Vec<u8>) -> Resu
         }
     }
 
-    let timestamp = optional_datetime(row, "timestamp")?
-        .as_ref()
-        .map(format_rfc5424_timestamp)
-        .unwrap_or_else(|| "-".to_string());
+    let timestamp = match optional_datetime(row, "timestamp")?.as_ref() {
+        Some(timestamp) => format_rfc5424_timestamp(timestamp),
+        None => "-".to_string(),
+    };
     let priority = u16::from(facility) * 8 + u16::from(severity);
     use std::io::Write as _;
     write!(
@@ -188,12 +190,32 @@ fn encode_field_error(
     }
 }
 
-fn split_priority(payload: &str) -> (u8, &str, bool) {
+/// A payload split at its `<PRI>` header. `has_priority` says whether the header was actually
+/// present, because a payload without one keeps the default priority and is never read as RFC
+/// 5424.
+struct SplitPriority<'payload> {
+    priority: u8,
+    body: &'payload str,
+    has_priority: bool,
+}
+
+impl<'payload> SplitPriority<'payload> {
+    /// A payload whose `<PRI>` header is missing or malformed, which stays whole and unprefixed.
+    const fn absent(payload: &'payload str) -> Self {
+        Self {
+            priority: DEFAULT_PRIORITY,
+            body: payload,
+            has_priority: false,
+        }
+    }
+}
+
+fn split_priority(payload: &str) -> SplitPriority<'_> {
     let Some(rest) = payload.strip_prefix('<') else {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     };
     let Some(end) = rest.find('>') else {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     };
     let digits = &rest[..end];
     if digits.is_empty()
@@ -201,15 +223,19 @@ fn split_priority(payload: &str) -> (u8, &str, bool) {
         || !digits.bytes().all(|byte| byte.is_ascii_digit())
         || (digits.len() > 1 && digits.starts_with('0'))
     {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     }
     let Ok(priority) = digits.parse::<u8>() else {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     };
     if priority > 191 {
-        return (DEFAULT_PRIORITY, payload, false);
+        return SplitPriority::absent(payload);
     }
-    (priority, &rest[end + 1..], true)
+    SplitPriority {
+        priority,
+        body: &rest[end + 1..],
+        has_priority: true,
+    }
 }
 
 fn looks_like_rfc5424(body: &str) -> bool {
@@ -326,11 +352,10 @@ fn parse_rfc3164<'a>(
             message: body,
         });
     };
-    let (hostname, remainder) = remainder
-        .split_once(' ')
-        .map_or((remainder, ""), |(hostname, remainder)| {
-            (hostname, remainder)
-        });
+    let (hostname, remainder) = match remainder.split_once(' ') {
+        Some((hostname, remainder)) => (hostname, remainder),
+        None => (remainder, ""),
+    };
     let hostname = if hostname.is_empty() {
         None
     } else {
@@ -395,7 +420,10 @@ fn parse_rfc5424_timestamp(
 ) -> Result<DateTime<FixedOffset>, CodecError> {
     let bytes = value.as_bytes();
     let zone_start = if bytes.last() == Some(&b'Z') {
-        bytes.len().saturating_sub(1)
+        bytes
+            .len()
+            .checked_sub(1)
+            .verified("a trailing byte means the value holds at least one byte")
     } else if bytes.len() >= 6
         && matches!(bytes[bytes.len() - 6], b'+' | b'-')
         && bytes[bytes.len() - 3] == b':'
@@ -577,31 +605,28 @@ fn valid_sd_name_byte(byte: u8) -> bool {
     (b'!'..=b'~').contains(&byte) && !matches!(byte, b'=' | b']' | b'"')
 }
 
-fn build_batch(
+fn append_row(
     codec: &CompiledCodec,
     parsed: &ParsedSyslog<'_>,
-) -> Result<RuntimeRecordBatch, CodecError> {
-    let mut builder = codec.schema.batch_builder(1);
+    builder: &mut RuntimeRecordBatchBuilder,
+) -> Result<(), CodecError> {
     for index in 0..codec.schema.fields.len() {
         let field = codec.schema.fields[index].name.as_str();
         match field {
-            "facility" => append_u8(&mut builder, index, parsed.facility),
-            "severity" => append_u8(&mut builder, index, parsed.severity),
-            "timestamp" => append_datetime(&mut builder, index, parsed.timestamp.as_ref()),
-            "hostname" => append_string(&mut builder, index, parsed.hostname),
-            "app_name" => append_string(&mut builder, index, parsed.app_name),
-            "proc_id" => append_string(&mut builder, index, parsed.proc_id),
-            "msg_id" => append_string(&mut builder, index, parsed.msg_id),
-            "structured_data" => append_string(&mut builder, index, parsed.structured_data),
-            "message" => append_string(&mut builder, index, Some(parsed.message)),
+            "facility" => append_u8(builder, index, parsed.facility),
+            "severity" => append_u8(builder, index, parsed.severity),
+            "timestamp" => append_datetime(builder, index, parsed.timestamp.as_ref()),
+            "hostname" => append_string(builder, index, parsed.hostname),
+            "app_name" => append_string(builder, index, parsed.app_name),
+            "proc_id" => append_string(builder, index, parsed.proc_id),
+            "msg_id" => append_string(builder, index, parsed.msg_id),
+            "structured_data" => append_string(builder, index, parsed.structured_data),
+            "message" => append_string(builder, index, Some(parsed.message)),
             unknown => Err(format!("unsupported SYSLOG schema field '{unknown}'")),
         }
         .map_err(|reason| decode_error(codec, reason))?;
     }
-    builder
-        .finish_row()
-        .and_then(|()| builder.finish())
-        .map_err(|reason| decode_error(codec, reason))
+    Ok(())
 }
 
 fn prepare_append(builder: &mut RuntimeRecordBatchBuilder, index: usize) -> Result<(), String> {
@@ -700,11 +725,10 @@ fn required_u8(row: &ArrowCodecRow<'_>, name: &str) -> Result<u8, CodecError> {
     if array.is_null(row.row_index) {
         return Err(encode_field_error(row, name, "required field is null"));
     }
-    array
-        .as_any()
-        .downcast_ref::<UInt8Array>()
-        .map(|array| array.value(row.row_index))
-        .ok_or_else(|| encode_field_error(row, name, "field is not a U8 column"))
+    let Some(array) = array.as_any().downcast_ref::<UInt8Array>() else {
+        return Err(encode_field_error(row, name, "field is not a U8 column"));
+    };
+    Ok(array.value(row.row_index))
 }
 
 fn required_string<'a>(row: &'a ArrowCodecRow<'_>, name: &str) -> Result<&'a str, CodecError> {
@@ -731,11 +755,14 @@ fn optional_string<'a>(
     if array.is_null(row.row_index) {
         return Ok(None);
     }
-    array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .map(|array| Some(array.value(row.row_index)))
-        .ok_or_else(|| encode_field_error(row, name, "field is not a STRING column"))
+    let Some(array) = array.as_any().downcast_ref::<StringArray>() else {
+        return Err(encode_field_error(
+            row,
+            name,
+            "field is not a STRING column",
+        ));
+    };
+    Ok(Some(array.value(row.row_index)))
 }
 
 fn optional_datetime(
@@ -749,13 +776,16 @@ fn optional_datetime(
     if array.is_null(row.row_index) {
         return Ok(None);
     }
-    array
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .map(|array| {
-            Some(DateTime::from_timestamp_nanos(array.value(row.row_index)).fixed_offset())
-        })
-        .ok_or_else(|| encode_field_error(row, name, "field is not a DATETIME column"))
+    let Some(array) = array.as_any().downcast_ref::<TimestampNanosecondArray>() else {
+        return Err(encode_field_error(
+            row,
+            name,
+            "field is not a DATETIME column",
+        ));
+    };
+    Ok(Some(
+        DateTime::from_timestamp_nanos(array.value(row.row_index)).fixed_offset(),
+    ))
 }
 
 fn header_value<'a>(

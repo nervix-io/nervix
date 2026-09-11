@@ -1,4 +1,5 @@
 Feature: MySQL emission
+  @domain_execution_time
   Scenario Outline: MySQL emitter inserts mapped rows from a relay
     Given MQTT is running
     And MySQL is running
@@ -6,7 +7,7 @@ Feature: MySQL emission
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And MySQL table "notifications_mysql_out_{{test_id}}" exists
     When these NSPL commands are executed
@@ -34,6 +35,7 @@ Feature: MySQL emission
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC mysql_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         ON QUIESCE DROP DECODE USING notification_codec
+        TIMESTAMP NOW
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -43,15 +45,16 @@ Feature: MySQL emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT mysql_client
         TYPE MYSQL
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
-        START;
+        START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And emitter "to_mysql" enters stall mode
     Then within "10s" repeatedly publishing MQTT message to topic "mysql_notifications_in_{{test_id}}" yields a relay subscription payload
@@ -122,6 +125,7 @@ Feature: MySQL emission
         ON GENERAL ERROR LOG;
         CREATE CLIENT mysql_client
         TYPE MYSQL
+        POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
@@ -210,7 +214,7 @@ Feature: MySQL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT mysql_client TYPE MYSQL CONFIG {
+      CREATE CLIENT mysql_client TYPE MYSQL POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{mysql_addr}}'
       };
       CREATE EMITTER to_mysql

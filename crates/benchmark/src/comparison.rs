@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -276,38 +278,47 @@ impl BenchmarkSuiteReport {
             "## Benchmark comparison\n\n**Execution:** {successful} of {total} catalog executions \
              succeeded; all {total} were attempted across {benchmark_count} workloads.\n"
         );
+        /// Whether one workload ran under one implementation, so the status table lists attempts
+        /// that failed next to the ones that produced results.
+        struct ExecutionStatus<'a> {
+            benchmark: &'a str,
+            implementation: &'a str,
+            succeeded: bool,
+        }
+
         let mut statuses = Vec::with_capacity(total);
         if let Some(comparison) = &self.comparison {
             for benchmark in &comparison.benchmarks {
                 for run in &benchmark.runs {
-                    statuses.push((
-                        benchmark.slug.as_str(),
-                        run.manifest.implementation.as_str(),
-                        true,
-                    ));
+                    statuses.push(ExecutionStatus {
+                        benchmark: benchmark.slug.as_str(),
+                        implementation: run.manifest.implementation.as_str(),
+                        succeeded: true,
+                    });
                 }
             }
         }
         for failure in &self.failures {
-            statuses.push((
-                failure.benchmark.as_str(),
-                failure.implementation.as_str(),
-                false,
-            ));
+            statuses.push(ExecutionStatus {
+                benchmark: failure.benchmark.as_str(),
+                implementation: failure.implementation.as_str(),
+                succeeded: false,
+            });
         }
         statuses.sort_by(|left, right| {
-            left.0.cmp(right.0).then_with(|| {
-                implementation_sort_key(left.1).cmp(&implementation_sort_key(right.1))
+            left.benchmark.cmp(right.benchmark).then_with(|| {
+                implementation_sort_key(left.implementation)
+                    .cmp(&implementation_sort_key(right.implementation))
             })
         });
         markdown.push_str("\n### Execution status\n\n| Workload | Implementation | Status |\n");
         markdown.push_str("|:--|:--|:--|\n");
-        for (benchmark, implementation, succeeded) in statuses {
+        for status in statuses {
             markdown.push_str(&format!(
                 "| {} | {} | {} |\n",
-                display_name(benchmark),
-                display_name(implementation),
-                if succeeded {
+                display_name(status.benchmark),
+                display_name(status.implementation),
+                if status.succeeded {
                     "✅ Passed"
                 } else {
                     "❌ Failed"
@@ -344,16 +355,14 @@ impl BenchmarkSuiteReport {
     }
 
     fn successful_runs(&self) -> usize {
-        self.comparison
-            .as_ref()
-            .map(|comparison| {
-                comparison
-                    .benchmarks
-                    .iter()
-                    .map(|benchmark| benchmark.runs.len())
-                    .sum()
-            })
-            .unwrap_or(0)
+        match &self.comparison {
+            Some(comparison) => comparison
+                .benchmarks
+                .iter()
+                .map(|benchmark| benchmark.runs.len())
+                .sum(),
+            None => 0,
+        }
     }
 
     fn benchmark_count(&self) -> usize {
@@ -426,16 +435,12 @@ impl BenchmarkRuns {
         for (index, run) in self.runs.iter().enumerate() {
             let end_to_end = format!(
                 "{} msg/s",
-                format_count(run.report.end_to_end_messages_per_second.round() as u64)
+                format_rounded_count(run.report.end_to_end_messages_per_second)
             );
             let payload = format!("{:.2} MiB/s", run.report.end_to_end_payload_mib_per_second);
             let generation = format!(
                 "{} rec/s",
-                format_count(
-                    run.report
-                        .output_records_per_second_during_generation
-                        .round() as u64
-                )
+                format_rounded_count(run.report.output_records_per_second_during_generation)
             );
             let drain = format!("{:.3} s", run.report.drain_seconds);
             let parity = format!(
@@ -443,8 +448,8 @@ impl BenchmarkRuns {
                 format_count(run.report.input_messages),
                 format_count(run.report.output_records)
             );
-            let backlog_percentage = run.report.peak_backlog_messages as f64
-                / run.report.max_backlog_messages as f64
+            let backlog_percentage = run.report.peak_backlog_messages.approx_into::<f64>()
+                / run.report.max_backlog_messages.approx_into::<f64>()
                 * 100.0;
             let cap_marker = if run.report.saturated_backlog() {
                 "⚠️ "
@@ -512,14 +517,16 @@ impl BenchmarkRuns {
             render_parameters(&first.manifest.parameters)
         ));
         for run in &self.runs {
+            let mut directory = "unknown";
+            if let Some(name) = run.directory.file_name()
+                && let Some(name) = name.to_str()
+            {
+                directory = name;
+            }
             let mut provenance = format!(
-                "- {}: subject `{}`, run `{}`",
+                "- {}: subject `{}`, run `{directory}`",
                 display_name(&run.manifest.implementation),
                 run.manifest.subject,
-                run.directory
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("unknown"),
             );
             if let Some(identity) = &run.image_identity {
                 provenance.push_str(&format!(
@@ -727,12 +734,16 @@ fn validate_report(
             "generation and end-to-end durations must be positive".to_string(),
         ));
     }
-    if (report.target_duration_seconds - manifest.duration_seconds as f64).abs() > 0.000_001 {
+    if (report.target_duration_seconds - manifest.duration_seconds.approx_into::<f64>()).abs()
+        > 0.000_001
+    {
         return Err(invalid(
             "target duration does not match run.toml".to_string(),
         ));
     }
-    if (report.warmup_target_seconds - manifest.warmup_seconds as f64).abs() > 0.000_001 {
+    if (report.warmup_target_seconds - manifest.warmup_seconds.approx_into::<f64>()).abs()
+        > 0.000_001
+    {
         return Err(invalid(
             "warm-up target does not match run.toml".to_string(),
         ));
@@ -856,10 +867,10 @@ pub(crate) fn display_name(value: &str) -> String {
             "vector" => "Vector".to_string(),
             _ => {
                 let mut characters = word.chars();
-                characters
-                    .next()
-                    .map(|first| first.to_uppercase().chain(characters).collect())
-                    .unwrap_or_default()
+                match characters.next() {
+                    Some(first) => first.to_uppercase().chain(characters).collect(),
+                    None => String::new(),
+                }
             }
         })
         .collect::<Vec<_>>()
@@ -879,7 +890,10 @@ fn human_list(values: &[String]) -> String {
         values => format!(
             "{}, and {}",
             values[..values.len() - 1].join(", "),
-            values.last().expect("non-empty list has a last value")
+            values.last().verified(
+                "the shorter slice patterns above already matched every list of fewer than three \
+                 values"
+            )
         ),
     }
 }
@@ -895,14 +909,28 @@ pub(crate) fn format_count(value: u64) -> String {
         if first_group > 0 || index > 0 {
             formatted.push(',');
         }
-        formatted.push_str(std::str::from_utf8(chunk).expect("decimal digits are valid UTF-8"));
+        formatted.push_str(
+            std::str::from_utf8(chunk)
+                .verified("the chunks come from a decimal rendering, which is ASCII"),
+        );
     }
     formatted
 }
 
+/// Renders a measured rate as a grouped integer count.
+///
+/// A rate that has no integer value at all — a non-finite sample, or one past the `u64` range —
+/// renders as the unformatted float, so a report never claims a count it did not measure.
+pub(crate) fn format_rounded_count(value: f64) -> String {
+    match value.round().checked_approx_into() {
+        Some(count) => format_count(count),
+        None => value.to_string(),
+    }
+}
+
 fn format_metric_value(value: f64) -> String {
     if value.fract() == 0.0 {
-        format_count(value as u64)
+        format_rounded_count(value)
     } else {
         format_metric_decimal(value, 3)
             .trim_end_matches('0')
@@ -916,10 +944,10 @@ fn format_metric_decimal(value: f64, precision: usize) -> String {
     let Some((whole, fraction)) = rendered.split_once('.') else {
         return rendered;
     };
-    let whole = whole
-        .parse::<u64>()
-        .map(format_count)
-        .unwrap_or_else(|_| whole.to_string());
+    let whole = match whole.parse::<u64>() {
+        Ok(count) => format_count(count),
+        Err(_) => whole.to_string(),
+    };
     format!("{whole}.{fraction}")
 }
 

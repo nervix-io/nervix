@@ -41,6 +41,9 @@ impl PreparedSqsRecord {
         group_id: Result<Option<String>, String>,
         acks: AckSet,
     ) -> Result<Self, String> {
+        const ENCODED_IN_MEMORY: &str =
+            "every term counts bytes of a record this node already holds in memory";
+
         let body = String::from_utf8(payload)
             .map_err(|_| "SQS message body is not valid UTF-8".to_string())?;
         if !SqsEmitter::has_valid_message_characters(&body) {
@@ -66,19 +69,30 @@ impl PreparedSqsRecord {
         if let Some(group_id) = group_id.as_deref() {
             SqsEmitter::validate_group_id(group_id)?;
         }
+        let group_id_len = match group_id.as_ref() {
+            Some(group_id) => group_id.len(),
+            None => 0,
+        };
         let encoded_bytes = body
             .len()
-            .saturating_add(
+            .checked_add(
                 attributes
                     .iter()
                     .map(|(name, value)| {
+                        let value_len = match value.string_value() {
+                            Some(value) => value.len(),
+                            None => 0,
+                        };
                         name.len()
-                            .saturating_add(value.data_type().len())
-                            .saturating_add(value.string_value().map(str::len).unwrap_or_default())
+                            .checked_add(value.data_type().len())
+                            .and_then(|size| size.checked_add(value_len))
+                            .assured(ENCODED_IN_MEMORY)
                     })
-                    .fold(0_usize, usize::saturating_add),
+                    .try_fold(0_usize, usize::checked_add)
+                    .assured(ENCODED_IN_MEMORY),
             )
-            .saturating_add(group_id.as_ref().map_or(0, String::len));
+            .and_then(|size| size.checked_add(group_id_len))
+            .assured(ENCODED_IN_MEMORY);
         if encoded_bytes > SQS_MAX_REQUEST_BYTES {
             return Err(format!(
                 "SQS record is {encoded_bytes} bytes; the protocol limit is 256 KiB"
@@ -102,12 +116,9 @@ impl SqsEmitter {
         queue: &str,
         mode: SqsPublishingMode,
     ) -> EmitterRuntimeResult<Self> {
-        let client = Self::client_from_config(
-            resolved
-                .map(|config| config.entries.as_slice())
-                .unwrap_or(client.config.as_slice()),
-        )
-        .await?;
+        let client =
+            Self::client_from_config(client_config_entries(resolved, client.config.as_slice()))
+                .await?;
         let queue_url = Self::queue_url(&client, queue).await?;
         Ok(Self {
             client,
@@ -183,15 +194,20 @@ impl SqsEmitter {
     }
 
     async fn queue_url(client: &SqsClient, queue: &str) -> EmitterRuntimeResult<String> {
-        client
+        let queue_url = client
             .get_queue_url()
             .queue_name(queue)
             .send()
             .await
             .map_err(emitter_publish_error)?
             .queue_url()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| emitter_publish_error(format!("SQS queue '{queue}' has no URL")))
+            .map(ToOwned::to_owned);
+        match queue_url {
+            Some(queue_url) => Ok(queue_url),
+            None => Err(emitter_publish_error(format!(
+                "SQS queue '{queue}' has no URL"
+            ))),
+        }
     }
 
     pub(super) async fn publish(
@@ -202,15 +218,16 @@ impl SqsEmitter {
         let mut prepared = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
+            let position = record.position();
             match PreparedSqsRecord::new(
-                (record.batch_index, record.row_index),
+                position,
                 record.payload,
                 record.headers,
                 record.sqs_message_group,
                 record.acks,
             ) {
                 Ok(record) => prepared.push(record),
-                Err(reason) => outcome.reject((record.batch_index, record.row_index), reason),
+                Err(reason) => outcome.reject(position, reason),
             }
         }
         match self.mode {
@@ -313,7 +330,11 @@ impl SqsEmitter {
         for record in records {
             let would_exceed_count = current.len() == SQS_MAX_BATCH_ENTRIES;
             let would_exceed_bytes = !current.is_empty()
-                && current_bytes.saturating_add(record.encoded_bytes) > SQS_MAX_REQUEST_BYTES;
+                && record.encoded_bytes
+                    > SQS_MAX_REQUEST_BYTES.checked_sub(current_bytes).verified(
+                        "PreparedSqsRecord::new rejects a record above the request limit, so a \
+                         chunk's running total never passes it",
+                    );
             let would_repeat_fifo_group = record
                 .group_id
                 .as_ref()
@@ -323,7 +344,9 @@ impl SqsEmitter {
                 current_bytes = 0;
                 current_fifo_groups.clear();
             }
-            current_bytes = current_bytes.saturating_add(record.encoded_bytes);
+            current_bytes = current_bytes
+                .checked_add(record.encoded_bytes)
+                .assured("both counts total bytes of records this node already holds in memory");
             if let Some(group) = record.group_id.as_ref() {
                 current_fifo_groups.insert(group.clone());
             }
@@ -399,9 +422,15 @@ impl SqsEmitter {
     }
 
     fn batch_entry_index(id: &str, record_count: usize) -> Option<usize> {
-        id.strip_prefix('m')
-            .and_then(|index| index.parse::<usize>().ok())
-            .filter(|index| *index < record_count)
+        let index = id.strip_prefix('m')?;
+        let Ok(index) = index.parse::<usize>() else {
+            return None;
+        };
+        if index < record_count {
+            Some(index)
+        } else {
+            None
+        }
     }
 
     fn is_record_failure(sender_fault: bool, code: &str, message: Option<&str>) -> bool {
@@ -425,7 +454,7 @@ impl SqsEmitter {
     fn has_valid_message_characters(value: &str) -> bool {
         value.chars().all(|character| {
             matches!(character, '\u{0009}' | '\u{000A}' | '\u{000D}')
-                || matches!(character as u32, 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
+                || matches!(u32::from(character), 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
         })
     }
 
@@ -522,7 +551,10 @@ mod tests {
 
     fn prepared(payload_bytes: usize) -> PreparedSqsRecord {
         PreparedSqsRecord::new(
-            (0, 0),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
             vec![b'x'; payload_bytes],
             Vec::new(),
             Ok(None),
@@ -533,21 +565,30 @@ mod tests {
 
     fn prepared_in_group(row: usize, group: &str) -> PreparedSqsRecord {
         let mut record = PreparedSqsRecord::new(
-            (0, row),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: row,
+            },
             vec![b'x'],
             Vec::new(),
             Ok(Some(group.to_string())),
             AckSet::empty(),
         )
         .expect("test SQS FIFO record should be valid");
-        record.position = (0, row);
+        record.position = BrokerRecordPosition {
+            batch_index: 0,
+            row_index: row,
+        };
         record
     }
 
     #[test]
     fn rejects_a_record_larger_than_the_declared_sqs_protocol_limit() {
         let error = PreparedSqsRecord::new(
-            (0, 0),
+            BrokerRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
             vec![b'x'; SQS_MAX_REQUEST_BYTES + 1],
             Vec::new(),
             Ok(None),
@@ -563,7 +604,10 @@ mod tests {
         let mut records = (0..11)
             .map(|row| {
                 let mut record = prepared(1);
-                record.position = (0, row);
+                record.position = BrokerRecordPosition {
+                    batch_index: 0,
+                    row_index: row,
+                };
                 record
             })
             .collect::<Vec<_>>();
@@ -581,8 +625,8 @@ mod tests {
             chunks.iter().map(Vec::len).collect::<Vec<_>>(),
             [10, 1, 1, 1]
         );
-        assert_eq!(positions[0], (0, 0));
-        assert_eq!(positions[10], (0, 10));
+        assert_eq!(positions[0].row_index, 0);
+        assert_eq!(positions[10].row_index, 10);
     }
 
     #[test]
@@ -595,17 +639,17 @@ mod tests {
         ];
 
         let chunks = SqsEmitter::batch_chunks(records);
-        let positions = chunks
+        let rows = chunks
             .iter()
             .map(|chunk| {
                 chunk
                     .iter()
-                    .map(|record| record.position)
+                    .map(|record| record.position.row_index)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(positions, [vec![(0, 0), (0, 1)], vec![(0, 2), (0, 3)]]);
+        assert_eq!(rows, [vec![0, 1], vec![2, 3]]);
     }
 
     #[test]

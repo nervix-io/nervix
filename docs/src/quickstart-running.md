@@ -5,20 +5,25 @@ broker, and a Redis server.
 
 ## Start The Server
 
-A Nervix node is a single `nervix-server` process. Start a fresh single-node cluster:
+A Nervix node is a single `nervix-server` process. From a repository checkout, create the local
+development identity and start a fresh single-node cluster:
 
 ```bash
+just generate-dev-tls
 nervix-server \
   --node-id node-1 \
-  --cluster-api-listen-addr 127.0.0.1:47393 \
-  --cluster-api-advertise-addr 127.0.0.1:47393 \
+  --interconnect-listen-addr 127.0.0.1:47392 \
+  --interconnect-advertise-addr 127.0.0.1:47392 \
+  --interconnect-tls-ca tls/dev/ca.pem \
+  --interconnect-tls-cert tls/dev/node.pem \
+  --interconnect-tls-key tls/dev/node-key.pem \
   --allow-bootstrap \
   --init-default-user-password nervix
 ```
 
 - `--node-id` names this node inside the cluster.
-- `--cluster-api-listen-addr` and `--cluster-api-advertise-addr` configure the internal cluster
-  API; a single local node points both at the same local port.
+- The interconnect address and TLS files configure the mandatory authenticated HTTP/2 listener; a
+  single local node points its listener and advertised address at the same local port.
 - `--allow-bootstrap` lets this node form a brand-new cluster instead of joining an existing one.
 - `--init-default-user-password` seeds the `default` user's password on the very first startup.
   Once the user exists, remove the flag from normal startup.

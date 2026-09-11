@@ -1,11 +1,12 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{CreateStatement, CreateUser};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, if_not_exists_clause, into_parse_error, kw, lex_input,
-        string_lit, tok, user_name,
+        LexedInput, ParseError, ParseFromSourceError, if_not_exists_clause, into_parse_error, kw,
+        lex_input, string_lit, tok, user_name,
     },
 };
 
@@ -26,7 +27,11 @@ pub fn create_user_parser<'src>()
 }
 
 pub fn parse_create_user(input: &str) -> Result<CreateStatement<CreateUser>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = create_user_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -40,7 +45,7 @@ pub fn parse_create_user(input: &str) -> Result<CreateStatement<CreateUser>, Par
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 

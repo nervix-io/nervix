@@ -5,7 +5,7 @@
 //! input draining, and quiesce work accounting. Nodes retain their processing and output behavior.
 //!
 //! The mode deliberately uses Tokio's wall-clock [`Instant`]. Emitters and reingestors have this
-//! contract today, while materializers use it for their wall-clock expiration scan. Processor
+//! contract today, while relay-state tasks use it for their wall-clock expiration scan. Processor
 //! supervisors use it for relay fan-in, but their branch workers retain paced domain timestamps
 //! and operation-owned buffers behind that boundary. Connector ingestors consume external
 //! transports rather than relays and remain outside this boundary.
@@ -22,54 +22,47 @@
 
 use std::{future::pending, task::Poll};
 
-use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use nervix_models::Identifier;
+use ahash::{HashSet, HashSetExt};
+use futures_util::{StreamExt as _, stream::FuturesUnordered};
+use indexmap::IndexMap;
+use meticulous::OptionExt as _;
+use nervix_models::RelayName;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
-    time::{Duration, Instant, sleep_until},
+    time::{Instant, sleep_until},
 };
 use triomphe::Arc;
 
 use super::{
-    BranchKey, DomainForceFlushCompletion, DomainForceFlushParticipant, NodeQuiesceCounters,
-    NodeQuiesceWorkGuard, RelayRecordBatch, RelayRuntimeFanIn,
+    BranchBufferTimingResult, BranchKey, DomainClock, DomainForceFlushCompletion,
+    DomainForceFlushParticipant, NodeQuiesceCounters, NodeQuiesceWorkGuard, RelayRecordBatch,
+    RelayRuntimeFanIn, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    branch_buffering::{BranchBufferDeadline, wait_for_branch_buffer_deadline},
 };
 use crate::runtime_ack::AckSet;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct RuntimeInputCollectPolicy {
-    pub(super) interval: Duration,
-    pub(super) max_batch_size: Option<u64>,
-}
-
-impl RuntimeInputCollectPolicy {
-    pub(super) fn size_boundary_reached(self, pending_bytes: u64) -> bool {
-        self.max_batch_size
-            .is_some_and(|max_batch_size| pending_bytes >= max_batch_size)
-    }
-}
 
 #[derive(Debug, Error)]
 pub(super) enum RelayInteractionError {
     #[error("relay interaction requires at least one input")]
     NoInputs,
     #[error("relay interaction input relay '{relay}' is declared more than once")]
-    DuplicateInput { relay: Identifier },
+    DuplicateInput { relay: RelayName },
     #[error("failed to concatenate collected input from relay '{relay}': {reason}")]
     Concatenate {
-        relay: Identifier,
+        relay: RelayName,
         reason: String,
         acks: AckSet,
     },
+    #[error("failed to wait for collected relay input: {reason}")]
+    CollectionTiming { reason: String, acks: AckSet },
 }
 
 impl RelayInteractionError {
     pub(super) fn acks(&self) -> Option<&AckSet> {
-        if let Self::Concatenate { acks, .. } = self {
-            Some(acks)
-        } else {
-            None
+        match self {
+            Self::Concatenate { acks, .. } | Self::CollectionTiming { acks, .. } => Some(acks),
+            Self::NoInputs | Self::DuplicateInput { .. } => None,
         }
     }
 }
@@ -106,7 +99,7 @@ pub(super) enum RelayInteractionStop {
 #[derive(Debug)]
 pub(super) enum RelayInteractionEvent<C> {
     Batch {
-        relay: Identifier,
+        relay: RelayName,
         batch: RelayRecordBatch,
     },
     Wake,
@@ -127,14 +120,15 @@ impl<C> RelayInteractionWork<C> {
 }
 
 pub(super) struct RelayInteractionInput {
-    relay: Identifier,
+    relay: RelayName,
     receiver: RelayRuntimeFanIn,
     collect_policy: Option<RuntimeInputCollectPolicy>,
+    domain_clock: Option<DomainClock>,
 }
 
 impl RelayInteractionInput {
     pub(super) fn new(
-        relay: Identifier,
+        relay: RelayName,
         receiver: RelayRuntimeFanIn,
         collect_policy: Option<RuntimeInputCollectPolicy>,
     ) -> Self {
@@ -142,15 +136,14 @@ impl RelayInteractionInput {
             relay,
             receiver,
             collect_policy,
+            domain_clock: None,
         }
     }
-}
 
-#[derive(Debug, Default)]
-struct RelayInputBranchCollection {
-    batches: Vec<RelayRecordBatch>,
-    bytes: u64,
-    deadline: Option<Instant>,
+    pub(super) fn with_domain_clock(mut self, domain_clock: DomainClock) -> Self {
+        self.domain_clock = Some(domain_clock);
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -162,8 +155,11 @@ struct RelayInputCollectionError {
 #[derive(Debug)]
 struct RelayInputCollection {
     policy: Option<RuntimeInputCollectPolicy>,
-    pending: HashMap<Option<BranchKey>, RelayInputBranchCollection>,
-    branch_order: Vec<Option<BranchKey>>,
+    domain_clock: Option<DomainClock>,
+    /// Collected batches keyed by branch, in the order the branches first collected. Arrival order
+    /// decides which branch flushes next, and the key resolves the branch a batch belongs to, so
+    /// this is one ordered map instead of a map plus a separate order sequence to scan.
+    pending: IndexMap<Option<BranchKey>, RuntimeInputCollector>,
     quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
     pending_batches: usize,
 }
@@ -171,12 +167,13 @@ struct RelayInputCollection {
 impl RelayInputCollection {
     fn new(
         policy: Option<RuntimeInputCollectPolicy>,
+        domain_clock: Option<DomainClock>,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
     ) -> Self {
         Self {
             policy,
-            pending: HashMap::new(),
-            branch_order: Vec::new(),
+            domain_clock,
+            pending: IndexMap::new(),
             quiesce_counters,
             pending_batches: 0,
         }
@@ -189,46 +186,74 @@ impl RelayInputCollection {
         let Some(policy) = self.policy else {
             return Ok(Some(batch));
         };
+        let Some(domain_clock) = &self.domain_clock else {
+            return Err(RelayInputCollectionError {
+                reason: "collected relay input has no bound domain clock".to_string(),
+                acks: batch.merged_acks(),
+            });
+        };
+        let snapshot = domain_clock
+            .snapshot()
+            .map_err(|error| RelayInputCollectionError {
+                reason: format!("could not read the domain clock while collecting input: {error}"),
+                acks: batch.merged_acks(),
+            })?;
         let key = batch.key.clone();
-        if !self.pending.contains_key(&key) {
-            self.branch_order.push(key.clone());
-        }
-        let collection = self.pending.entry(key.clone()).or_default();
-        collection.bytes = collection.bytes.saturating_add(batch.estimated_bytes());
-        collection.batches.push(batch);
-        self.pending_batches = self.pending_batches.saturating_add(1);
+        let collection = self
+            .pending
+            .entry(key.clone())
+            .or_insert_with(|| RuntimeInputCollector::new(policy));
+        let size_boundary_reached = collection.push(batch, domain_clock, &snapshot);
+        self.pending_batches = self
+            .pending_batches
+            .checked_add(1)
+            .assured("the pending batches counted here are already held in memory");
         if let Some(counters) = &self.quiesce_counters {
             counters
                 .collected_inputs
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
-        collection
-            .deadline
-            .get_or_insert_with(|| Instant::now() + policy.interval);
-        if policy.size_boundary_reached(collection.bytes) {
+        if size_boundary_reached {
             return self.take(&key).map(Some);
         }
         Ok(None)
     }
 
-    fn next_deadline(&self) -> Option<Instant> {
+    fn deadlines(&self) -> Vec<(DomainClock, BranchBufferDeadline)> {
+        let Some(domain_clock) = &self.domain_clock else {
+            return Vec::new();
+        };
         self.pending
             .values()
-            .filter_map(|collection| collection.deadline)
-            .min()
+            .filter_map(RuntimeInputCollector::deadline)
+            .map(|deadline| (domain_clock.clone(), deadline))
+            .collect()
     }
 
-    fn take_due(
-        &mut self,
-        now: Instant,
-    ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
-        let key = self.branch_order.iter().find_map(|key| {
-            self.pending
-                .get(key)
-                .and_then(|collection| collection.deadline)
-                .is_some_and(|deadline| deadline <= now)
-                .then_some(key.clone())
-        });
+    fn take_due(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
+        let Some(domain_clock) = &self.domain_clock else {
+            return Ok(None);
+        };
+        let snapshot = domain_clock
+            .snapshot()
+            .map_err(|error| RelayInputCollectionError {
+                reason: format!("could not read the domain clock while releasing input: {error}"),
+                acks: self.pending_acks(),
+            })?;
+        let mut due_key = None;
+        for (key, collection) in &self.pending {
+            let is_due = collection
+                .is_due(domain_clock, &snapshot)
+                .map_err(|error| RelayInputCollectionError {
+                    reason: format!("could not inspect a collected-input deadline: {error}"),
+                    acks: self.pending_acks(),
+                })?;
+            if is_due {
+                due_key = Some(key.clone());
+                break;
+            }
+        }
+        let key = due_key;
         let Some(key) = key else {
             return Ok(None);
         };
@@ -236,9 +261,10 @@ impl RelayInputCollection {
     }
 
     fn take_any(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
-        let Some(key) = self.branch_order.first().cloned() else {
+        let Some((key, _)) = self.pending.first() else {
             return Ok(None);
         };
+        let key = key.clone();
         self.take(&key).map(Some)
     }
 
@@ -246,25 +272,33 @@ impl RelayInputCollection {
         &mut self,
         key: &Option<BranchKey>,
     ) -> Result<RelayRecordBatch, RelayInputCollectionError> {
-        let collection = self
+        let mut collection = self
             .pending
-            .remove(key)
-            .expect("ordered input collection key must exist");
-        self.branch_order.retain(|candidate| candidate != key);
+            .shift_remove(key)
+            .verified("take is only called with a key the pending map still holds");
         self.pending_batches = self
             .pending_batches
-            .saturating_sub(collection.batches.len());
+            .checked_sub(collection.pending_len())
+            .verified("every batch in this collection raised the pending count when it arrived");
         if let Some(counters) = &self.quiesce_counters {
             counters.collected_inputs.fetch_sub(
-                collection.batches.len(),
+                collection.pending_len(),
                 std::sync::atomic::Ordering::AcqRel,
             );
         }
-        RelayRecordBatch::concat_preserving(collection.batches).map_err(|error| {
+        RelayRecordBatch::concat_preserving(collection.take_pending()).map_err(|error| {
             let (reason, batches) = *error;
             let acks = AckSet::merged(batches.iter().map(RelayRecordBatch::merged_acks));
             RelayInputCollectionError { reason, acks }
         })
+    }
+
+    fn pending_acks(&self) -> AckSet {
+        AckSet::merged(
+            self.pending
+                .values()
+                .map(RuntimeInputCollector::merged_acks),
+        )
     }
 }
 
@@ -275,20 +309,14 @@ impl Drop for RelayInputCollection {
                 .collected_inputs
                 .fetch_sub(self.pending_batches, std::sync::atomic::Ordering::AcqRel);
         }
-        for batch in self
-            .pending
-            .values()
-            .flat_map(|collection| &collection.batches)
-        {
-            batch
-                .merged_acks()
-                .no_ack("relay interaction dropped collected input");
+        for collection in self.pending.values() {
+            collection.no_ack_pending("relay interaction dropped collected input");
         }
     }
 }
 
 struct RelayInteractionSource {
-    relay: Identifier,
+    relay: RelayName,
     receiver: RelayRuntimeFanIn,
     collection: RelayInputCollection,
     closed: bool,
@@ -343,6 +371,7 @@ impl RelayInteractionInputs {
                 receiver: input.receiver,
                 collection: RelayInputCollection::new(
                     input.collect_policy,
+                    input.domain_clock,
                     quiesce_counters.clone(),
                 ),
                 closed: false,
@@ -369,10 +398,7 @@ impl RelayInteractionInputs {
             .collect()
     }
 
-    fn poll_recv(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<(usize, RelayRecordBatch, Option<NodeQuiesceWorkGuard>)>> {
+    fn poll_recv(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Option<ReceivedBatch>> {
         let source_count = self.sources.len();
         let mut open = false;
         let quiesce_counters = self.quiesce_counters.clone();
@@ -389,7 +415,11 @@ impl RelayInteractionInputs {
             {
                 Poll::Ready(Some((batch, work))) => {
                     self.receive_cursor = (index + 1) % source_count;
-                    return Poll::Ready(Some((index, batch, work)));
+                    return Poll::Ready(Some(ReceivedBatch {
+                        source: index,
+                        batch,
+                        work,
+                    }));
                 }
                 Poll::Ready(None) => source.closed = true,
                 Poll::Pending => {}
@@ -415,7 +445,9 @@ impl RelayInteractionInputs {
                 .try_recv_with_quiesce(quiesce_counters.as_ref())
             {
                 Ok((batch, work)) => {
-                    remaining[index] = remaining[index].saturating_sub(1);
+                    remaining[index] = remaining[index]
+                        .checked_sub(1)
+                        .verified("this loop skips a source whose remaining cut is already empty");
                     self.receive_cursor = (index + 1) % source_count;
                     return ReadyInput::Batch(index, batch, work);
                 }
@@ -441,7 +473,7 @@ impl RelayInteractionInputs {
         &mut self,
         source: usize,
         batch: RelayRecordBatch,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         let relay = self.sources[source].relay.clone();
         self.sources[source]
             .collection
@@ -454,23 +486,18 @@ impl RelayInteractionInputs {
             })
     }
 
-    fn next_collection_deadline(&self) -> Option<Instant> {
+    fn collection_deadlines(&self) -> Vec<(DomainClock, BranchBufferDeadline)> {
         self.sources
             .iter()
-            .filter_map(|source| source.collection.next_deadline())
-            .min()
+            .flat_map(|source| source.collection.deadlines())
+            .collect()
     }
 
-    fn take_due(
-        &mut self,
-        now: Instant,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
-        self.take_collection(|collection| collection.take_due(now))
+    fn take_due(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
+        self.take_collection(RelayInputCollection::take_due)
     }
 
-    fn take_any(
-        &mut self,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    fn take_any(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         self.take_collection(RelayInputCollection::take_any)
     }
 
@@ -479,7 +506,7 @@ impl RelayInteractionInputs {
         mut take: impl FnMut(
             &mut RelayInputCollection,
         ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError>,
-    ) -> Result<Option<(Identifier, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
         let source_count = self.sources.len();
         for offset in 0..source_count {
             let index = (self.collection_cursor + offset) % source_count;
@@ -497,6 +524,14 @@ impl RelayInteractionInputs {
             }
         }
         Ok(None)
+    }
+
+    fn pending_acks(&self) -> AckSet {
+        AckSet::merged(
+            self.sources
+                .iter()
+                .map(|source| source.collection.pending_acks()),
+        )
     }
 }
 
@@ -657,17 +692,16 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 continue;
             }
 
-            let now = Instant::now();
-            if wake_at.is_some_and(|deadline| deadline <= now) {
+            if wake_at.is_some_and(|deadline| deadline <= Instant::now()) {
                 return Ok(self.work(RelayInteractionEvent::Wake));
             }
             let work = self.begin_work();
-            if let Some((relay, batch)) = self.inputs.take_due(now)? {
+            if let Some((relay, batch)) = self.inputs.take_due()? {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
 
-            let collection_at = self.inputs.next_collection_deadline();
+            let collection_deadlines = self.inputs.collection_deadlines();
             let selected = tokio::select! {
                 biased;
                 command = recv_optional_command(&mut self.commands) => Selected::Command(command),
@@ -678,7 +712,9 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                     Selected::ForceFlush(changed)
                 }
                 _ = wait_until(wake_at) => Selected::Wake,
-                _ = wait_until(collection_at) => Selected::CollectionDue,
+                result = wait_for_collection_deadlines(collection_deadlines) => {
+                    Selected::CollectionDue(result)
+                }
                 input = std::future::poll_fn(|cx| self.inputs.poll_recv(cx)), if receive_input => {
                     Selected::Input(input)
                 }
@@ -708,12 +744,21 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                     true,
                 ),
                 Selected::Wake => return Ok(self.work(RelayInteractionEvent::Wake)),
-                Selected::CollectionDue => {}
-                Selected::Input(Some((source, batch, work))) => {
-                    if let Some((relay, batch)) = self.inputs.accept(source, batch)? {
-                        return Ok(
-                            self.work_with(RelayInteractionEvent::Batch { relay, batch }, work)
-                        );
+                Selected::CollectionDue(Ok(())) => {}
+                Selected::CollectionDue(Err(reason)) => {
+                    return Err(RelayInteractionError::CollectionTiming {
+                        reason: reason.to_string(),
+                        acks: self.inputs.pending_acks(),
+                    });
+                }
+                Selected::Input(Some(received)) => {
+                    if let Some((relay, batch)) =
+                        self.inputs.accept(received.source, received.batch)?
+                    {
+                        return Ok(self.work_with(
+                            RelayInteractionEvent::Batch { relay, batch },
+                            received.work,
+                        ));
                     }
                 }
                 Selected::Input(None) => {
@@ -793,7 +838,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         loop {
             tokio::task::consume_budget().await;
             let ready = {
-                let drain = self.drain.as_mut().expect("drain state must exist");
+                let drain = self
+                    .drain
+                    .as_mut()
+                    .verified("this path only runs while the interaction is draining");
                 self.inputs.try_recv_snapshot(&mut drain.remaining)
             };
             let input = match ready {
@@ -811,7 +859,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
-            let drain = self.drain.take().expect("drain state must exist");
+            let drain = self
+                .drain
+                .take()
+                .verified("this path only runs while the interaction is draining");
             let event = match drain.finish {
                 DrainFinish::ForceFlush(completion) => {
                     RelayInteractionEvent::ForceFlush(completion)
@@ -829,8 +880,16 @@ enum Selected<C> {
     Shutdown(Result<(), ()>),
     ForceFlush(Result<DomainForceFlushCompletion, ()>),
     Wake,
-    CollectionDue,
-    Input(Option<(usize, RelayRecordBatch, Option<NodeQuiesceWorkGuard>)>),
+    CollectionDue(BranchBufferTimingResult<()>),
+    Input(Option<ReceivedBatch>),
+}
+
+/// A batch dequeued from one of a node's inputs, with the quiesce work it already owns. The work
+/// guard travels with the batch so quiesce accounting never has a gap between dequeue and handling.
+struct ReceivedBatch {
+    source: usize,
+    batch: RelayRecordBatch,
+    work: Option<NodeQuiesceWorkGuard>,
 }
 
 async fn recv_optional_command<C>(commands: &mut Option<mpsc::Receiver<C>>) -> Option<C> {
@@ -856,17 +915,37 @@ async fn wait_until(deadline: Option<Instant>) {
     }
 }
 
+async fn wait_for_collection_deadlines(
+    deadlines: Vec<(DomainClock, BranchBufferDeadline)>,
+) -> BranchBufferTimingResult<()> {
+    if deadlines.is_empty() {
+        pending::<()>().await;
+        return Ok(());
+    }
+    let mut waits = FuturesUnordered::new();
+    for (clock, deadline) in deadlines {
+        waits.push(async move { wait_for_branch_buffer_deadline(&clock, deadline).await });
+    }
+    waits
+        .next()
+        .await
+        .verified("a non-empty collection deadline set always contains one wait future")
+}
+
 #[cfg(test)]
 mod tests {
     use std::{num::NonZeroUsize, sync::OnceLock};
 
-    use nervix_models::{CreateSchema, Identifier, ParseAsType, Timestamp};
+    use arch_into::ArchInto as _;
+    use nervix_models::{
+        CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
+    };
 
     use super::*;
     use crate::{
         runtime::{
             BranchKey, NodeQuiesceCounters, RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn,
-            RuntimeInputCollectPolicy, force_flush::DomainForceFlush,
+            RuntimeInputCollectPolicy, domain, force_flush::DomainForceFlush, test_domain_clock,
         },
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{CompiledSchema, RuntimeValue, compile_schema, test_runtime_row},
@@ -877,9 +956,11 @@ mod tests {
         SCHEMA
             .get_or_init(|| {
                 triomphe::Arc::new(compile_schema(&CreateSchema {
-                    name: Identifier::parse("relay_interaction_test").expect("valid schema"),
+                    name: SchemaName::from(
+                        &ModelName::parse("relay_interaction_test").expect("valid schema"),
+                    ),
                     fields: vec![nervix_models::SchemaField {
-                        name: Identifier::parse("value").expect("valid field"),
+                        name: FieldName::parse("value").expect("valid field"),
                         ty: ParseAsType::I64,
                         optional: false,
                         sensitive: false,
@@ -906,9 +987,11 @@ mod tests {
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
         let alternate_schema = triomphe::Arc::new(compile_schema(&CreateSchema {
-            name: Identifier::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            name: SchemaName::from(
+                &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
+            ),
             fields: vec![nervix_models::SchemaField {
-                name: Identifier::parse("value").expect("valid field"),
+                name: FieldName::parse("value").expect("valid field"),
                 ty: ParseAsType::String,
                 optional: false,
                 sensitive: false,
@@ -927,7 +1010,7 @@ mod tests {
     fn branch(value: &str) -> Option<BranchKey> {
         Some(
             BranchKey::from_fields([(
-                Identifier::parse("tenant").expect("valid branch field"),
+                FieldName::parse("tenant").expect("valid branch field"),
                 RuntimeValue::String(value.to_string()),
             )])
             .expect("branch key must build"),
@@ -947,15 +1030,18 @@ mod tests {
         capacity: usize,
         policy: Option<RuntimeInputCollectPolicy>,
     ) -> (RelayInteractionInput, RelayBroadcast<RelayRecordBatch>) {
-        let relay = Identifier::parse(name).expect("valid relay");
+        let relay = RelayName::parse(name).expect("valid relay");
         let broadcast = RelayBroadcast::with_capacity(
             NonZeroUsize::new(capacity).expect("nonzero test capacity"),
         );
         let receiver = RelayRuntimeFanIn::new(broadcast.new_receiver());
-        (
-            RelayInteractionInput::new(relay, receiver, policy),
-            broadcast,
-        )
+        let input = RelayInteractionInput::new(relay, receiver, policy);
+        let input = if policy.is_some() {
+            input.with_domain_clock(test_domain_clock(&domain("relay_interaction")))
+        } else {
+            input
+        };
+        (input, broadcast)
     }
 
     fn force_flush_participant(
@@ -1319,7 +1405,7 @@ mod tests {
             tokio::task::consume_budget().await;
             match event(&mut interaction, None).await {
                 RelayInteractionEvent::Batch { batch, .. } => {
-                    for row in 0..batch.message_count() as usize {
+                    for row in 0..batch.message_count().arch_into() {
                         let record = batch.runtime_row(row).expect("row must exist");
                         let Ok(Some(RuntimeValue::I64(value))) = record.value("value") else {
                             panic!("row value must be I64")
@@ -1364,18 +1450,16 @@ mod tests {
             tokio::task::consume_budget().await;
             match event(&mut interaction, None).await {
                 RelayInteractionEvent::Batch { relay, batch } => {
-                    let tenant = batch
-                        .key
-                        .as_ref()
-                        .and_then(|key| key.field_value("tenant"))
-                        .and_then(|value| {
-                            if let RuntimeValue::String(value) = value {
-                                Some(value.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .expect("collected branch must be retained");
+                    let Some(key) = batch.key.as_ref() else {
+                        panic!("collected branch must be retained");
+                    };
+                    let Some(value) = key.field_value("tenant") else {
+                        panic!("collected branch must retain its tenant");
+                    };
+                    let RuntimeValue::String(tenant) = value else {
+                        panic!("collected tenant branch value must be STRING");
+                    };
+                    let tenant = tenant.clone();
                     groups.push((relay.as_str().to_string(), tenant, batch.message_count()));
                 }
                 RelayInteractionEvent::ForceFlush(completion) => {
@@ -1939,12 +2023,12 @@ mod tests {
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
-        let (_, _, work) = std::future::poll_fn(|cx| inputs.poll_recv(cx))
+        let received = std::future::poll_fn(|cx| inputs.poll_recv(cx))
             .await
             .expect("ready input must dequeue");
         assert_eq!(inputs.pending_snapshot(), [0]);
         assert_eq!(counters.outstanding_work(), 1);
-        drop(work);
+        drop(received.work);
         assert_eq!(counters.outstanding_work(), 0);
     }
 
@@ -1963,17 +2047,17 @@ mod tests {
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
-        let (source, batch, work) = std::future::poll_fn(|cx| inputs.poll_recv(cx))
+        let received = std::future::poll_fn(|cx| inputs.poll_recv(cx))
             .await
             .expect("ready input must dequeue");
         assert!(
             inputs
-                .accept(source, batch)
+                .accept(received.source, received.batch)
                 .expect("collection must accept batch")
                 .is_none()
         );
         assert_eq!(counters.outstanding_work(), 2);
-        drop(work);
+        drop(received.work);
         assert_eq!(counters.outstanding_work(), 1);
     }
 
@@ -2108,12 +2192,16 @@ mod tests {
         let (first_acks, first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
         let first = batch_with(1, None, first_acks);
-        let max_batch_size = first.estimated_bytes().saturating_add(1);
+        let max_batch_size = first
+            .estimated_bytes()
+            .checked_add(1)
+            .assured("a test batch is far smaller than the u64 byte range");
         let mut collection = RelayInputCollection::new(
             Some(RuntimeInputCollectPolicy {
                 interval: tokio::time::Duration::from_secs(60),
                 max_batch_size: Some(max_batch_size),
             }),
+            Some(test_domain_clock(&domain("relay_interaction"))),
             None,
         );
         assert!(

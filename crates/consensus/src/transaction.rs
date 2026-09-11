@@ -1,11 +1,17 @@
+use arch_into::ArchInto as _;
+use meticulous::OptionExt as _;
 use nervix_models::{
-    Domain, DomainClockState, DomainSchedule, DomainStartPoint, DomainState, Identifier,
-    QuiesceLevel, Statement, Timestamp,
+    ClusterNodeIdentity, DomainClockState, DomainName, DomainSchedule, DomainStartPoint,
+    DomainState, QuiesceLevel, ResourceName, Statement, Timestamp, UserName,
 };
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+use strum::IntoStaticStr;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionStatement {
     pub source: String,
     pub statement: Statement,
@@ -13,26 +19,41 @@ pub struct TransactionStatement {
 
 impl TransactionStatement {
     pub fn source_bytes(&self) -> u64 {
-        u64::try_from(self.source.len()).unwrap_or(u64::MAX)
+        self.source.len().arch_into()
     }
 }
 
 /// The replicated admission limits a queued statement is checked against. They travel together
 /// because every admission check applies both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct TransactionQueueLimits {
     pub max_statements: usize,
     pub max_source_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionDiagnostic {
     pub message: String,
     pub span_start: u32,
     pub span_end: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionCommandResult {
     pub success: bool,
     pub message: String,
@@ -40,11 +61,14 @@ pub struct TransactionCommandResult {
     pub already_existed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionStepResult {
     pub first_statement: usize,
     pub statement_count: usize,
     pub quiesce_level: Option<QuiesceLevel>,
+    pub planned_relocations: Option<usize>,
     pub result: TransactionCommandResult,
 }
 
@@ -59,13 +83,27 @@ pub struct TransactionCommitAdvance {
     pub completion: Option<TransactionOutcome>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionCommitProgress {
     pub next_statement: usize,
     pub results: Vec<TransactionStepResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    IntoStaticStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionOutcome {
     Committed,
     Failed { failing_step: usize, error: String },
@@ -75,23 +113,22 @@ pub enum TransactionOutcome {
 
 impl TransactionOutcome {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Committed => "COMMITTED",
-            Self::Failed { .. } => "FAILED",
-            Self::Reverted => "REVERTED",
-            Self::Expired => "EXPIRED",
-        }
+        self.into()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct FinishedTransaction {
     pub outcome: TransactionOutcome,
     pub finished_at: Timestamp,
     pub results: Vec<TransactionStepResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum TransactionState {
     Open,
     Committing(TransactionCommitProgress),
@@ -115,11 +152,13 @@ impl TransactionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ReplicatedTransaction {
     pub id: String,
-    pub domain: Domain,
-    pub owner: Identifier,
+    pub domain: DomainName,
+    pub owner: UserName,
     pub created_at: Timestamp,
     pub last_activity_at: Timestamp,
     pub state: TransactionState,
@@ -129,7 +168,7 @@ pub struct ReplicatedTransaction {
 }
 
 impl ReplicatedTransaction {
-    pub fn open(id: String, domain: Domain, owner: Identifier, now: Timestamp) -> Self {
+    pub fn open(id: String, domain: DomainName, owner: UserName, now: Timestamp) -> Self {
         Self {
             id,
             domain,
@@ -149,7 +188,8 @@ impl ReplicatedTransaction {
             TransactionState::Committing(progress) => self
                 .statements
                 .len()
-                .saturating_sub(progress.next_statement),
+                .checked_sub(progress.next_statement)
+                .verified("commit progress never runs past the statements it commits"),
             TransactionState::Finished(_) => 0,
         }
     }
@@ -181,7 +221,7 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub(crate) fn ensure_owner(&self, owner: &Identifier) -> Result<(), TransactionMutationError> {
+    pub(crate) fn ensure_owner(&self, owner: &UserName) -> Result<(), TransactionMutationError> {
         if &self.owner == owner {
             Ok(())
         } else {
@@ -191,7 +231,10 @@ impl ReplicatedTransaction {
         }
     }
 
-    pub(crate) fn ensure_domain(&self, domain: &Domain) -> Result<(), TransactionMutationError> {
+    pub(crate) fn ensure_domain(
+        &self,
+        domain: &DomainName,
+    ) -> Result<(), TransactionMutationError> {
         if &self.domain == domain {
             Ok(())
         } else {
@@ -205,8 +248,8 @@ impl ReplicatedTransaction {
 
     pub fn validate_queue_admission(
         &self,
-        owner: &Identifier,
-        domain: &Domain,
+        owner: &UserName,
+        domain: &DomainName,
         statement: &TransactionStatement,
         limits: TransactionQueueLimits,
     ) -> Result<(), TransactionMutationError> {
@@ -224,10 +267,13 @@ impl ReplicatedTransaction {
                 limit: limits.max_statements,
             });
         }
-        let next_source_bytes = self
+        // A statement whose bytes cannot even be added to the queued total is past any
+        // configured limit, so it reports as the same admission failure.
+        let admitted = self
             .queued_source_bytes
-            .saturating_add(statement.source_bytes());
-        if next_source_bytes > limits.max_source_bytes {
+            .checked_add(statement.source_bytes())
+            .is_some_and(|next| next <= limits.max_source_bytes);
+        if !admitted {
             return Err(TransactionMutationError::SourceByteLimit {
                 id: self.id.clone(),
                 limit: limits.max_source_bytes,
@@ -238,8 +284,8 @@ impl ReplicatedTransaction {
 
     pub(crate) fn queue(
         &mut self,
-        owner: &Identifier,
-        domain: &Domain,
+        owner: &UserName,
+        domain: &DomainName,
         at: Timestamp,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
@@ -247,9 +293,13 @@ impl ReplicatedTransaction {
         self.validate_queue_admission(owner, domain, &statement, limits)?;
         let next_source_bytes = self
             .queued_source_bytes
-            .saturating_add(statement.source_bytes());
+            .checked_add(statement.source_bytes())
+            .verified("the admission check above rejected a statement that does not fit");
         self.last_activity_at = at;
-        self.statement_count = self.statement_count.saturating_add(1);
+        self.statement_count = self
+            .statement_count
+            .checked_add(1)
+            .verified("the admission check above bounds the count by the statement limit");
         self.queued_source_bytes = next_source_bytes;
         self.statements.push(statement);
         Ok(())
@@ -257,7 +307,7 @@ impl ReplicatedTransaction {
 
     pub(crate) fn start_commit(
         &mut self,
-        owner: &Identifier,
+        owner: &UserName,
         at: Timestamp,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
@@ -277,7 +327,7 @@ impl ReplicatedTransaction {
 
     pub(crate) fn touch(
         &mut self,
-        owner: &Identifier,
+        owner: &UserName,
         at: Timestamp,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
@@ -322,7 +372,7 @@ impl ReplicatedTransaction {
             });
         }
         if result.first_statement != expected_next_statement
-            || result.statement_count != next_statement.saturating_sub(expected_next_statement)
+            || Some(result.statement_count) != next_statement.checked_sub(expected_next_statement)
         {
             return Err(TransactionMutationError::InvalidStepResult {
                 id: self.id.clone(),
@@ -361,7 +411,7 @@ impl ReplicatedTransaction {
 
     pub(crate) fn revert(
         &mut self,
-        owner: &Identifier,
+        owner: &UserName,
         at: Timestamp,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
@@ -407,10 +457,12 @@ impl ReplicatedTransaction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum TransactionStepEffect {
     ReplaceDomainSchedule {
-        domain: Domain,
+        domain: DomainName,
         expected_schedule: Option<Box<DomainSchedule>>,
         schedule: Option<Box<DomainSchedule>>,
     },
@@ -421,26 +473,40 @@ pub enum TransactionStepEffect {
         schedule: Option<Box<DomainSchedule>>,
     },
     StartDomain {
-        domain_id: Domain,
+        domain_id: DomainName,
         expected_start_version: u64,
         start: DomainStartPoint,
         clock: Option<DomainClockState>,
+        authority: Option<ClusterNodeIdentity>,
     },
     StopDomain {
-        domain_id: Domain,
+        domain_id: DomainName,
         expected_start_version: u64,
     },
     CreateResourceCatalog {
-        identifier: Identifier,
+        identifier: ResourceName,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct TransactionMutationResponse {
     pub result: Result<ReplicatedTransaction, TransactionMutationError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Error,
+)]
 pub enum TransactionMutationError {
     #[error("transaction '{id}' already exists")]
     AlreadyExists { id: String },
@@ -454,8 +520,8 @@ pub enum TransactionMutationError {
     )]
     DomainMismatch {
         id: String,
-        expected: Domain,
-        requested: Domain,
+        expected: DomainName,
+        requested: DomainName,
     },
     #[error("transaction '{id}' is not open (state {state})")]
     NotOpen { id: String, state: String },

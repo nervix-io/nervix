@@ -1,32 +1,38 @@
 use chumsky::prelude::*;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterDomain, CreateDomain, CreateStatement, DomainConfig, DomainPace, DomainStartPoint,
-    PlacementPolicy, StartDomain, StopDomain,
+    DomainTimeRate, PlacementPolicy, StartDomain, StopDomain, Timestamp,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, completion_context, domain_name, duration_lit,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, string_lit,
-        suggestions_from_errors, tok, word_raw,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        domain_name, duration_lit, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
+        lex_input, string_lit, suggestions_from_errors, tok, word_raw,
     },
 };
 
 fn float_lit<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], DomainTimeRate, extra::Err<ParseError<'src>>> + Clone {
     choice((select! { Token::NumberLiteral(v) => v }, word_raw()))
-        .try_map(|raw, span| {
-            raw.parse::<f64>()
-                .map(|_| raw.clone())
-                .map_err(|err| Rich::custom(span, format!("invalid time rate '{raw}': {err}")))
-        })
         .labelled("time_rate")
+        .try_map(|raw, span| {
+            raw.parse::<DomainTimeRate>()
+                .map_err(|err| Rich::custom(span, err.to_string()))
+        })
 }
 
 fn timestamp_lit<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    choice((string_lit(), word_raw())).labelled("timestamp")
+-> impl Parser<'src, &'src [Token], Timestamp, extra::Err<ParseError<'src>>> + Clone {
+    choice((string_lit(), word_raw()))
+        .labelled("timestamp")
+        .try_map(|raw, span| {
+            raw.parse::<Timestamp>().map_err(|err| {
+                Rich::custom(span, format!("invalid start timestamp '{raw}': {err}"))
+            })
+        })
 }
 
 pub fn create_domain_parser<'src>()
@@ -103,7 +109,7 @@ pub fn start_domain_parser<'src>()
     let time_rate = kw_phrase2(Identifier::Time, Identifier::Rate)
         .ignore_then(float_lit())
         .or_not()
-        .map(|time_rate| time_rate.unwrap_or_else(|| "1.0".to_string()));
+        .map(|time_rate| time_rate.unwrap_or(DomainTimeRate::ONE));
     let at_start = kw(Identifier::At).ignore_then(choice((
         kw(Identifier::Now)
             .ignore_then(time_rate.clone())
@@ -136,7 +142,11 @@ pub fn stop_domain_parser<'src>()
 pub fn parse_create_domain(
     input: &str,
 ) -> Result<CreateStatement<CreateDomain>, ParseFromSourceError> {
-    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
     let out = create_domain_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
@@ -150,15 +160,14 @@ pub fn parse_create_domain(
     } else {
         Ok(out
             .into_output()
-            .expect("successful parse must have output"))
+            .verified("has_errors returned false above, so this parse produced output"))
     }
 }
 
 pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
-    let (_, _, tokens) = match lex_input(&source) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
+    let Some(tokens) = completion_tokens(&source) else {
+        return Vec::new();
     };
     let out = choice((
         create_domain_parser().to(()),
@@ -176,7 +185,9 @@ pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{DomainPace, DomainStartPoint, PlacementPolicy, Statement};
+    use nervix_models::{
+        DomainPace, DomainStartPoint, DomainTimeRate, PlacementPolicy, Statement, Timestamp,
+    };
 
     use crate::statement::{parse_statement, suggest_statement};
 
@@ -323,8 +334,11 @@ mod tests {
         assert_eq!(
             command.start,
             DomainStartPoint::At {
-                timestamp: "2026-04-06T12:00:00Z".to_string(),
-                time_rate: "4.0".to_string()
+                timestamp: "2026-04-06T12:00:00Z"
+                    .parse::<Timestamp>()
+                    .expect("fixture timestamp is representable"),
+                time_rate: DomainTimeRate::try_from(4.0)
+                    .expect("fixture rate is positive and finite")
             }
         );
     }
@@ -364,9 +378,59 @@ mod tests {
         assert_eq!(
             command.start,
             DomainStartPoint::Now {
-                time_rate: "1.0".to_string()
+                time_rate: DomainTimeRate::ONE
             }
         );
+    }
+
+    #[test]
+    fn rejects_start_timestamps_outside_signed_unix_nanoseconds() {
+        for timestamp in [
+            "1677-09-21T00:12:43.145224191Z",
+            "2262-04-11T23:47:16.854775808Z",
+        ] {
+            let error = parse_statement(&format!("START AT '{timestamp}' TIME RATE 1.0;"))
+                .expect_err("timestamp just outside the supported range must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("outside the signed Unix-nanosecond range"),
+                "unexpected diagnostic: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_nonpositive_and_nonfinite_start_rates() {
+        for rate in ["0", "-1", "NaN", "inf"] {
+            assert!(
+                parse_statement(&format!("START AT NOW TIME RATE {rate};")).is_err(),
+                "rate {rate} must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_tiny_and_large_finite_start_rates() {
+        for rate in ["5e-324", "1.7976931348623157e308"] {
+            let parsed = parse_statement(&format!("START AT NOW TIME RATE {rate};"))
+                .expect("every positive finite f64 rate is supported");
+            let canonical = parsed
+                .to_canonical_nspl()
+                .expect("a validated start command must render");
+            assert_eq!(
+                parse_statement(&canonical).expect("canonical start command must parse"),
+                parsed
+            );
+            let Statement::StartDomain(command) = parsed else {
+                panic!("expected start domain");
+            };
+            let DomainStartPoint::Now { time_rate } = command.start else {
+                panic!("expected a NOW start point");
+            };
+            assert!(time_rate.get().is_finite());
+            assert!(time_rate.get() > 0.0);
+        }
     }
 
     #[test]
