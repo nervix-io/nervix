@@ -107,6 +107,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
   of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
   an unreached future center.
+- Treat HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` as domain-clock cadence. HTTP and
+  generators have an immediate first occurrence; Prometheus first becomes due after one interval.
+  Later occurrences stay anchored, coalesce missed periods into one newest-due execution, and
+  advance directly to the first future boundary. Prometheus queries at the due instant and
+  evaluates returned data with a fresh execution snapshot. The declared quiesce mode still decides
+  whether polling is suspended or buffered; withholding work does not pause or re-anchor the
+  cadence. Connector timeouts, retries, backoff, and cancellation remain physical.
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.

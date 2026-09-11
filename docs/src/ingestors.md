@@ -379,6 +379,8 @@ ON QUIESCE SUSPEND
 ```
 
 - polls a configured HTTP endpoint periodically
+- issues the first request immediately, then follows an anchored domain-clock cadence; slow
+  responses coalesce missed occurrences into one request at the newest due instant
 - `204 No Content` is treated as no message
 - `SUSPEND` skips polls and therefore creates a sampling gap
 - `BUFFER` keeps polling on the declared cadence and drains retained poll payloads in order
@@ -587,6 +589,9 @@ ON QUIESCE SUSPEND
 ```
 
 Prometheus samples are flattened into JSON before codec decoding.
+The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
+as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
+evaluated with a fresh domain execution snapshot.
 `SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
 and delivers retained results in order after resume.
 
