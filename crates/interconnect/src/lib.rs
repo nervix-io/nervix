@@ -39,8 +39,9 @@ mod wire;
 pub use connection::{IncomingByteStream, RelayAdmission, RelayCancellationGuard};
 pub use identity::TlsConfigBundle;
 pub use request::{
-    HandlerRegistrationError, InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure,
-    RequestContext, RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
+    HandlerRegistrationError, HealthCheck, InterconnectRequest, InterconnectStreamRequest,
+    RemoteRequestFailure, RequestContext, RequestError, RequestSubquota, StreamHandlerError,
+    StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
@@ -706,17 +707,6 @@ pub struct EntityGateReleaseRequest {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityGateReleaseResponse {
     pub result: Result<(), String>,
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HealthCheck;
-
-impl InterconnectRequest for HealthCheck {
-    type Response = ();
-
-    const NAME: &'static str = "raft_health";
-    const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(1);
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

@@ -191,6 +191,17 @@ pub trait InterconnectRequest: RkyvMessage {
     const REQUIRES_LIVE_TARGET: bool = true;
 }
 
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthCheck;
+
+impl InterconnectRequest for HealthCheck {
+    type Response = ();
+
+    const NAME: &'static str = "raft_health";
+    const CLASS: PoolClass = PoolClass::Management;
+    const TIMEOUT: Duration = Duration::from_secs(1);
+}
+
 /// A typed request whose response is an incrementally flow-controlled byte stream.
 pub trait InterconnectStreamRequest: RkyvMessage {
     const NAME: &'static str;
