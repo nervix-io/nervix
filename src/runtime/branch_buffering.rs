@@ -59,10 +59,8 @@ impl RuntimeFlushPolicy {
 
 #[derive(Debug, Error)]
 pub(super) enum BranchBufferTimingError {
-    #[error("the physical FLUSH IMMEDIATE deadline is outside the monotonic clock range")]
-    ImmediateDeadline,
-    #[error("a monotonic wake deadline is outside the monotonic clock range")]
-    WakeDeadline,
+    #[error("a monotonic deadline is outside the monotonic clock range")]
+    PhysicalRange,
     #[error("the domain clock could not reach a branch-buffer deadline")]
     LogicalDeadline,
 }
@@ -113,7 +111,7 @@ impl RuntimeWake {
     pub(super) fn after(timeout: Duration) -> BranchBufferTimingResult<Self> {
         let deadline = PhysicalDeadlineCapability::new()
             .after(timeout)
-            .change_context(BranchBufferTimingError::WakeDeadline)?;
+            .change_context(BranchBufferTimingError::PhysicalRange)?;
         Ok(Self::never().with_physical(deadline))
     }
 
@@ -237,7 +235,7 @@ impl BranchBufferTimer {
             RuntimeFlushPolicy::Immediate => {
                 let physical = PhysicalDeadlineCapability::new()
                     .after(RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT)
-                    .change_context(BranchBufferTimingError::ImmediateDeadline)?;
+                    .change_context(BranchBufferTimingError::PhysicalRange)?;
                 BranchBufferDeadline::Physical(physical)
             }
         });
@@ -260,6 +258,10 @@ impl BranchBufferTimer {
                 Ok(PhysicalDeadlineCapability::new().is_reached(*deadline))
             }
         }
+    }
+
+    pub(super) const fn is_armed(&self) -> bool {
+        self.deadline.is_some()
     }
 
     pub(super) fn deadline(&self) -> Option<BranchBufferDeadline> {

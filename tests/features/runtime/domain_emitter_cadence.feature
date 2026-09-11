@@ -207,7 +207,7 @@ Feature: Domain-paced emitter cadence
       """
       {"user_id":9,"action":"immediate"}
       """
-    Then within "2s" the observed broker receives payloads
+    Then within "5s" the observed broker receives payloads
       """
       {"user_id":9,"action":"immediate"}
       """

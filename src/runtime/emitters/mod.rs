@@ -2,8 +2,8 @@ use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
 use thiserror::Error;
 
 use super::{
-    *,
     physical_time::{PhysicalDeadline, PhysicalDeadlineCapability},
+    *,
 };
 
 pub(in crate::runtime) mod clickhouse;
@@ -931,11 +931,18 @@ impl EmitterBatchBuffer {
         self.arm_cadence(context, flush_policy)
     }
 
+    /// Starts the cadence for a buffer that just stopped being empty.
+    ///
+    /// An armed cadence is left alone, so a later batch joining the same buffer neither brings the
+    /// deadline forward nor pays for a clock read.
     fn arm_cadence(
         &mut self,
         context: &EmitterSinkContext,
         flush_policy: RuntimeFlushPolicy,
     ) -> EmitterRuntimeResult<()> {
+        if self.cadence.is_armed() {
+            return Ok(());
+        }
         let snapshot = context.execution_snapshot()?;
         self.cadence
             .arm_flush(flush_policy, &context.clock, &snapshot)
@@ -958,29 +965,26 @@ impl EmitterBatchBuffer {
         let Some(flush_policy) = self.flush_policy else {
             return Err(Report::new(EmitterRuntimeError::FlushPolicyNotInitialized));
         };
-        self.pending_messages = self
-            .pending_messages
-            .checked_add(batch.message_count())
-            .assured("both counts total messages this emitter already holds in memory");
-        self.pending_bytes = self
-            .pending_bytes
-            .checked_add(batch.estimated_bytes())
-            .assured("both counts estimate bytes of batches this node already holds in memory");
-        self.pending.push(batch);
-        self.update_buffered_messages();
+        self.retain(batch);
         self.arm_cadence(context, flush_policy)?;
         Ok(flush_policy.size_boundary_reached(self.pending_bytes))
     }
 
-    /// Retains a batch that arrived while the emitter was draining.
+    /// Retains a batch whose release the caller already owns.
     ///
-    /// A drain publishes everything the emitter holds regardless of cadence, so the batch it
-    /// accepts needs no deadline: the drain that took it is what releases it. This also keeps a
-    /// drain independent of the domain clock, which a stopping domain has already uninstalled.
-    fn retain_for_drain(&mut self, batch: EmitterPublishBatch) -> EmitterRuntimeResult<()> {
+    /// A drain publishes everything the emitter holds, and a batch put back after a failed
+    /// transfer is released by the retry that failure schedules. Neither needs a cadence deadline,
+    /// and leaving the clock out keeps both paths working for a domain that has already
+    /// uninstalled it.
+    fn retain_without_cadence(&mut self, batch: EmitterPublishBatch) -> EmitterRuntimeResult<()> {
         if self.flush_policy.is_none() {
             return Err(Report::new(EmitterRuntimeError::FlushPolicyNotInitialized));
         }
+        self.retain(batch);
+        Ok(())
+    }
+
+    fn retain(&mut self, batch: EmitterPublishBatch) {
         self.pending_messages = self
             .pending_messages
             .checked_add(batch.message_count())
@@ -991,7 +995,6 @@ impl EmitterBatchBuffer {
             .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
         self.update_buffered_messages();
-        Ok(())
     }
 
     fn is_due(&self, context: &EmitterSinkContext) -> EmitterRuntimeResult<bool> {
@@ -1212,7 +1215,6 @@ impl EmitterRetrySchedule {
         self.waiting_for_stall_clear = false;
     }
 }
-
 
 fn compile_sql_values_program(
     label: &'static str,
@@ -1755,8 +1757,12 @@ enum SinkEmitter {
     Postgres(PostgresEmitter),
     MySql(MySqlEmitter),
     MongoDb(MongoDbEmitter),
-    Iceberg(IcebergEmitter),
-    Missing { reason: String },
+    /// Boxed because the Iceberg sink carries its catalog client, staging directory, mapped
+    /// schema, and both cadence timers, which would otherwise set the size of every sink variant.
+    Iceberg(Box<IcebergEmitter>),
+    Missing {
+        reason: String,
+    },
 }
 
 #[derive(Clone)]
@@ -2108,7 +2114,7 @@ impl SinkEmitter {
         result: IcebergEmitterResult<IcebergEmitter>,
     ) -> Self {
         match result {
-            Ok(emitter) => Self::Iceberg(emitter),
+            Ok(emitter) => Self::Iceberg(Box::new(emitter)),
             Err(error) => {
                 let reason = iceberg_error_message(&error);
                 context.report_init_error("iceberg", &reason);
@@ -2492,7 +2498,7 @@ impl SinkEmitter {
                 Err(error) => {
                     for batch in pending {
                         tokio::task::consume_budget().await;
-                        buffer.push(context, batch)?;
+                        buffer.retain_without_cadence(batch)?;
                     }
                     return Err(Report::new(EmitterRuntimeError::PublishBatch)
                         .attach_printable(iceberg_error_message(&error)));
@@ -3540,8 +3546,7 @@ impl EmitterTask {
             };
             loop {
                 tokio::task::consume_budget().await;
-                let wake = retry_schedule
-                    .wake(sink.cadence_wake(&context.clock, &emitter_buffer));
+                let wake = retry_schedule.wake(sink.cadence_wake(&context.clock, &emitter_buffer));
                 let receive_input = !retry_schedule.is_active()
                     || emitter_buffer_count.load(Ordering::Acquire) == 0;
                 let work = match interaction.next_with_input(wake, receive_input).await {
@@ -3993,7 +3998,7 @@ impl EmitterTask {
 
                         if interaction.is_draining() {
                             if let Err(error) =
-                                emitter_buffer.retain_for_drain(publish_batch.clone())
+                                emitter_buffer.retain_without_cadence(publish_batch.clone())
                             {
                                 let reason = emitter_error_message(&error);
                                 let operation =
@@ -5113,10 +5118,21 @@ mod tests {
             .assured("the two test batches are far smaller than the u64 byte range");
 
         let context = sink_context();
-        assert!(!buffer.push(&context, first).expect("first batch must buffer"));
+        assert!(
+            !buffer
+                .push(&context, first)
+                .expect("first batch must buffer")
+        );
         assert_eq!(buffer.pending_messages, 1);
-        assert!(buffer.deadline().is_some(), "the first push arms the cadence");
-        assert!(!buffer.push(&context, second).expect("second batch must buffer"));
+        assert!(
+            buffer.deadline().is_some(),
+            "the first push arms the cadence"
+        );
+        assert!(
+            !buffer
+                .push(&context, second)
+                .expect("second batch must buffer")
+        );
 
         assert!(
             !buffer
@@ -5148,10 +5164,7 @@ mod tests {
             buffer
                 .push(
                     &context,
-                    EmitterPublishBatch::from_batch(
-                        input_batch(),
-                        Timestamp::from_unix_nanos(100),
-                    )
+                    EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100),)
                 )
                 .expect("batch must buffer")
         );
@@ -5432,14 +5445,17 @@ mod tests {
                 EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
             )
             .expect("batch must buffer");
-        let cadence = buffer.deadline().expect("the push arms the logical cadence");
+        let cadence = buffer
+            .deadline()
+            .expect("the push arms the logical cadence");
         let mut retry = EmitterRetrySchedule::default();
 
         let idle = retry.wake(RuntimeWake::never().with_buffer(&context.clock, cadence.clone()));
         assert!(
-            idle.is_reached()
-                .expect("the fixture clock stays installed")
-                == false
+            !idle
+                .is_reached()
+                .expect("the fixture clock stays installed"),
+            "an idle retry leaves the ordinary cadence wake in place"
         );
 
         retry

@@ -647,7 +647,11 @@ impl IcebergEmitter {
     }
 
     /// Adds this sink's own flush and commit cadences to the emitter's wake.
-    pub(in crate::runtime) fn cadence_wake(&self, clock: &DomainClock, wake: RuntimeWake) -> RuntimeWake {
+    pub(in crate::runtime) fn cadence_wake(
+        &self,
+        clock: &DomainClock,
+        wake: RuntimeWake,
+    ) -> RuntimeWake {
         let wake = match self.flush_cadence.deadline() {
             Some(deadline) => wake.with_buffer(clock, deadline),
             None => wake,
@@ -671,7 +675,12 @@ impl IcebergEmitter {
         self.arm_flush_cadence(context)
     }
 
+    /// Starts the flush cadence for a staging buffer that just stopped being empty. An armed
+    /// cadence is left alone, so a later batch neither moves it nor pays for a clock read.
     fn arm_flush_cadence(&mut self, context: &EmitterSinkContext) -> IcebergEmitterResult<()> {
+        if self.flush_cadence.is_armed() {
+            return Ok(());
+        }
         let snapshot = Self::execution_snapshot(context)?;
         self.flush_cadence
             .arm_flush(self.flush_policy, &context.clock, &snapshot)
@@ -792,13 +801,15 @@ impl IcebergEmitter {
         &mut self,
         context: &EmitterSinkContext,
     ) -> IcebergEmitterResult<Option<PublishReport>> {
-        let snapshot = Self::execution_snapshot(context)?;
-        if self
-            .flush_cadence
-            .is_due(&context.clock, &snapshot)
-            .change_context(IcebergEmitterError::CadenceTiming)?
-        {
-            self.flush_to_disk().await?;
+        if self.flush_cadence.is_armed() {
+            let snapshot = Self::execution_snapshot(context)?;
+            if self
+                .flush_cadence
+                .is_due(&context.clock, &snapshot)
+                .change_context(IcebergEmitterError::CadenceTiming)?
+            {
+                self.flush_to_disk().await?;
+            }
         }
         self.commit_if_due(context, false).await
     }

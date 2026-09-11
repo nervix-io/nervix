@@ -156,8 +156,9 @@ bursts through the missed intervals. Prometheus sends the due instant as its que
 then takes a fresh domain execution snapshot when the response is decoded and evaluated. Skipped
 polls and generators during quiescing do not stop or re-anchor the cadence.
 
-`COLLECT FOR` and `FLUSH EACH` are domain-logical durations. A paced domain's `TIME RATE` therefore
-accelerates or slows them, and a stopped clock cannot silently turn either policy into a wall-clock
+`COLLECT FOR`, `FLUSH EACH`, and the Iceberg `COMMIT EACH` are domain-logical durations, in
+emitters exactly as in every other flush-based node. A paced domain's `TIME RATE` therefore
+accelerates or slows them, and a stopped clock cannot silently turn any of them into a wall-clock
 wait. Each source relay and concrete branch owns its collection deadline; each concrete output
 branch owns its route deadline. A deadline starts only when data enters an empty buffer and is
 cleared when that buffer is released by time, size, force flush, shutdown, or error handling.
@@ -166,6 +167,15 @@ cleared when that buffer is released by time, size, force flush, shutdown, or er
 of domain rate. The ingestor source-group limit of 1,024 messages and 5 ms idle close are also
 physical and run before route-local flushing. Connector retry and backoff timers remain separate
 physical controls; none of these operational waits is projected through the domain clock.
+
+An emitter's publish cadence and its publish attempts are separate state. Retry backoff, the
+acknowledgement keepalive that holds an upstream `MODE ACK` source open while a sink is
+unavailable, the sink acknowledgement timeout, the stop and drain deadlines, and an HTTP
+`Retry-After` a server returns are all physical: a paced domain never shortens or lengthens the
+real wait an external system asked for. A failed attempt keeps the emitter's pending batches, their
+acknowledgements, and its unchanged cadence deadline; while a retry is scheduled the emitter waits
+for the retry instead of the cadence, and a forced flush or drain still releases the buffer. The
+maximum batch size releases a buffer that has reached it as soon as no retry is pending.
 
 ## Execution-Time Snapshots
 

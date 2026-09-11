@@ -628,18 +628,6 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         self.terminal_drain
     }
 
-    /// Reports whether the consumer's own wake is already due, before any input is dequeued.
-    ///
-    /// A due wake precedes ready input so a paced flush or a due retry is never starved by a hot
-    /// source, and the input it did not take stays collected for the following call.
-    fn wake_is_reached(&self, wake: &RuntimeWake) -> Result<bool, RelayInteractionError> {
-        wake.is_reached()
-            .map_err(|error| RelayInteractionError::WakeTiming {
-                reason: error.to_string(),
-                acks: self.inputs.pending_acks(),
-            })
-    }
-
     pub(super) fn shutdown_receiver(&mut self) -> &mut watch::Receiver<bool> {
         if self.suppress_shutdown {
             &mut self.drain_shutdown_rx
@@ -707,8 +695,17 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 continue;
             }
 
-            if self.wake_is_reached(&wake)? {
-                return Ok(self.work(RelayInteractionEvent::Wake));
+            // A due wake precedes ready input, so a paced flush or a due retry is never starved
+            // by a hot source. Input the wake did not take stays collected for the next call.
+            match wake.is_reached() {
+                Ok(true) => return Ok(self.work(RelayInteractionEvent::Wake)),
+                Ok(false) => {}
+                Err(error) => {
+                    return Err(RelayInteractionError::WakeTiming {
+                        reason: error.to_string(),
+                        acks: self.inputs.pending_acks(),
+                    });
+                }
             }
             let work = self.begin_work();
             if let Some((relay, batch)) = self.inputs.take_due()? {
@@ -1115,7 +1112,8 @@ mod tests {
 
         for expected in 1..=3 {
             tokio::task::consume_budget().await;
-            let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await
+            let RelayInteractionEvent::Batch { batch, .. } =
+                event(&mut interaction, RuntimeWake::never()).await
             else {
                 panic!("ready batch {expected} was not consumed")
             };
@@ -1142,7 +1140,8 @@ mod tests {
         let mut observed = Vec::new();
         for _ in 0..2 {
             tokio::task::consume_budget().await;
-            let RelayInteractionEvent::Batch { relay, batch } = event(&mut interaction, RuntimeWake::never()).await
+            let RelayInteractionEvent::Batch { relay, batch } =
+                event(&mut interaction, RuntimeWake::never()).await
             else {
                 panic!("both sources must produce")
             };
@@ -1176,7 +1175,8 @@ mod tests {
         ));
         for expected in [1, 2] {
             tokio::task::consume_budget().await;
-            let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await
+            let RelayInteractionEvent::Batch { batch, .. } =
+                event(&mut interaction, RuntimeWake::never()).await
             else {
                 panic!("ready batch {expected} must follow the serviced wake")
             };
@@ -1205,7 +1205,8 @@ mod tests {
         let mut observed = Vec::new();
         for _ in 0..8 {
             tokio::task::consume_budget().await;
-            let RelayInteractionEvent::Batch { relay, batch } = event(&mut interaction, RuntimeWake::never()).await
+            let RelayInteractionEvent::Batch { relay, batch } =
+                event(&mut interaction, RuntimeWake::never()).await
             else {
                 panic!("every ready source must make progress")
             };
@@ -1242,7 +1243,8 @@ mod tests {
         let mut observed = Vec::new();
         for _ in 0..4 {
             tokio::task::consume_budget().await;
-            let RelayInteractionEvent::Batch { relay, batch } = event(&mut interaction, RuntimeWake::never()).await
+            let RelayInteractionEvent::Batch { relay, batch } =
+                event(&mut interaction, RuntimeWake::never()).await
             else {
                 panic!("all ready batches must make progress")
             };
@@ -1285,7 +1287,9 @@ mod tests {
             event(&mut interaction, wake_now()).await,
             RelayInteractionEvent::Wake
         ));
-        let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await else {
+        let RelayInteractionEvent::Batch { batch, .. } =
+            event(&mut interaction, RuntimeWake::never()).await
+        else {
             panic!("due collection must remain available after the wake")
         };
         assert_eq!(value(&batch), 1);
@@ -1310,7 +1314,9 @@ mod tests {
         assert!(matches!(wake, RelayInteractionEvent::Wake));
         assert_eq!(interaction.inputs.sources[0].receiver.pending_len(), 1);
 
-        let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await else {
+        let RelayInteractionEvent::Batch { batch, .. } =
+            event(&mut interaction, RuntimeWake::never()).await
+        else {
             panic!("resuming input must deliver the ready batch")
         };
         assert_eq!(value(&batch), 1);
@@ -1338,7 +1344,9 @@ mod tests {
         complete_force_flush(work);
         assert_eq!(interaction.inputs.sources[0].receiver.pending_len(), 1);
 
-        let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await else {
+        let RelayInteractionEvent::Batch { batch, .. } =
+            event(&mut interaction, RuntimeWake::never()).await
+        else {
             panic!("resuming input must deliver the batch retained across force flush")
         };
         assert_eq!(value(&batch), 1);
@@ -1363,7 +1371,9 @@ mod tests {
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
-        let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await else {
+        let RelayInteractionEvent::Batch { batch, .. } =
+            event(&mut interaction, RuntimeWake::never()).await
+        else {
             panic!("collection timer must release input")
         };
         assert_eq!(batch.message_count(), 2);
@@ -1390,7 +1400,8 @@ mod tests {
 
         for expected in [1, 2] {
             tokio::task::consume_budget().await;
-            let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await
+            let RelayInteractionEvent::Batch { batch, .. } =
+                event(&mut interaction, RuntimeWake::never()).await
             else {
                 panic!("size boundary must release batch {expected}")
             };
@@ -1534,7 +1545,9 @@ mod tests {
             .await
             .expect("post-cut batch must queue");
         complete_force_flush(event(&mut interaction, RuntimeWake::never()).await);
-        let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await else {
+        let RelayInteractionEvent::Batch { batch, .. } =
+            event(&mut interaction, RuntimeWake::never()).await
+        else {
             panic!("post-cut batch must remain for normal processing")
         };
         assert_eq!(value(&batch), 2);
@@ -1595,7 +1608,9 @@ mod tests {
             .expect("interaction must build");
         shutdown_tx.send(true).expect("shutdown must send");
 
-        let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await else {
+        let RelayInteractionEvent::Batch { batch, .. } =
+            event(&mut interaction, RuntimeWake::never()).await
+        else {
             panic!("shutdown must drain accepted input")
         };
         assert_eq!(batch.message_count(), 3);
@@ -1654,7 +1669,8 @@ mod tests {
         let mut interaction = RelayInteraction::new(vec![left, right], shutdown_rx, None, None)
             .expect("interaction must build");
 
-        let RelayInteractionEvent::Batch { relay, batch } = event(&mut interaction, RuntimeWake::never()).await
+        let RelayInteractionEvent::Batch { relay, batch } =
+            event(&mut interaction, RuntimeWake::never()).await
         else {
             panic!("open source must continue after its sibling closes")
         };
@@ -1886,7 +1902,11 @@ mod tests {
             .expect("interaction must build");
 
         assert!(matches!(
-            event(&mut interaction, wake_in(tokio::time::Duration::from_millis(1))).await,
+            event(
+                &mut interaction,
+                wake_in(tokio::time::Duration::from_millis(1))
+            )
+            .await,
             RelayInteractionEvent::Wake
         ));
     }
@@ -2028,7 +2048,10 @@ mod tests {
         }
         assert_eq!(counters.outstanding_work(), 1);
         force_flush.request();
-        let work = interaction.next(RuntimeWake::never()).await.expect("batch must release");
+        let work = interaction
+            .next(RuntimeWake::never())
+            .await
+            .expect("batch must release");
         assert_eq!(counters.outstanding_work(), 2);
         drop(work);
         assert_eq!(counters.outstanding_work(), 1);
@@ -2160,7 +2183,9 @@ mod tests {
                 .expect("interaction must build");
         force_flush.request();
 
-        let RelayInteractionEvent::Batch { batch, .. } = event(&mut interaction, RuntimeWake::never()).await else {
+        let RelayInteractionEvent::Batch { batch, .. } =
+            event(&mut interaction, RuntimeWake::never()).await
+        else {
             panic!("collected batch must be released")
         };
         assert_eq!(batch.message_count(), 2);
