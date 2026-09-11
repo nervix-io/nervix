@@ -4976,10 +4976,11 @@ impl SessionServiceImpl {
     async fn reconcile_resources_once(&self) {
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let resources = self.inner.consensus.current_resources().await;
-        let live_nodes = self.inner.cluster.gossip_state().await.live_nodes;
-        let live_node_ids = live_nodes
+        let gossip = self.inner.cluster.gossip_state().await;
+        let live_node_ids = gossip
+            .live_identities()
             .into_iter()
-            .map(|node| node.node_id)
+            .map(|identity| identity.node_id().clone())
             .collect::<BTreeSet<_>>();
 
         // Replicas indexed by the resource version they hold and then by the node holding it. The
@@ -12572,9 +12573,9 @@ impl SessionServiceImpl {
             .collect::<Vec<_>>();
         let gossip = self.inner.cluster.gossip_state().await;
         let live_node_ids = gossip
-            .live_nodes
-            .iter()
-            .map(|node| node.node_id.clone())
+            .live_identities()
+            .into_iter()
+            .map(|identity| identity.node_id().clone())
             .collect::<BTreeSet<_>>();
         let mut live_node_ids = live_node_ids;
         if live_node_ids.is_empty() {
@@ -12737,14 +12738,14 @@ impl SessionServiceImpl {
             .collect::<Vec<_>>();
         let gossip = self.inner.cluster.gossip_state().await;
         let live_node_ids = gossip
-            .live_nodes
-            .iter()
-            .map(|node| &node.node_id)
+            .live_identities()
+            .into_iter()
+            .map(|identity| identity.node_id().clone())
             .collect::<BTreeSet<_>>();
         !live_node_ids.is_empty()
             && live_node_ids.iter().all(|node_id| {
                 replicas.iter().any(|replica| {
-                    replica.key.node_id == **node_id && replica.state == ResourceNodeState::Ready
+                    replica.key.node_id == *node_id && replica.state == ResourceNodeState::Ready
                 })
             })
     }
