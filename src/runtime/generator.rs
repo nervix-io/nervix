@@ -5,7 +5,6 @@ use super::*;
 pub(super) struct GeneratorTaskSpec {
     pub(super) generator: CreateGenerator,
     pub(super) source_relay: RelayName,
-    pub(super) source_schema: Arc<CompiledSchema>,
     pub(super) source_branching: Vec<FieldName>,
     pub(super) context_projection: GeneratorContextProjection,
     pub(super) routes: Vec<GeneratorTaskRouteSpec>,
@@ -28,7 +27,6 @@ impl GeneratorTaskSpec {
         Self {
             generator,
             source_relay,
-            source_schema,
             source_branching,
             context_projection,
             routes,
@@ -410,7 +408,6 @@ impl Runtime {
         let GeneratorTaskSpec {
             generator,
             source_relay,
-            source_schema,
             source_branching,
             context_projection,
             routes,
@@ -555,7 +552,7 @@ impl Runtime {
 
                     let mut state_load_failed = false;
                     let state = match runtime
-                        .materialized_stream_state_from_owner(&task_domain, &source_relay)
+                        .materialized_records_from_owner(&task_domain, &source_relay)
                         .await
                     {
                         Ok(state) => state,
@@ -573,62 +570,31 @@ impl Runtime {
                         }
                     };
 
-                    let mut source_state_by_branch = HashMap::<
-                        Option<BranchKey>,
-                        Vec<nervix_models::RemoteRuntimeRecord>,
-                    >::default();
+                    // Records arrive with the concrete branch they were materialized in, so
+                    // the generator groups by that typed identity instead of rediscovering it
+                    // from the columns.
+                    let mut source_state_by_branch =
+                        HashMap::<Option<BranchKey>, Vec<RuntimeRow>>::default();
                     if !state_load_failed {
-                        let mut latest_state =
-                            HashMap::<String, nervix_models::RemoteRuntimeRecord>::default();
-                        for (key, record) in state {
-                            let replace = latest_state.get(&key).is_none_or(|existing| {
-                                let existing = &existing.metadata;
-                                let candidate = &record.metadata;
-                                candidate.ingested_at_high_watermark
-                                    > existing.ingested_at_high_watermark
-                                    || (candidate.ingested_at_high_watermark
-                                        == existing.ingested_at_high_watermark
-                                        && candidate.ingested_at_low_watermark
-                                            > existing.ingested_at_low_watermark)
+                        let mut latest_state = HashMap::<Option<BranchKey>, RuntimeRow>::default();
+                        for record in state {
+                            let replace = latest_state.get(&record.branch).is_none_or(|existing| {
+                                record.row.metadata().is_newer_than(existing.metadata())
                             });
                             if replace {
-                                latest_state.insert(key, record);
+                                latest_state.insert(record.branch, record.row);
                             }
                         }
-                        for record in latest_state.into_values() {
+                        for (branch_key, row) in latest_state {
                             let branch_key = if source_branching.is_empty() {
                                 None
                             } else {
-                                match BranchKey::from_remote_record(
-                                    &record,
-                                    source_branching.iter(),
-                                ) {
-                                    Ok(Some(key)) => Some(key),
-                                    Ok(None) => {
-                                        task_events.report_error(format!(
-                                            "generator '{}' source relay '{}' record is missing \
-                                             concrete branch fields",
-                                            task_generator.as_str(),
-                                            source_relay.as_str(),
-                                        ));
-                                        continue;
-                                    }
-                                    Err(error) => {
-                                        task_events.report_error(format!(
-                                            "generator '{}' source relay '{}' has invalid \
-                                             concrete branch fields: {}",
-                                            task_generator.as_str(),
-                                            source_relay.as_str(),
-                                            error,
-                                        ));
-                                        continue;
-                                    }
-                                }
+                                branch_key
                             };
                             source_state_by_branch
                                 .entry(branch_key)
                                 .or_default()
-                                .push(record);
+                                .push(row);
                         }
                     }
 
@@ -675,22 +641,10 @@ impl Runtime {
 
                             for source_record in records {
                                 tokio::task::consume_budget().await;
-                                let (source_batch, source_metadata) =
-                                    match source_schema.runtime_batch_from_remote(source_record) {
-                                        Ok(decoded) => decoded,
-                                        Err(error) => {
-                                            task_events.report_error(format!(
-                                                "failed to decode generator '{}' source relay \
-                                                 '{}' state in domain '{}': {}",
-                                                task_generator.as_str(),
-                                                source_relay.as_str(),
-                                                task_domain.as_str(),
-                                                error
-                                            ));
-                                            continue;
-                                        }
-                                    };
-                                let source_batch = Arc::new(source_batch);
+                                let source_metadata = source_record.metadata().clone();
+                                // Projection, not reconstruction: the row already shares its
+                                // carrier columns and this narrows them to the one row.
+                                let source_batch = Arc::new(source_record.one_row_batch());
                                 let context = match context_projection
                                     .project(source_batch.as_ref(), &branch_key)
                                 {

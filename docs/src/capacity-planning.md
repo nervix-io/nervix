@@ -100,7 +100,9 @@ not pay for a window's state, and a window width does not bound a correlator.
   ordering slot. Management subquotas independently reserve streams for discovery, liveness,
   acknowledgement progress, relay admission, cancellation, and terminal outcomes even when
   ordinary management requests are full.
-  Bulk subquotas independently reserve streams for resource transfer and Raft snapshot transfer.
+  Bulk subquotas independently reserve streams for resource transfer and for runtime and Raft
+  snapshot transfer. A runtime state snapshot is described before it is fetched, so a node that
+  already holds the current revision causes no scan and no encoding on the node that owns it.
   Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
   node.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained

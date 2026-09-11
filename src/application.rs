@@ -203,6 +203,7 @@ use crate::{
     resource_interconnect::{
         FetchResourceArchive, PublishResourceReplica, ResourceInterconnectError,
     },
+    runtime::{DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot},
 };
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -12373,6 +12374,7 @@ impl SessionServiceImpl {
             .inner
             .runtime
             .local_materialized_stream_state(domain, &show.relay)
+            .await
         {
             Ok(entries) if !entries.is_empty() => entries,
             Ok(_) if !relay_node.executes_on(self.inner.consensus.local_node_id()) => {
@@ -12399,18 +12401,17 @@ impl SessionServiceImpl {
         } else {
             let entry_lines = entries
                 .into_iter()
-                .map(|(key, record)| {
-                    let metadata = &record.metadata;
+                .map(|record| {
                     format!(
                         "key={} payload={} low={} high={}",
-                        if key.is_empty() {
+                        if record.branch.is_empty() {
                             "(root)"
                         } else {
-                            key.as_str()
+                            record.branch.as_str()
                         },
-                        runtime_schema::remote_runtime_record_to_json_string(&record),
-                        metadata.ingested_at_low_watermark,
-                        metadata.ingested_at_high_watermark
+                        record.payload,
+                        record.ingested_at_low_watermark,
+                        record.ingested_at_high_watermark
                     )
                 })
                 .collect::<Vec<_>>();
@@ -19632,6 +19633,40 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
+        let describe_snapshot_service = service.clone();
+        interconnect
+            .register_handler::<DescribeStateSnapshot, _, _>(move |_context, request| {
+                let service = describe_snapshot_service.clone();
+                async move {
+                    match crate::runtime::RuntimeStatePlacement::from_remote(request.placement) {
+                        Ok(placement) => {
+                            service
+                                .inner
+                                .runtime
+                                .describe_sealed_materialized_snapshot(
+                                    &placement,
+                                    request.after_revision,
+                                )
+                                .await
+                        }
+                        Err(error) => DescribedStateSnapshot::Unavailable(error),
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let fetch_snapshot_service = service.clone();
+        interconnect
+            .register_stream_handler::<FetchStateSnapshot, _, _>(move |_context, request| {
+                let service = fetch_snapshot_service.clone();
+                async move {
+                    service
+                        .inner
+                        .runtime
+                        .stream_sealed_materialized_snapshot(request)
+                        .await
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let state_sync_service = service.clone();
         interconnect
             .register_handler::<RemoteStateSyncRequest, _, _>(move |_context, request| {
