@@ -10,21 +10,29 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
+#[cfg(any(test, feature = "testing"))]
+use meticulous::ResultExt as _;
 #[cfg(test)]
 use nervix_models::DomainTick;
 use nervix_models::{
     DomainAdmissionWindow, DomainClockAuthority, DomainClockError, DomainClockPeriod,
     DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
 };
+#[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
 use tokio::sync::watch;
+#[cfg(any(test, feature = "testing"))]
 use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
-use super::{ObservedDomainTick, Runtime, VmExecutionContext};
-use crate::runtime::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
+#[cfg(test)]
+use super::VmExecutionContext;
+use super::{ObservedDomainTick, Runtime};
+#[cfg(any(test, feature = "testing"))]
+use crate::runtime::physical_time::PhysicalDeadlineCapability;
+use crate::runtime::physical_time::actual_utc_now;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DomainClockAccessError {
@@ -46,6 +54,7 @@ pub enum DomainClockAccessError {
     #[error(
         "logical deadline for domain '{deadline_domain}' cannot be used by domain '{clock_domain}'"
     )]
+    #[cfg(any(test, feature = "testing"))]
     DeadlineDomainMismatch {
         clock_domain: DomainName,
         deadline_domain: DomainName,
@@ -70,6 +79,7 @@ pub enum DomainClockArithmetic {
 pub type DomainClockAccessResult<T> = Result<T, Report<DomainClockAccessError>>;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "testing"))]
 pub enum DomainClockWaitError {
     #[error("domain '{domain}' clock became unavailable while waiting for a logical deadline")]
     Clock { domain: DomainName },
@@ -79,6 +89,7 @@ pub enum DomainClockWaitError {
     PhysicalDeadline { domain: DomainName },
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub type DomainClockWaitResult<T> = Result<T, Report<DomainClockWaitError>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,6 +414,7 @@ impl DomainClock {
         Ok(DomainIngestionSnapshot { snapshot, window })
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn deadline_at(&self, due_at: Timestamp) -> LogicalDeadline {
         LogicalDeadline {
             domain: self.inner.domain.clone(),
@@ -461,6 +473,7 @@ impl DomainClock {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn wait_until(
         &self,
         deadline: LogicalDeadline,
@@ -575,6 +588,7 @@ pub struct DomainExecutionSnapshot {
 }
 
 impl DomainExecutionSnapshot {
+    #[cfg(test)]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
@@ -583,6 +597,7 @@ impl DomainExecutionSnapshot {
         self.now
     }
 
+    #[cfg(test)]
     pub fn vm_context(&self) -> VmExecutionContext {
         VmExecutionContext {
             now: self.now,
@@ -590,12 +605,14 @@ impl DomainExecutionSnapshot {
         }
     }
 
+    #[cfg(test)]
     pub const fn wasm_context(&self) -> WasmExecutionContext {
         WasmExecutionContext::new(self.now)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "testing"))]
 pub struct LogicalDeadline {
     domain: DomainName,
     generation: u64,
@@ -603,11 +620,13 @@ pub struct LogicalDeadline {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "testing"))]
 pub struct LogicalDeadlineReached {
     due_at: Timestamp,
     snapshot: DomainExecutionSnapshot,
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl LogicalDeadlineReached {
     pub const fn due_at(&self) -> Timestamp {
         self.due_at
