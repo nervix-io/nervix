@@ -231,6 +231,56 @@ enum FoldedValue {
     Null(RegisterType),
 }
 
+/// What constant folding decides about one CASE branch before any row is seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchSelection {
+    /// The condition is statically false, so the branch never contributes a result.
+    NeverTaken,
+    /// The condition is statically true, so the branch answers every row that reaches it.
+    AlwaysTaken,
+    /// The condition depends on row data and is evaluated at run time.
+    RowDependent,
+}
+
+impl BranchSelection {
+    /// Decide one `CASE <operand> WHEN <value>` branch, which matches when the WHEN value equals
+    /// the operand.
+    fn for_simple_branch(operand: &FoldedValue, folded_when: Option<FoldedValue>) -> Self {
+        let Some(folded_when) = folded_when else {
+            return Self::RowDependent;
+        };
+        let Some(comparison) = fold_binary_expr(BinaryOp::Eq, operand.clone(), folded_when) else {
+            return Self::RowDependent;
+        };
+
+        match comparison {
+            FoldedValue::NonNull(ScalarValue::Boolean(true)) => Self::AlwaysTaken,
+            FoldedValue::NonNull(ScalarValue::Boolean(false)) => Self::NeverTaken,
+            FoldedValue::NonNull(_) | FoldedValue::Null(_) => Self::RowDependent,
+        }
+    }
+
+    /// Decide one `CASE WHEN <condition>` branch, which matches when the condition is true.
+    fn for_searched_branch(when: &SpannedExpr, folded_when: Option<FoldedValue>) -> Self {
+        if let Expr::Literal(literal) = &when.inner {
+            match literal {
+                Literal::Bool(true) => return Self::AlwaysTaken,
+                Literal::Bool(false) => return Self::NeverTaken,
+                // A written NULL is not a match. Constant folding reports it as unfoldable rather
+                // than as false, so the literal is decided here instead.
+                Literal::Null => return Self::NeverTaken,
+                Literal::Int64(_) | Literal::Float64(_) | Literal::String(_) => {}
+            }
+        }
+
+        match folded_when {
+            Some(FoldedValue::NonNull(ScalarValue::Boolean(true))) => Self::AlwaysTaken,
+            Some(FoldedValue::NonNull(ScalarValue::Boolean(false))) => Self::NeverTaken,
+            Some(FoldedValue::NonNull(_) | FoldedValue::Null(_)) | None => Self::RowDependent,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     PassthroughByName,
@@ -1606,78 +1656,81 @@ impl Compiler {
         span: Span,
     ) -> Result<RegisterRef, CompileError> {
         let outer_mask = self.current_error_mask;
-        let folded_operand = operand.map(fold_constant_expr).transpose()?.flatten();
-        let mut active_branches = Vec::with_capacity(branches.len());
-        let mut effective_else = else_result;
+        let folded_operand = match operand {
+            Some(operand) => fold_constant_expr(operand)?,
+            None => None,
+        };
+        let mut row_dependent = Vec::with_capacity(branches.len());
+        let mut otherwise_result = else_result;
 
+        // Scan the written branches, dropping the ones that can never match and stopping at the
+        // first one that always matches, whose result then answers every row.
         for branch in branches {
-            let known_match = if operand.is_some() {
-                if let Some(operand) = &folded_operand {
-                    if let Some(when) = fold_constant_expr(&branch.when)?
-                        && let Some(value) = fold_binary_expr(BinaryOp::Eq, operand.clone(), when)
-                    {
-                        match value {
-                            FoldedValue::NonNull(ScalarValue::Boolean(value)) => Some(value),
-                            FoldedValue::NonNull(_) | FoldedValue::Null(_) => None,
-                        }
-                    } else {
-                        None
+            // A simple CASE compares each WHEN value against the operand, while a searched CASE
+            // reads each WHEN as a Boolean condition. The written operand decides which form this
+            // is, because a folded operand of `None` only says the operand is not a constant.
+            let selection = if operand.is_some() {
+                match &folded_operand {
+                    Some(folded_operand) => {
+                        let folded_when = fold_constant_expr(&branch.when)?;
+                        BranchSelection::for_simple_branch(folded_operand, folded_when)
                     }
-                } else {
-                    None
+                    // A non-constant operand decides nothing, so no WHEN value is folded.
+                    None => BranchSelection::RowDependent,
                 }
             } else {
-                match &branch.when.inner {
-                    Expr::Literal(Literal::Bool(value)) => Some(*value),
-                    Expr::Literal(Literal::Null) => Some(false),
-                    _ => match fold_constant_expr(&branch.when)? {
-                        Some(FoldedValue::NonNull(ScalarValue::Boolean(value))) => Some(value),
-                        Some(FoldedValue::NonNull(_) | FoldedValue::Null(_)) | None => None,
-                    },
-                }
+                let folded_when = fold_constant_expr(&branch.when)?;
+                BranchSelection::for_searched_branch(&branch.when, folded_when)
             };
-            match known_match {
-                Some(false) => {}
-                Some(true) => {
-                    effective_else = Some(&branch.result);
+
+            match selection {
+                BranchSelection::NeverTaken => {}
+                BranchSelection::AlwaysTaken => {
+                    otherwise_result = Some(&branch.result);
                     break;
                 }
-                None => active_branches.push(branch),
+                BranchSelection::RowDependent => row_dependent.push(branch),
             }
         }
 
-        if active_branches.is_empty() {
-            return self.compile_case_result(effective_else, result_type, outer_mask, span);
+        if row_dependent.is_empty() {
+            return self.compile_case_result(otherwise_result, result_type, outer_mask, span);
         }
 
-        let operand_reg = operand
-            .map(|operand| self.compile_expr(operand))
-            .transpose()?;
-        let mut matched = None;
-        let mut select_arms = Vec::with_capacity(active_branches.len());
+        let operand_reg = match operand {
+            Some(operand) => Some(self.compile_expr(operand)?),
+            None => None,
+        };
+        let mut matched: Option<RegisterRef> = None;
+        let mut select_arms = Vec::with_capacity(row_dependent.len());
 
-        for branch in active_branches {
+        for branch in row_dependent {
+            // Rows an earlier branch already answered must not observe this branch at all, so both
+            // the condition and the result compile under a mask narrowed to the rows still open.
             let unmatched = matched.map(|matched| self.emit_boolean_not(matched, span));
-            let eligible = unmatched
-                .map(|unmatched| self.combine_with_outer_mask(outer_mask, unmatched, span));
-            let condition_mask = eligible.or(outer_mask);
+            let condition_mask = match unmatched {
+                Some(unmatched) => Some(self.combine_with_outer_mask(outer_mask, unmatched, span)),
+                None => outer_mask,
+            };
             let condition = self.with_error_mask(condition_mask, |compiler| {
                 let when = compiler.compile_expr(&branch.when)?;
-                Ok(match operand_reg {
-                    Some(operand) => {
-                        compiler.emit_boolean_binary(BinaryOp::Eq, operand, when, branch.when.span)
-                    }
-                    None => when,
-                })
+                let Some(operand) = operand_reg else {
+                    return Ok(when);
+                };
+                let compared =
+                    compiler.emit_boolean_binary(BinaryOp::Eq, operand, when, branch.when.span);
+                Ok(compared)
             })?;
-            let normalized = self.normalize_condition(condition, branch.when.span);
-            let selected = match unmatched {
+            // `Select` applies its arms in reverse, so each arm carries the branch's own match and
+            // first-match order is resolved there rather than in the arm mask.
+            let branch_match = self.normalize_condition(condition, branch.when.span);
+            let first_match = match unmatched {
                 Some(unmatched) => {
-                    self.emit_boolean_binary(BinaryOp::And, unmatched, normalized, span)
+                    self.emit_boolean_binary(BinaryOp::And, unmatched, branch_match, span)
                 }
-                None => normalized,
+                None => branch_match,
             };
-            let selected = self.combine_with_outer_mask(outer_mask, selected, span);
+            let selected = self.combine_with_outer_mask(outer_mask, first_match, span);
             let value = self.compile_case_result(
                 Some(&branch.result),
                 result_type,
@@ -1685,21 +1738,25 @@ impl Compiler {
                 branch.result.span,
             )?;
             select_arms.push(SelectArm {
-                mask: normalized,
+                mask: branch_match,
                 value,
             });
-            matched = Some(match matched {
-                Some(matched) => self.emit_boolean_binary(BinaryOp::Or, matched, normalized, span),
-                None => normalized,
-            });
+            matched = match matched {
+                Some(previous) => {
+                    Some(self.emit_boolean_binary(BinaryOp::Or, previous, branch_match, span))
+                }
+                None => Some(branch_match),
+            };
         }
 
-        let else_mask = matched.map(|matched| {
-            let unmatched = self.emit_boolean_not(matched, span);
-            self.combine_with_outer_mask(outer_mask, unmatched, span)
-        });
-        let else_mask = else_mask.or(outer_mask);
-        let otherwise = self.compile_case_result(effective_else, result_type, else_mask, span)?;
+        let else_mask = match matched {
+            Some(matched) => {
+                let unmatched = self.emit_boolean_not(matched, span);
+                Some(self.combine_with_outer_mask(outer_mask, unmatched, span))
+            }
+            None => outer_mask,
+        };
+        let otherwise = self.compile_case_result(otherwise_result, result_type, else_mask, span)?;
         let output_type = Self::register_type_for_data_type(result_type, span, "CASE result")?;
         let dst = self.alloc_temp(output_type);
         self.emit(
@@ -1721,21 +1778,23 @@ impl Compiler {
         span: Span,
     ) -> Result<RegisterRef, CompileError> {
         self.with_error_mask(error_mask, |compiler| {
-            if result.is_none_or(|result| matches!(result.inner, Expr::Literal(Literal::Null))) {
-                let ty = Self::register_type_for_data_type(result_type, span, "CASE NULL result")?;
-                let dst = compiler.alloc_temp(ty);
-                compiler.emit(
-                    InstructionKind::NullLiteral {
-                        dst,
-                        data_type: result_type.clone(),
-                    },
-                    span,
-                );
-                Ok(dst)
-            } else {
-                compiler
-                    .compile_expr(result.verified("the branch above returned for the absent case"))
+            if let Some(result) = result
+                && !matches!(result.inner, Expr::Literal(Literal::Null))
+            {
+                return compiler.compile_expr(result);
             }
+
+            // An omitted ELSE and a written NULL both produce the same typed null.
+            let ty = Self::register_type_for_data_type(result_type, span, "CASE NULL result")?;
+            let dst = compiler.alloc_temp(ty);
+            compiler.emit(
+                InstructionKind::NullLiteral {
+                    dst,
+                    data_type: result_type.clone(),
+                },
+                span,
+            );
+            Ok(dst)
         })
     }
 
@@ -3228,6 +3287,16 @@ mod tests {
         })
     }
 
+    fn select_arm_count(compiled: &CompiledProgram) -> usize {
+        let mut arm_count = 0;
+        for instruction in &compiled.instructions {
+            if let InstructionKind::Select { arms, .. } = &instruction.kind {
+                arm_count += arms.len();
+            }
+        }
+        arm_count
+    }
+
     fn schema(fields: Vec<Field>) -> Arc<Schema> {
         Arc::new(Schema::new(fields))
     }
@@ -3407,6 +3476,63 @@ mod tests {
                 .iter()
                 .all(|instruction| !matches!(instruction.kind, InstructionKind::Select { .. }))
         );
+    }
+
+    #[test]
+    fn folds_statically_decided_case_branches() {
+        let schema = schema(vec![
+            Field::new("number", DataType::Int64, false),
+            Field::new("kind", DataType::Utf8, false),
+        ]);
+        let result_field = vec![Field::new("result", DataType::Int64, false)];
+
+        let dropped_false = parse_program(
+            "SET result = CASE WHEN FALSE THEN 1 WHEN input.number = 0 THEN 2 ELSE 3 END",
+        )
+        .expect("program must parse");
+        let compiled = compile_program_with_output_fields(
+            &dropped_false,
+            schema.clone(),
+            result_field.clone(),
+        )
+        .expect("a statically false branch must compile");
+        assert_eq!(select_arm_count(&compiled), 1);
+
+        let stops_at_true = parse_program(
+            "SET result = CASE WHEN input.number = 0 THEN 1 WHEN TRUE THEN 2 WHEN input.number = \
+             1 THEN 3 ELSE 4 END",
+        )
+        .expect("program must parse");
+        let compiled = compile_program_with_output_fields(
+            &stops_at_true,
+            schema.clone(),
+            result_field.clone(),
+        )
+        .expect("a statically true branch must compile");
+        assert_eq!(select_arm_count(&compiled), 1);
+
+        let constant_operand =
+            parse_program("SET result = CASE \"b\" WHEN \"a\" THEN 1 WHEN \"b\" THEN 2 ELSE 3 END")
+                .expect("program must parse");
+        let compiled = compile_program_with_output_fields(
+            &constant_operand,
+            schema.clone(),
+            result_field.clone(),
+        )
+        .expect("a constant simple CASE must compile");
+        assert_eq!(select_arm_count(&compiled), 0);
+
+        let constant_operand_with_row_branch = parse_program(
+            "SET result = CASE \"z\" WHEN \"a\" THEN 1 WHEN input.kind THEN 2 ELSE 3 END",
+        )
+        .expect("program must parse");
+        let compiled = compile_program_with_output_fields(
+            &constant_operand_with_row_branch,
+            schema,
+            result_field,
+        )
+        .expect("a partly folded simple CASE must compile");
+        assert_eq!(select_arm_count(&compiled), 1);
     }
 
     #[test]

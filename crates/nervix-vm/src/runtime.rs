@@ -3672,6 +3672,33 @@ mod tests {
     }
 
     #[test]
+    fn case_falls_back_to_the_first_statically_true_branch() {
+        let parsed = parse_program(
+            "SET result = CASE WHEN input.number = 0 THEN 1 WHEN TRUE THEN 2 ELSE 3 END",
+        )
+        .expect("conditional expression must parse");
+        let schema = schema(vec![Field::new("number", DataType::Int64, true)]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![Field::new("result", DataType::Int64, true)],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![TypedArray::Int64(Int64Array::from(vec![Some(0), Some(7)]))],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Int64(result) = output_column(&output, "result") else {
+            panic!("result must be Int64");
+        };
+
+        assert_eq!(result.value(0), 1);
+        assert_eq!(result.value(1), 2);
+    }
+
+    #[test]
     fn executes_null_assignment_to_declared_optional_field() {
         let parsed = parse_program("SET maybe = NULL").expect("must parse");
         let schema = schema(vec![Field::new("value", DataType::Utf8, true)]);
