@@ -1822,9 +1822,10 @@ impl Runtime {
                                 .unwrap_or(Duration::ZERO)
                         })
                     };
-                let wake = match expiration_sleep {
-                    Some(sleep) => match RuntimeWake::after(sleep) {
-                        Ok(wake) => wake,
+                let mut wake = RuntimeWake::never();
+                if let Some(sleep) = expiration_sleep {
+                    match RuntimeWake::after(sleep) {
+                        Ok(scheduled) => wake = scheduled,
                         Err(error) => {
                             warn!(
                                 domain = domain.as_str(),
@@ -1834,9 +1835,8 @@ impl Runtime {
                             );
                             break 'state_task;
                         }
-                    },
-                    None => RuntimeWake::never(),
-                };
+                    }
+                }
                 let work = match interaction.next(wake).await {
                     Ok(work) => work,
                     Err(error) => {

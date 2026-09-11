@@ -1,9 +1,10 @@
-//! The Arrow IPC body a relay batch travels as, and the only way to produce or consume one.
+//! The Arrow IPC body a batch travels as, and the only way to produce or consume one.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Encoding a batch into one shared immutable body and decoding a body back into a
-//!   batch, both off the async workers and both charged to the relay budget before they allocate.
+//!   batch, both off the async workers and both charged to the budget of the carriage they travel
+//!   under before they allocate.
 //! - **Depends on.** The executor that admits and charges the work, and Arrow's IPC codec.
 //! - **Must not know.** Who sends the body, how many destinations it has, or what happens to the
 //!   batch afterwards.
@@ -61,6 +62,47 @@ impl ArrowBodyError {
     }
 }
 
+/// Which budget and which limits one Arrow body is produced and consumed under. A body's carriage
+/// is a property of the path it travels, so a relay batch and a sealed snapshot section never
+/// share a ceiling or a memory class by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrowBodyCarriage {
+    /// One relay batch on the data plane.
+    Relay,
+    /// One Arrow section of a sealed runtime snapshot on the bulk path.
+    SnapshotSection,
+}
+
+impl ArrowBodyCarriage {
+    const fn memory_class(self) -> MemoryClass {
+        match self {
+            Self::Relay => MemoryClass::Relay,
+            Self::SnapshotSection => MemoryClass::Bulk,
+        }
+    }
+
+    const fn cpu_class(self) -> CpuClass {
+        match self {
+            Self::Relay => CpuClass::Data,
+            Self::SnapshotSection => CpuClass::Bulk,
+        }
+    }
+
+    fn encoded_limit(self, executor: &Executor) -> u64 {
+        match self {
+            Self::Relay => executor.limits().relay_encoded_bytes.as_u64(),
+            Self::SnapshotSection => executor.limits().snapshot_section_bytes.as_u64(),
+        }
+    }
+
+    fn decoded_limit(self, executor: &Executor) -> u64 {
+        match self {
+            Self::Relay => executor.limits().relay_decoded_bytes.as_u64(),
+            Self::SnapshotSection => executor.limits().snapshot_section_bytes.as_u64(),
+        }
+    }
+}
+
 /// What one caller accepts from an untrusted body, checked before the bytes it describes are
 /// turned into columns.
 struct BodyContract {
@@ -68,6 +110,8 @@ struct BodyContract {
     schema: Option<StdArc<ArrowSchema>>,
     /// How many Arrow sections the body may carry.
     max_sections: NonZeroUsize,
+    /// The budget and ceilings this body travels under.
+    carriage: ArrowBodyCarriage,
 }
 
 impl RuntimeRecordBatch {
@@ -81,28 +125,50 @@ impl RuntimeRecordBatch {
         &self,
         executor: &Executor,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-        let limit = executor.limits().relay_encoded_bytes.as_u64();
+        self.encode_body(executor, ArrowBodyCarriage::Relay).await
+    }
+
+    /// Encode this batch as one Arrow section of a sealed runtime snapshot, charged to the bulk
+    /// budget and bounded by the section limit rather than by the relay body limit.
+    pub async fn encode_arrow_snapshot_section(
+        &self,
+        executor: &Executor,
+    ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
+        self.encode_body(executor, ArrowBodyCarriage::SnapshotSection)
+            .await
+    }
+
+    async fn encode_body(
+        &self,
+        executor: &Executor,
+        carriage: ArrowBodyCarriage,
+    ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
+        let limit = carriage.encoded_limit(executor);
         // Charge what the columns already occupy, bounded by the body limit, before the writer
-        // allocates anything. It grows from there only while the relay class can back it.
+        // allocates anything. It grows from there only while the carriage's class can back it.
         let estimate: u64 = self.batch.get_array_memory_size().arch_into();
         let reservation = executor
-            .reserve(MemoryClass::Relay, estimate.min(limit))
+            .reserve(carriage.memory_class(), estimate.min(limit))
             .await
             .change_context(ArrowBodyError::Admission)?;
         let batch = self.batch.clone();
         executor
-            .run_cpu(CpuClass::Data, reservation, move |charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(ArrowBodyError::Cancelled)?;
-                let buffer = BudgetedBuffer::with_limit(charge, limit);
-                let mut writer = StreamWriter::try_new(buffer, batch.schema_ref())
-                    .map_err(ArrowBodyError::encoding)?;
-                writer.write(&batch).map_err(ArrowBodyError::encoding)?;
-                writer.finish().map_err(ArrowBodyError::encoding)?;
-                let buffer = writer.into_inner().map_err(ArrowBodyError::encoding)?;
-                Ok(ChargedBytes::from_buffer(buffer))
-            })
+            .run_cpu(
+                carriage.cpu_class(),
+                reservation,
+                move |charge, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(ArrowBodyError::Cancelled)?;
+                    let buffer = BudgetedBuffer::with_limit(charge, limit);
+                    let mut writer = StreamWriter::try_new(buffer, batch.schema_ref())
+                        .map_err(ArrowBodyError::encoding)?;
+                    writer.write(&batch).map_err(ArrowBodyError::encoding)?;
+                    writer.finish().map_err(ArrowBodyError::encoding)?;
+                    let buffer = writer.into_inner().map_err(ArrowBodyError::encoding)?;
+                    Ok(ChargedBytes::from_buffer(buffer))
+                },
+            )
             .await
             .change_context(ArrowBodyError::Execution)?
     }
@@ -119,6 +185,27 @@ impl RuntimeRecordBatch {
             BodyContract {
                 schema: None,
                 max_sections: NonZeroUsize::MAX,
+                carriage: ArrowBodyCarriage::Relay,
+            },
+        )
+        .await
+    }
+
+    /// Decode one Arrow section of a sealed runtime snapshot, which must carry exactly one section
+    /// of `expected_schema`. Charged to the bulk budget and bounded by the section limit rather
+    /// than by the relay body limit.
+    pub async fn decode_arrow_snapshot_section(
+        executor: &Executor,
+        expected_schema: StdArc<ArrowSchema>,
+        body: ChargedBytes,
+    ) -> Result<Self, Report<ArrowBodyError>> {
+        decode_body(
+            executor,
+            body,
+            BodyContract {
+                schema: Some(expected_schema),
+                max_sections: NonZeroUsize::MIN,
+                carriage: ArrowBodyCarriage::SnapshotSection,
             },
         )
         .await
@@ -163,6 +250,7 @@ impl CompiledSchema {
             BodyContract {
                 schema: Some(StdArc::clone(&self.arrow_schema)),
                 max_sections: NonZeroUsize::MIN,
+                carriage: ArrowBodyCarriage::Relay,
             },
         )
         .await?;
@@ -182,17 +270,17 @@ async fn decode_body(
     body: ChargedBytes,
     contract: BodyContract,
 ) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
-    let limits = *executor.limits();
+    let encoded_limit = contract.carriage.encoded_limit(executor);
     let encoded: u64 = body.len().arch_into();
     // The encoded length is known before anything is decoded, so an oversized body is refused here
     // rather than after its buffers have been allocated.
-    if encoded > limits.relay_encoded_bytes.as_u64() {
+    if encoded > encoded_limit {
         return Err(Report::new(ArrowBodyError::BodyTooLarge {
             size: encoded,
-            limit: limits.relay_encoded_bytes.as_u64(),
+            limit: encoded_limit,
         }));
     }
-    let decoded_limit = limits.relay_decoded_bytes.as_u64();
+    let decoded_limit = contract.carriage.decoded_limit(executor);
     // Charge the data the decoder will produce and the scratch its conversion overlaps with, both
     // before it allocates either. Uncompressed Arrow decodes to about the size it was encoded at,
     // so one encoded size covers the decoded columns and a second covers the overlap. The charge
@@ -203,62 +291,66 @@ async fn decode_body(
         .unwrap_or(decoded_limit)
         .min(decoded_limit);
     let reservation = executor
-        .reserve(MemoryClass::Relay, charge)
+        .reserve(contract.carriage.memory_class(), charge)
         .await
         .change_context(ArrowBodyError::Admission)?;
     executor
-        .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
-            cancellation
-                .check()
-                .change_context(ArrowBodyError::Cancelled)?;
-            let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
-                .map_err(ArrowBodyError::decoding)?;
-            let schema = reader.schema();
-            if let Some(expected) = &contract.schema
-                && schema.as_ref() != expected.as_ref()
-            {
-                return Err(ArrowBodyError::decoding(
-                    "arrow ipc schema does not match the compiled schema",
-                ));
-            }
-            let mut batches = Vec::new();
-            let mut decoded = 0_u64;
-            for next in reader.by_ref() {
+        .run_cpu(
+            contract.carriage.cpu_class(),
+            reservation,
+            move |_charge, cancellation| {
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
-                let batch = next.map_err(ArrowBodyError::decoding)?;
-                if batches.len() >= contract.max_sections.get() {
-                    return Err(Report::new(ArrowBodyError::TooManySections {
-                        sections: batches
-                            .len()
-                            .checked_add(1)
-                            .unwrap_or(contract.max_sections.get()),
-                        limit: contract.max_sections.get(),
-                    }));
+                let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
+                    .map_err(ArrowBodyError::decoding)?;
+                let schema = reader.schema();
+                if let Some(expected) = &contract.schema
+                    && schema.as_ref() != expected.as_ref()
+                {
+                    return Err(ArrowBodyError::decoding(
+                        "arrow ipc schema does not match the compiled schema",
+                    ));
                 }
-                let section = batch_payload_bytes(&batch);
-                decoded = decoded.checked_add(section).ok_or_else(|| {
-                    Report::new(ArrowBodyError::DecodedTooLarge {
-                        size: u64::MAX,
-                        limit: decoded_limit,
-                    })
-                })?;
-                // Each section is measured as it lands, so a body whose declared buffers expand
-                // past the limit stops at the section that crossed it.
-                if decoded > decoded_limit {
-                    return Err(Report::new(ArrowBodyError::DecodedTooLarge {
-                        size: decoded,
-                        limit: decoded_limit,
-                    }));
+                let mut batches = Vec::new();
+                let mut decoded = 0_u64;
+                for next in reader.by_ref() {
+                    cancellation
+                        .check()
+                        .change_context(ArrowBodyError::Cancelled)?;
+                    let batch = next.map_err(ArrowBodyError::decoding)?;
+                    if batches.len() >= contract.max_sections.get() {
+                        return Err(Report::new(ArrowBodyError::TooManySections {
+                            sections: batches
+                                .len()
+                                .checked_add(1)
+                                .unwrap_or(contract.max_sections.get()),
+                            limit: contract.max_sections.get(),
+                        }));
+                    }
+                    let section = batch_payload_bytes(&batch);
+                    decoded = decoded.checked_add(section).ok_or_else(|| {
+                        Report::new(ArrowBodyError::DecodedTooLarge {
+                            size: u64::MAX,
+                            limit: decoded_limit,
+                        })
+                    })?;
+                    // Each section is measured as it lands, so a body whose declared buffers expand
+                    // past the limit stops at the section that crossed it.
+                    if decoded > decoded_limit {
+                        return Err(Report::new(ArrowBodyError::DecodedTooLarge {
+                            size: decoded,
+                            limit: decoded_limit,
+                        }));
+                    }
+                    batches.push(batch);
                 }
-                batches.push(batch);
-            }
-            if batches.is_empty() && contract.schema.is_some() {
-                return Err(Report::new(ArrowBodyError::NoSection));
-            }
-            RuntimeRecordBatch::from_decoded_sections(schema, batches)
-        })
+                if batches.is_empty() && contract.schema.is_some() {
+                    return Err(Report::new(ArrowBodyError::NoSection));
+                }
+                RuntimeRecordBatch::from_decoded_sections(schema, batches)
+            },
+        )
         .await
         .change_context(ArrowBodyError::Execution)?
 }

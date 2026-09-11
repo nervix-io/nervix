@@ -1515,7 +1515,7 @@ impl Runtime {
 mod tests {
     use std::sync::{Arc as StdArc, atomic::Ordering};
 
-    use ahash::{HashMap, HashSet};
+    use ahash::HashMap;
     use arc_swap::ArcSwapOption;
     use nervix_models::{
         AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,
@@ -1573,7 +1573,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: HashMap::default(),
         };
         let inputs = [
@@ -1732,7 +1731,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: HashMap::default(),
         };
         let graph = StdArc::new(ArcSwapOption::from(None));
@@ -1880,7 +1878,6 @@ mod tests {
                     )]
                     .into_iter()
                     .collect(),
-                    materialized_streams: HashSet::default(),
                     processors: HashMap::default(),
                 },
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),

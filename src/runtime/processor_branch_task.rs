@@ -315,8 +315,8 @@ pub(super) async fn run_processor_node_runtime(
         let maintenance_timeout = if ownership_frozen {
             OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
         } else {
-            next_expiration_scan
-                .min(next_lru_snapshot)
+            let next_maintenance = next_expiration_scan.min(next_lru_snapshot);
+            next_maintenance
                 .checked_duration_since(Instant::now())
                 .unwrap_or(Duration::ZERO)
         };
@@ -1167,7 +1167,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use ahash::{HashMap, HashSet};
+    use ahash::HashMap;
     use arc_swap::ArcSwapOption;
     use nervix_models::{
         CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
@@ -1216,7 +1216,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: [(
                 named("dedup_users"),
                 RelayProcessorTemplate {

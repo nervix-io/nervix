@@ -634,45 +634,10 @@ impl BranchInstanceTemplate {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let materialized_states = self
-            .materialized_streams
-            .iter()
-            .filter(|relay| !runtime.relay_is_cluster_scheduled(domain, relay))
-            .map(|relay| {
-                let execution = runtime.inner.executions.get(domain).ok_or_else(|| {
-                    format!(
-                        "materialized relay '{}' is not instantiated in domain '{}'",
-                        relay.as_str(),
-                        domain.as_str()
-                    )
-                })?;
-                let Some(spec) = execution.materialized_stream_specs.get(relay) else {
-                    return Err(format!(
-                        "materialized relay '{}' is not instantiated in domain '{}'",
-                        relay.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                let schema = spec.schema.clone();
-                let placement = runtime.state_placement(
-                    domain,
-                    RuntimeStateKind::MaterializedRelay,
-                    ModelKind::Relay,
-                    relay,
-                    key.clone(),
-                );
-                let mut assignment = runtime
-                    .replicated_materialized_stream_state(placement, schema, None, Vec::new(), None)
-                    .map_err(|error| error.to_string())?;
-                let state = assignment.originator.take().ok_or_else(|| {
-                    format!(
-                        "branch-local materialized relay '{}' lacks authoritative state access",
-                        relay.as_str()
-                    )
-                })?;
-                Ok((relay.clone(), state))
-            })
-            .collect::<Result<HashMap<_, _>, String>>()?;
+        // Branch-local materialized states are opened as their relays first materialize a batch,
+        // because opening a persisted snapshot is admitted, charged work that this synchronous
+        // instantiation cannot wait for.
+        let materialized_states = HashMap::default();
         let processors = self
             .processors
             .iter()

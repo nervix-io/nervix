@@ -1125,10 +1125,11 @@ impl EmitterRetrySchedule {
     }
 
     fn next_ack_alive_at(retry_at: PhysicalDeadline) -> PhysicalDeadline {
-        PhysicalDeadlineCapability::new()
+        let keepalive = PhysicalDeadlineCapability::new()
             .after(RETRY_ACK_ALIVE_EACH)
-            .assured("the acknowledgement keepalive interval is a fixed hundred milliseconds")
-            .min(retry_at)
+            .assured("the acknowledgement keepalive interval is a fixed hundred milliseconds");
+        // The last keepalive of a wait lands on the retry itself rather than after it.
+        keepalive.min(retry_at)
     }
 
     /// The wake the emitter asks for: the retry and keepalive deadlines while a retry is
@@ -3464,17 +3465,15 @@ impl EmitterTask {
             let _client_mounts = resolved_client
                 .as_ref()
                 .and_then(|config| config.mounts.clone());
-            let interaction_inputs = inputs
-                .into_iter()
-                .map(|(relay, receiver)| {
-                    let input = RelayInteractionInput::new(relay, receiver, input_collect_policy);
-                    if input_collect_policy.is_some() {
-                        input.with_domain_clock(domain_clock.clone())
-                    } else {
-                        input
-                    }
-                })
-                .collect();
+            let mut interaction_inputs = Vec::with_capacity(inputs.len());
+            for (relay, receiver) in inputs {
+                let input = RelayInteractionInput::new(relay, receiver, input_collect_policy);
+                if input_collect_policy.is_some() {
+                    interaction_inputs.push(input.with_domain_clock(domain_clock.clone()));
+                } else {
+                    interaction_inputs.push(input);
+                }
+            }
             let mut interaction = RelayInteraction::with_commands(
                 interaction_inputs,
                 interaction_shutdown_rx,
