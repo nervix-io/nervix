@@ -1404,7 +1404,30 @@ impl Runtime {
                         batch,
                     } => {
                         debug_assert_eq!(input_relay, task_from_relay);
-                        let delivery_observation = batch.delivery_observation(current_timestamp());
+                        // Delivery latency compares the batch's domain ingestion watermarks
+                        // against the domain time at which this input was accepted, so both
+                        // operands stay in the domain's logical coordinate.
+                        let accepted_at = match domain_clock.snapshot() {
+                            Ok(snapshot) => snapshot.now(),
+                            Err(error) => {
+                                let reason = format!(
+                                    "reingestor '{}' in domain '{}' could not read the domain \
+                                     time of accepted input: {error}",
+                                    task_reingestor.as_str(),
+                                    task_domain.as_str(),
+                                );
+                                runtime.handle_internal_processor_error_for_acks(
+                                    &task_domain,
+                                    ModelKind::Reingestor,
+                                    ModelName::from(&task_reingestor),
+                                    &task_error_policies,
+                                    batch.acks.iter(),
+                                    reason,
+                                );
+                                continue;
+                            }
+                        };
+                        let delivery_observation = batch.delivery_observation(accepted_at);
                         let physical_node_id =
                             runtime.inner.remote_dispatch.local_node_id.read().clone();
                         runtime
@@ -1519,7 +1542,7 @@ mod tests {
     use arc_swap::ArcSwapOption;
     use nervix_models::{
         AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,
-        ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName, Timestamp,
+        ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
     };
     use tokio::{
         sync::{Mutex, mpsc, watch},
@@ -1752,6 +1775,9 @@ mod tests {
             pending: HashMap::default(),
         };
 
+        let domain_clock = runtime
+            .bind_domain_clock(&domain)
+            .expect("the fixture installs a running unpaced clock");
         for round in 0..3 {
             let mut prepared = Vec::new();
             for index in 0..64 {
@@ -1777,7 +1803,7 @@ mod tests {
                     ingestor: &named("tenant_partition"),
                     graph: &graph,
                     template: &template,
-                    now: Timestamp::from_unix_nanos(1_000_000_000 + i64::from(round)),
+                    domain_clock: &domain_clock,
                 },
                 &mut instances,
                 prepared,

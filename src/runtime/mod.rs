@@ -341,7 +341,7 @@ use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, IngestorRouteRuntime,
     MaterializedBatchWaitContext, PendingMaterializedBatch, branch_lru_placement,
     flush_branch_junction, internal_processor_error_policies, output_error_policies,
-    persist_branch_instance_lru_snapshot, wall_duration_until_domain_deadline,
+    persist_branch_instance_lru_snapshot,
 };
 pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 use client_config::{
@@ -357,7 +357,7 @@ use correlator::{
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
     DomainClockLifecycle, DomainExecutionSnapshot, LogicalDeadline,
-    checked_add_duration_to_timestamp, current_timestamp,
+    checked_add_duration_to_timestamp, current_timestamp, wait_for_branch_deadline,
 };
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
