@@ -13,11 +13,13 @@ use std::{
     time::Duration,
 };
 
-use nervix_interconnect::{InterconnectRequest, PoolClass, RequestSubquota};
+use nervix_interconnect::{
+    InterconnectDuplexRequest, InterconnectRequest, PoolClass, RequestSubquota,
+};
 use nervix_models::ClusterNodeName;
 use openraft::{
     BasicNode, Entry, LogId, Membership, SnapshotMeta, StoredMembership, Vote, entry::EntryPayload,
-    raft::TransferLeaderError,
+    raft::{StreamAppendError, StreamAppendResult, TransferLeaderError},
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
@@ -227,10 +229,6 @@ impl AppendEntriesRecord {
         }
     }
 
-    pub(crate) fn is_heartbeat(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     pub(crate) fn origin_node_id(&self) -> &ClusterNodeName {
         &self.vote.node_id
     }
@@ -283,14 +281,47 @@ impl AppendEntriesResponseRecord {
     }
 }
 
+/// One ordered append stream from a leader to one follower.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ReplicateRequest(pub(crate) AppendEntriesRecord);
+pub(crate) struct OpenAppendStream {
+    pub(crate) leader_node_id: ClusterNodeName,
+}
 
-impl InterconnectRequest for ReplicateRequest {
-    type Response = Result<AppendEntriesResponseRecord, ConsensusRequestError>;
-    const NAME: &'static str = "raft_replicate";
+impl InterconnectDuplexRequest for OpenAppendStream {
+    type Item = AppendEntriesRecord;
+    type Response = Result<StreamAppendResultRecord, ConsensusRequestError>;
+
+    const NAME: &'static str = "raft_append_stream";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+/// What the follower's Raft made of one submitted batch.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum StreamAppendResultRecord {
+    Matching(Option<LogIdRecord>),
+    Conflict(LogIdRecord),
+    HigherVote(VoteRecord),
+}
+
+impl From<StreamAppendResult<TypeConfig>> for StreamAppendResultRecord {
+    fn from(value: StreamAppendResult<TypeConfig>) -> Self {
+        match value {
+            Ok(matching) => Self::Matching(matching.map(Into::into)),
+            Err(StreamAppendError::Conflict(log_id)) => Self::Conflict(log_id.into()),
+            Err(StreamAppendError::HigherVote(vote)) => Self::HigherVote(vote.into()),
+        }
+    }
+}
+
+impl StreamAppendResultRecord {
+    pub(crate) fn into_result(self) -> StreamAppendResult<TypeConfig> {
+        match self {
+            Self::Matching(matching) => Ok(matching.map(LogIdRecord::into_log_id)),
+            Self::Conflict(log_id) => Err(StreamAppendError::Conflict(log_id.into_log_id())),
+            Self::HigherVote(vote) => Err(StreamAppendError::HigherVote(vote.into_vote())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -418,6 +449,7 @@ pub(crate) struct BeginSnapshotTransfer {
     transfer_id: u64,
     vote: VoteRecord,
     meta: SnapshotMetaRecord,
+    section_count: u32,
     total_bytes: u64,
 }
 
@@ -425,6 +457,7 @@ pub(crate) struct SnapshotTransferStart {
     pub(crate) transfer_id: u64,
     pub(crate) vote: VoteOf,
     pub(crate) meta: SnapshotMetaOf,
+    pub(crate) section_count: u32,
     pub(crate) total_bytes: u64,
 }
 
@@ -433,12 +466,14 @@ impl BeginSnapshotTransfer {
         transfer_id: u64,
         vote: VoteOf,
         meta: SnapshotMetaOf,
+        section_count: u32,
         total_bytes: u64,
     ) -> Self {
         Self {
             transfer_id,
             vote: vote.into(),
             meta: SnapshotMetaRecord::from_meta(&meta),
+            section_count,
             total_bytes,
         }
     }
@@ -448,6 +483,7 @@ impl BeginSnapshotTransfer {
             transfer_id: self.transfer_id,
             vote: self.vote.into_vote(),
             meta: self.meta.into_meta()?,
+            section_count: self.section_count,
             total_bytes: self.total_bytes,
         })
     }
@@ -468,6 +504,8 @@ impl InterconnectRequest for BeginSnapshotTransfer {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SnapshotChunk {
     pub(crate) transfer_id: u64,
+    pub(crate) section_index: u32,
+    pub(crate) section_bytes: u64,
     pub(crate) offset: u64,
     pub(crate) bytes: Vec<u8>,
 }

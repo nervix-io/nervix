@@ -75,10 +75,10 @@ use nervix_client_core::{
 };
 use nervix_consensus::{
     Administrator, Consensus, ConsensusError, ConsensusRuntimeState, ConsensusSettings,
-    ConsensusTransactionError, Observer, Proposer, ReplicatedTransaction, TransactionCommandResult,
-    TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits,
-    TransactionState, TransactionStatement, TransactionStepEffect, TransactionStepResult,
-    UserCredentials,
+    ConsensusTransactionError, Observer, Proposer, RaftRetentionPolicy, ReplicatedTransaction,
+    TransactionCommandResult, TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome,
+    TransactionQueueLimits, TransactionState, TransactionStatement, TransactionStepEffect,
+    TransactionStepResult, UserCredentials,
 };
 use nervix_dataflow_graph::{DataflowGraph, DataflowNodeHealth, DataflowNodeStatus};
 use nervix_execution::MemoryClass;
@@ -2623,6 +2623,39 @@ pub struct Args {
     pub raft_election_timeout_max: Duration,
     #[arg(
         long,
+        env = "NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD",
+        default_value = "10000"
+    )]
+    pub raft_snapshot_entry_threshold: u64,
+    #[arg(
+        long,
+        env = "NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD",
+        default_value = "64MiB",
+        value_parser = parse_human_bytes,
+    )]
+    pub raft_snapshot_byte_threshold: ubyte::ByteUnit,
+    #[arg(
+        long,
+        env = "NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED",
+        default_value = "1000"
+    )]
+    pub raft_covered_log_entries_retained: u64,
+    #[arg(
+        long,
+        env = "NERVIX_RAFT_COVERED_LOG_BYTES_RETAINED",
+        default_value = "64MiB",
+        value_parser = parse_human_bytes,
+    )]
+    pub raft_covered_log_bytes_retained: ubyte::ByteUnit,
+    #[arg(
+        long,
+        env = "NERVIX_RAFT_RETAINED_LOG_CAP",
+        default_value = "1GiB",
+        value_parser = parse_human_bytes,
+    )]
+    pub raft_retained_log_cap: ubyte::ByteUnit,
+    #[arg(
+        long,
         env = "NERVIX_TRANSACTION_IDLE_TIMEOUT",
         default_value = "15m",
         value_parser = parse_human_duration
@@ -3788,6 +3821,8 @@ pub struct Application {
     pub raft_heartbeat_interval: Duration,
     pub raft_election_timeout_min: Duration,
     pub raft_election_timeout_max: Duration,
+    #[builder(default)]
+    pub raft_retention: RaftRetentionPolicy,
     #[builder(default = DEFAULT_TRANSACTION_IDLE_TIMEOUT)]
     pub transaction_idle_timeout: Duration,
     #[builder(default = DEFAULT_TRANSACTION_TOMBSTONE_RETENTION)]
@@ -3977,6 +4012,14 @@ impl TryFrom<Args> for Application {
             .raft_heartbeat_interval(args.raft_heartbeat_interval)
             .raft_election_timeout_min(args.raft_election_timeout_min)
             .raft_election_timeout_max(args.raft_election_timeout_max)
+            .raft_retention(RaftRetentionPolicy {
+                snapshot_entry_threshold: args.raft_snapshot_entry_threshold,
+                snapshot_byte_threshold: args.raft_snapshot_byte_threshold.as_u64(),
+                covered_entries_retained: args.raft_covered_log_entries_retained,
+                covered_bytes_retained: args.raft_covered_log_bytes_retained.as_u64(),
+                retained_log_cap_bytes: args.raft_retained_log_cap.as_u64(),
+                ..RaftRetentionPolicy::default()
+            })
             .transaction_idle_timeout(args.transaction_idle_timeout)
             .transaction_tombstone_retention(args.transaction_tombstone_retention)
             .transaction_max_statements(args.transaction_max_statements)
@@ -18518,6 +18561,7 @@ impl Application {
         let raft_heartbeat_interval = self.raft_heartbeat_interval;
         let raft_election_timeout_min = self.raft_election_timeout_min;
         let raft_election_timeout_max = self.raft_election_timeout_max;
+        let raft_retention = self.raft_retention;
         let transaction_idle_timeout = self.transaction_idle_timeout;
         let transaction_tombstone_retention = self.transaction_tombstone_retention;
         let transaction_max_statements = self.transaction_max_statements;
@@ -18741,6 +18785,7 @@ impl Application {
                 raft_heartbeat_interval,
                 raft_election_timeout_min,
                 raft_election_timeout_max,
+                raft_retention,
             },
         )
         .await
@@ -21067,6 +21112,7 @@ mod tests {
                 raft_heartbeat_interval: Duration::from_millis(50),
                 raft_election_timeout_min: Duration::from_millis(150),
                 raft_election_timeout_max: Duration::from_millis(300),
+                raft_retention: RaftRetentionPolicy::default(),
             },
         )
         .await

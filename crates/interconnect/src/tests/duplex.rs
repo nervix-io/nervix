@@ -66,10 +66,11 @@ async fn a_duplex_stream_answers_every_frame_in_submission_order() {
         .expect("the duplex test stream should open");
 
     for value in 0..PIPELINED_ITEMS {
-        sender
+        let bytes = sender
             .send(CountingItem { value })
             .await
             .expect("every pipelined frame should be submitted");
+        assert!(bytes > 0, "a submitted frame reports the bytes it carried");
     }
     sender
         .finish()

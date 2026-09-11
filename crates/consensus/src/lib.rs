@@ -23,6 +23,7 @@ use std::{
 
 use error_stack::Report;
 use fjall::{Database, Keyspace};
+use futures_util::StreamExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::Transport;
 use nervix_models::{
@@ -61,10 +62,16 @@ use triomphe::Arc;
 
 mod durable_batch;
 mod records;
+mod replication;
+mod retention;
+mod snapshot;
+pub use retention::RaftRetentionPolicy;
+pub use snapshot::SealedSnapshot;
 mod storage;
 mod storage_fault;
 
 use records::{Records, ResourceRecords, ScheduleRecords};
+use replication::AppendPath;
 #[cfg(test)]
 use storage::FjallLogReader;
 use storage::FjallStore;
@@ -332,12 +339,14 @@ pub type VoteOf = Vote<LeaderIdOf<TypeConfig>>;
 pub type StoredMembershipOf =
     StoredMembership<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>;
 pub type SnapshotOf =
-    Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, Cursor<Vec<u8>>>;
+    Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, SealedSnapshot>;
 
 const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// How many consensus transitions a session can fall behind before the bus drops the oldest.
 const CONSENSUS_EVENT_CAPACITY: usize = 256;
-const SNAPSHOT_CHUNK_BYTES: usize = 64 * 1024;
+/// How often a mutation held back by log retention rechecks for reclaimed space.
+const RETENTION_ADMISSION_POLL: Duration = Duration::from_millis(50);
+
 static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -351,6 +360,7 @@ pub struct ConsensusSettings {
     pub raft_heartbeat_interval: Duration,
     pub raft_election_timeout_min: Duration,
     pub raft_election_timeout_max: Duration,
+    pub raft_retention: RaftRetentionPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,11 +533,6 @@ impl StateMachineData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredSnapshotData {
-    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
-    data: Vec<u8>,
-}
 
 #[derive(Debug, Clone)]
 struct PeerHealth {
@@ -535,36 +540,60 @@ struct PeerHealth {
     last_reported_unavailable_at: Option<Instant>,
 }
 
+/// A snapshot a peer is staging into this node's own snapshot storage.
+///
+/// Sections arrive one at a time and are sealed as they complete, so the transfer never holds more
+/// than one section in memory regardless of how large the snapshot is.
 struct IncomingSnapshotTransfer {
     transfer_id: u64,
+    generation: u64,
     vote: VoteOf,
     meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+    section_count: u32,
     total_bytes: u64,
-    snapshot: Vec<u8>,
+    /// The section being assembled, and how many of its declared bytes have arrived.
+    section: PendingSection,
+    staged_sections: u32,
+    staged_bytes: u64,
 }
 
-struct CompletedSnapshotTransfer {
-    vote: VoteOf,
-    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
-    snapshot: Vec<u8>,
+struct PendingSection {
+    index: u32,
+    declared_bytes: u64,
+    bytes: Vec<u8>,
+}
+
+/// One completed section, taken out of the transfer so it can be sealed outside the lock.
+struct StagedSection {
+    generation: u64,
+    index: u32,
+    bytes: Vec<u8>,
 }
 
 impl IncomingSnapshotTransfer {
     fn new(
         transfer_id: u64,
+        generation: u64,
         vote: VoteOf,
         meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+        section_count: u32,
         total_bytes: u64,
-    ) -> Result<Self, Report<SnapshotTransferError>> {
-        usize::try_from(total_bytes)
-            .map_err(|_| Report::new(SnapshotTransferError::UnaddressableLength { total_bytes }))?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             transfer_id,
+            generation,
             vote,
             meta,
+            section_count,
             total_bytes,
-            snapshot: Vec::new(),
-        })
+            section: PendingSection {
+                index: 0,
+                declared_bytes: 0,
+                bytes: Vec::new(),
+            },
+            staged_sections: 0,
+            staged_bytes: 0,
+        }
     }
 
     fn verify_id(&self, transfer_id: u64) -> Result<(), Report<SnapshotTransferError>> {
@@ -577,44 +606,96 @@ impl IncomingSnapshotTransfer {
         Ok(())
     }
 
+    /// Take one chunk, and return the section it completed.
     fn append_chunk(
         &mut self,
         transfer_id: u64,
-        offset: u64,
-        bytes: Vec<u8>,
-    ) -> Result<(), Report<SnapshotTransferError>> {
+        chunk: SnapshotChunkPart,
+        section_limit: u64,
+        chunk_limit: usize,
+    ) -> Result<Option<StagedSection>, Report<SnapshotTransferError>> {
         self.verify_id(transfer_id)?;
-        if bytes.len() > SNAPSHOT_CHUNK_BYTES {
+        if chunk.bytes.len() > chunk_limit {
             return Err(Report::new(SnapshotTransferError::ChunkTooLarge {
-                actual: bytes.len(),
-                limit: SNAPSHOT_CHUNK_BYTES,
+                actual: chunk.bytes.len(),
+                limit: chunk_limit,
             }));
         }
-        let expected_offset = u64::try_from(self.snapshot.len())
+        if chunk.section_bytes > section_limit {
+            return Err(Report::new(SnapshotTransferError::SectionTooLarge {
+                actual: chunk.section_bytes,
+                limit: section_limit,
+            }));
+        }
+        if chunk.section_index != self.staged_sections || chunk.section_index >= self.section_count
+        {
+            return Err(Report::new(SnapshotTransferError::WrongSection {
+                expected: self.staged_sections,
+                actual: chunk.section_index,
+            }));
+        }
+        if chunk.offset == 0 {
+            self.section = PendingSection {
+                index: chunk.section_index,
+                declared_bytes: chunk.section_bytes,
+                bytes: Vec::new(),
+            };
+        }
+        if self.section.index != chunk.section_index
+            || self.section.declared_bytes != chunk.section_bytes
+        {
+            return Err(Report::new(SnapshotTransferError::WrongSection {
+                expected: self.section.index,
+                actual: chunk.section_index,
+            }));
+        }
+        let received = u64::try_from(self.section.bytes.len())
             .assured("supported targets have a pointer width no larger than u64");
-        if offset != expected_offset {
+        if chunk.offset != received {
             return Err(Report::new(SnapshotTransferError::WrongOffset {
-                expected: expected_offset,
-                actual: offset,
+                expected: received,
+                actual: chunk.offset,
             }));
         }
-        let chunk_bytes = u64::try_from(bytes.len())
+        let chunk_bytes = u64::try_from(chunk.bytes.len())
             .assured("supported targets have a pointer width no larger than u64");
-        let end = expected_offset.checked_add(chunk_bytes).ok_or_else(|| {
+        let end = received.checked_add(chunk_bytes).ok_or_else(|| {
+            Report::new(SnapshotTransferError::ExceedsDeclaredLength {
+                declared: self.section.declared_bytes,
+            })
+        })?;
+        if end > self.section.declared_bytes {
+            return Err(Report::new(SnapshotTransferError::ExceedsDeclaredLength {
+                declared: self.section.declared_bytes,
+            }));
+        }
+        self.section
+            .bytes
+            .try_reserve(chunk.bytes.len())
+            .map_err(|_| Report::new(SnapshotTransferError::Allocation { requested: end }))?;
+        self.section.bytes.extend_from_slice(&chunk.bytes);
+        if end < self.section.declared_bytes {
+            return Ok(None);
+        }
+        self.staged_sections = self
+            .staged_sections
+            .checked_add(1)
+            .ok_or_else(|| Report::new(SnapshotTransferError::TooManySections)) ?;
+        self.staged_bytes = self.staged_bytes.checked_add(end).ok_or_else(|| {
             Report::new(SnapshotTransferError::ExceedsDeclaredLength {
                 declared: self.total_bytes,
             })
         })?;
-        if end > self.total_bytes {
+        if self.staged_bytes > self.total_bytes {
             return Err(Report::new(SnapshotTransferError::ExceedsDeclaredLength {
                 declared: self.total_bytes,
             }));
         }
-        self.snapshot
-            .try_reserve(bytes.len())
-            .map_err(|_| Report::new(SnapshotTransferError::Allocation { requested: end }))?;
-        self.snapshot.extend_from_slice(&bytes);
-        Ok(())
+        Ok(Some(StagedSection {
+            generation: self.generation,
+            index: self.section.index,
+            bytes: std::mem::take(&mut self.section.bytes),
+        }))
     }
 
     fn complete(
@@ -622,20 +703,36 @@ impl IncomingSnapshotTransfer {
         transfer_id: u64,
     ) -> Result<CompletedSnapshotTransfer, Report<SnapshotTransferError>> {
         self.verify_id(transfer_id)?;
-        let actual = u64::try_from(self.snapshot.len())
-            .assured("supported targets have a pointer width no larger than u64");
-        if actual != self.total_bytes {
+        if self.staged_sections != self.section_count || self.staged_bytes != self.total_bytes {
             return Err(Report::new(SnapshotTransferError::Incomplete {
                 expected: self.total_bytes,
-                actual,
+                actual: self.staged_bytes,
             }));
         }
         Ok(CompletedSnapshotTransfer {
+            generation: self.generation,
             vote: self.vote,
             meta: self.meta,
-            snapshot: self.snapshot,
+            section_count: self.section_count,
+            total_bytes: self.total_bytes,
         })
     }
+}
+
+struct CompletedSnapshotTransfer {
+    generation: u64,
+    vote: VoteOf,
+    meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+    section_count: u32,
+    total_bytes: u64,
+}
+
+/// One arriving chunk of one snapshot section.
+struct SnapshotChunkPart {
+    section_index: u32,
+    section_bytes: u64,
+    offset: u64,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -644,10 +741,14 @@ enum SnapshotTransferError {
     Missing { peer: ClusterNodeName },
     #[error("snapshot transfer {actual} superseded transfer {expected}")]
     Superseded { expected: u64, actual: u64 },
-    #[error("snapshot transfer declares an unaddressable {total_bytes}-byte length")]
-    UnaddressableLength { total_bytes: u64 },
     #[error("snapshot chunk offset {actual} differs from expected offset {expected}")]
     WrongOffset { expected: u64, actual: u64 },
+    #[error("snapshot chunk names section {actual}, expected section {expected}")]
+    WrongSection { expected: u32, actual: u32 },
+    #[error("snapshot section declares {actual} bytes, exceeding the {limit}-byte limit")]
+    SectionTooLarge { actual: u64, limit: u64 },
+    #[error("snapshot transfer staged more sections than it declared")]
+    TooManySections,
     #[error("snapshot chunk contains {actual} bytes, exceeding the {limit}-byte limit")]
     ChunkTooLarge { actual: usize, limit: usize },
     #[error("snapshot transfer would exceed its declared {declared}-byte length")]
@@ -658,6 +759,8 @@ enum SnapshotTransferError {
     Allocation { requested: u64 },
     #[error("raft rejected the completed snapshot: {0}")]
     Install(String),
+    #[error("the arriving snapshot section could not be sealed: {0}")]
+    Stage(String),
 }
 
 #[derive(Debug, Error)]
@@ -690,6 +793,15 @@ pub enum ConsensusError {
     MembershipChangeTimeout {
         operation: String,
         timeout: Duration,
+    },
+    #[error(
+        "the retained raft log holds {retained} bytes against a {cap}-byte cap and did not \
+         reclaim within {waited:?}"
+    )]
+    LogRetentionSaturated {
+        retained: u64,
+        cap: u64,
+        waited: Duration,
     },
 }
 
@@ -909,10 +1021,12 @@ struct ConsensusState {
     interconnect_advertise_addr: String,
     interconnect: Transport,
     node_unavailability_timeout: Duration,
+    raft_retention: RaftRetentionPolicy,
     peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
+    retention_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// The consensus event bus, and the one way a Raft transition reaches an attached session.
@@ -1014,6 +1128,7 @@ impl Consensus {
         let store = FjallStore::from_database(db, settings.executor.clone())
             .await
             .map_err(ConsensusError::Storage)?;
+        let retention = settings.raft_retention;
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
@@ -1023,10 +1138,14 @@ impl Consensus {
                     .unwrap_or(u64::MAX),
                 election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
                     .unwrap_or(u64::MAX),
-                // A single consensus command may use the full interconnect command-byte budget.
-                // Replicate one entry per request so catch-up cannot exceed that bounded payload.
-                max_payload_entries: 1,
-                snapshot_policy: openraft::SnapshotPolicy::Never,
+                // The log reader fills a batch to the append target and never splits a command,
+                // so the byte bound comes from storage. This only caps how many entries one
+                // batch may gather before that bound is reached.
+                max_payload_entries: replication::MAX_APPEND_BATCH_ENTRIES,
+                snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(
+                    retention.snapshot_entry_threshold,
+                ),
+                max_in_snapshot_log_to_keep: retention.covered_entries_retained,
                 ..Default::default()
             }
             .validate()
@@ -1034,7 +1153,9 @@ impl Consensus {
         );
 
         let network = NetworkFactory {
+            local_node_id: settings.node_id.clone(),
             interconnect: settings.interconnect.clone(),
+            executor: settings.executor.clone(),
         };
         let raft = Raft::new(
             settings.node_id.clone(),
@@ -1084,6 +1205,9 @@ impl Consensus {
             }
         });
 
+        let retention_task = tokio::spawn(
+            retention::RetentionTask::new(raft.clone(), store.clone(), retention).run(),
+        );
         let consensus = Self {
             inner: Arc::new(ConsensusState {
                 raft,
@@ -1092,10 +1216,12 @@ impl Consensus {
                 interconnect_advertise_addr: settings.interconnect_advertise_addr,
                 interconnect: settings.interconnect,
                 node_unavailability_timeout: settings.node_unavailability_timeout,
+                raft_retention: retention,
                 peer_health: RwLock::new(BTreeMap::new()),
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
                 metrics_task: Mutex::new(Some(metrics_task)),
+                retention_task: Mutex::new(Some(retention_task)),
             }),
         };
         consensus.register_protocol_handlers()?;
@@ -1133,28 +1259,24 @@ impl Consensus {
         let receiver = self.protocol_receiver();
         self.inner
             .interconnect
-            .register_handler::<wire::ReplicateRequest, _, _>(move |context, request| {
-                let receiver = receiver.clone();
-                async move {
-                    validate_protocol_origin(
-                        context.peer_node_id(),
-                        request.0.origin_node_id(),
-                        "replication",
-                    )
-                    .map_err(wire::ConsensusRequestError::invalid_origin)?;
-                    let request = match request.0.into_request() {
-                        Ok(request) => request,
-                        Err(error) => {
-                            return Err(wire::ConsensusRequestError::invalid_request(error));
-                        }
-                    };
-                    receiver
-                        .append_entries(request)
-                        .await
-                        .map(wire::AppendEntriesResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::raft)
-                }
-            })
+            .register_duplex_handler::<wire::OpenAppendStream, _, _>(
+                move |context, request, items| {
+                    let receiver = receiver.clone();
+                    async move {
+                        validate_protocol_origin(
+                            context.peer_node_id(),
+                            &request.leader_node_id,
+                            "an append stream",
+                        )
+                        .map_err(|error| {
+                            nervix_interconnect::StreamHandlerError::new(error.to_string())
+                        })?;
+                        let answers = receiver
+                            .answer_append_stream(context.peer_node_id().clone(), items);
+                        Ok(nervix_interconnect::DuplexResponses::new(answers.map(Ok)))
+                    }
+                },
+            )
             .map_err(|_| ConsensusError::Startup)?;
 
         let receiver = self.protocol_receiver();
@@ -1199,6 +1321,7 @@ impl Consensus {
                             transfer.transfer_id,
                             transfer.vote,
                             transfer.meta,
+                            transfer.section_count,
                             transfer.total_bytes,
                         )
                         .map_err(wire::ConsensusRequestError::snapshot_transfer)
@@ -1216,9 +1339,14 @@ impl Consensus {
                         .append_snapshot_chunk(
                             context.peer_node_id(),
                             request.transfer_id,
-                            request.offset,
-                            request.bytes,
+                            SnapshotChunkPart {
+                                section_index: request.section_index,
+                                section_bytes: request.section_bytes,
+                                offset: request.offset,
+                                bytes: request.bytes,
+                            },
                         )
+                        .await
                         .map_err(wire::ConsensusRequestError::snapshot_transfer)
                 }
             })
@@ -1275,16 +1403,20 @@ impl Consensus {
         self.inner.store.wait_for_idle().await.assured(
             "the live consensus executor owns the ordered worker and its no-op barrier cannot fail",
         );
-        let handle = self.inner.metrics_task.lock().take();
-        if let Some(handle) = handle {
+        let metrics_task = self.inner.metrics_task.lock().take();
+        let retention_task = self.inner.retention_task.lock().take();
+        for (name, handle) in [("metrics", metrics_task), ("retention", retention_task)] {
+            let Some(handle) = handle else {
+                continue;
+            };
             handle.abort();
             // The abort makes a cancellation the expected outcome and it says nothing new. A panic
-            // is the opposite: the metrics task died on its own and this join is the last place
-            // that fact exists.
+            // is the opposite: the task died on its own and this join is the last place that fact
+            // exists.
             if let Err(error) = handle.await
                 && !error.is_cancelled()
             {
-                error!(%error, "consensus metrics task panicked before shutdown could join it");
+                error!(%error, "consensus {name} task panicked before shutdown could join it");
             }
         }
     }
@@ -1510,14 +1642,12 @@ impl Proposer {
     ) -> Result<(), ConsensusError> {
         let response = self
             .inner
-            .raft
             .client_write(ConsensusCommand::ReplaceDomainSchedule {
                 domain,
                 expected_schedule: expected_schedule.map(Box::new),
                 schedule: schedule.map(Box::new),
             })
-            .await
-            .map_err(ConsensusError::from)?;
+            .await?;
         match response.data {
             ConsensusResponse::Applied => Ok(()),
             ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
@@ -1527,14 +1657,11 @@ impl Proposer {
 
     pub async fn put_domain(&self, domain: DomainState) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::PutDomain {
                 domain: Box::new(domain),
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn put_domain_and_schedule(
         &self,
@@ -1545,15 +1672,13 @@ impl Proposer {
     ) -> Result<(), ConsensusError> {
         let response = self
             .inner
-            .raft
             .client_write(ConsensusCommand::PutDomainAndSchedule {
                 expected_domain: expected_domain.map(Box::new),
                 expected_schedule: expected_schedule.map(Box::new),
                 domain: Box::new(domain),
                 schedule: schedule.map(Box::new),
             })
-            .await
-            .map_err(ConsensusError::from)?;
+            .await?;
         match response.data {
             ConsensusResponse::Applied => Ok(()),
             ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
@@ -1569,7 +1694,6 @@ impl Proposer {
         authority: Option<ClusterNodeIdentity>,
     ) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::StartDomain {
                 domain_id,
                 start,
@@ -1577,18 +1701,13 @@ impl Proposer {
                 authority,
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn stop_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::StopDomain { domain_id })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn reconcile_domain_clock_authority(
         &self,
@@ -1599,7 +1718,6 @@ impl Proposer {
     ) -> Result<(), Report<ConsensusError>> {
         let written = self
             .inner
-            .raft
             .client_write(ConsensusCommand::ReconcileDomainClockAuthority {
                 domain_id,
                 expected_start_version,
@@ -1609,38 +1727,29 @@ impl Proposer {
             .await;
         match written {
             Ok(_) => Ok(()),
-            Err(error) => Err(Report::new(ConsensusError::from(error))),
+            Err(error) => Err(Report::new(error)),
         }
     }
 
     pub async fn pause_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::PauseDomain { domain_id })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn resume_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::ResumeDomain { domain_id })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn create_user(&self, user: UserCredentials) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::CreateUser {
                 user: Box::new(user),
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn begin_resource_upload(
         &self,
@@ -1648,12 +1757,10 @@ impl Proposer {
     ) -> Result<ResourceUpload, Report<ConsensusError>> {
         let response = self
             .inner
-            .raft
             .client_write(ConsensusCommand::BeginResourceUpload {
                 key: Box::new(key.clone()),
             })
-            .await
-            .map_err(ConsensusError::from)?;
+            .await?;
         match response.data {
             ConsensusResponse::Applied => self
                 .current_resources()
@@ -1676,15 +1783,12 @@ impl Proposer {
         identifier: &ResourceName,
     ) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::CreateResourceCatalog {
                 domain: domain.clone(),
                 identifier: identifier.clone(),
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn publish_resource_upload(
         &self,
@@ -1694,14 +1798,12 @@ impl Proposer {
     ) -> Result<ResourceUpload, Report<ConsensusError>> {
         let response = self
             .inner
-            .raft
             .client_write(ConsensusCommand::PublishResourceUpload {
                 key: Box::new(key.clone()),
                 resource: Box::new(resource),
                 replica: Box::new(replica),
             })
-            .await
-            .map_err(ConsensusError::from)?;
+            .await?;
         match response.data {
             ConsensusResponse::Applied => self
                 .current_resources()
@@ -1723,14 +1825,11 @@ impl Proposer {
         replica: ResourceNodeStatus,
     ) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::PutResourceReplica {
                 replica: Box::new(replica),
             })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     pub async fn set_node_cordoned(
         &self,
@@ -1738,12 +1837,9 @@ impl Proposer {
         cordoned: bool,
     ) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::SetNodeCordoned { node_id, cordoned })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 
     async fn write_transaction(
         &self,
@@ -1751,10 +1847,8 @@ impl Proposer {
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         let response = self
             .inner
-            .raft
             .client_write(command)
-            .await
-            .map_err(ConsensusError::from)?;
+            .await?;
         let ConsensusResponse::Transaction(response) = response.data else {
             return Err(ConsensusTransactionError::InvalidResponse);
         };
@@ -1876,12 +1970,9 @@ impl Proposer {
         finished_before: nervix_models::Timestamp,
     ) -> Result<(), ConsensusError> {
         self.inner
-            .raft
             .client_write(ConsensusCommand::RemoveFinishedTransactions { finished_before })
             .await
-            .map(|_| ())
-            .map_err(ConsensusError::from)
-    }
+            .map(|_| ())}
 }
 
 impl Administrator {
@@ -2141,6 +2232,50 @@ impl Administrator {
     }
 }
 
+impl ConsensusState {
+    /// Propose one command once reclaiming the log has left room for it.
+    ///
+    /// A node whose retained log has reached its cap holds new mutations back rather than growing
+    /// past the bound. Reads, health and recovery continue throughout, and a node whose
+    /// reclamation genuinely cannot keep up fails the mutation instead of waiting forever.
+    async fn client_write(
+        &self,
+        command: ConsensusCommand,
+    ) -> Result<openraft::raft::ClientWriteResponse<TypeConfig>, ConsensusError> {
+        self.admit_mutation().await?;
+        self.raft
+            .client_write(command)
+            .await
+            .map_err(ConsensusError::from)
+    }
+
+    async fn admit_mutation(&self) -> Result<(), ConsensusError> {
+        let cap = self.raft_retention.retained_log_cap_bytes;
+        if self.store.retained_log_bytes() <= cap {
+            return Ok(());
+        }
+        let deadline = self.raft_retention.retention_admission_timeout;
+        let waited = timeout(deadline, async {
+            loop {
+                tokio::task::consume_budget().await;
+                tokio::time::sleep(RETENTION_ADMISSION_POLL).await;
+                if self.store.retained_log_bytes() <= cap {
+                    return;
+                }
+            }
+        })
+        .await;
+        match waited {
+            Ok(()) => Ok(()),
+            Err(_) => Err(ConsensusError::LogRetentionSaturated {
+                retained: self.store.retained_log_bytes(),
+                cap,
+                waited: deadline,
+            }),
+        }
+    }
+}
+
 impl ProtocolReceiver {
     pub async fn append_entries(
         &self,
@@ -2169,25 +2304,52 @@ impl ProtocolReceiver {
         transfer_id: u64,
         vote: VoteOf,
         meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
+        section_count: u32,
         total_bytes: u64,
     ) -> Result<(), Report<SnapshotTransferError>> {
-        let transfer = IncomingSnapshotTransfer::new(transfer_id, vote, meta, total_bytes)?;
+        let generation = self.inner.store.claim_snapshot_generation();
+        let transfer = IncomingSnapshotTransfer::new(
+            transfer_id,
+            generation,
+            vote,
+            meta,
+            section_count,
+            total_bytes,
+        );
+        // A peer that restarts a transfer abandons whatever the previous one staged.
+        self.discard_snapshot_transfer(&peer);
         self.inner.incoming_snapshots.lock().insert(peer, transfer);
         Ok(())
     }
 
-    fn append_snapshot_chunk(
+    /// Take one chunk and, when it completes a section, seal that section in node-owned storage.
+    async fn append_snapshot_chunk(
         &self,
         peer: &ClusterNodeName,
         transfer_id: u64,
-        offset: u64,
-        bytes: Vec<u8>,
+        chunk: SnapshotChunkPart,
     ) -> Result<(), Report<SnapshotTransferError>> {
-        let mut transfers = self.inner.incoming_snapshots.lock();
-        let transfer = transfers
-            .get_mut(peer)
-            .ok_or_else(|| Report::new(SnapshotTransferError::Missing { peer: peer.clone() }))?;
-        transfer.append_chunk(transfer_id, offset, bytes)
+        let limits = self.inner.store.limits();
+        let completed = {
+            let mut transfers = self.inner.incoming_snapshots.lock();
+            let transfer = transfers.get_mut(peer).ok_or_else(|| {
+                Report::new(SnapshotTransferError::Missing { peer: peer.clone() })
+            })?;
+            transfer.append_chunk(
+                transfer_id,
+                chunk,
+                limits.snapshot_section_bytes.as_u64(),
+                snapshot_chunk_bytes(&limits),
+            )?
+        };
+        let Some(section) = completed else {
+            return Ok(());
+        };
+        self.inner
+            .store
+            .stage_snapshot_section(section.generation, section.index, section.bytes)
+            .await
+            .map_err(|error| Report::new(SnapshotTransferError::Stage(error.to_string())))
     }
 
     async fn finish_snapshot_transfer(
@@ -2208,49 +2370,90 @@ impl ProtocolReceiver {
                 .verified("the transfer was found for this peer immediately above")
         };
         let transfer = transfer.complete(transfer_id)?;
-        self.install_full_snapshot(transfer.vote, transfer.meta, transfer.snapshot)
+        let snapshot = self.inner.store.open_staged_snapshot(snapshot::SnapshotManifest {
+            generation: transfer.generation,
+            last_applied_log_id: transfer.meta.last_log_id.clone(),
+            last_membership: Arc::new(transfer.meta.last_membership.clone()),
+            section_count: transfer.section_count,
+            total_bytes: transfer.total_bytes,
+        });
+        // The authoritative check belongs to Raft: it revalidates the vote and whether this
+        // snapshot still applies before anything is published.
+        self.inner
+            .raft
+            .install_full_snapshot(
+                transfer.vote,
+                Snapshot {
+                    meta: transfer.meta,
+                    snapshot,
+                },
+            )
             .await
             .map_err(|error| Report::new(SnapshotTransferError::Install(error.to_string())))
     }
 
-    async fn install_full_snapshot(
-        &self,
-        vote: VoteOf,
-        meta: openraft::SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
-        snapshot: Vec<u8>,
-    ) -> Result<SnapshotResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
-        self.inner
-            .raft
-            .install_full_snapshot(
-                vote,
-                Snapshot {
-                    meta,
-                    snapshot: Cursor::new(snapshot),
-                },
-            )
-            .await
+    /// Drop a transfer a peer abandoned, releasing the generation it staged.
+    fn discard_snapshot_transfer(&self, peer: &ClusterNodeName) {
+        let abandoned = self.inner.incoming_snapshots.lock().remove(peer);
+        if let Some(abandoned) = abandoned {
+            self.inner
+                .store
+                .abandon_snapshot_generation(abandoned.generation);
+        }
     }
 }
 
 #[derive(Clone)]
 struct NetworkFactory {
+    local_node_id: ClusterNodeName,
     interconnect: Transport,
+    executor: nervix_execution::Executor,
 }
 
 #[derive(Clone)]
 struct NetworkClient {
+    local_node_id: ClusterNodeName,
     target: ClusterNodeName,
     interconnect: Transport,
+    executor: nervix_execution::Executor,
+    append_path: AppendPath,
+}
+
+impl NetworkFactory {
+    fn client(&self, target: ClusterNodeName, append_path: AppendPath) -> NetworkClient {
+        NetworkClient {
+            local_node_id: self.local_node_id.clone(),
+            target,
+            interconnect: self.interconnect.clone(),
+            executor: self.executor.clone(),
+            append_path,
+        }
+    }
 }
 
 impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     type Network = NetworkClient;
 
     async fn new_client(&mut self, target: ClusterNodeName, _node: &Node) -> Self::Network {
-        Self::Network {
-            target,
-            interconnect: self.interconnect.clone(),
-        }
+        self.client(target, AppendPath::Replication)
+    }
+
+    /// Leader liveness probes keep their own management connection, so a saturated append stream
+    /// cannot delay the lease that keeps this leader in office.
+    async fn new_heartbeat_client(
+        &mut self,
+        target: ClusterNodeName,
+        _node: &Node,
+    ) -> Self::Network {
+        self.client(target, AppendPath::Heartbeat)
+    }
+
+    async fn new_snapshot_client(
+        &mut self,
+        target: ClusterNodeName,
+        _node: &Node,
+    ) -> Self::Network {
+        self.client(target, AppendPath::Replication)
     }
 }
 
@@ -2264,6 +2467,13 @@ fn next_snapshot_transfer_id() -> io::Result<u64> {
             current.checked_add(1)
         })
         .map_err(|_| io::Error::other("snapshot transfer id space is exhausted"))
+}
+
+/// The application body one snapshot chunk submits. A section is carried as more chunks, never as
+/// a larger one.
+fn snapshot_chunk_bytes(limits: &nervix_execution::OperationLimits) -> usize {
+    usize::try_from(limits.bulk_chunk_bytes.as_u64())
+        .assured("a configured bulk chunk fits the address space it is buffered in")
 }
 
 fn snapshot_request_timeout(deadline: Instant) -> io::Result<Duration> {
@@ -2290,29 +2500,77 @@ fn unreachable_err<E: std::error::Error + Send + Sync + 'static>(
 }
 
 impl RaftNetworkV2<TypeConfig> for NetworkClient {
-    type SnapshotData = Cursor<Vec<u8>>;
+    type SnapshotData = SealedSnapshot;
 
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
-        let rpc_timeout = option.hard_ttl();
         let record = wire::AppendEntriesRecord::from_request(rpc);
-        let response = if record.is_heartbeat() {
-            self.interconnect
-                .request_with_timeout(&self.target, wire::HeartbeatRequest(record), rpc_timeout)
-                .await
-        } else {
-            self.interconnect
-                .request_with_timeout(&self.target, wire::ReplicateRequest(record), rpc_timeout)
-                .await
-        }
-        .map_err(io_error)
-        .map_err(unreachable_err)?
-        .map_err(io_error)
-        .map_err(unreachable_err)?;
+        let response = self
+            .interconnect
+            .request_with_timeout(
+                &self.target,
+                wire::HeartbeatRequest(record),
+                replication::append_deadline(&option),
+            )
+            .await
+            .map_err(io_error)
+            .map_err(unreachable_err)?
+            .map_err(io_error)
+            .map_err(unreachable_err)?;
         Ok(response.into_response())
+    }
+
+    /// Carry appends on the path this client was built for.
+    ///
+    /// A replication client opens one ordered stream to its follower and pipelines every batch
+    /// over it. A heartbeat client keeps OpenRaft's one-probe-at-a-time shape on the management
+    /// pool, where a saturated append stream cannot reach it.
+    fn stream_append<'s, S>(
+        &'s mut self,
+        input: S,
+        option: RPCOption,
+    ) -> openraft::base::BoxFuture<
+        's,
+        Result<
+            openraft::base::BoxStream<
+                's,
+                Result<openraft::raft::StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>,
+            >,
+            RPCError<TypeConfig>,
+        >,
+    >
+    where
+        S: futures_util::Stream<Item = AppendEntriesRequest<TypeConfig>>
+            + openraft::OptionalSend
+            + Unpin
+            + 'static,
+    {
+        match self.append_path {
+            AppendPath::Heartbeat => {
+                openraft::network::stream_append_sequential(self, input, option)
+            }
+            AppendPath::Replication => {
+                let interconnect = self.interconnect.clone();
+                let executor = self.executor.clone();
+                let local_node_id = self.local_node_id.clone();
+                let target = self.target.clone();
+                Box::pin(async move {
+                    let answers = replication::open_append_stream(
+                        &interconnect,
+                        &executor,
+                        &local_node_id,
+                        &target,
+                        input,
+                        option,
+                    )
+                    .await?;
+                    Ok(answers)
+                })
+            }
+        }
     }
 
     async fn vote(
@@ -2335,10 +2593,19 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         Ok(response.into_response())
     }
 
+    /// Send one sealed snapshot generation, section by section.
+    ///
+    /// Only one section is held in memory at a time, so a snapshot larger than the transfer budget
+    /// still moves. Cancellation is honoured between every chunk.
     async fn full_snapshot(
         &mut self,
         vote: VoteOf,
-        snapshot: SnapshotOf,
+        snapshot: Snapshot<
+            CommittedLeaderIdOf<TypeConfig>,
+            ClusterNodeName,
+            Node,
+            Self::SnapshotData,
+        >,
         cancel: impl std::future::Future<Output = openraft::error::ReplicationClosed>
         + openraft::OptionalSend
         + 'static,
@@ -2354,14 +2621,19 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
             .map_err(unreachable_err)
             .map_err(StreamingError::from)?;
         let Snapshot { meta, snapshot } = snapshot;
-        let snapshot = snapshot.into_inner();
-        let total_bytes = u64::try_from(snapshot.len())
-            .assured("supported targets have a pointer width no larger than u64");
+        let manifest = snapshot.manifest().clone();
+        let chunk_bytes = snapshot_chunk_bytes(self.executor.limits());
         let transfer = async {
             self.interconnect
                 .request_with_timeout(
                     &self.target,
-                    wire::BeginSnapshotTransfer::from_parts(transfer_id, vote, meta, total_bytes),
+                    wire::BeginSnapshotTransfer::from_parts(
+                        transfer_id,
+                        vote,
+                        meta,
+                        manifest.section_count,
+                        manifest.total_bytes,
+                    ),
                     snapshot_request_timeout(deadline).map_err(unreachable_err)?,
                 )
                 .await
@@ -2370,29 +2642,40 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
                 .map_err(io_error)
                 .map_err(unreachable_err)?;
 
-            let mut offset = 0_u64;
-            for chunk in snapshot.chunks(SNAPSHOT_CHUNK_BYTES) {
+            for section_index in 0..manifest.section_count {
                 tokio::task::consume_budget().await;
-                self.interconnect
-                    .request_with_timeout(
-                        &self.target,
-                        wire::SnapshotChunk {
-                            transfer_id,
-                            offset,
-                            bytes: chunk.to_vec(),
-                        },
-                        snapshot_request_timeout(deadline).map_err(unreachable_err)?,
-                    )
+                let section = snapshot
+                    .section(section_index)
                     .await
-                    .map_err(io_error)
-                    .map_err(unreachable_err)?
-                    .map_err(io_error)
                     .map_err(unreachable_err)?;
-                let chunk_bytes = u64::try_from(chunk.len())
+                let section_bytes = u64::try_from(section.len())
                     .assured("supported targets have a pointer width no larger than u64");
-                offset = offset
-                    .checked_add(chunk_bytes)
-                    .assured("snapshot chunks are slices of one Vec whose length fits in u64");
+                let mut offset = 0_u64;
+                for chunk in section.chunks(chunk_bytes) {
+                    tokio::task::consume_budget().await;
+                    self.interconnect
+                        .request_with_timeout(
+                            &self.target,
+                            wire::SnapshotChunk {
+                                transfer_id,
+                                section_index,
+                                section_bytes,
+                                offset,
+                                bytes: chunk.to_vec(),
+                            },
+                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                        )
+                        .await
+                        .map_err(io_error)
+                        .map_err(unreachable_err)?
+                        .map_err(io_error)
+                        .map_err(unreachable_err)?;
+                    let chunk_len = u64::try_from(chunk.len())
+                        .assured("supported targets have a pointer width no larger than u64");
+                    offset = offset
+                        .checked_add(chunk_len)
+                        .assured("chunks are slices of one section whose length fits in u64");
+                }
             }
 
             self.interconnect

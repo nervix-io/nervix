@@ -6,9 +6,10 @@
 //! - **Must not know.** Network transport, graph execution or application lifecycle policy.
 
 use std::{
-    io::{self, Cursor},
+    collections::BTreeSet,
+    io,
     ops::{Bound, RangeBounds},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
@@ -29,16 +30,28 @@ use triomphe::Arc;
 
 use crate::{
     AppliedConsensusCommand, LogIdOf, SnapshotOf, StateMachineChanges, StateMachineData,
-    StoredMembershipOf, StoredSnapshotData, TypeConfig, VoteOf, apply_consensus_command,
+    StoredMembershipOf, TypeConfig, VoteOf, apply_consensus_command,
     durable_batch::{DurableBatch, StorageFailure},
     read_key,
     records::{Records, ResourceRecords, ScheduleRecords},
+    replication::append_batch_target_bytes,
+    snapshot::{
+        KEY_MANIFEST, SealedSnapshot, SectionWriter, SnapshotGenerations, SnapshotManifest,
+        SnapshotSection, StoredRecord, generation_prefix, section_generation, section_key,
+    },
     storage_decode,
     storage_fault::{StorageBoundary, StorageFault},
 };
 
+/// One consistent view of the state machine, gathered before its sections are written.
+struct SealedGeneration {
+    metadata: StateMetadata,
+    sections: Vec<Vec<u8>>,
+    total_bytes: u64,
+}
+
 const KEY_METADATA: &[u8] = b"metadata";
-const KEY_SNAPSHOT: &[u8] = b"snapshot";
+const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
@@ -155,7 +168,10 @@ pub(super) struct StoreState {
     sm: Keyspace,
     snapshot: Keyspace,
     pub(super) state_machine: RwLock<StateMachineData>,
-    current_snapshot: RwLock<Option<Arc<StoredSnapshotData>>>,
+    pub(super) snapshots: SnapshotGenerations,
+    /// Appended entry bytes since the last completed snapshot, which is what the byte-based
+    /// snapshot cadence watches. Truncation leaves it high, so the cadence only ever fires early.
+    log_bytes_since_snapshot: AtomicU64,
     pub(super) schedule_tx: watch::Sender<u64>,
     pub(super) domain_tx: watch::Sender<u64>,
     pub(super) resource_tx: watch::Sender<u64>,
@@ -287,6 +303,165 @@ impl StoreInner {
         Ok(applied.response)
     }
 
+    /// Seal one consistent view of the state machine as a new generation and publish it.
+    ///
+    /// The read runs on the one ordered consensus storage worker, so the records, the applied
+    /// index and the membership it gathers all belong to the same committed revision.
+    async fn seal_generation(&self) -> io::Result<SnapshotManifest> {
+        let section_limit = self.executor.limits().snapshot_section_bytes.as_u64();
+        let generation = self.snapshots.claim_generation();
+        let sections = self
+            .run(MemoryClass::Bulk, move |inner, _| {
+                let metadata: StateMetadata = read_key(&inner.sm, KEY_METADATA)?
+                    .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+                let mut writer = SectionWriter::new(section_limit);
+                for item in inner.sm.iter() {
+                    let (key, value) = item.into_inner().map_err(io::Error::other)?;
+                    writer.push(StoredRecord {
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                    })?;
+                }
+                let total_bytes = writer.total_bytes();
+                let sections = writer.finish()?;
+                Ok(SealedGeneration {
+                    metadata,
+                    sections,
+                    total_bytes,
+                })
+            })
+            .await?;
+        let section_count =
+            u32::try_from(sections.sections.len()).map_err(|_| io::Error::other(StorageFailure::Capacity))?;
+        for (index, bytes) in sections.sections.into_iter().enumerate() {
+            tokio::task::consume_budget().await;
+            let index = u32::try_from(index)
+                .map_err(|_| io::Error::other(StorageFailure::Capacity))?;
+            self.stage_section(generation, index, bytes).await?;
+        }
+        let manifest = SnapshotManifest {
+            generation,
+            last_applied_log_id: sections.metadata.last_applied_log_id,
+            last_membership: sections.metadata.last_membership,
+            section_count,
+            total_bytes: sections.total_bytes,
+        };
+        self.publish_manifest(manifest.clone(), None).await?;
+        self.log_bytes_since_snapshot.store(0, Ordering::Relaxed);
+        Ok(manifest)
+    }
+
+    /// Write one sealed section of a staged generation.
+    pub(super) async fn stage_section(
+        &self,
+        generation: u64,
+        index: u32,
+        bytes: Vec<u8>,
+    ) -> io::Result<()> {
+        self.run(MemoryClass::Bulk, move |inner, reservation| {
+            let mut batch = DurableBatch::new(reservation)?;
+            batch.insert(&inner.snapshot, &section_key(generation, index), &bytes)?;
+            inner.commit("snapshot_section", batch)
+        })
+        .await
+    }
+
+    pub(super) async fn read_section(&self, generation: u64, index: u32) -> io::Result<Vec<u8>> {
+        if self.snapshots.is_obsolete(generation) {
+            return Err(io::Error::other(StorageFailure::SnapshotSuperseded));
+        }
+        self.run(MemoryClass::Bulk, move |inner, _| {
+            read_key::<Vec<u8>>(&inner.snapshot, &section_key(generation, index))?
+                .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))
+        })
+        .await
+    }
+
+    /// Publish `manifest` as the node's snapshot in one durable batch.
+    ///
+    /// `installing` names the generation whose records still have to replace the state machine, so
+    /// a node that stops between the publication and the replacement resumes it on the next start.
+    async fn publish_manifest(
+        &self,
+        manifest: SnapshotManifest,
+        installing: Option<u64>,
+    ) -> io::Result<()> {
+        self.run(MemoryClass::Bulk, move |inner, reservation| {
+            let mut batch = DurableBatch::new(reservation)?;
+            batch.insert(&inner.snapshot, KEY_MANIFEST, &manifest)?;
+            match installing {
+                Some(generation) => {
+                    batch.insert(&inner.snapshot, KEY_INSTALLING, &generation)?;
+                }
+                None => {
+                    inner.snapshots.publish(manifest);
+                    inner.delete_unreferenced_generations(&mut batch)?;
+                }
+            }
+            inner.commit("snapshot_manifest", batch)
+        })
+        .await
+    }
+
+    /// Replace the state machine with the records of `manifest`, then clear the installing marker.
+    ///
+    /// Every step is idempotent, so a node that stops part-way redoes the whole replacement on its
+    /// next start rather than loading a half-replaced state.
+    pub(super) async fn replace_state_machine(
+        &self,
+        manifest: &SnapshotManifest,
+    ) -> io::Result<StateMachineData> {
+        let generation = manifest.generation;
+        self.run(MemoryClass::Bulk, move |inner, reservation| {
+            let mut batch = DurableBatch::new(reservation)?;
+            for item in inner.sm.iter() {
+                batch.remove(&inner.sm, &item.key().map_err(io::Error::other)?)?;
+            }
+            inner.commit("snapshot_clear", batch)
+        })
+        .await?;
+        for index in 0..manifest.section_count {
+            tokio::task::consume_budget().await;
+            let bytes = self.read_section(generation, index).await?;
+            self.run(MemoryClass::Bulk, move |inner, reservation| {
+                let section: SnapshotSection = storage_decode(&bytes)?;
+                let mut batch = DurableBatch::new(reservation)?;
+                for record in section.records {
+                    batch.insert_encoded(&inner.sm, &record.key, record.value)?;
+                }
+                inner.commit("snapshot_records", batch)
+            })
+            .await?;
+        }
+        let manifest = manifest.clone();
+        self.run(MemoryClass::Bulk, move |inner, reservation| {
+            let mut batch = DurableBatch::new(reservation)?;
+            batch.remove(&inner.snapshot, KEY_INSTALLING)?;
+            inner.snapshots.publish(manifest);
+            inner.delete_unreferenced_generations(&mut batch)?;
+            inner.commit("snapshot_installed", batch)?;
+            let metadata: StateMetadata = read_key(&inner.sm, KEY_METADATA)?
+                .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+            StateMachineData::load(&inner.sm, metadata)
+        })
+        .await
+    }
+
+    /// A reader for a published generation, holding it against deletion until the reader is done.
+    pub(super) fn open_sealed_snapshot(&self, manifest: SnapshotManifest) -> SealedSnapshot {
+        self.snapshots.pin(manifest.generation);
+        SealedSnapshot::new(self.clone(), manifest)
+    }
+
+    fn delete_unreferenced_generations(&self, batch: &mut DurableBatch<'_>) -> io::Result<()> {
+        for generation in self.snapshots.take_unreferenced() {
+            for item in self.snapshot.prefix(generation_prefix(generation)) {
+                batch.remove(&self.snapshot, &item.key().map_err(io::Error::other)?)?;
+            }
+        }
+        Ok(())
+    }
+
     fn log_key(index: u64) -> Vec<u8> {
         index.to_be_bytes().to_vec()
     }
@@ -317,7 +492,7 @@ impl FjallStore {
     pub(super) async fn from_database(db: Database, executor: Executor) -> io::Result<Self> {
         let reservation = StoreInner::reserve(&executor, MemoryClass::Commands).await?;
         let store_executor = executor.clone();
-        executor
+        let store = executor
             .run_storage(
                 StorageClass::Consensus,
                 reservation,
@@ -357,8 +532,16 @@ impl FjallStore {
                             state
                         }
                     };
-                    let current_snapshot =
-                        read_key::<StoredSnapshotData>(&snapshot, KEY_SNAPSHOT)?.map(Arc::new);
+                    let manifest = read_key::<SnapshotManifest>(&snapshot, KEY_MANIFEST)?;
+                    let generations = SnapshotGenerations::new(manifest);
+                    let mut stored_generations = BTreeSet::new();
+                    for item in snapshot.iter() {
+                        let key = item.key().map_err(io::Error::other)?;
+                        if let Some(generation) = section_generation(&key) {
+                            stored_generations.insert(generation);
+                        }
+                    }
+                    generations.observe_stored(stored_generations.into_iter());
                     let revision = match &state_machine.last_applied_log_id {
                         Some(id) => id.index,
                         None => 0,
@@ -375,7 +558,8 @@ impl FjallStore {
                                 sm,
                                 snapshot,
                                 state_machine: RwLock::new(state_machine),
-                                current_snapshot: RwLock::new(current_snapshot),
+                                snapshots: generations,
+                                log_bytes_since_snapshot: AtomicU64::new(0),
                                 schedule_tx: watch::channel(revision).0,
                                 domain_tx: watch::channel(revision).0,
                                 resource_tx: watch::channel(revision).0,
@@ -386,7 +570,33 @@ impl FjallStore {
                 },
             )
             .await
-            .map_err(io::Error::other)?
+            .map_err(io::Error::other)??;
+        // A node that stopped between publishing a snapshot manifest and replacing its state
+        // machine from that generation finishes the replacement before anything reads the state.
+        store.resume_interrupted_install().await?;
+        Ok(store)
+    }
+
+    /// Finish an install the node was part-way through when it stopped.
+    async fn resume_interrupted_install(&self) -> io::Result<()> {
+        let installing = self
+            .inner
+            .run(MemoryClass::Management, |inner, _| {
+                read_key::<u64>(&inner.snapshot, KEY_INSTALLING)
+            })
+            .await?;
+        let Some(generation) = installing else {
+            return Ok(());
+        };
+        let manifest = self
+            .inner
+            .snapshots
+            .active()
+            .filter(|manifest| manifest.generation == generation)
+            .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+        let state = self.inner.replace_state_machine(&manifest).await?;
+        *self.inner.state_machine.write() = state;
+        Ok(())
     }
 
     pub(super) async fn has_raft_state(&self) -> io::Result<bool> {
@@ -406,6 +616,85 @@ impl FjallStore {
     /// handle.
     pub(super) async fn wait_for_idle(&self) -> io::Result<()> {
         self.inner.run(MemoryClass::Management, |_, _| Ok(())).await
+    }
+
+    /// Appended entry bytes since the last completed snapshot.
+    pub(super) fn log_bytes_since_snapshot(&self) -> u64 {
+        self.inner.log_bytes_since_snapshot.load(Ordering::Relaxed)
+    }
+
+    /// What the retained Raft log occupies on disk.
+    pub(super) fn retained_log_bytes(&self) -> u64 {
+        self.inner.logs.disk_space()
+    }
+
+    /// The highest index that may be purged so the snapshot-covered log stays inside its bounds.
+    ///
+    /// The scan walks back from the snapshot index and stops as soon as either bound is reached,
+    /// so it reads no more than the retention policy keeps. `None` means the covered log is
+    /// already inside both bounds.
+    pub(super) async fn covered_retention_boundary(
+        &self,
+        snapshot_index: u64,
+        entries_retained: u64,
+        bytes_retained: u64,
+    ) -> io::Result<Option<u64>> {
+        self.inner
+            .run(MemoryClass::Management, move |inner, _| {
+                let bounds = StoreInner::log_bounds(..=snapshot_index);
+                let mut kept_entries = 0_u64;
+                let mut kept_bytes = 0_u64;
+                let mut boundary = None;
+                for item in inner.logs.range(bounds).rev() {
+                    let (key, value) = item.into_inner().map_err(io::Error::other)?;
+                    let index: [u8; 8] = key
+                        .as_ref()
+                        .try_into()
+                        .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+                    let index = u64::from_be_bytes(index);
+                    let length = u64::try_from(value.len()).map_err(io::Error::other)?;
+                    if kept_entries >= entries_retained || kept_bytes >= bytes_retained {
+                        boundary = Some(index);
+                        break;
+                    }
+                    kept_entries = kept_entries
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+                    kept_bytes = kept_bytes
+                        .checked_add(length)
+                        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+                }
+                Ok(boundary)
+            })
+            .await
+    }
+
+    /// The generation number the next staged transfer writes its sections under.
+    pub(super) fn claim_snapshot_generation(&self) -> u64 {
+        self.inner.snapshots.claim_generation()
+    }
+
+    /// Give up a staged generation. Its sections are deleted by the next durable batch.
+    pub(super) fn abandon_snapshot_generation(&self, generation: u64) {
+        self.inner.snapshots.abandon(generation);
+    }
+
+    pub(super) fn limits(&self) -> nervix_execution::OperationLimits {
+        *self.inner.executor.limits()
+    }
+
+    pub(super) async fn stage_snapshot_section(
+        &self,
+        generation: u64,
+        index: u32,
+        bytes: Vec<u8>,
+    ) -> io::Result<()> {
+        self.inner.stage_section(generation, index, bytes).await
+    }
+
+    /// A reader for a generation that has been staged but not yet published.
+    pub(super) fn open_staged_snapshot(&self, manifest: SnapshotManifest) -> SealedSnapshot {
+        self.inner.open_sealed_snapshot(manifest)
     }
 
     fn log_reader(&self) -> FjallLogReader {
@@ -451,6 +740,44 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
         self.inner
             .run(MemoryClass::Management, |inner, _| {
                 read_key(&inner.meta, KEY_VOTE)
+            })
+            .await
+    }
+
+    /// Fill one replication batch up to the append target, never splitting an entry.
+    ///
+    /// Admission for the bytes this materializes is acquired before the range is read, so a
+    /// batch is bounded at the point it comes out of the log rather than at the network send.
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> io::Result<Vec<EntryOf<TypeConfig>>> {
+        let bounds = StoreInner::log_bounds(start..end);
+        self.inner
+            .run(MemoryClass::Commands, move |inner, _| {
+                let target = append_batch_target_bytes(&inner.executor);
+                let mut entries = Vec::new();
+                let mut bytes = 0_u64;
+                for item in inner.logs.range(bounds) {
+                    let (_, value) = item.into_inner().map_err(io::Error::other)?;
+                    let length = u64::try_from(value.len()).map_err(io::Error::other)?;
+                    // One semantic command is never split, so the first entry is always read even
+                    // when it alone exceeds the target.
+                    if !entries.is_empty()
+                        && bytes
+                            .checked_add(length)
+                            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?
+                            > target
+                    {
+                        break;
+                    }
+                    bytes = bytes
+                        .checked_add(length)
+                        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+                    entries.push(storage_decode(&value)?);
+                }
+                Ok(entries)
             })
             .await
     }
@@ -518,12 +845,16 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
                 .inner
                 .run(MemoryClass::Commands, move |inner, reservation| {
                     let mut batch = DurableBatch::new(reservation)?;
-                    batch.insert(
+                    let entry_bytes = batch.insert_measured(
                         &inner.logs,
                         &StoreInner::log_key(entry.log_id.index),
                         &entry,
                     )?;
-                    inner.commit("append", batch)
+                    inner.commit("append", batch)?;
+                    inner
+                        .log_bytes_since_snapshot
+                        .fetch_add(entry_bytes, Ordering::Relaxed);
+                    Ok(())
                 })
                 .await;
             if let Err(error) = result {
@@ -558,6 +889,9 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
                     batch.remove(&inner.logs, &item.key().map_err(io::Error::other)?)?;
                 }
                 batch.insert(&inner.meta, KEY_LAST_PURGED, &Some(log_id))?;
+                // Reclaiming covered log space is also when a generation nothing reads any more
+                // stops occupying storage.
+                inner.delete_unreferenced_generations(&mut batch)?;
                 inner.commit("purge", batch)
             })
             .await
@@ -565,7 +899,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
 }
 
 impl RaftStateMachine<TypeConfig> for FjallStore {
-    type SnapshotData = Cursor<Vec<u8>>;
+    type SnapshotData = SealedSnapshot;
     type SnapshotBuilder = Self;
     async fn applied_state(&mut self) -> io::Result<(Option<LogIdOf>, StoredMembershipOf)> {
         let state = self.inner.state();
@@ -598,6 +932,11 @@ impl RaftStateMachine<TypeConfig> for FjallStore {
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         self.clone()
     }
+    /// Make a staged generation the node's state.
+    ///
+    /// The sections are already sealed in storage, so this is one durable batch that switches the
+    /// state-machine records, the applied index, the membership and the active generation
+    /// together. A batch that fails leaves the preceding generation active and unchanged.
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<
@@ -605,75 +944,58 @@ impl RaftStateMachine<TypeConfig> for FjallStore {
             crate::ClusterNodeName,
             crate::Node,
         >,
-        snapshot: Cursor<Vec<u8>>,
+        snapshot: SealedSnapshot,
     ) -> io::Result<()> {
         let meta = meta.clone();
+        let manifest = snapshot.manifest().clone();
+        if manifest.last_applied_log_id != meta.last_log_id
+            || manifest.last_membership.as_ref() != &meta.last_membership
+        {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        // The staged sections are already sealed, so this batch is the commit point: it names the
+        // new generation and marks the state machine as not yet replaced from it.
         self.inner
-            .run(MemoryClass::Bulk, move |inner, reservation| {
-                let bytes = snapshot.into_inner();
-                let state: StateMachineData = storage_decode(&bytes)?;
-                if state.last_applied_log_id != meta.last_log_id
-                    || state.last_membership.as_ref() != &meta.last_membership
-                {
-                    return Err(io::Error::other(StorageFailure::InvalidState));
-                }
-                let mut batch = DurableBatch::new(reservation)?;
-                state.write_changes(&inner.state(), &mut batch, &inner.sm)?;
-                let stored = Arc::new(StoredSnapshotData { meta, data: bytes });
-                batch.insert(&inner.snapshot, KEY_SNAPSHOT, stored.as_ref())?;
-                inner.commit("install_snapshot", batch)?;
-                inner.publish(
-                    state,
-                    &AppliedConsensusCommand::applied(StateMachineChanges {
-                        schedule_changed: true,
-                        domains_changed: true,
-                        resources_changed: true,
-                        transactions_changed: true,
-                    }),
-                );
-                *inner.current_snapshot.write() = Some(stored);
-                Ok(())
-            })
-            .await
+            .publish_manifest(manifest.clone(), Some(manifest.generation))
+            .await?;
+        let state = self.inner.replace_state_machine(&manifest).await?;
+        self.inner.publish(
+            state,
+            &AppliedConsensusCommand::applied(StateMachineChanges {
+                schedule_changed: true,
+                domains_changed: true,
+                resources_changed: true,
+                transactions_changed: true,
+            }),
+        );
+        Ok(())
     }
     async fn get_current_snapshot(&mut self) -> io::Result<Option<SnapshotOf>> {
-        self.inner
-            .run(MemoryClass::Bulk, |inner, _| {
-                let snapshot = inner.current_snapshot.read().clone();
-                Ok(snapshot.map(|stored| Snapshot {
-                    meta: stored.meta.clone(),
-                    snapshot: Cursor::new(stored.data.clone()),
-                }))
-            })
-            .await
+        let Some(manifest) = self.inner.snapshots.active() else {
+            return Ok(None);
+        };
+        Ok(Some(Snapshot {
+            meta: manifest.snapshot_meta(),
+            snapshot: self.inner.open_sealed_snapshot(manifest),
+        }))
     }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for FjallStore {
-    type SnapshotData = Cursor<Vec<u8>>;
+    type SnapshotData = SealedSnapshot;
+
+    /// Seal one consistent view of the state machine as a new generation, then publish it.
+    ///
+    /// Sections are written and synchronized first; the manifest that names the generation, its
+    /// applied index and its membership is published afterwards. A build that fails part-way
+    /// leaves the preceding generation active, and the sections it wrote are deleted by the next
+    /// publication or by the next startup.
     async fn build_snapshot(&mut self) -> io::Result<SnapshotOf> {
-        self.inner
-            .run(MemoryClass::Bulk, |inner, reservation| {
-                let state = inner.state();
-                let meta = SnapshotMeta {
-                    last_log_id: state.last_applied_log_id.clone(),
-                    last_membership: state.last_membership.as_ref().clone(),
-                };
-                let data = DurableBatch::encode(&state, reservation.bytes() / 4)?;
-                let stored = Arc::new(StoredSnapshotData {
-                    meta: meta.clone(),
-                    data: data.clone(),
-                });
-                let mut batch = DurableBatch::new(reservation)?;
-                batch.insert(&inner.snapshot, KEY_SNAPSHOT, stored.as_ref())?;
-                inner.commit("snapshot", batch)?;
-                *inner.current_snapshot.write() = Some(stored);
-                Ok(Snapshot {
-                    meta,
-                    snapshot: Cursor::new(data),
-                })
-            })
-            .await
+        let manifest = self.inner.seal_generation().await?;
+        Ok(Snapshot {
+            meta: manifest.snapshot_meta(),
+            snapshot: self.inner.open_sealed_snapshot(manifest),
+        })
     }
 }
 

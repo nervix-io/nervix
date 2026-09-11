@@ -238,7 +238,10 @@ pub struct DuplexSender<M: InterconnectDuplexRequest> {
 
 impl<M: InterconnectDuplexRequest> DuplexSender<M> {
     /// Submit one frame. Frames arrive at the peer in submission order.
-    pub async fn send(&mut self, item: M::Item) -> Result<(), Report<RequestError>> {
+    ///
+    /// Returns how many encoded bytes the frame carried, which is what a caller bounding its own
+    /// outstanding work counts.
+    pub async fn send(&mut self, item: M::Item) -> Result<u64, Report<RequestError>> {
         let (payload, reservation) = item
             .encode_rkyv(
                 self.executor.clone(),
@@ -249,16 +252,17 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
             .map_err(|error| {
                 Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
             })?;
-        self.writer
-            .send_frame(ChargedBytes::from_owned(payload, reservation))
-            .await
-            .map_err(|error| {
-                Report::new(RequestError::Stream {
-                    node: self.node.clone(),
-                    request: M::NAME,
-                    reason: error.to_string(),
-                })
+        let frame = ChargedBytes::from_owned(payload, reservation);
+        let bytes = u64::try_from(frame.len())
+            .assured("supported targets have a pointer width no larger than u64");
+        self.writer.send_frame(frame).await.map_err(|error| {
+            Report::new(RequestError::Stream {
+                node: self.node.clone(),
+                request: M::NAME,
+                reason: error.to_string(),
             })
+        })?;
+        Ok(bytes)
     }
 
     /// Stop submitting. The peer finishes the frames it already has and then ends its own

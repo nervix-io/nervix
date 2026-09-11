@@ -83,6 +83,41 @@ impl Harness {
             clock: None,
         }
     }
+    /// Copy one generation's sections into this store the way an arriving transfer does.
+    async fn receive(&self, source: &SealedSnapshot) -> Result<SealedSnapshot, io::Error> {
+        let manifest = source.manifest().clone();
+        let generation = self.store.claim_snapshot_generation();
+        for index in 0..manifest.section_count {
+            let bytes = source.section(index).await?;
+            self.store
+                .stage_snapshot_section(generation, index, bytes)
+                .await?;
+        }
+        Ok(self.store.open_staged_snapshot(SnapshotManifest {
+            generation,
+            ..manifest
+        }))
+    }
+
+    async fn read_sections(snapshot: &SealedSnapshot) -> Result<Vec<Vec<u8>>, io::Error> {
+        let mut sections = Vec::new();
+        for index in 0..snapshot.manifest().section_count {
+            sections.push(snapshot.section(index).await?);
+        }
+        Ok(sections)
+    }
+
+    fn stored_generations(&self) -> Result<BTreeSet<u64>, io::Error> {
+        let mut generations = BTreeSet::new();
+        for item in self.store.inner.snapshot.iter() {
+            let key = item.key().map_err(io::Error::other)?;
+            if let Some(generation) = section_generation(&key) {
+                generations.insert(generation);
+            }
+        }
+        Ok(generations)
+    }
+
     fn entry(index: u64, command: ConsensusCommand) -> EntryOf<TypeConfig> {
         EntryOf::<TypeConfig> {
             log_id: Self::log_id(index),
@@ -431,15 +466,16 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
             )
             .await?;
         let preceding = target.store.inner.state();
+        let staged = target.receive(&built.snapshot).await?;
         target
             .store
             .inner
             .faults
-            .fail_next("install_snapshot".into(), boundary);
+            .fail_next("snapshot_manifest".into(), boundary);
         assert!(
             target
                 .store
-                .install_snapshot(&built.meta, built.snapshot.clone())
+                .install_snapshot(&built.meta, staged)
                 .await
                 .is_err()
         );
@@ -451,6 +487,8 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
                 assert!(target.store.get_current_snapshot().await?.is_none());
             }
             StorageBoundary::AfterSync => {
+                // The manifest reached storage, so the interrupted replacement is finished on the
+                // next start and the node ends on the generation that was published.
                 assert_eq!(target.store.inner.state(), expected);
                 let current = target
                     .store
@@ -459,12 +497,15 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
                     .ok_or("snapshot missing after its durable installation")?;
                 assert_eq!(current.meta, built.meta);
                 assert_eq!(
-                    current.snapshot.into_inner(),
-                    built.snapshot.clone().into_inner()
+                    Harness::read_sections(&current.snapshot).await?,
+                    Harness::read_sections(&built.snapshot).await?
                 );
             }
         }
     }
+    // The reader holds the source database open; a reopen only succeeds once it is released.
+    let built_meta = built.meta.clone();
+    drop(built);
     let mut source = source.reopen().await?;
     assert_eq!(
         source
@@ -473,8 +514,92 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
             .await?
             .ok_or("built snapshot missing after reopen")?
             .meta,
-        built.meta
+        built_meta
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
+    let mut source = Harness::new().await?;
+    for index in 1..=8 {
+        source
+            .apply(
+                index,
+                ConsensusCommand::PutDomain {
+                    domain: Box::new(Harness::domain(&format!("domain_{index}"))),
+                },
+            )
+            .await?;
+    }
+    let built = source.store.build_snapshot().await?;
+    let manifest_sections = built.snapshot.manifest().section_count;
+    let sections = Harness::read_sections(&built.snapshot).await?;
+    assert_eq!(
+        u32::try_from(sections.len())?,
+        manifest_sections,
+        "the manifest names exactly the sections the generation holds"
+    );
+    let limit = source
+        .executor
+        .limits()
+        .snapshot_section_bytes
+        .as_u64();
+    for section in &sections {
+        assert!(
+            u64::try_from(section.len())? <= limit,
+            "no section exceeds the configured section limit"
+        );
+    }
+    let records: usize = sections
+        .iter()
+        .map(|bytes| {
+            let section: SnapshotSection = crate::storage_decode(bytes)?;
+            Ok::<usize, io::Error>(section.records.len())
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .sum();
+    assert!(
+        records >= 8,
+        "every stored record belongs to one section, got {records}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_superseded_generation_is_deleted_once_nothing_reads_it() -> TestResult {
+    let mut source = Harness::new().await?;
+    source
+        .apply(
+            1,
+            ConsensusCommand::PutDomain {
+                domain: Box::new(Harness::domain("first")),
+            },
+        )
+        .await?;
+    let first = source.store.build_snapshot().await?;
+    let first_generation = first.snapshot.manifest().generation;
+    source
+        .apply(
+            2,
+            ConsensusCommand::PutDomain {
+                domain: Box::new(Harness::domain("second")),
+            },
+        )
+        .await?;
+    let second = source.store.build_snapshot().await?;
+    assert!(
+        source.stored_generations()?.contains(&first_generation),
+        "a generation an open reader holds stays in storage"
+    );
+    drop(first);
+    source.store.build_snapshot().await?;
+    assert!(
+        !source.stored_generations()?.contains(&first_generation),
+        "a generation nothing reads is deleted by the next publication"
+    );
+    drop(second);
     Ok(())
 }
 

@@ -145,7 +145,8 @@ impl PoolClass {
     pub(crate) fn payload_limit(self, executor: &Executor) -> u64 {
         match self {
             Self::Management => executor.limits().management_event_bytes.as_u64(),
-            Self::Commands | Self::Replication => executor.limits().command_bytes.as_u64(),
+            Self::Commands => executor.limits().command_bytes.as_u64(),
+            Self::Replication => executor.limits().replication_batch_bytes.as_u64(),
             Self::Relay => executor.limits().relay_encoded_bytes.as_u64(),
             Self::Bulk => executor
                 .limits()

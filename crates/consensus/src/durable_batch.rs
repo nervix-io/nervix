@@ -20,6 +20,8 @@ pub enum StorageFailure {
     Stopped,
     #[error("invalid consensus record storage; recreate the node's stored state")]
     InvalidState,
+    #[error("the snapshot generation this transfer was reading has been superseded")]
+    SnapshotSuperseded,
     #[error("failed to encode consensus record: {0}")]
     Encode(#[source] ciborium::ser::Error<io::Error>),
     #[error("consensus database write failed: {0}")]
@@ -96,6 +98,17 @@ impl<'a> DurableBatch<'a> {
         key: &[u8],
         value: &T,
     ) -> io::Result<()> {
+        self.insert_measured(keyspace, key, value)?;
+        Ok(())
+    }
+
+    /// Insert one record and report how many bytes it encoded to.
+    pub(crate) fn insert_measured<T: Serialize>(
+        &mut self,
+        keyspace: &Keyspace,
+        key: &[u8],
+        value: &T,
+    ) -> io::Result<u64> {
         self.charge_key(key)?;
         let mut writer = RecordWriter {
             bytes: Vec::new(),
@@ -105,10 +118,28 @@ impl<'a> DurableBatch<'a> {
             .map_err(|error| io::Error::other(StorageFailure::Encode(error)))?;
         self.charge(writer.bytes.len())?;
         writer.bytes.shrink_to_fit();
+        let encoded = u64::try_from(writer.bytes.len()).map_err(io::Error::other)?;
         self.mutations.push(Mutation::Put {
             keyspace: keyspace.clone(),
             key: key.to_vec(),
             value: writer.bytes,
+        });
+        Ok(encoded)
+    }
+
+    /// Write a value that is already encoded, such as one restored from a snapshot section.
+    pub(crate) fn insert_encoded(
+        &mut self,
+        keyspace: &Keyspace,
+        key: &[u8],
+        value: Vec<u8>,
+    ) -> io::Result<()> {
+        self.charge_key(key)?;
+        self.charge(value.len())?;
+        self.mutations.push(Mutation::Put {
+            keyspace: keyspace.clone(),
+            key: key.to_vec(),
+            value,
         });
         Ok(())
     }
