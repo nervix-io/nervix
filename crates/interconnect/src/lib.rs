@@ -709,6 +709,17 @@ pub struct EntityGateReleaseResponse {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthCheck;
+
+impl InterconnectRequest for HealthCheck {
+    type Response = ();
+
+    const NAME: &'static str = "raft_health";
+    const CLASS: PoolClass = PoolClass::Management;
+    const TIMEOUT: Duration = Duration::from_secs(1);
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeMetricsRequest {
     pub domain: DomainName,
     pub kind: ModelKind,

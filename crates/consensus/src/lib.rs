@@ -1262,7 +1262,7 @@ impl Consensus {
 
         self.inner
             .interconnect
-            .register_handler::<wire::HealthCheck, _, _>(|_, _| async {})
+            .register_handler::<nervix_interconnect::HealthCheck, _, _>(|_, _| async {})
             .map_err(|_| ConsensusError::Startup)?;
         Ok(())
     }
@@ -2069,7 +2069,7 @@ impl Administrator {
     async fn ping_peer(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
         self.inner
             .interconnect
-            .request(node_id, wire::HealthCheck)
+            .request(node_id, nervix_interconnect::HealthCheck)
             .await
             .map_err(|_| ConsensusError::Transport)
     }
