@@ -18,7 +18,8 @@ use nervix_interconnect::{
 };
 use nervix_models::ClusterNodeName;
 use openraft::{
-    BasicNode, Entry, LogId, Membership, SnapshotMeta, StoredMembership, Vote, entry::EntryPayload,
+    BasicNode, Entry, LogId, Membership, SnapshotMeta, StoredMembership, Vote,
+    entry::EntryPayload,
     raft::{StreamAppendError, StreamAppendResult, TransferLeaderError},
 };
 use rkyv::{Archive, Deserialize, Serialize};

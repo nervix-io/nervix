@@ -62,8 +62,8 @@ mod duplex;
 mod relay;
 mod stream;
 
+pub(crate) use duplex::FrameReader;
 pub use duplex::{DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender};
-pub(crate) use duplex::{FrameReader, FrameWriter, OpenedDuplexStream};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 
@@ -2505,78 +2505,6 @@ impl TransportState {
 }
 
 impl ClientConnection {
-    /// Open one ordered bidirectional frame stream. Both directions stay open until their owner
-    /// half-closes them, so an idle stream is a live stream, not a stalled request.
-    async fn open_duplex_raw(
-        &self,
-        state: &TransportState,
-        path: &str,
-        class: PoolClass,
-        opening: ChargedBytes,
-        setup_timeout: Duration,
-    ) -> Result<OpenedDuplexStream, Report<TransportError>> {
-        if self.closed.is_cancelled() {
-            return Err(Report::new(TransportError::Closed(self.key.target.addr)));
-        }
-        let operation = async {
-            let sender = self
-                .sender
-                .clone()
-                .ready()
-                .await
-                .map_err(TransportError::from)?;
-            let mut request_url = url::Url::parse("https://localhost/")
-                .assured("the fixed HTTPS request base is a valid URL");
-            request_url
-                .set_host(Some(&self.key.target.server_name))
-                .map_err(|_| {
-                    Report::new(TransportError::InvalidServerName(
-                        self.key.target.server_name.clone(),
-                    ))
-                })?;
-            request_url.set_path(path);
-            let request = Request::builder()
-                .method(Method::POST)
-                .version(Version::HTTP_2)
-                .uri(request_url.as_str())
-                .body(())
-                .map_err(|error| Report::new(TransportError::Http(error.to_string())))?;
-            let (response, stream) = {
-                let mut sender = sender;
-                sender.send_request(request, false).map_err(TransportError::from)?
-            };
-            let mut writer = FrameWriter::new(stream, state.options.progress_timeout);
-            writer.send_frame(opening).await?;
-            let response = response.await.map_err(TransportError::from)?;
-            let status = response.status();
-            if !status.is_success() {
-                let message = read_body(
-                    &state.executor,
-                    class.memory_class(),
-                    class.control_body_limit(&state.executor),
-                    state.options.progress_timeout,
-                    response.into_body(),
-                )
-                .await?;
-                return Err(Report::new(TransportError::RemoteRejected {
-                    status: status.as_u16(),
-                    message: String::from_utf8_lossy(message.as_ref()).into_owned(),
-                }));
-            }
-            Ok(OpenedDuplexStream {
-                writer,
-                body: response.into_body(),
-            })
-        };
-        match timeout(setup_timeout, operation).await {
-            Ok(result) => result,
-            Err(_) => Err(Report::new(TransportError::RequestTimeout {
-                peer: self.key.node_id.clone(),
-                timeout: setup_timeout,
-            })),
-        }
-    }
-
     async fn request_stream_raw(
         &self,
         state: &TransportState,

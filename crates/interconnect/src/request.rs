@@ -241,9 +241,8 @@ impl StreamHandlerError {
 pub type OutgoingByteStream =
     Pin<Box<dyn Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static>>;
 
-pub(crate) type OutgoingFrameStream = Pin<
-    Box<dyn Stream<Item = Result<ChargedBytes, Report<StreamHandlerError>>> + Send + 'static>,
->;
+pub(crate) type OutgoingFrameStream =
+    Pin<Box<dyn Stream<Item = Result<ChargedBytes, Report<StreamHandlerError>>> + Send + 'static>>;
 
 /// A producer-owned stream with its exact byte count declared before response headers are sent.
 pub struct StreamingResponse {
@@ -503,8 +502,9 @@ type HandlerFuture = Pin<
 type StreamHandlerFuture =
     Pin<Box<dyn Future<Output = Result<StreamingResponse, RemoteRequestFailure>> + Send + 'static>>;
 
-type DuplexHandlerFuture =
-    Pin<Box<dyn Future<Output = Result<OutgoingFrameStream, RemoteRequestFailure>> + Send + 'static>>;
+type DuplexHandlerFuture = Pin<
+    Box<dyn Future<Output = Result<OutgoingFrameStream, RemoteRequestFailure>> + Send + 'static>,
+>;
 
 trait ErasedRequestHandler: Send + Sync {
     fn class(&self) -> PoolClass;
@@ -600,9 +600,7 @@ where
                     let (payload, reservation) = response
                         .encode_rkyv(executor, M::CLASS, limit)
                         .await
-                        .map_err(|error| {
-                            Report::new(StreamHandlerError::new(error.to_string()))
-                        })?;
+                        .map_err(|error| Report::new(StreamHandlerError::new(error.to_string())))?;
                     Ok(ChargedBytes::from_owned(payload, reservation))
                 }
             });

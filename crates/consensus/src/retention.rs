@@ -99,9 +99,8 @@ impl RetentionTask {
     /// The entry-count threshold is OpenRaft's own snapshot policy; this only adds the byte bound,
     /// and never asks twice for the same completed snapshot, so at most one build is active.
     async fn request_snapshot_when_bytes_exceed_threshold(&mut self, snapshot_index: Option<u64>) {
-        if self.requested_for == Some(snapshot_index.unwrap_or_default())
-            && self.requested_for.is_some()
-        {
+        let completed = snapshot_index.unwrap_or_default();
+        if self.requested_for == Some(completed) {
             return;
         }
         if self.store.log_bytes_since_snapshot() < self.policy.snapshot_byte_threshold {
@@ -114,7 +113,7 @@ impl RetentionTask {
             bytes = self.store.log_bytes_since_snapshot(),
             "raft snapshot requested by the retained byte threshold"
         );
-        self.requested_for = Some(snapshot_index.unwrap_or_default());
+        self.requested_for = Some(completed);
     }
 
     /// Purge the part of the covered log that exceeds the retained byte bound.
@@ -146,6 +145,9 @@ impl RetentionTask {
         if self.raft.trigger().purge_log(purge_upto).await.is_err() {
             return;
         }
-        debug!(purge_upto, "raft log purge requested by the retention bound");
+        debug!(
+            purge_upto,
+            "raft log purge requested by the retention bound"
+        );
     }
 }

@@ -330,12 +330,12 @@ impl StoreInner {
                 })
             })
             .await?;
-        let section_count =
-            u32::try_from(sections.sections.len()).map_err(|_| io::Error::other(StorageFailure::Capacity))?;
+        let section_count = u32::try_from(sections.sections.len())
+            .map_err(|_| io::Error::other(StorageFailure::Capacity))?;
         for (index, bytes) in sections.sections.into_iter().enumerate() {
             tokio::task::consume_budget().await;
-            let index = u32::try_from(index)
-                .map_err(|_| io::Error::other(StorageFailure::Capacity))?;
+            let index =
+                u32::try_from(index).map_err(|_| io::Error::other(StorageFailure::Capacity))?;
             self.stage_section(generation, index, bytes).await?;
         }
         let manifest = SnapshotManifest {

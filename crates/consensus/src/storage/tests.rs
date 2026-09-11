@@ -540,11 +540,7 @@ async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
         manifest_sections,
         "the manifest names exactly the sections the generation holds"
     );
-    let limit = source
-        .executor
-        .limits()
-        .snapshot_section_bytes
-        .as_u64();
+    let limit = source.executor.limits().snapshot_section_bytes.as_u64();
     for section in &sections {
         assert!(
             u64::try_from(section.len())? <= limit,

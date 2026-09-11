@@ -25,12 +25,12 @@ use lapin::{
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
+use nervix_consensus::RaftRetentionPolicy;
 use nervix_execution::Executor;
 use nervix_interconnect::{
     ControlEnvelope, Envelope, PeerTarget, RuntimeErrorEvent, TlsConfigBundle, Transport,
     TransportOptions,
 };
-use nervix_consensus::RaftRetentionPolicy;
 use nervix_models::ClusterNodeName;
 pub use nervix_proto as proto;
 

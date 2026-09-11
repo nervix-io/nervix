@@ -14,7 +14,7 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use h2::{Reason, RecvStream, SendStream, server};
-use http::{Response, StatusCode, Version};
+use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
@@ -22,8 +22,8 @@ use tokio::time::{Instant, timeout};
 use triomphe::Arc;
 
 use super::{
-    BODY_CHUNK_BYTES, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
-    send_static_error,
+    BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
+    read_body, send_static_error,
 };
 use crate::{
     PoolClass, RequestError, TransportError,
@@ -177,29 +177,26 @@ impl FrameReader {
 }
 
 /// Writes whole frames into one direction of a duplex stream.
-pub(crate) struct FrameWriter {
+struct FrameWriter {
     stream: SendStream<Bytes>,
     progress_timeout: Duration,
 }
 
 /// The two directions of a duplex stream the peer has accepted.
-pub(crate) struct OpenedDuplexStream {
-    pub(crate) writer: FrameWriter,
-    pub(crate) body: RecvStream,
+struct OpenedDuplexStream {
+    writer: FrameWriter,
+    body: RecvStream,
 }
 
 impl FrameWriter {
-    pub(crate) fn new(stream: SendStream<Bytes>, progress_timeout: Duration) -> Self {
+    fn new(stream: SendStream<Bytes>, progress_timeout: Duration) -> Self {
         Self {
             stream,
             progress_timeout,
         }
     }
 
-    pub(crate) async fn send_frame(
-        &mut self,
-        payload: ChargedBytes,
-    ) -> Result<(), Report<TransportError>> {
+    async fn send_frame(&mut self, payload: ChargedBytes) -> Result<(), Report<TransportError>> {
         let length = u32::try_from(payload.len()).map_err(|_| {
             Report::new(TransportError::Encode(
                 "duplex frame exceeds u32 bytes".to_string(),
@@ -263,7 +260,7 @@ impl FrameWriter {
     }
 
     /// Half-close this direction. The peer sees the frame sequence end here.
-    pub(crate) fn finish(&mut self) -> Result<(), Report<TransportError>> {
+    fn finish(&mut self) -> Result<(), Report<TransportError>> {
         self.stream
             .send_data(Bytes::new(), true)
             .map_err(TransportError::from)?;
@@ -434,6 +431,82 @@ impl<T> DuplexResponses<T> {
     }
 }
 
+impl ClientConnection {
+    /// Open one ordered bidirectional frame stream. Both directions stay open until their owner
+    /// half-closes them, so an idle stream is a live stream, not a stalled request.
+    async fn open_duplex_raw(
+        &self,
+        state: &TransportState,
+        path: &str,
+        class: PoolClass,
+        opening: ChargedBytes,
+        setup_timeout: Duration,
+    ) -> Result<OpenedDuplexStream, Report<TransportError>> {
+        if self.closed.is_cancelled() {
+            return Err(Report::new(TransportError::Closed(self.key.target.addr)));
+        }
+        let operation = async {
+            let sender = self
+                .sender
+                .clone()
+                .ready()
+                .await
+                .map_err(TransportError::from)?;
+            let mut request_url = url::Url::parse("https://localhost/")
+                .assured("the fixed HTTPS request base is a valid URL");
+            request_url
+                .set_host(Some(&self.key.target.server_name))
+                .map_err(|_| {
+                    Report::new(TransportError::InvalidServerName(
+                        self.key.target.server_name.clone(),
+                    ))
+                })?;
+            request_url.set_path(path);
+            let request = Request::builder()
+                .method(Method::POST)
+                .version(Version::HTTP_2)
+                .uri(request_url.as_str())
+                .body(())
+                .map_err(|error| Report::new(TransportError::Http(error.to_string())))?;
+            let (response, stream) = {
+                let mut sender = sender;
+                sender
+                    .send_request(request, false)
+                    .map_err(TransportError::from)?
+            };
+            let mut writer = FrameWriter::new(stream, state.options.progress_timeout);
+            writer.send_frame(opening).await?;
+            let response = response.await.map_err(TransportError::from)?;
+            let status = response.status();
+            if !status.is_success() {
+                let message = read_body(
+                    &state.executor,
+                    class.memory_class(),
+                    class.control_body_limit(&state.executor),
+                    state.options.progress_timeout,
+                    response.into_body(),
+                )
+                .await?;
+                return Err(Report::new(TransportError::RemoteRejected {
+                    status: status.as_u16(),
+                    message: String::from_utf8_lossy(message.as_ref()).into_owned(),
+                }));
+            }
+            Ok(OpenedDuplexStream {
+                writer,
+                body: response.into_body(),
+            })
+        };
+        match timeout(setup_timeout, operation).await {
+            Ok(result) => result,
+            Err(_) => Err(Report::new(TransportError::RequestTimeout {
+                peer: self.key.node_id.clone(),
+                timeout: setup_timeout,
+            })),
+        }
+    }
+}
+
 impl TransportState {
     pub(crate) async fn open_duplex_stream<M: InterconnectDuplexRequest>(
         &self,
@@ -447,11 +520,11 @@ impl TransportState {
             timeout: setup_timeout,
             admission,
         } = request;
-        let deadline = Instant::now()
-            .checked_add(setup_timeout)
-            .ok_or_else(|| TransportError::InvalidOptions {
+        let deadline = Instant::now().checked_add(setup_timeout).ok_or_else(|| {
+            TransportError::InvalidOptions {
                 reason: "duplex setup deadline exceeds the monotonic clock range".to_string(),
-            })?;
+            }
+        })?;
         let lease = self.lease(node_id, class, subquota, deadline).await?;
         let OpenedDuplexStream { writer, body } = lease
             .connection

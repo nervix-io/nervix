@@ -548,7 +548,6 @@ impl StateMachineData {
     }
 }
 
-
 #[derive(Debug, Clone)]
 struct PeerHealth {
     unavailable_since: Option<Instant>,
@@ -695,7 +694,7 @@ impl IncomingSnapshotTransfer {
         self.staged_sections = self
             .staged_sections
             .checked_add(1)
-            .ok_or_else(|| Report::new(SnapshotTransferError::TooManySections)) ?;
+            .ok_or_else(|| Report::new(SnapshotTransferError::TooManySections))?;
         self.staged_bytes = self.staged_bytes.checked_add(end).ok_or_else(|| {
             Report::new(SnapshotTransferError::ExceedsDeclaredLength {
                 declared: self.total_bytes,
@@ -1291,8 +1290,8 @@ impl Consensus {
                         .map_err(|error| {
                             nervix_interconnect::StreamHandlerError::new(error.to_string())
                         })?;
-                        let answers = receiver
-                            .answer_append_stream(context.peer_node_id().clone(), items);
+                        let answers =
+                            receiver.answer_append_stream(context.peer_node_id().clone(), items);
                         Ok(nervix_interconnect::DuplexResponses::new(answers.map(Ok)))
                     }
                 },
@@ -1400,13 +1399,11 @@ impl Consensus {
                         .map(wire::TransferLeadershipResponse::from)
                         .map_err(wire::ConsensusRequestError::raft)
                 }
-            })
-?;
+            })?;
 
         self.inner
             .interconnect
-            .register_handler::<wire::HealthCheck, _, _>(|_, _| async {})
-?;
+            .register_handler::<wire::HealthCheck, _, _>(|_, _| async {})?;
         Ok(())
     }
 
@@ -1687,7 +1684,8 @@ impl Proposer {
                 domain: Box::new(domain),
             })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn put_domain_and_schedule(
         &self,
@@ -1727,13 +1725,15 @@ impl Proposer {
                 authority,
             })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn stop_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.inner
             .client_write(ConsensusCommand::StopDomain { domain_id })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn reconcile_domain_clock_authority(
         &self,
@@ -1761,13 +1761,15 @@ impl Proposer {
         self.inner
             .client_write(ConsensusCommand::PauseDomain { domain_id })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn resume_domain(&self, domain_id: DomainName) -> Result<(), ConsensusError> {
         self.inner
             .client_write(ConsensusCommand::ResumeDomain { domain_id })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn create_user(&self, user: UserCredentials) -> Result<(), ConsensusError> {
         self.inner
@@ -1775,7 +1777,8 @@ impl Proposer {
                 user: Box::new(user),
             })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn begin_resource_upload(
         &self,
@@ -1814,7 +1817,8 @@ impl Proposer {
                 identifier: identifier.clone(),
             })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn publish_resource_upload(
         &self,
@@ -1855,7 +1859,8 @@ impl Proposer {
                 replica: Box::new(replica),
             })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     pub async fn set_node_cordoned(
         &self,
@@ -1865,16 +1870,14 @@ impl Proposer {
         self.inner
             .client_write(ConsensusCommand::SetNodeCordoned { node_id, cordoned })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 
     async fn write_transaction(
         &self,
         command: ConsensusCommand,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        let response = self
-            .inner
-            .client_write(command)
-            .await?;
+        let response = self.inner.client_write(command).await?;
         let ConsensusResponse::Transaction(response) = response.data else {
             return Err(ConsensusTransactionError::InvalidResponse);
         };
@@ -1998,7 +2001,8 @@ impl Proposer {
         self.inner
             .client_write(ConsensusCommand::RemoveFinishedTransactions { finished_before })
             .await
-            .map(|_| ())}
+            .map(|_| ())
+    }
 }
 
 impl Administrator {
@@ -2390,13 +2394,16 @@ impl ProtocolReceiver {
                 .verified("the transfer was found for this peer immediately above")
         };
         let transfer = transfer.complete(transfer_id)?;
-        let snapshot = self.inner.store.open_staged_snapshot(snapshot::SnapshotManifest {
-            generation: transfer.generation,
-            last_applied_log_id: transfer.meta.last_log_id.clone(),
-            last_membership: Arc::new(transfer.meta.last_membership.clone()),
-            section_count: transfer.section_count,
-            total_bytes: transfer.total_bytes,
-        });
+        let snapshot = self
+            .inner
+            .store
+            .open_staged_snapshot(snapshot::SnapshotManifest {
+                generation: transfer.generation,
+                last_applied_log_id: transfer.meta.last_log_id.clone(),
+                last_membership: Arc::new(transfer.meta.last_membership.clone()),
+                section_count: transfer.section_count,
+                total_bytes: transfer.total_bytes,
+            });
         // The authoritative check belongs to Raft: it revalidates the vote and whether this
         // snapshot still applies before anything is published.
         self.inner

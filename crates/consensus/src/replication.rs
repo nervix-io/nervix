@@ -97,6 +97,15 @@ fn stream_failed(target: &ClusterNodeName, reason: impl std::fmt::Display) -> RP
     }))
 }
 
+/// Why one follower's submission stopped. Either way nothing more belongs on this stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmissionStopped {
+    /// The response reader ended this generation, so no further batch can be acknowledged.
+    GenerationEnded,
+    /// The stream to the follower failed while a batch was being written.
+    StreamFailed,
+}
+
 /// One batch the leader has submitted and not yet seen acknowledged.
 struct OutstandingBatch {
     last_log_id: Option<LogIdOf>,
@@ -113,7 +122,10 @@ struct AppendSubmission {
 }
 
 impl AppendSubmission {
-    async fn submit(&mut self, request: AppendEntriesRequest<TypeConfig>) -> Result<(), ()> {
+    async fn submit(
+        &mut self,
+        request: AppendEntriesRequest<TypeConfig>,
+    ) -> Result<(), SubmissionStopped> {
         let last_log_id = match request.entries.last() {
             Some(entry) => Some(entry.log_id.clone()),
             None => request.prev_log_id.clone(),
@@ -121,24 +133,21 @@ impl AppendSubmission {
         self.wait_for_follower_capacity().await?;
         let record = wire::AppendEntriesRecord::from_request(request);
         let Ok(bytes) = self.sender.send(record).await else {
-            return Err(());
+            return Err(SubmissionStopped::StreamFailed);
         };
         self.submitted_bytes = self
             .submitted_bytes
             .checked_add(bytes)
             .assured("outstanding bytes never exceed the per-follower bound plus one batch");
-        let outstanding = OutstandingBatch {
-            last_log_id,
-            bytes,
-        };
+        let outstanding = OutstandingBatch { last_log_id, bytes };
         match self.outstanding.send(outstanding).await {
             Ok(()) => Ok(()),
-            Err(_) => Err(()),
+            Err(_) => Err(SubmissionStopped::GenerationEnded),
         }
     }
 
     /// Wait until this follower's unacknowledged bytes leave room for one more target-size batch.
-    async fn wait_for_follower_capacity(&mut self) -> Result<(), ()> {
+    async fn wait_for_follower_capacity(&mut self) -> Result<(), SubmissionStopped> {
         while self
             .submitted_bytes
             .checked_add(self.batch_target_bytes)
@@ -146,7 +155,7 @@ impl AppendSubmission {
         {
             tokio::task::consume_budget().await;
             let Some(acknowledged) = self.acknowledged.recv().await else {
-                return Err(());
+                return Err(SubmissionStopped::GenerationEnded);
             };
             self.submitted_bytes = self
                 .submitted_bytes
@@ -183,7 +192,9 @@ impl AppendStreamGeneration {
         // nothing to carry is never cut short.
         let answer = match timeout(self.response_deadline, self.receiver.next()).await {
             Ok(Ok(Some(answer))) => answer,
-            Ok(Ok(None)) => return self.fail(stream_failed(&self.target, "the follower ended the stream")),
+            Ok(Ok(None)) => {
+                return self.fail(stream_failed(&self.target, "the follower ended the stream"));
+            }
             Ok(Err(error)) => return self.fail(stream_failed(&self.target, error)),
             Err(_) => {
                 return self.fail(RPCError::Unreachable(Unreachable::new(
@@ -237,9 +248,12 @@ where
     S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
 {
     let deadline = append_deadline(&option);
-    let setup_deadline = Instant::now()
-        .checked_add(deadline)
-        .ok_or_else(|| stream_failed(target, "the setup deadline exceeds the monotonic clock range"))?;
+    let setup_deadline = Instant::now().checked_add(deadline).ok_or_else(|| {
+        stream_failed(
+            target,
+            "the setup deadline exceeds the monotonic clock range",
+        )
+    })?;
     let opened = timeout(
         setup_deadline.saturating_duration_since(Instant::now()),
         interconnect.open_duplex_stream(
@@ -284,11 +298,11 @@ where
             let Some(request) = next else {
                 break;
             };
-            if submission.submit(request).await.is_err() {
+            if let Err(stopped) = submission.submit(request).await {
+                debug!(target = %submission_target, ?stopped, "raft append stream stopped submitting");
                 break;
             }
         }
-        debug!(target = %submission_target, "raft append stream stopped submitting");
         submission
             .sender
             .finish()
