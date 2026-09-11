@@ -744,14 +744,12 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
         else {
             panic!("clock source recorder '{name}' returned no request list: {observations}");
         };
-        if requests.len() == expected_count {
+        // Polling continues while this observer request is in flight, so a loaded suite can pass
+        // the target count before the response arrives. The first expected occurrences remain the
+        // exact sample validated below.
+        if requests.len() >= expected_count {
             break observations;
         }
-        assert!(
-            requests.len() < expected_count,
-            "clock source recorder '{name}' exceeded the expected {expected_count} requests: \
-             {observations}"
-        );
         assert!(
             Instant::now() < deadline,
             "clock source recorder '{name}' expected {expected_count} requests, observed {}: \
