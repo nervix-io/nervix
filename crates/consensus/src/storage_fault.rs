@@ -15,7 +15,7 @@ pub enum StorageBoundary {
 
 #[cfg(not(any(test, feature = "testing")))]
 #[derive(Clone, Default)]
-pub struct StorageFault;
+pub struct StorageFault(());
 
 #[cfg(not(any(test, feature = "testing")))]
 impl StorageFault {

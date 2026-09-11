@@ -233,8 +233,23 @@ autoinherit-check:
     cargo autoinherit
     git diff --exit-code
 
-cargo-clippy:
-    RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-features --all-targets --workspace
+cargo-clippy-all:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-features --all-targets --workspace
+
+cargo-clippy-server:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-server" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
+
+cargo-clippy-client:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-cli -q
+
+cargo-clippy-nspl-format:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-nspl-format" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-nspl-format -q
+
+cargo-clippy-web-console:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-web-console" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
+
+[parallel]
+cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console
 
 [parallel]
 lint-inner: cargo-clippy proto-lint
