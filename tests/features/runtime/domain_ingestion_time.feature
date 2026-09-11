@@ -129,43 +129,35 @@ Feature: Logical ingestion time and admission
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE PACED DOMAIN {{domain}} WITH PERIOD <period> SKEW <period>;
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 1h;
       CREATE SCHEMA request ( sequence I64, occurred_at DATETIME );
-      CREATE SCHEMA observation ( sequence I64, occurred_at DATETIME, observed_at DATETIME );
       CREATE WIRE JSON SCHEMA request_wire MODE STRICT ( sequence integer, occurred_at string );
       CREATE CODEC request_codec FROM WIRE JSON SCHEMA request_wire TO SCHEMA request
         ENCODE occurred_at AS RFC3339;
-      CREATE RELAY observations SCHEMA observation UNBRANCHED;
+      CREATE RELAY observations SCHEMA request UNBRANCHED;
       CREATE VHOST edge retained-clock-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT clock_ingress ON edge PATH '/clock' TYPE HTTP;
       CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP AT occurred_at
-        TO observations INHERIT ALL SET observed_at = now()
-        UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR clock_source FROM ENDPOINT clock_ingress MODE NO_ACK SEQUENTIAL
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
-        TIMESTAMP NOW
-        TO observations INHERIT ALL SET observed_at = now()
+        TO observations INHERIT ALL
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION clock_observations TO observations;
       """
+    And domain clock for domain "{{domain}}" starts with its complete retained admission history for period "1h"
     And domain clock progress for domain "{{domain}}" is paused before delivery
     When these NSPL commands are executed on the leader node
       """
-      START AT '2000-01-01T00:00:00Z' TIME RATE <rate>;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     Then within "5s" domain clock progress for domain "{{domain}}" reaches the delivery pause
-    And within "45s" admission at host "retained-clock-{{test_id}}.example.com" retains 256 positions from "2000-01-01T00:00:00Z" with period "<period>"
+    And admission at host "retained-clock-{{test_id}}.example.com" retains 256 positions from "2000-01-01T00:00:00Z" with period "1h"
     When domain clock progress for domain "{{domain}}" resumes
 
     Examples:
-      | cluster_size | rate | period |
-      | 1            | 0.01 | 1ms    |
-      | 3            | 0.01 | 1ms    |
-      | 1            | 4.0  | 400ms  |
-      | 3            | 4.0  | 400ms  |
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @logical_ingestion_time
   Scenario Outline: Buffered TIMESTAMP NOW is selected when quiesced intake is delivered

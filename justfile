@@ -379,7 +379,7 @@ build-cli:
 [parallel]
 build-apps: build-cli build-server
 
-build-local-dashboard: build-deps build-apps
+build-all: generate-dev-tls build-deps build-apps
 
 wasm-processor-rust-guest:
     #!/usr/bin/env bash
@@ -461,7 +461,11 @@ wasm-processor-go-guest:
         exit 127
     fi
     cd examples/wasm-processors/go-guest
-    tinygo build \
+    # TinyGo compiles against the standard library of the Go toolchain that `go` selects, and
+    # automatic selection never moves below a newer host Go, so the go.mod toolchain is forced.
+    toolchain="$(sed -n 's/^toolchain //p' go.mod)"
+    test -n "${toolchain}"
+    GOTOOLCHAIN="${toolchain}" tinygo build \
         -target=wasm-unknown \
         -scheduler=none \
         -opt=z \
@@ -490,7 +494,7 @@ reset-local-dashboard-state:
     set -euo pipefail
     rm -rf .nervix-db
 
-cluster-dashboard: generate-dev-tls build-local-dashboard
+cluster-dashboard: build-all
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p .nervix-db/node1 .nervix-db/node2 .nervix-db/node3
@@ -577,7 +581,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.18.0}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.19.0}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \

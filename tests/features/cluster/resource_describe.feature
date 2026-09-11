@@ -379,6 +379,7 @@ Feature: Resource lifecycle
       """
     And node "node-1" eventually reports leader "node-1"
     And node "node-3" is stopped
+    Then node "node-1" eventually reports status containing "raft member 'node-3' is marked unavailable"
     When these NSPL commands are executed on node "node-1"
       """
       CREATE DOMAIN {{domain}};
