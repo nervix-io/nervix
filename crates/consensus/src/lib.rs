@@ -52,7 +52,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::{
-    sync::{RwLock, broadcast, watch},
+    sync::{Mutex as AsyncMutex, broadcast, watch},
     task::JoinHandle,
     time::{Instant, timeout},
 };
@@ -86,6 +86,12 @@ pub use transaction::{
 )]
 pub enum ConsensusCommand {
     ReplaceDomainSchedule {
+        domain: DomainName,
+        expected_schedule: Option<Box<DomainSchedule>>,
+        schedule: Option<Box<DomainSchedule>>,
+    },
+    ApplyAutomaticDomainSchedule {
+        fence: AutomaticScheduleFence,
         domain: DomainName,
         expected_schedule: Option<Box<DomainSchedule>>,
         schedule: Option<Box<DomainSchedule>>,
@@ -221,6 +227,15 @@ impl std::fmt::Display for ConsensusCommand {
                     write!(f, "clear-domain-schedule:{}", domain.as_str())
                 }
             }
+            Self::ApplyAutomaticDomainSchedule {
+                domain, schedule, ..
+            } => {
+                if schedule.is_some() {
+                    write!(f, "apply-automatic-domain-schedule:{}", domain.as_str())
+                } else {
+                    write!(f, "clear-automatic-domain-schedule:{}", domain.as_str())
+                }
+            }
             Self::PutDomainAndSchedule { domain, .. } => {
                 write!(f, "put-domain-and-schedule:{}", domain.id.as_str())
             }
@@ -334,7 +349,7 @@ pub type StoredMembershipOf =
 pub type SnapshotOf =
     Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, Cursor<Vec<u8>>>;
 
-const HEARTBEAT_ERROR_REPORT_MIN_INTERVAL: Duration = Duration::from_secs(10);
+const MEMBERSHIP_MUTATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many consensus transitions a session can fall behind before the bus drops the oldest.
 const CONSENSUS_EVENT_CAPACITY: usize = 256;
 const SNAPSHOT_CHUNK_BYTES: usize = 64 * 1024;
@@ -347,7 +362,6 @@ pub struct ConsensusSettings {
     pub interconnect_advertise_addr: String,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
-    pub node_unavailability_timeout: Duration,
     pub raft_heartbeat_interval: Duration,
     pub raft_election_timeout_min: Duration,
     pub raft_election_timeout_max: Duration,
@@ -395,6 +409,20 @@ impl GossipState {
         }
         current.into_values().collect()
     }
+
+    fn latest_admission_candidates(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+        let mut current = BTreeMap::<ClusterNodeName, GossipNode>::new();
+        for node in self.admission_candidates() {
+            let replace = match current.get(&node.node_id) {
+                Some(observed) => observed.incarnation < node.incarnation,
+                None => true,
+            };
+            if replace {
+                current.insert(node.node_id.clone(), node.clone());
+            }
+        }
+        current
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +431,108 @@ pub struct ConsensusRuntimeState {
     pub schedule: ClusterSchedule,
     pub domains: BTreeMap<DomainName, DomainState>,
     pub domain_clock_authorities: BTreeMap<DomainName, DomainClockAuthority>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct LeaderTenure {
+    leader_id: ClusterNodeName,
+    term: u64,
+}
+
+impl LeaderTenure {
+    pub fn leader_id(&self) -> &ClusterNodeName {
+        &self.leader_id
+    }
+
+    pub fn term(&self) -> u64 {
+        self.term
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct AutomaticScheduleFence {
+    leader_tenure: LeaderTenure,
+    input_revision: Option<u64>,
+}
+
+impl AutomaticScheduleFence {
+    pub fn leader_tenure(&self) -> &LeaderTenure {
+        &self.leader_tenure
+    }
+
+    pub fn input_revision(&self) -> Option<u64> {
+        self.input_revision
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomaticScheduleInput {
+    runtime_state: ConsensusRuntimeState,
+    fence: AutomaticScheduleFence,
+}
+
+impl AutomaticScheduleInput {
+    pub fn runtime_state(&self) -> &ConsensusRuntimeState {
+        &self.runtime_state
+    }
+
+    pub fn fence(&self) -> AutomaticScheduleFence {
+        self.fence.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MembershipSnapshot {
+    voters: BTreeSet<ClusterNodeName>,
+    nodes: BTreeMap<ClusterNodeName, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MembershipMutation {
+    AddLearner {
+        node_id: ClusterNodeName,
+        address: String,
+        refresh: bool,
+    },
+    ChangeVoters {
+        voters: BTreeSet<ClusterNodeName>,
+    },
+}
+
+impl MembershipSnapshot {
+    fn automatic_mutations(&self, gossip: &GossipState) -> Vec<MembershipMutation> {
+        let mut mutations = Vec::new();
+        let mut desired_voters = self.voters.clone();
+        for node in gossip.latest_admission_candidates().into_values() {
+            if node.interconnect_advertise_addr.is_empty() {
+                continue;
+            }
+
+            let known_address = self.nodes.get(&node.node_id);
+            let is_voter = self.voters.contains(&node.node_id);
+            if !is_voter || known_address != Some(&node.interconnect_advertise_addr) {
+                let refresh = known_address.is_some()
+                    && known_address != Some(&node.interconnect_advertise_addr);
+                mutations.push(MembershipMutation::AddLearner {
+                    node_id: node.node_id.clone(),
+                    address: node.interconnect_advertise_addr,
+                    refresh,
+                });
+            }
+            desired_voters.insert(node.node_id);
+        }
+
+        if desired_voters != self.voters {
+            mutations.push(MembershipMutation::ChangeVoters {
+                voters: desired_voters,
+            });
+        }
+        mutations
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,12 +657,6 @@ impl StateMachineData {
 struct StoredSnapshotData {
     meta: SnapshotMeta<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node>,
     data: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct PeerHealth {
-    unavailable_since: Option<Instant>,
-    last_reported_unavailable_at: Option<Instant>,
 }
 
 struct IncomingSnapshotTransfer {
@@ -908,8 +1032,7 @@ struct ConsensusState {
     local_node_id: ClusterNodeName,
     interconnect_advertise_addr: String,
     interconnect: Transport,
-    node_unavailability_timeout: Duration,
-    peer_health: RwLock<BTreeMap<ClusterNodeName, PeerHealth>>,
+    membership_mutation: AsyncMutex<()>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
@@ -1091,8 +1214,7 @@ impl Consensus {
                 local_node_id: settings.node_id,
                 interconnect_advertise_addr: settings.interconnect_advertise_addr,
                 interconnect: settings.interconnect,
-                node_unavailability_timeout: settings.node_unavailability_timeout,
-                peer_health: RwLock::new(BTreeMap::new()),
+                membership_mutation: AsyncMutex::new(()),
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
                 metrics_task: Mutex::new(Some(metrics_task)),
@@ -1260,10 +1382,6 @@ impl Consensus {
             })
             .map_err(|_| ConsensusError::Startup)?;
 
-        self.inner
-            .interconnect
-            .register_handler::<nervix_interconnect::HealthCheck, _, _>(|_, _| async {})
-            .map_err(|_| ConsensusError::Startup)?;
         Ok(())
     }
 
@@ -1387,10 +1505,6 @@ impl Observer {
         lines.push(format!("raft.current_leader: {current_leader}"));
         lines.push(format!("raft.current_term: {}", metrics.current_term));
         lines.push(format!("raft.state: {:?}", metrics.state));
-        lines.push(format!(
-            "raft.node_unavailability_timeout: {:?}",
-            self.inner.node_unavailability_timeout
-        ));
         let cordoned = self.cordoned_node_ids().await;
         lines.push(format!(
             "raft.cordoned_nodes: {}",
@@ -1502,6 +1616,47 @@ impl Proposer {
         self.observer.clone()
     }
 
+    pub async fn automatic_schedule_input(
+        &self,
+    ) -> Result<AutomaticScheduleInput, Report<ConsensusError>> {
+        let before = self.inner.raft.metrics().borrow_watched().clone();
+        if before.current_leader.as_ref() != Some(&self.inner.local_node_id) {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: before.current_leader,
+            }));
+        }
+
+        let state = self.inner.store.inner.state();
+        let after = self.inner.raft.metrics().borrow_watched().clone();
+        if after.current_leader.as_ref() != Some(&self.inner.local_node_id)
+            || after.current_term != before.current_term
+        {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: after.current_leader,
+            }));
+        }
+
+        let input_revision = state
+            .last_applied_log_id
+            .as_ref()
+            .map(|log_id| log_id.index);
+        Ok(AutomaticScheduleInput {
+            runtime_state: ConsensusRuntimeState {
+                revision: state.runtime_revision,
+                schedule: (&state.schedule).into(),
+                domains: (&state.domains).into(),
+                domain_clock_authorities: (&state.domain_clock_authorities).into(),
+            },
+            fence: AutomaticScheduleFence {
+                leader_tenure: LeaderTenure {
+                    leader_id: self.inner.local_node_id.clone(),
+                    term: before.current_term,
+                },
+                input_revision,
+            },
+        })
+    }
+
     pub async fn replace_domain_schedule(
         &self,
         domain: DomainName,
@@ -1522,6 +1677,41 @@ impl Proposer {
             ConsensusResponse::Applied => Ok(()),
             ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
             ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn apply_automatic_domain_schedule(
+        &self,
+        fence: AutomaticScheduleFence,
+        domain: DomainName,
+        expected_schedule: Option<DomainSchedule>,
+        schedule: Option<DomainSchedule>,
+    ) -> Result<(), Report<ConsensusError>> {
+        if fence.leader_tenure.leader_id != self.inner.local_node_id {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: self.inner.raft.current_leader().await,
+            }));
+        }
+
+        let response = self
+            .inner
+            .raft
+            .client_write(ConsensusCommand::ApplyAutomaticDomainSchedule {
+                fence,
+                domain,
+                expected_schedule: expected_schedule.map(Box::new),
+                schedule: schedule.map(Box::new),
+            })
+            .await
+            .map_err(|error| Report::new(ConsensusError::from(error)))?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
         }
     }
 
@@ -1892,6 +2082,7 @@ impl Administrator {
     }
 
     pub async fn maybe_initialize(&self) -> Result<bool, ConsensusError> {
+        let _membership_mutation = self.inner.membership_mutation.lock().await;
         if self
             .inner
             .store
@@ -1921,157 +2112,75 @@ impl Administrator {
     }
 
     pub async fn reconcile_nodes(&self, gossip: GossipState) -> Result<(), ConsensusError> {
+        let _membership_mutation = self.inner.membership_mutation.lock().await;
         let leader = self.inner.raft.current_leader().await;
         if leader.as_ref() != Some(&self.inner.local_node_id) {
             return Ok(());
         }
 
-        let metrics = self.inner.raft.metrics().borrow_watched().clone();
-        let current_voters = metrics
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect::<BTreeSet<_>>();
-        let mut desired_voters = current_voters.clone();
-        let mut added_learner = false;
-
-        for node in gossip.admission_candidates() {
+        let before = self.effective_membership();
+        let mutations = before.automatic_mutations(&gossip);
+        for mutation in mutations {
             tokio::task::consume_budget().await;
-            if node.interconnect_advertise_addr.is_empty() {
-                continue;
-            }
-
-            let known_node = metrics
-                .membership_config
-                .membership()
-                .get_node(&node.node_id)
-                .cloned();
-            if known_node.is_none()
-                || known_node.as_ref().map(|known| &known.addr)
-                    != Some(&node.interconnect_advertise_addr)
-            {
-                let add_message = if known_node.is_some() {
-                    format!(
-                        "raft refreshing learner {} address to {}",
-                        node.node_id, node.interconnect_advertise_addr
+            match mutation {
+                MembershipMutation::AddLearner {
+                    node_id,
+                    address,
+                    refresh,
+                } => {
+                    let operation = if refresh {
+                        format!("refresh learner '{node_id}' at {address}")
+                    } else if before.nodes.contains_key(&node_id) {
+                        format!("wait for learner '{node_id}' to catch up at {address}")
+                    } else {
+                        format!("add learner '{node_id}' at {address}")
+                    };
+                    self.inner.events.report(format!("raft {operation}"));
+                    let admission = timeout(
+                        MEMBERSHIP_MUTATION_TIMEOUT,
+                        self.inner
+                            .raft
+                            .add_learner(node_id, BasicNode::new(address), true),
                     )
-                } else {
-                    format!(
-                        "raft adding learner {} at {}",
-                        node.node_id, node.interconnect_advertise_addr
+                    .await;
+                    let result = match admission {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let observed = self.effective_membership();
+                            return Err(self.membership_timeout(operation, &observed));
+                        }
+                    };
+                    result.map_err(ConsensusError::from)?;
+                }
+                MembershipMutation::ChangeVoters { voters } => {
+                    let operation = format!("promote voters {voters:?}");
+                    let membership = timeout(
+                        MEMBERSHIP_MUTATION_TIMEOUT,
+                        self.inner.raft.change_membership(voters.clone(), true),
                     )
-                };
-                self.inner.events.report(add_message);
-                self.inner
-                    .raft
-                    .add_learner(
-                        node.node_id.clone(),
-                        BasicNode::new(node.interconnect_advertise_addr.clone()),
-                        true,
-                    )
-                    .await
-                    .map_err(|_| ConsensusError::Transport)?;
-                added_learner = true;
-            }
-
-            desired_voters.insert(node.node_id.clone());
-        }
-
-        let membership_nodes = metrics
-            .membership_config
-            .nodes()
-            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut unavailable = Vec::new();
-        for node_id in current_voters.iter() {
-            tokio::task::consume_budget().await;
-            if node_id == &self.inner.local_node_id {
-                continue;
-            }
-
-            let Some(_) = membership_nodes.get(node_id) else {
-                continue;
-            };
-
-            let chitchat_unavailable = gossip.dead_node_ids.contains(node_id);
-            let healthcheck_unavailable = self.ping_peer(node_id).await.is_err();
-            unavailable.push((
-                node_id.clone(),
-                chitchat_unavailable || healthcheck_unavailable,
-            ));
-        }
-
-        {
-            let mut peer_health = self.inner.peer_health.write().await;
-
-            for (node_id, is_unavailable) in unavailable {
-                let entry = peer_health.entry(node_id.clone()).or_insert(PeerHealth {
-                    unavailable_since: None,
-                    last_reported_unavailable_at: None,
-                });
-
-                if is_unavailable {
-                    let unavailable_since =
-                        entry.unavailable_since.get_or_insert_with(Instant::now);
-                    let should_report = unavailable_since.elapsed()
-                        >= self.inner.node_unavailability_timeout
-                        && entry.last_reported_unavailable_at.is_none_or(|last| {
-                            last.elapsed() >= HEARTBEAT_ERROR_REPORT_MIN_INTERVAL
-                        });
-                    if should_report {
-                        let message = format!(
-                            "raft peer {} remains unavailable for {:?} (threshold {:?})",
-                            node_id,
-                            unavailable_since.elapsed(),
-                            self.inner.node_unavailability_timeout
-                        );
-                        self.inner.events.report(message);
-                        entry.last_reported_unavailable_at = Some(Instant::now());
-                    }
-                } else {
-                    entry.unavailable_since = None;
-                    entry.last_reported_unavailable_at = None;
+                    .await;
+                    let result = match membership {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let observed = self.effective_membership();
+                            if observed.voters == voters {
+                                continue;
+                            }
+                            return Err(self.membership_timeout(operation, &observed));
+                        }
+                    };
+                    result.map_err(ConsensusError::from)?;
                 }
             }
-
-            peer_health.retain(|node_id, _| {
-                current_voters.contains(node_id) || desired_voters.contains(node_id)
-            });
         }
 
-        if !added_learner && desired_voters == current_voters {
-            return Ok(());
-        }
-
-        self.inner
-            .raft
-            .change_membership(desired_voters.clone(), true)
-            .await
-            .map_err(|_| ConsensusError::Transport)?;
-        let after = self
-            .inner
-            .raft
-            .metrics()
-            .borrow_watched()
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect::<BTreeSet<_>>();
-        if current_voters != after {
+        let after = self.effective_membership();
+        if before.voters != after.voters {
             self.inner
                 .events
-                .report(format!("raft membership updated: {after:?}"));
+                .report(format!("raft membership updated: {:?}", after.voters));
         }
         Ok(())
-    }
-
-    async fn ping_peer(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
-        self.inner
-            .interconnect
-            .request(node_id, nervix_interconnect::HealthCheck)
-            .await
-            .map_err(|_| ConsensusError::Transport)
     }
 
     pub async fn drop_node(&self, node_id: &ClusterNodeName) -> Result<(), ConsensusError> {
@@ -2079,54 +2188,73 @@ impl Administrator {
             return Err(ConsensusError::RemoveLocalLeader(node_id.to_string()));
         }
 
-        let metrics = self.inner.raft.metrics().borrow_watched().clone();
-        let member_ids = metrics
-            .membership_config
-            .nodes()
-            .map(|(member_id, _)| member_id.clone())
-            .collect::<BTreeSet<_>>();
-        if !member_ids.contains(node_id) {
+        let _membership_mutation = self.inner.membership_mutation.lock().await;
+        let before = self.effective_membership();
+        if !before.nodes.contains_key(node_id) {
             return Err(ConsensusError::NodeNotFound(node_id.to_string()));
         }
 
-        let mut desired_voters = metrics
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect::<BTreeSet<_>>();
+        let mut desired_voters = before.voters;
         let was_voter = desired_voters.remove(node_id);
         if was_voter && desired_voters.is_empty() {
             return Err(ConsensusError::RemoveLastVoter(node_id.to_string()));
         }
 
-        let membership_change_timeout = self
-            .inner
-            .node_unavailability_timeout
-            .max(Duration::from_secs(5))
-            * 2;
-        timeout(
-            membership_change_timeout,
+        let operation = format!("remove node '{node_id}'");
+        let membership = timeout(
+            MEMBERSHIP_MUTATION_TIMEOUT,
             self.inner
                 .raft
                 .change_membership(desired_voters.clone(), false),
         )
-        .await
-        .map_err(|_| ConsensusError::MembershipChangeTimeout {
-            operation: format!("remove node '{node_id}'"),
-            timeout: membership_change_timeout,
-        })?
-        .map_err(|error| {
-            if let RaftError::APIError(ClientWriteError::ForwardToLeader(_)) = error {
-                ConsensusError::from(error)
-            } else {
-                ConsensusError::Transport
+        .await;
+        let result = match membership {
+            Ok(result) => result,
+            Err(_) => {
+                let observed = self.effective_membership();
+                if !observed.nodes.contains_key(node_id) {
+                    self.inner
+                        .events
+                        .report(format!("raft node removed after timed wait: {node_id}"));
+                    return Ok(());
+                }
+                return Err(self.membership_timeout(operation, &observed));
             }
-        })?;
+        };
+        result.map_err(ConsensusError::from)?;
 
         self.inner
             .events
             .report(format!("raft node removed: {node_id}"));
         Ok(())
+    }
+
+    fn effective_membership(&self) -> MembershipSnapshot {
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        MembershipSnapshot {
+            voters: metrics.membership_config.membership().voter_ids().collect(),
+            nodes: metrics
+                .membership_config
+                .nodes()
+                .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
+                .collect(),
+        }
+    }
+
+    fn membership_timeout(
+        &self,
+        operation: String,
+        observed: &MembershipSnapshot,
+    ) -> ConsensusError {
+        self.inner.events.report(format!(
+            "raft membership wait timed out after {MEMBERSHIP_MUTATION_TIMEOUT:?}: {operation}; \
+             observed effective voters {:?} and nodes {:?}",
+            observed.voters, observed.nodes
+        ));
+        ConsensusError::MembershipChangeTimeout {
+            operation,
+            timeout: MEMBERSHIP_MUTATION_TIMEOUT,
+        }
     }
 
     pub async fn transfer_leadership_to(
@@ -2456,6 +2584,12 @@ struct AppliedConsensusCommand {
     transactions_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppliedEntryContext {
+    leader_term: u64,
+    input_revision: Option<u64>,
+}
+
 impl AppliedConsensusCommand {
     fn applied(changes: StateMachineChanges) -> Self {
         Self {
@@ -2493,9 +2627,25 @@ impl AppliedConsensusCommand {
     }
 }
 
+#[cfg(test)]
 fn apply_consensus_command(
     state: &mut StateMachineData,
     command: &ConsensusCommand,
+) -> AppliedConsensusCommand {
+    apply_consensus_command_at(
+        state,
+        command,
+        AppliedEntryContext {
+            leader_term: 0,
+            input_revision: None,
+        },
+    )
+}
+
+fn apply_consensus_command_at(
+    state: &mut StateMachineData,
+    command: &ConsensusCommand,
+    context: AppliedEntryContext,
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
@@ -2504,6 +2654,31 @@ fn apply_consensus_command(
             expected_schedule,
             schedule,
         } => {
+            if state.schedule.domain(domain) != expected_schedule.as_deref() {
+                return AppliedConsensusCommand::conflict(format!(
+                    "domain '{}' schedule changed",
+                    domain.as_str()
+                ));
+            }
+            state.replace_domain_schedule(domain, schedule.as_deref());
+            changes.schedule_changed = true;
+        }
+        ConsensusCommand::ApplyAutomaticDomainSchedule {
+            fence,
+            domain,
+            expected_schedule,
+            schedule,
+        } => {
+            if context.leader_term != fence.leader_tenure.term {
+                return AppliedConsensusCommand::conflict(
+                    "automatic schedule decision leader tenure changed".to_string(),
+                );
+            }
+            if context.input_revision != fence.input_revision {
+                return AppliedConsensusCommand::conflict(
+                    "automatic schedule decision input revision changed".to_string(),
+                );
+            }
             if state.schedule.domain(domain) != expected_schedule.as_deref() {
                 return AppliedConsensusCommand::conflict(format!(
                     "domain '{}' schedule changed",
@@ -3071,10 +3246,13 @@ fn read_key<T: DeserializeOwned>(keyspace: &Keyspace, key: &[u8]) -> io::Result<
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, ops::RangeInclusive};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        ops::RangeInclusive,
+    };
 
     use fjall::Database;
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
         DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
@@ -3092,12 +3270,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
-        GossipNode, GossipState, ProtocolOriginError, ResourceRecords, StateMachineChanges,
-        StateMachineData, TransactionCommandResult, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStepEffect, TransactionStepResult, TypeConfig,
-        UserCredentials, apply_consensus_command, apply_transaction_step_effect, io_error,
-        storage_decode, validate_protocol_origin,
+        AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, ConsensusCommand,
+        ConsensusResponse, FjallLogReader, FjallStore, GossipNode, GossipState, LeaderTenure,
+        MembershipMutation, MembershipSnapshot, ProtocolOriginError, ResourceRecords,
+        StateMachineChanges, StateMachineData, TransactionCommandResult, TransactionMutationError,
+        TransactionOutcome, TransactionStatement, TransactionStepEffect, TransactionStepResult,
+        TypeConfig, UserCredentials, apply_consensus_command, apply_consensus_command_at,
+        apply_transaction_step_effect, io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionQueueLimits,
@@ -3240,6 +3419,82 @@ mod tests {
         assert_eq!(
             state.live_identities(),
             BTreeSet::from([node_identity("node-1", 11)])
+        );
+    }
+
+    #[test]
+    fn observed_learner_retries_catch_up_before_promotion() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                node_id: joining.clone(),
+                incarnation: ClusterNodeIncarnation::new(2),
+                grpc_advertise_addr: String::new(),
+                web_console_advertise_addr: String::new(),
+                interconnect_advertise_addr: "https://node-2.test:7443".to_string(),
+            }],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([
+                (first.clone(), "https://node-1.test:7443".to_string()),
+                (joining.clone(), "https://node-2.test:7443".to_string()),
+            ]),
+        };
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip),
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    address: "https://node-2.test:7443".to_string(),
+                    refresh: false,
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn changed_endpoint_is_refreshed_before_membership_promotion() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let current_address = "https://node-2.test:7443".to_string();
+        let replacement_address = "https://node-2.test:8443".to_string();
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                node_id: joining.clone(),
+                incarnation: ClusterNodeIncarnation::new(3),
+                grpc_advertise_addr: String::new(),
+                web_console_advertise_addr: String::new(),
+                interconnect_advertise_addr: replacement_address.clone(),
+            }],
+            dead_node_ids: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([
+                (first.clone(), "https://node-1.test:7443".to_string()),
+                (joining.clone(), current_address),
+            ]),
+        };
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip),
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    address: replacement_address,
+                    refresh: true,
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
         );
     }
 
@@ -3633,6 +3888,106 @@ mod tests {
         );
         assert_eq!(state.schedule.domain(&domain("tenant")), Some(&committed));
         assert!(!applied.schedule_changed);
+    }
+
+    #[test]
+    fn automatic_schedule_publication_rejects_a_stale_leader_tenure() {
+        let proposed = domain_schedule("tenant");
+        let mut state = StateMachineData::default();
+        let applied = apply_consensus_command_at(
+            &mut state,
+            &ConsensusCommand::ApplyAutomaticDomainSchedule {
+                fence: AutomaticScheduleFence {
+                    leader_tenure: LeaderTenure {
+                        leader_id: ClusterNodeName::parse("node-1")
+                            .assured("the test node name is valid"),
+                        term: 7,
+                    },
+                    input_revision: Some(40),
+                },
+                domain: domain("tenant"),
+                expected_schedule: None,
+                schedule: Some(Box::new(proposed)),
+            },
+            AppliedEntryContext {
+                leader_term: 8,
+                input_revision: Some(40),
+            },
+        );
+
+        assert_eq!(
+            applied.response,
+            ConsensusResponse::Conflict(
+                "automatic schedule decision leader tenure changed".to_string()
+            )
+        );
+        assert_eq!(state.schedule.domains.len(), 0);
+        assert!(!applied.schedule_changed);
+    }
+
+    #[test]
+    fn automatic_schedule_publication_rejects_a_stale_input_revision() {
+        let proposed = domain_schedule("tenant");
+        let mut state = StateMachineData::default();
+        let applied = apply_consensus_command_at(
+            &mut state,
+            &ConsensusCommand::ApplyAutomaticDomainSchedule {
+                fence: AutomaticScheduleFence {
+                    leader_tenure: LeaderTenure {
+                        leader_id: ClusterNodeName::parse("node-1")
+                            .assured("the test node name is valid"),
+                        term: 7,
+                    },
+                    input_revision: Some(40),
+                },
+                domain: domain("tenant"),
+                expected_schedule: None,
+                schedule: Some(Box::new(proposed)),
+            },
+            AppliedEntryContext {
+                leader_term: 7,
+                input_revision: Some(41),
+            },
+        );
+
+        assert_eq!(
+            applied.response,
+            ConsensusResponse::Conflict(
+                "automatic schedule decision input revision changed".to_string()
+            )
+        );
+        assert_eq!(state.schedule.domains.len(), 0);
+        assert!(!applied.schedule_changed);
+    }
+
+    #[test]
+    fn automatic_schedule_publication_applies_a_current_fence() {
+        let proposed = domain_schedule("tenant");
+        let mut state = StateMachineData::default();
+        let applied = apply_consensus_command_at(
+            &mut state,
+            &ConsensusCommand::ApplyAutomaticDomainSchedule {
+                fence: AutomaticScheduleFence {
+                    leader_tenure: LeaderTenure {
+                        leader_id: ClusterNodeName::parse("node-1")
+                            .assured("the test node name is valid"),
+                        term: 7,
+                    },
+                    input_revision: Some(40),
+                },
+                domain: domain("tenant"),
+                expected_schedule: None,
+                schedule: Some(Box::new(proposed.clone())),
+            },
+            AppliedEntryContext {
+                leader_term: 7,
+                input_revision: Some(40),
+            },
+        );
+
+        assert_eq!(applied.response, ConsensusResponse::Applied);
+        assert_eq!(state.schedule.domain(&domain("tenant")), Some(&proposed));
+        assert!(applied.schedule_changed);
     }
 
     #[test]

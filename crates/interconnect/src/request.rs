@@ -25,7 +25,7 @@ use error_stack::Report;
 use futures_util::Stream;
 use meticulous::ResultExt as _;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::high::{HighDeserializer, HighSerializer},
@@ -43,9 +43,9 @@ use super::{
     ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
     ConfirmOwnershipHandoffStateRequest, ControlEnvelope, DescribeIngestorRequest,
     DiscardOwnershipHandoffStateRequest, ForcedOwnershipRecoveryPreparation,
-    IngestorDescribeEnvelope, OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
-    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest, Transport,
-    TransportError, wire,
+    IngestorDescribeEnvelope, MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffCheckpoint,
+    OwnershipHandoffResponse, PoolClass, PrepareForcedOwnershipRecoveryRequest,
+    PrepareOwnershipHandoffStateRequest, Transport, TransportError, wire,
 };
 use crate::connection::OutboundByteStreamRequest;
 
@@ -192,13 +192,14 @@ pub trait InterconnectRequest: RkyvMessage {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HealthCheck;
+pub struct ApplicationHealthProbe;
 
-impl InterconnectRequest for HealthCheck {
-    type Response = ();
+impl InterconnectRequest for ApplicationHealthProbe {
+    type Response = ClusterNodeIdentity;
 
-    const NAME: &'static str = "raft_health";
+    const NAME: &'static str = "application_health_probe";
     const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_secs(1);
 }
 
@@ -253,6 +254,11 @@ pub enum RequestError {
         request: &'static str,
         subquota: RequestSubquota,
     },
+    #[error("interconnect connection capacity is exhausted for '{request}' on node '{node}'")]
+    ConnectionCapacityExhausted {
+        node: ClusterNodeName,
+        request: &'static str,
+    },
     #[error("failed to encode interconnect request '{request}'")]
     Encode { request: &'static str },
     #[error("failed to decode the response for interconnect request '{request}'")]
@@ -306,6 +312,30 @@ pub enum RequestError {
         declared: u64,
         received: u64,
     },
+}
+
+impl RequestError {
+    /// Whether this request was refused solely because a local or remote admission quota was full.
+    pub fn is_capacity_exhaustion(&self) -> bool {
+        match self {
+            Self::AdmissionFull { .. }
+            | Self::ConnectionCapacityExhausted { .. }
+            | Self::RemoteRejected {
+                failure: RemoteRequestFailure::AdmissionFull { .. },
+                ..
+            } => true,
+            Self::Encode { .. }
+            | Self::Decode { .. }
+            | Self::ShuttingDown { .. }
+            | Self::TargetLeft { .. }
+            | Self::Timeout { .. }
+            | Self::RemoteRejected { .. }
+            | Self::Transport { .. }
+            | Self::ResponseMismatch { .. }
+            | Self::Stream { .. }
+            | Self::StreamLengthMismatch { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -365,12 +395,14 @@ const PER_NODE_COMPLETION_REQUEST_LIMIT: usize = 4;
 const _: () = assert!(
     PER_NODE_RESERVED_REQUEST_MINIMUM > 0
         && PER_NODE_STANDARD_REQUEST_LIMIT > 0
-        && PER_NODE_COMPLETION_REQUEST_LIMIT > 0,
+        && PER_NODE_COMPLETION_REQUEST_LIMIT > 0
+        && MAX_CONCURRENT_HEALTH_PROBES > 0,
     "per-node request policy inputs must be nonzero",
 );
 const _: () = assert!(
     PER_NODE_STANDARD_REQUEST_LIMIT >= PER_NODE_RESERVED_REQUEST_MINIMUM
-        && PER_NODE_COMPLETION_REQUEST_LIMIT >= PER_NODE_RESERVED_REQUEST_MINIMUM,
+        && PER_NODE_COMPLETION_REQUEST_LIMIT >= PER_NODE_RESERVED_REQUEST_MINIMUM
+        && MAX_CONCURRENT_HEALTH_PROBES >= PER_NODE_RESERVED_REQUEST_MINIMUM,
     "each per-node request limit must include the reserved minimum",
 );
 
@@ -390,10 +422,7 @@ impl RequestQuotas {
                 PER_NODE_RESERVED_REQUEST_MINIMUM,
                 PER_NODE_STANDARD_REQUEST_LIMIT,
             ))),
-            liveness: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_STANDARD_REQUEST_LIMIT,
-            ))),
+            liveness: StdArc::new(Semaphore::new(MAX_CONCURRENT_HEALTH_PROBES)),
             progress: StdArc::new(Semaphore::new(capacity.clamp(
                 PER_NODE_RESERVED_REQUEST_MINIMUM,
                 PER_NODE_STANDARD_REQUEST_LIMIT,
@@ -998,6 +1027,12 @@ impl Transport {
                             timeout: timeout_duration,
                         })
                     }
+                    super::TransportError::PoolExhausted => {
+                        Report::new(RequestError::ConnectionCapacityExhausted {
+                            node: node.clone(),
+                            request: M::NAME,
+                        })
+                    }
                     error => Report::new(RequestError::Transport {
                         node: node.clone(),
                         request: M::NAME,
@@ -1112,4 +1147,66 @@ impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
     const NAME: &'static str = "discard_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn application_health_probe_uses_reserved_management_capacity_and_returns_identity() {
+        fn assert_identity_response<M>()
+        where
+            M: InterconnectRequest<Response = ClusterNodeIdentity>,
+        {
+        }
+
+        assert_identity_response::<ApplicationHealthProbe>();
+        assert_eq!(ApplicationHealthProbe::NAME, "application_health_probe");
+        assert_eq!(ApplicationHealthProbe::CLASS, PoolClass::Management);
+        assert_eq!(ApplicationHealthProbe::SUBQUOTA, RequestSubquota::Liveness);
+        assert_eq!(ApplicationHealthProbe::TIMEOUT, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn request_errors_distinguish_capacity_exhaustion_from_peer_failure() {
+        let node = ClusterNodeName::parse("node-b")
+            .assured("the test node name follows the public node-name grammar");
+        let local_capacity = RequestError::AdmissionFull {
+            request: "application_health_probe",
+            subquota: RequestSubquota::Liveness,
+        };
+        let remote_capacity = RequestError::RemoteRejected {
+            node: node.clone(),
+            request: "application_health_probe",
+            failure: RemoteRequestFailure::AdmissionFull {
+                subquota: RequestSubquota::Liveness,
+            },
+        };
+        let connection_capacity = RequestError::ConnectionCapacityExhausted {
+            node: node.clone(),
+            request: "application_health_probe",
+        };
+        let peer_timeout = RequestError::Timeout {
+            node,
+            request: "application_health_probe",
+            timeout: Duration::from_secs(1),
+        };
+
+        assert!(local_capacity.is_capacity_exhaustion());
+        assert!(remote_capacity.is_capacity_exhaustion());
+        assert!(connection_capacity.is_capacity_exhaustion());
+        assert!(!peer_timeout.is_capacity_exhaustion());
+    }
+
+    #[test]
+    fn liveness_quota_supports_the_node_health_probe_limit() {
+        let quotas = RequestQuotas::new(1);
+
+        assert_eq!(
+            quotas.liveness.available_permits(),
+            super::super::MAX_CONCURRENT_HEALTH_PROBES,
+            "health capacity must not shrink with the general incoming request queue"
+        );
+    }
 }

@@ -84,6 +84,7 @@ use nervix_dataflow_graph::{DataflowGraph, DataflowNodeHealth, DataflowNodeStatu
 use nervix_execution::MemoryClass;
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
+    ApplicationHealthProbe,
     CaptureOwnershipHandoffStateRequest as RemoteCaptureOwnershipHandoffStateRequest,
     ConfirmOwnershipHandoffStateRequest as RemoteConfirmOwnershipHandoffStateRequest,
     ControlEnvelope, DataflowNodeStatusEnvelope,
@@ -109,7 +110,7 @@ use nervix_interconnect::{
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
     Envelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
     LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
-    OwnershipHandoffFailure, PeerTarget,
+    MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerTarget,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest,
     RelayAdmission, RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
@@ -4477,7 +4478,7 @@ async fn apply_cluster_runtime_state(
         tokio::task::consume_budget().await;
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
-        let gossip = cluster.gossip_state().await;
+        let gossip = cluster.availability_state().await;
         let expected_nodes = gossip.live_identities();
         let ready_nodes = cluster
             .nodes_ready_for_runtime_revision(state.revision)
@@ -4976,7 +4977,7 @@ impl SessionServiceImpl {
     async fn reconcile_resources_once(&self) {
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let resources = self.inner.consensus.current_resources().await;
-        let gossip = self.inner.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.availability_state().await;
         let live_node_ids = gossip
             .live_identities()
             .into_iter()
@@ -5320,7 +5321,7 @@ impl SessionServiceImpl {
     }
 
     async fn domain_clock_authority_candidates(&self) -> DomainClockAuthorityCandidates {
-        let gossip = self.inner.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.availability_state().await;
         let live_identities = gossip.live_identities();
         let live_node_ids = live_identities
             .iter()
@@ -6355,7 +6356,7 @@ impl SessionServiceImpl {
     async fn available_node_incarnations(
         &self,
     ) -> BTreeMap<ClusterNodeName, ClusterNodeIncarnation> {
-        let gossip = self.inner.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.availability_state().await;
         gossip
             .live_nodes
             .into_iter()
@@ -12571,7 +12572,7 @@ impl SessionServiceImpl {
             .filter(|replica| replica.key.version_key().resource_id() == id)
             .cloned()
             .collect::<Vec<_>>();
-        let gossip = self.inner.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.availability_state().await;
         let live_node_ids = gossip
             .live_identities()
             .into_iter()
@@ -12736,7 +12737,7 @@ impl SessionServiceImpl {
             .iter()
             .filter(|replica| replica.key.version_key().resource_id() == *id)
             .collect::<Vec<_>>();
-        let gossip = self.inner.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.availability_state().await;
         let live_node_ids = gossip
             .live_identities()
             .into_iter()
@@ -12886,7 +12887,7 @@ impl SessionServiceImpl {
     }
 
     async fn drop_node(&self, node_id: ClusterNodeName) -> CommandResult {
-        let gossip = self.inner.cluster.gossip_state().await;
+        let gossip = self.inner.cluster.availability_state().await;
         let is_live = gossip
             .live_nodes
             .iter()
@@ -17839,6 +17840,9 @@ async fn render_cluster_status(cluster: &cluster::ClusterHandle, consensus: &Obs
         .keys()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    let health_unavailable = cluster.peer_health_snapshot().unavailable_nodes();
+    let mut unavailable = gossip.dead_node_ids.clone();
+    unavailable.extend(health_unavailable.iter().cloned());
 
     let mut warned = false;
     for missing in gossip_ids.difference(&raft_ids) {
@@ -17853,10 +17857,10 @@ async fn render_cluster_status(cluster: &cluster::ClusterHandle, consensus: &Obs
             "- raft member '{missing}' is not currently visible in gossip"
         ));
     }
-    for dead in gossip.dead_node_ids.intersection(&raft_ids) {
+    for dead in unavailable.intersection(&raft_ids) {
         warned = true;
-        let source = if cluster.is_interconnect_unavailable(dead) {
-            "interconnect"
+        let source = if health_unavailable.contains(dead) {
+            "application health"
         } else {
             "chitchat"
         };
@@ -18087,7 +18091,12 @@ async fn run_domain_clock(
         tokio::task::consume_budget().await;
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
-        let live_targets = service.inner.cluster.gossip_state().await.live_identities();
+        let live_targets = service
+            .inner
+            .cluster
+            .availability_state()
+            .await
+            .live_identities();
         let ready_targets = service
             .inner
             .cluster
@@ -18266,7 +18275,7 @@ async fn deliver_domain_clock_progress(
     progress: &DomainClockProgress,
     delivered_targets: &mut BTreeSet<ClusterNodeIdentity>,
 ) {
-    let gossip = service.inner.cluster.gossip_state().await;
+    let gossip = service.inner.cluster.availability_state().await;
     let ready = service
         .inner
         .cluster
@@ -18736,7 +18745,6 @@ impl Application {
                 interconnect_advertise_addr: interconnect_advertise_addr.to_string(),
                 interconnect: interconnect.clone(),
                 executor: startup.runtime.executor().clone(),
-                node_unavailability_timeout,
                 raft_heartbeat_interval,
                 raft_election_timeout_min,
                 raft_election_timeout_max,
@@ -18785,12 +18793,43 @@ impl Application {
         .await
         .change_context(AppError::StartCluster);
         let cluster = match cluster_result {
-            Ok(cluster) => Arc::new(cluster),
+            Ok(cluster) => cluster,
             Err(error) => {
                 startup.terminate().await;
                 return Err(error);
             }
         };
+        let local_health_identity = cluster.local_node_identity().await;
+        #[cfg(feature = "testing")]
+        let health_fault_injection = fault_injection.clone();
+        let health_handler = interconnect.register_handler::<ApplicationHealthProbe, _, _>({
+            move |context, _request| {
+                let local_health_identity = local_health_identity.clone();
+                #[cfg(feature = "testing")]
+                let health_fault_injection = health_fault_injection.clone();
+                async move {
+                    #[cfg(feature = "testing")]
+                    health_fault_injection
+                        .pause_health_response_if_armed(
+                            context.peer_node_id(),
+                            local_health_identity.node_id(),
+                        )
+                        .await;
+                    #[cfg(not(feature = "testing"))]
+                    drop(context);
+                    local_health_identity
+                }
+            }
+        });
+        if let Err(error) = health_handler {
+            cluster
+                .shutdown()
+                .await
+                .discarded("the handler-registration error remains the startup failure");
+            startup.terminate().await;
+            return Err(error.change_context(AppError::StartInterconnect));
+        }
+        let cluster = Arc::new(cluster);
         let ApplicationStartup {
             db,
             resource_store,
@@ -18812,12 +18851,14 @@ impl Application {
 
         let cluster_for_reconcile = cluster.clone();
         let consensus_for_reconcile = consensus.proposer();
-        let administrator_for_reconcile = consensus.administrator();
         let registry_for_reconcile = registry.clone();
         let runtime_for_reconcile = runtime.clone();
         let interconnect_for_reconcile = interconnect.clone();
         let local_node_for_reconcile = node_id.clone();
         let reconcile_shutdown = shutdown.clone();
+        let cluster_for_membership_reconcile = cluster.clone();
+        let administrator_for_membership_reconcile = consensus.administrator();
+        let membership_reconcile_shutdown = shutdown.clone();
         let mut background_tasks = Vec::new();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -18837,6 +18878,40 @@ impl Application {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
+        background_tasks.push(tokio::spawn(async move {
+            sleep(Duration::from_millis(500)).await;
+            let mut initialized = false;
+            loop {
+                tokio::task::consume_budget().await;
+                if membership_reconcile_shutdown.is_cancelled() {
+                    break;
+                }
+                if allow_bootstrap && !initialized {
+                    match administrator_for_membership_reconcile
+                        .maybe_initialize()
+                        .await
+                    {
+                        Ok(did_initialize) => {
+                            initialized = did_initialize;
+                        }
+                        Err(error) => {
+                            warn!(%error, "raft bootstrap attempt failed");
+                        }
+                    }
+                }
+                let gossip = cluster_for_membership_reconcile.gossip_state().await;
+                if let Err(error) = administrator_for_membership_reconcile
+                    .reconcile_nodes(gossip)
+                    .await
+                {
+                    warn!(%error, "raft membership reconciliation failed");
+                }
+                tokio::select! {
+                    _ = membership_reconcile_shutdown.cancelled() => break,
+                    _ = sleep(Duration::from_secs(1)) => {}
+                }
+            }
+        }));
         #[cfg(feature = "testing")]
         {
             let mut leadership_transfer_rx = runtime.subscribe_leadership_transfers();
@@ -18881,7 +18956,6 @@ impl Application {
         }
         background_tasks.push(tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;
-            let mut initialized = false;
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
@@ -18889,24 +18963,10 @@ impl Application {
                 if reconcile_shutdown.is_cancelled() {
                     break;
                 }
-                let gossip = cluster_for_reconcile.gossip_state().await;
-                if allow_bootstrap && !initialized {
-                    match administrator_for_reconcile.maybe_initialize().await {
-                        Ok(did_initialize) => {
-                            initialized = did_initialize;
-                        }
-                        Err(err) => {
-                            warn!(error = %err, "raft bootstrap attempt failed");
-                        }
-                    }
-                }
-                if let Err(err) = administrator_for_reconcile.reconcile_nodes(gossip).await {
-                    warn!(error = %err, "raft membership reconciliation failed");
-                }
                 if consensus_for_reconcile.current_leader().await.as_ref()
                     == Some(consensus_for_reconcile.local_node_id())
                 {
-                    let committing_domains = consensus_for_reconcile
+                    let orphaned_alter_committing_domains = consensus_for_reconcile
                         .current_transactions()
                         .await
                         .into_values()
@@ -18917,7 +18977,7 @@ impl Application {
                         .collect::<HashSet<_>>();
                     for (domain, state) in consensus_for_reconcile.current_domains().await {
                         if let DomainStatus::Paused = state.status
-                            && !committing_domains.contains(&domain)
+                            && !orphaned_alter_committing_domains.contains(&domain)
                             && !runtime_for_reconcile.domain_alter_is_active(&domain)
                         {
                             match consensus_for_reconcile.resume_domain(domain.clone()).await {
@@ -18997,133 +19057,81 @@ impl Application {
                             }
                         }
                     }
-                    let scheduling_gossip = cluster_for_reconcile.gossip_state().await;
-                    let live_node_ids = scheduling_gossip
-                        .live_nodes
-                        .iter()
-                        .filter(|node| !scheduling_gossip.dead_node_ids.contains(&node.node_id))
-                        .map(|node| node.node_id.clone())
-                        .collect::<Vec<_>>();
-                    let live_node_incarnations = scheduling_gossip
-                        .live_nodes
-                        .iter()
-                        .filter(|node| !scheduling_gossip.dead_node_ids.contains(&node.node_id))
-                        .map(|node| (node.node_id.clone(), node.incarnation))
-                        .collect::<BTreeMap<_, _>>();
-                    let live_voters = consensus_for_reconcile
-                        .live_voter_ids(live_node_ids.clone())
-                        .await;
-                    let schedulable_node_ids = consensus_for_reconcile
-                        .schedulable_live_voter_ids(live_node_ids)
-                        .await;
-                    let current_schedule = consensus_for_reconcile.current_schedule().await;
-                    let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
-                    let schedulable_node_set = schedulable_node_ids
-                        .iter()
-                        .cloned()
-                        .collect::<BTreeSet<_>>();
-                    let active_graphs = registry_for_reconcile.active_graphs();
-                    let active_domains = active_graphs
-                        .iter()
-                        .map(|(domain, _)| domain.clone())
-                        .collect::<HashSet<_>>();
-                    for domain_schedule in current_schedule.domains.values() {
-                        if active_domains.contains(&domain_schedule.domain)
-                            || committing_domains.contains(&domain_schedule.domain)
-                            || runtime_for_reconcile
-                                .domain_alter_is_active(&domain_schedule.domain)
-                        {
-                            continue;
-                        }
-                        let mut failover_schedule = domain_schedule.clone();
-                        let failover_moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
-                            &mut failover_schedule,
-                            None,
-                            &live_voter_set,
-                            &schedulable_node_set,
-                        );
-                        if failover_moves.is_empty() {
-                            continue;
-                        }
-                        for failover_move in &failover_moves {
-                            if let Some(replica) = failover_move.promoted_replica.as_ref() {
-                                info!(
-                                    domain = domain_schedule.domain.as_str(),
-                                    node = failover_move.label,
-                                    promoted_replica = %replica,
-                                    "failover promoted live replica to primary"
-                                );
-                            } else if let Some(fallback_node) =
-                                failover_move.fallback_node.as_ref()
-                            {
-                                warn!(
-                                    domain = domain_schedule.domain.as_str(),
-                                    node = failover_move.label,
-                                    %fallback_node,
-                                    "failover found no live replica; moving scheduled node without \
-                                     local replicated state"
-                                );
-                            }
-                        }
-                        ForcedOwnershipRecoveryCoordinator {
-                            runtime: &runtime_for_reconcile,
-                            interconnect: &interconnect_for_reconcile,
-                            local_node_id: &local_node_for_reconcile,
-                            node_incarnations: &live_node_incarnations,
-                        }
-                        .prepare_schedule(domain_schedule, &mut failover_schedule)
-                        .await;
-                        if let Err(err) = consensus_for_reconcile
-                            .replace_domain_schedule(
-                                domain_schedule.domain.clone(),
-                                Some(domain_schedule.clone()),
-                                Some(failover_schedule),
-                            )
-                            .await
-                        {
-                            warn!(error = %err, "failed to republish domain schedule after node failover");
-                        }
-                    }
-                    for (domain, graph) in active_graphs {
-                        if committing_domains.contains(&domain)
-                            || runtime_for_reconcile.domain_alter_is_active(&domain)
-                        {
-                            continue;
-                        }
-                        let Some(domain_state) =
-                            consensus_for_reconcile.current_domain(&domain).await
+                    loop {
+                        tokio::task::consume_budget().await;
+                        let Ok(automatic_schedule_input) =
+                            consensus_for_reconcile.automatic_schedule_input().await
                         else {
-                            continue;
+                            break;
                         };
-                        #[cfg(feature = "testing")]
-                        let mut schedule = graph.schedule_for_domain_with_mode(
-                            &domain,
-                            &schedulable_node_ids,
-                            replica_count,
-                            domain_state.config.placement,
-                            scheduler_mode,
-                        );
-                        #[cfg(not(feature = "testing"))]
-                        let mut schedule = graph.schedule_for_domain(
-                            &domain,
-                            &schedulable_node_ids,
-                            replica_count,
-                            domain_state.config.placement,
-                        );
-                        let current_domain = current_schedule.domain(&domain);
-                        let mut failover_existing = current_domain.cloned();
-                        if let Some(existing) = &mut failover_existing {
-                            let failover_moves =
-                                SessionServiceImpl::failover_unavailable_scheduled_nodes(
-                                    existing,
-                                    Some(&schedule),
-                                    &live_voter_set,
-                                    &schedulable_node_set,
-                                );
+                        let committing_domains = consensus_for_reconcile
+                            .current_transactions()
+                            .await
+                            .into_values()
+                            .filter(|transaction| {
+                                matches!(transaction.state, TransactionState::Committing(_))
+                            })
+                            .map(|transaction| transaction.domain)
+                            .collect::<HashSet<_>>();
+                        let health_snapshot = cluster_for_reconcile.peer_health_snapshot();
+                        let health_scheduling_revision = health_snapshot.scheduling_revision();
+                        let scheduling_gossip = cluster_for_reconcile.gossip_state().await;
+                        let mut unavailable_node_ids = scheduling_gossip.dead_node_ids.clone();
+                        unavailable_node_ids.extend(health_snapshot.unavailable_nodes());
+                        let live_node_ids = scheduling_gossip
+                            .live_nodes
+                            .iter()
+                            .filter(|node| !unavailable_node_ids.contains(&node.node_id))
+                            .map(|node| node.node_id.clone())
+                            .collect::<Vec<_>>();
+                        let live_node_incarnations = scheduling_gossip
+                            .live_nodes
+                            .iter()
+                            .filter(|node| !unavailable_node_ids.contains(&node.node_id))
+                            .map(|node| (node.node_id.clone(), node.incarnation))
+                            .collect::<BTreeMap<_, _>>();
+                        let live_voters = consensus_for_reconcile
+                            .live_voter_ids(live_node_ids.clone())
+                            .await;
+                        let schedulable_node_ids = consensus_for_reconcile
+                            .schedulable_live_voter_ids(live_node_ids)
+                            .await;
+                        let current_schedule = &automatic_schedule_input.runtime_state().schedule;
+                        let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
+                        let schedulable_node_set = schedulable_node_ids
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        let active_graphs = registry_for_reconcile.active_graphs();
+                        let active_domains = active_graphs
+                            .iter()
+                            .map(|(domain, _)| domain.clone())
+                            .collect::<HashSet<_>>();
+                        let mut automatic_decision_selected = false;
+                        let mut automatic_decision_published = false;
+                        for domain_schedule in current_schedule.domains.values() {
+                            tokio::task::consume_budget().await;
+                            if active_domains.contains(&domain_schedule.domain)
+                                || committing_domains.contains(&domain_schedule.domain)
+                                || runtime_for_reconcile
+                                    .domain_alter_is_active(&domain_schedule.domain)
+                            {
+                                continue;
+                            }
+                            let mut failover_schedule = domain_schedule.clone();
+                            let failover_moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
+                                &mut failover_schedule,
+                                None,
+                                &live_voter_set,
+                                &schedulable_node_set,
+                            );
+                            if failover_moves.is_empty() {
+                                continue;
+                            }
                             for failover_move in &failover_moves {
                                 if let Some(replica) = failover_move.promoted_replica.as_ref() {
                                     info!(
-                                        domain = domain.as_str(),
+                                        domain = domain_schedule.domain.as_str(),
                                         node = failover_move.label,
                                         promoted_replica = %replica,
                                         "failover promoted live replica to primary"
@@ -19132,42 +19140,147 @@ impl Application {
                                     failover_move.fallback_node.as_ref()
                                 {
                                     warn!(
-                                        domain = domain.as_str(),
+                                        domain = domain_schedule.domain.as_str(),
                                         node = failover_move.label,
                                         %fallback_node,
-                                        "failover found no live replica; moving scheduled node \
-                                         without local replicated state"
+                                        "failover found no live replica; moving scheduled node without \
+                                         local replicated state"
                                     );
                                 }
                             }
-                        }
-                        SessionServiceImpl::merge_existing_schedule_data(
-                            &mut schedule,
-                            failover_existing.as_ref(),
-                            &live_voters,
-                        );
-                        if current_domain == Some(&schedule) {
-                            continue;
-                        }
-                        if let Some(current_domain) = current_domain {
                             ForcedOwnershipRecoveryCoordinator {
                                 runtime: &runtime_for_reconcile,
                                 interconnect: &interconnect_for_reconcile,
                                 local_node_id: &local_node_for_reconcile,
                                 node_incarnations: &live_node_incarnations,
                             }
-                            .prepare_schedule(current_domain, &mut schedule)
+                            .prepare_schedule(domain_schedule, &mut failover_schedule)
                             .await;
-                        }
-                        if let Err(err) = consensus_for_reconcile
-                            .replace_domain_schedule(
-                                domain,
-                                current_domain.cloned(),
-                                Some(schedule),
+                            automatic_decision_selected = true;
+                            if !cluster_for_reconcile.peer_health_scheduling_revision_is_current(
+                                health_scheduling_revision,
                             )
-                            .await
-                        {
-                            warn!(error = %err, "failed to republish domain schedule after membership or schedulability change");
+                            {
+                                break;
+                            }
+                            match consensus_for_reconcile
+                                .apply_automatic_domain_schedule(
+                                    automatic_schedule_input.fence(),
+                                    domain_schedule.domain.clone(),
+                                    Some(domain_schedule.clone()),
+                                    Some(failover_schedule),
+                                )
+                                .await
+                            {
+                                Ok(()) => automatic_decision_published = true,
+                                Err(error) => {
+                                    warn!(%error, "failed to republish domain schedule after node failover");
+                                }
+                            }
+                            break;
+                        }
+                        if !automatic_decision_selected {
+                            for (domain, graph) in active_graphs {
+                                tokio::task::consume_budget().await;
+                                if committing_domains.contains(&domain)
+                                    || runtime_for_reconcile.domain_alter_is_active(&domain)
+                                {
+                                    continue;
+                                }
+                                let Some(domain_state) =
+                                    automatic_schedule_input.runtime_state().domains.get(&domain)
+                                else {
+                                    continue;
+                                };
+                                #[cfg(feature = "testing")]
+                                let mut schedule = graph.schedule_for_domain_with_mode(
+                                    &domain,
+                                    &schedulable_node_ids,
+                                    replica_count,
+                                    domain_state.config.placement,
+                                    scheduler_mode,
+                                );
+                                #[cfg(not(feature = "testing"))]
+                                let mut schedule = graph.schedule_for_domain(
+                                    &domain,
+                                    &schedulable_node_ids,
+                                    replica_count,
+                                    domain_state.config.placement,
+                                );
+                                let current_domain = current_schedule.domain(&domain);
+                                let mut failover_existing = current_domain.cloned();
+                                if let Some(existing) = &mut failover_existing {
+                                    let failover_moves =
+                                        SessionServiceImpl::failover_unavailable_scheduled_nodes(
+                                            existing,
+                                            Some(&schedule),
+                                            &live_voter_set,
+                                            &schedulable_node_set,
+                                        );
+                                    for failover_move in &failover_moves {
+                                        if let Some(replica) = failover_move.promoted_replica.as_ref() {
+                                            info!(
+                                                domain = domain.as_str(),
+                                                node = failover_move.label,
+                                                promoted_replica = %replica,
+                                                "failover promoted live replica to primary"
+                                            );
+                                        } else if let Some(fallback_node) =
+                                            failover_move.fallback_node.as_ref()
+                                        {
+                                            warn!(
+                                                domain = domain.as_str(),
+                                                node = failover_move.label,
+                                                %fallback_node,
+                                                "failover found no live replica; moving scheduled node \
+                                                 without local replicated state"
+                                            );
+                                        }
+                                    }
+                                }
+                                SessionServiceImpl::merge_existing_schedule_data(
+                                    &mut schedule,
+                                    failover_existing.as_ref(),
+                                    &live_voters,
+                                );
+                                if current_domain == Some(&schedule) {
+                                    continue;
+                                }
+                                if let Some(current_domain) = current_domain {
+                                    ForcedOwnershipRecoveryCoordinator {
+                                        runtime: &runtime_for_reconcile,
+                                        interconnect: &interconnect_for_reconcile,
+                                        local_node_id: &local_node_for_reconcile,
+                                        node_incarnations: &live_node_incarnations,
+                                    }
+                                    .prepare_schedule(current_domain, &mut schedule)
+                                    .await;
+                                }
+                                if !cluster_for_reconcile.peer_health_scheduling_revision_is_current(
+                                    health_scheduling_revision,
+                                )
+                                {
+                                    break;
+                                }
+                                match consensus_for_reconcile
+                                    .apply_automatic_domain_schedule(
+                                        automatic_schedule_input.fence(),
+                                        domain,
+                                        current_domain.cloned(),
+                                        Some(schedule),
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => automatic_decision_published = true,
+                                    Err(error) => {
+                                        warn!(%error, "failed to republish domain schedule after membership or schedulability change");
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if !automatic_decision_published {
+                            break;
                         }
                     }
                 }
@@ -19177,83 +19290,158 @@ impl Application {
                 }
             }
         }));
-        let interconnect_for_membership = interconnect.clone();
-        let cluster_for_interconnect = cluster.clone();
+        let interconnect_for_health = interconnect.clone();
+        let cluster_for_health = cluster.clone();
+        let mut health_topology = cluster.subscribe_live_node_states().await;
         let local_node_id = node_id;
         let mut awaiting_initial_bootstrap_peer = cluster_bootstrap_host.is_some();
-        let interconnect_membership_shutdown = shutdown.clone();
+        let health_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             loop {
                 tokio::task::consume_budget().await;
-                if interconnect_membership_shutdown.is_cancelled() {
+                if health_shutdown.is_cancelled() {
                     break;
                 }
-                let gossip = cluster_for_interconnect.gossip_state().await;
+                drop(health_topology.borrow_and_update());
+                let gossip = cluster_for_health.gossip_state().await;
                 let live_node_ids = gossip
                     .live_nodes
                     .iter()
                     .map(|node| node.node_id.clone())
                     .collect::<std::collections::BTreeSet<_>>();
-                struct PeerConnectionPlan {
-                    node_id: ClusterNodeName,
-                    target_label: String,
-                }
+                let peer_nodes = gossip
+                    .live_nodes
+                    .into_iter()
+                    .filter(|node| node.node_id != local_node_id)
+                    .collect::<Vec<_>>();
+                let health_endpoints = peer_nodes.iter().map(|node| {
+                    cluster::PeerHealthEndpoint::new(
+                        node.identity(),
+                        node.interconnect_advertise_addr.clone(),
+                    )
+                });
+                let health_targets = cluster_for_health
+                    .replace_peer_health_endpoints(health_endpoints)
+                    .into_iter()
+                    .map(|target| (target.node_id().clone(), target))
+                    .collect::<BTreeMap<_, _>>();
 
-                let mut plans = Vec::new();
                 let mut outbound_targets = BTreeMap::new();
-                for node in gossip.live_nodes {
-                    if node.node_id == local_node_id {
+                let mut scheduled_probes = Vec::new();
+                let mut topology_changed = false;
+                for node in peer_nodes {
+                    tokio::task::consume_budget().await;
+                    let Some(health_target) = health_targets.get(&node.node_id).cloned() else {
                         continue;
-                    }
+                    };
                     let Ok(target_addr) = node
                         .interconnect_advertise_addr
                         .parse::<cluster::HostPort>()
                     else {
-                        cluster_for_interconnect.record_interconnect_failure(&node.node_id, None);
+                        cluster_for_health
+                            .record_peer_health_result(cluster::PeerHealthProbeResult::new(
+                                health_target,
+                                cluster::PeerHealthProbeOutcome::Unscheduled,
+                                std::time::Instant::now(),
+                            ))
+                            .await;
                         continue;
                     };
-                    let target_label = target_addr.to_string();
-                    let targets = match target_addr.resolve_all().await {
+                    let resolution = tokio::select! {
+                        _ = health_shutdown.cancelled() => return,
+                        changed = health_topology.changed() => {
+                            changed.assured(
+                                "the cluster handle retains its Chitchat state sender for the server lifetime",
+                            );
+                            topology_changed = true;
+                            break;
+                        }
+                        resolution = target_addr.resolve_all() => resolution,
+                    };
+                    let targets = match resolution {
                         Ok(addrs) => addrs
                             .into_iter()
                             .map(|addr| PeerTarget::new(addr, target_addr.host()))
                             .collect::<BTreeSet<_>>(),
-                        Err(_err) => {
-                            cluster_for_interconnect.record_interconnect_failure(
-                                &node.node_id,
-                                Some(target_label.clone()),
-                            );
+                        Err(_) => {
+                            cluster_for_health
+                                .record_peer_health_result(cluster::PeerHealthProbeResult::new(
+                                    health_target,
+                                    cluster::PeerHealthProbeOutcome::Unscheduled,
+                                    std::time::Instant::now(),
+                                ))
+                                .await;
                             continue;
                         }
                     };
-                    outbound_targets.insert(node.node_id.clone(), targets.clone());
-                    plans.push(PeerConnectionPlan {
-                        node_id: node.node_id,
-                        target_label,
-                    });
+                    outbound_targets.insert(node.node_id, targets);
+                    scheduled_probes.push(health_target);
+                }
+                if topology_changed {
+                    continue;
                 }
                 if !outbound_targets.is_empty() {
                     awaiting_initial_bootstrap_peer = false;
                 }
                 if !awaiting_initial_bootstrap_peer {
-                    interconnect_for_membership.replace_live_nodes(&live_node_ids);
-                    cluster_for_interconnect.retain_interconnect_live_set(&live_node_ids);
-                    interconnect_for_membership.replace_outbound_targets(&outbound_targets);
+                    interconnect_for_health.replace_live_nodes(&live_node_ids);
+                    interconnect_for_health.replace_outbound_targets(&outbound_targets);
                 }
 
-                for plan in plans {
-                    tokio::task::consume_budget().await;
-                    if interconnect_for_membership.is_connected_to(&plan.node_id) {
-                        cluster_for_interconnect
-                            .record_interconnect_connected(&plan.node_id, plan.target_label);
-                    } else {
-                        cluster_for_interconnect
-                            .record_interconnect_failure(&plan.node_id, Some(plan.target_label));
+                let probe_results = stream::iter(scheduled_probes.into_iter().map(|target| {
+                    let interconnect = interconnect_for_health.clone();
+                    async move {
+                        let outcome = match interconnect
+                            .request(target.node_id(), ApplicationHealthProbe)
+                            .await
+                        {
+                            Ok(identity) if &identity == target.identity() => {
+                                cluster::PeerHealthProbeOutcome::Healthy(identity)
+                            }
+                            Ok(_) => cluster::PeerHealthProbeOutcome::Failure,
+                            Err(error) if error.current_context().is_capacity_exhaustion() => {
+                                cluster::PeerHealthProbeOutcome::CapacityExhausted
+                            }
+                            Err(_) => cluster::PeerHealthProbeOutcome::Failure,
+                        };
+                        cluster::PeerHealthProbeResult::new(
+                            target,
+                            outcome,
+                            std::time::Instant::now(),
+                        )
                     }
+                }))
+                .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
+                tokio::pin!(probe_results);
+                let topology_changed = loop {
+                    tokio::task::consume_budget().await;
+                    tokio::select! {
+                        _ = health_shutdown.cancelled() => return,
+                        changed = health_topology.changed() => {
+                            changed.assured(
+                                "the cluster handle retains its Chitchat state sender for the server lifetime",
+                            );
+                            break true;
+                        }
+                        result = probe_results.next() => match result {
+                            Some(result) => {
+                                cluster_for_health.record_peer_health_result(result).await;
+                            }
+                            None => break false,
+                        }
+                    }
+                };
+                if topology_changed {
+                    continue;
                 }
                 tokio::select! {
-                    _ = interconnect_membership_shutdown.cancelled() => break,
+                    _ = health_shutdown.cancelled() => break,
+                    changed = health_topology.changed() => {
+                        changed.assured(
+                            "the cluster handle retains its Chitchat state sender for the server lifetime",
+                        );
+                    }
                     _ = sleep(Duration::from_secs(1)) => {}
                 }
             }
@@ -21028,7 +21216,6 @@ mod tests {
                 interconnect_advertise_addr: interconnect.local_addr().to_string(),
                 interconnect: interconnect.clone(),
                 executor: executor.clone(),
-                node_unavailability_timeout: Duration::from_secs(10),
                 raft_heartbeat_interval: Duration::from_millis(50),
                 raft_election_timeout_min: Duration::from_millis(150),
                 raft_election_timeout_max: Duration::from_millis(300),

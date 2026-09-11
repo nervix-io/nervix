@@ -39,9 +39,9 @@ mod wire;
 pub use connection::{IncomingByteStream, RelayAdmission, RelayCancellationGuard};
 pub use identity::TlsConfigBundle;
 pub use request::{
-    HandlerRegistrationError, HealthCheck, InterconnectRequest, InterconnectStreamRequest,
-    RemoteRequestFailure, RequestContext, RequestError, RequestSubquota, StreamHandlerError,
-    StreamingResponse,
+    ApplicationHealthProbe, HandlerRegistrationError, InterconnectRequest,
+    InterconnectStreamRequest, RemoteRequestFailure, RequestContext, RequestError, RequestSubquota,
+    StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 
@@ -58,6 +58,8 @@ const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
 const DEFAULT_MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// The node-wide application-health probe budget, independently reserved in both directions.
+pub const MAX_CONCURRENT_HEALTH_PROBES: usize = 32;
 pub(crate) const RELAY_GRANT_LIFETIME: Duration = Duration::from_secs(5);
 pub(crate) const RKYV_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
 
