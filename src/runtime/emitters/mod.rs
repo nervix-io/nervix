@@ -1,7 +1,10 @@
-use error_stack::{AttachmentKind, FrameKind, Report};
+use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
 use thiserror::Error;
 
-use super::*;
+use super::{
+    *,
+    physical_time::{PhysicalDeadline, PhysicalDeadlineCapability},
+};
 
 pub(in crate::runtime) mod clickhouse;
 mod iceberg;
@@ -101,6 +104,10 @@ pub(in crate::runtime) struct EmitterSinkContext {
     emitter: EmitterName,
     error_policies: ErrorPolicies,
     udfs: Option<UdfExecutor>,
+    /// The bound clock that resolves this emitter's explicit `FLUSH EACH` and `COMMIT EACH`
+    /// cadences. Publish attempts, retry backoff, acknowledgement keepalive and stop deadlines
+    /// stay on the monotonic clock and never read it.
+    clock: DomainClock,
 }
 
 struct EmitterPublishControl<'a> {
@@ -811,6 +818,10 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     FaultInjected,
     #[error("emitter shutdown while stalled")]
     ShutdownWhileStalled,
+    #[error("the emitter could not resolve its flush cadence against the domain clock")]
+    FlushTiming,
+    #[error("the emitter retry deadline is outside the monotonic clock range")]
+    RetryTiming,
     #[error("emitter stop deadline elapsed")]
     StopDeadlineElapsed,
     #[error("failed to encode emitter batch")]
@@ -831,6 +842,8 @@ impl EmitterRuntimeError {
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
             | Self::StopDeadlineElapsed
+            | Self::FlushTiming
+            | Self::RetryTiming
             | Self::EncodeBatch => false,
         }
     }
@@ -865,13 +878,19 @@ impl PublishReport {
     }
 }
 
+/// The emitter's own buffer of published batches and the cadence deadline that releases them.
+///
+/// The cadence is the emitter's explicit `FLUSH EACH` or `FLUSH IMMEDIATE` policy and nothing
+/// else. Retry backoff and acknowledgement keepalive are owned by [`EmitterRetrySchedule`], so a
+/// failed publish attempt leaves this buffer's pending batches, acknowledgements and cadence
+/// deadline exactly as they were.
 #[derive(Default)]
 struct EmitterBatchBuffer {
     flush_policy: Option<RuntimeFlushPolicy>,
     pending: Vec<EmitterPublishBatch>,
     pending_messages: u64,
     pending_bytes: u64,
-    flush_at: Option<Instant>,
+    cadence: BranchBufferTimer,
     buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
@@ -886,7 +905,7 @@ impl EmitterBatchBuffer {
             pending: Vec::new(),
             pending_messages: 0,
             pending_bytes: 0,
-            flush_at: None,
+            cadence: BranchBufferTimer::default(),
             buffered_messages,
         }
     }
@@ -896,29 +915,46 @@ impl EmitterBatchBuffer {
             .set_generic(self.pending_messages.arch_into());
     }
 
-    fn reconfigure(&mut self, context: &EmitterSinkContext, flush_policy: &FlushPolicy) {
+    fn reconfigure(
+        &mut self,
+        context: &EmitterSinkContext,
+        flush_policy: &FlushPolicy,
+    ) -> EmitterRuntimeResult<()> {
         self.flush_policy = context.parse_flush_policy("emitter", flush_policy);
-        self.flush_at = self
-            .flush_policy
-            .filter(|_| !self.pending.is_empty())
-            .map(|policy| {
-                let interval = match policy {
-                    RuntimeFlushPolicy::Each { interval, .. } => interval,
-                    RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
-                };
-                Instant::now() + interval
-            });
+        self.cadence.clear();
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let Some(flush_policy) = self.flush_policy else {
+            return Ok(());
+        };
+        self.arm_cadence(context, flush_policy)
+    }
+
+    fn arm_cadence(
+        &mut self,
+        context: &EmitterSinkContext,
+        flush_policy: RuntimeFlushPolicy,
+    ) -> EmitterRuntimeResult<()> {
+        let snapshot = context.execution_snapshot()?;
+        self.cadence
+            .arm_flush(flush_policy, &context.clock, &snapshot)
+            .change_context(EmitterRuntimeError::FlushTiming)
     }
 
     fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
 
-    fn deadline(&self) -> Option<Instant> {
-        self.flush_at
+    fn deadline(&self) -> Option<BranchBufferDeadline> {
+        self.cadence.deadline()
     }
 
-    fn push(&mut self, batch: EmitterPublishBatch) -> EmitterRuntimeResult<bool> {
+    fn push(
+        &mut self,
+        context: &EmitterSinkContext,
+        batch: EmitterPublishBatch,
+    ) -> EmitterRuntimeResult<bool> {
         let Some(flush_policy) = self.flush_policy else {
             return Err(Report::new(EmitterRuntimeError::FlushPolicyNotInitialized));
         };
@@ -932,39 +968,51 @@ impl EmitterBatchBuffer {
             .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
         self.update_buffered_messages();
-        if self.flush_at.is_none() {
-            let interval = match flush_policy {
-                RuntimeFlushPolicy::Each { interval, .. } => interval,
-                RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
-            };
-            self.flush_at = Some(Instant::now() + interval);
-        }
+        self.arm_cadence(context, flush_policy)?;
         Ok(flush_policy.size_boundary_reached(self.pending_bytes))
     }
 
-    fn is_due(&self) -> bool {
-        self.flush_at
-            .is_some_and(|deadline| deadline <= Instant::now())
-    }
-
-    fn should_flush(&self, force: bool) -> bool {
-        !self.pending.is_empty() && (force || self.is_due())
-    }
-
-    fn defer_retry(&mut self, delay: Duration) {
-        if !self.pending.is_empty() {
-            self.flush_at = Some(Instant::now() + delay);
+    /// Retains a batch that arrived while the emitter was draining.
+    ///
+    /// A drain publishes everything the emitter holds regardless of cadence, so the batch it
+    /// accepts needs no deadline: the drain that took it is what releases it. This also keeps a
+    /// drain independent of the domain clock, which a stopping domain has already uninstalled.
+    fn retain_for_drain(&mut self, batch: EmitterPublishBatch) -> EmitterRuntimeResult<()> {
+        if self.flush_policy.is_none() {
+            return Err(Report::new(EmitterRuntimeError::FlushPolicyNotInitialized));
         }
+        self.pending_messages = self
+            .pending_messages
+            .checked_add(batch.message_count())
+            .assured("both counts total messages this emitter already holds in memory");
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
+        self.pending.push(batch);
+        self.update_buffered_messages();
+        Ok(())
     }
 
-    fn retain_for_retry(
-        &mut self,
-        batch: EmitterPublishBatch,
-        delay: Duration,
-    ) -> EmitterRuntimeResult<()> {
-        self.push(batch)?;
-        self.defer_retry(delay);
-        Ok(())
+    fn is_due(&self, context: &EmitterSinkContext) -> EmitterRuntimeResult<bool> {
+        let snapshot = context.execution_snapshot()?;
+        self.cadence
+            .is_due(&context.clock, &snapshot)
+            .change_context(EmitterRuntimeError::FlushTiming)
+    }
+
+    fn should_flush(
+        &self,
+        context: &EmitterSinkContext,
+        force: bool,
+    ) -> EmitterRuntimeResult<bool> {
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+        if force {
+            return Ok(true);
+        }
+        self.is_due(context)
     }
 
     fn pending_acks(&self) -> AckSet {
@@ -975,7 +1023,7 @@ impl EmitterBatchBuffer {
         let pending = std::mem::take(&mut self.pending);
         self.pending_messages = 0;
         self.pending_bytes = 0;
-        self.flush_at = None;
+        self.cadence.clear();
         self.update_buffered_messages();
         pending
     }
@@ -984,7 +1032,7 @@ impl EmitterBatchBuffer {
         self.pending.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
-        self.flush_at = None;
+        self.cadence.clear();
         self.update_buffered_messages();
     }
 
@@ -1014,10 +1062,26 @@ impl Drop for EmitterBatchBuffer {
     }
 }
 
+/// One deferral of an emitter's publish attempt: how long the emitter waits, which
+/// acknowledgements it keeps alive meanwhile, and what the operator is told about the wait.
+struct EmitterRetryDeferral<'a> {
+    wait: Duration,
+    acks: AckSet,
+    waiting_for_stall_clear: bool,
+    reason: Option<&'a str>,
+}
+
+/// The emitter's physical retry state: when the next publish attempt is allowed, and how often
+/// the acknowledgements it is holding are kept alive until then.
+///
+/// Both deadlines are monotonic. Retry backoff measures real unavailability of an external system
+/// and an acknowledgement keepalive measures a real upstream liveness expectation, so neither is
+/// scaled by the domain's pace. While a retry is scheduled it replaces the emitter's cadence wake,
+/// which stays armed and unchanged underneath it.
 #[derive(Default)]
 struct EmitterRetrySchedule {
-    retry_at: Option<Instant>,
-    ack_alive_at: Option<Instant>,
+    retry_at: Option<PhysicalDeadline>,
+    ack_alive_at: Option<PhysicalDeadline>,
     acks: AckSet,
     waiting_for_stall_clear: bool,
 }
@@ -1027,16 +1091,22 @@ impl EmitterRetrySchedule {
         self.retry_at.is_some()
     }
 
-    fn schedule(&mut self, delay: Duration, acks: AckSet, waiting_for_stall_clear: bool) {
-        let now = Instant::now();
-        let retry_at = now + delay;
+    fn schedule(
+        &mut self,
+        delay: Duration,
+        acks: AckSet,
+        waiting_for_stall_clear: bool,
+    ) -> EmitterRuntimeResult<()> {
+        let retry_at = PhysicalDeadlineCapability::new()
+            .after(delay)
+            .change_context(EmitterRuntimeError::RetryTiming)?;
         self.retry_at = Some(retry_at);
         if !acks.is_empty() {
             self.acks = acks;
         }
-        self.ack_alive_at =
-            (!self.acks.is_empty()).then(|| (now + RETRY_ACK_ALIVE_EACH).min(retry_at));
+        self.ack_alive_at = (!self.acks.is_empty()).then(|| Self::next_ack_alive_at(retry_at));
         self.waiting_for_stall_clear = waiting_for_stall_clear;
+        Ok(())
     }
 
     fn include_acks(&mut self, acks: AckSet) {
@@ -1047,35 +1117,46 @@ impl EmitterRetrySchedule {
         if let Some(retry_at) = self.retry_at
             && self.ack_alive_at.is_none()
         {
-            self.ack_alive_at = Some((Instant::now() + RETRY_ACK_ALIVE_EACH).min(retry_at));
+            self.ack_alive_at = Some(Self::next_ack_alive_at(retry_at));
         }
     }
 
-    fn deadline(&self, ordinary: Option<Instant>) -> Option<Instant> {
-        let retry = match (self.retry_at, self.ack_alive_at) {
-            (Some(retry_at), Some(ack_alive_at)) => Some(retry_at.min(ack_alive_at)),
-            (Some(retry_at), None) => Some(retry_at),
-            (None, _) => None,
+    fn next_ack_alive_at(retry_at: PhysicalDeadline) -> PhysicalDeadline {
+        PhysicalDeadlineCapability::new()
+            .after(RETRY_ACK_ALIVE_EACH)
+            .assured("the acknowledgement keepalive interval is a fixed hundred milliseconds")
+            .min(retry_at)
+    }
+
+    /// The wake the emitter asks for: the retry and keepalive deadlines while a retry is
+    /// scheduled, and otherwise the emitter's ordinary flush cadence.
+    fn wake(&self, ordinary: RuntimeWake) -> RuntimeWake {
+        let Some(retry_at) = self.retry_at else {
+            return ordinary;
         };
-        if retry.is_some() { retry } else { ordinary }
+        let wake = RuntimeWake::never().with_physical(retry_at);
+        match self.ack_alive_at {
+            Some(ack_alive_at) => wake.with_physical(ack_alive_at),
+            None => wake,
+        }
     }
 
     fn retry_is_due(&mut self) -> bool {
         let Some(retry_at) = self.retry_at else {
             return true;
         };
-        let now = Instant::now();
-        if now >= retry_at {
+        let physical_time = PhysicalDeadlineCapability::new();
+        if physical_time.is_reached(retry_at) {
             self.retry_at = None;
             self.ack_alive_at = None;
             return true;
         }
         if self
             .ack_alive_at
-            .is_some_and(|ack_alive_at| now >= ack_alive_at)
+            .is_some_and(|ack_alive_at| physical_time.is_reached(ack_alive_at))
         {
             self.acks.ack_alive();
-            self.ack_alive_at = Some((now + RETRY_ACK_ALIVE_EACH).min(retry_at));
+            self.ack_alive_at = Some(Self::next_ack_alive_at(retry_at));
         }
         false
     }
@@ -1090,6 +1171,40 @@ impl EmitterRetrySchedule {
         true
     }
 
+    /// Defers the next publish attempt and records the transient error that explains the wait.
+    ///
+    /// Constructing the monotonic deadline is the only fallible part. A configured or
+    /// server-supplied wait the monotonic clock cannot represent leaves no retry scheduled, so the
+    /// emitter falls back to its unchanged flush cadence and the failure is recorded as the
+    /// emitter's transient error instead of disappearing.
+    fn defer(&mut self, context: &EmitterSinkContext, deferral: EmitterRetryDeferral<'_>) {
+        let EmitterRetryDeferral {
+            wait,
+            acks,
+            waiting_for_stall_clear,
+            reason,
+        } = deferral;
+        match self.schedule(wait, acks, waiting_for_stall_clear) {
+            Ok(()) => {
+                if let Some(reason) = reason {
+                    context.runtime.record_emitter_transient_error_with_backoff(
+                        &context.domain,
+                        &context.emitter,
+                        reason,
+                        wait,
+                    );
+                }
+            }
+            Err(error) => {
+                context.runtime.record_emitter_transient_error(
+                    &context.domain,
+                    &context.emitter,
+                    emitter_error_message(&error),
+                );
+            }
+        }
+    }
+
     fn clear(&mut self) {
         self.retry_at = None;
         self.ack_alive_at = None;
@@ -1097,6 +1212,7 @@ impl EmitterRetrySchedule {
         self.waiting_for_stall_clear = false;
     }
 }
+
 
 fn compile_sql_values_program(
     label: &'static str,
@@ -1599,6 +1715,13 @@ impl EmitterSinkContext {
         );
     }
 
+    /// Reads the emitter's domain execution time for a cadence decision.
+    fn execution_snapshot(&self) -> EmitterRuntimeResult<DomainExecutionSnapshot> {
+        self.clock
+            .snapshot()
+            .change_context(EmitterRuntimeError::FlushTiming)
+    }
+
     fn parse_flush_policy(&self, kind: &str, policy: &FlushPolicy) -> Option<RuntimeFlushPolicy> {
         match Runtime::parse_runtime_node_flush_policy(&self.domain, kind, &self.emitter, policy) {
             Ok(policy) => Some(policy),
@@ -1994,15 +2117,15 @@ impl SinkEmitter {
         }
     }
 
-    fn flush_deadline(&self, buffer: &EmitterBatchBuffer) -> Option<Instant> {
-        let sink_deadline = match self {
-            Self::Iceberg(emitter) => emitter.flush_deadline(),
-            _ => None,
+    /// The wake that releases this emitter's buffered work on its own flush cadence.
+    fn cadence_wake(&self, clock: &DomainClock, buffer: &EmitterBatchBuffer) -> RuntimeWake {
+        let wake = match buffer.deadline() {
+            Some(deadline) => RuntimeWake::never().with_buffer(clock, deadline),
+            None => RuntimeWake::never(),
         };
-        match (sink_deadline, buffer.deadline()) {
-            (Some(sink), Some(buffer)) => Some(sink.min(buffer)),
-            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-            (None, None) => None,
+        match self {
+            Self::Iceberg(emitter) => emitter.cadence_wake(clock, wake),
+            _ => wake,
         }
     }
 
@@ -2061,12 +2184,13 @@ impl SinkEmitter {
         &mut self,
         context: &EmitterSinkContext,
         flush_policy: &FlushPolicy,
-    ) {
+    ) -> IcebergEmitterResult<()> {
         if let Self::Iceberg(emitter) = self
             && let Some(policy) = context.parse_flush_policy("iceberg emitter", flush_policy)
         {
-            emitter.reconfigure_flush_policy(policy);
+            emitter.reconfigure_flush_policy(context, policy)?;
         }
+        Ok(())
     }
 
     async fn flush_due(
@@ -2093,9 +2217,9 @@ impl SinkEmitter {
                     .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
                 await_until_emitter_stop_deadline(control.stop_rx, async {
                     if retry {
-                        emitter.finish().await
+                        emitter.finish(context).await
                     } else {
-                        emitter.flush_due().await
+                        emitter.flush_due(context).await
                     }
                 })
                 .await
@@ -2129,9 +2253,12 @@ impl SinkEmitter {
                             let _confirmation_wait = context
                                 .runtime
                                 .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                            await_until_emitter_stop_deadline(control.stop_rx, emitter.finish())
-                                .await
-                                .map_err(|()| emitter_stop_deadline_elapsed())?
+                            await_until_emitter_stop_deadline(
+                                control.stop_rx,
+                                emitter.finish(context),
+                            )
+                            .await
+                            .map_err(|()| emitter_stop_deadline_elapsed())?
                         };
                     }
                     Err(error) => {
@@ -2143,7 +2270,7 @@ impl SinkEmitter {
                 }
             }
         }
-        if !buffer.should_flush(retry) {
+        if !buffer.should_flush(context, retry)? {
             return Ok(None);
         }
         self.flush_buffer(sink, context, control, codec, buffer)
@@ -2171,7 +2298,7 @@ impl SinkEmitter {
                 let _confirmation_wait = context
                     .runtime
                     .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                await_until_emitter_stop_deadline(control.stop_rx, emitter.finish())
+                await_until_emitter_stop_deadline(control.stop_rx, emitter.finish(context))
                     .await
                     .map_err(|()| emitter_stop_deadline_elapsed())?
             };
@@ -2206,9 +2333,12 @@ impl SinkEmitter {
                             let _confirmation_wait = context
                                 .runtime
                                 .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                            await_until_emitter_stop_deadline(control.stop_rx, emitter.finish())
-                                .await
-                                .map_err(|()| emitter_stop_deadline_elapsed())?
+                            await_until_emitter_stop_deadline(
+                                control.stop_rx,
+                                emitter.finish(context),
+                            )
+                            .await
+                            .map_err(|()| emitter_stop_deadline_elapsed())?
                         };
                     }
                     Err(error) => {
@@ -2241,7 +2371,6 @@ impl SinkEmitter {
                     Err(error) if emitter_publish_error_is_retryable(&error) => {
                         let reason = emitter_error_message(&error);
                         let wait = emitter_retry_delay(control.backoff, &error);
-                        buffer.defer_retry(wait);
                         context.runtime.record_emitter_transient_error_with_backoff(
                             &context.domain,
                             &context.emitter,
@@ -2295,7 +2424,7 @@ impl SinkEmitter {
                     .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
                 await_until_emitter_stop_deadline(
                     control.stop_rx,
-                    emitter.publish_batch(batch.batch, batch.execution_now),
+                    emitter.publish_batch(context, batch.batch, batch.execution_now),
                 )
                 .await
                 .map_err(|()| EmitterPublishFailure::sink(emitter_stop_deadline_elapsed()))?
@@ -2322,7 +2451,10 @@ impl SinkEmitter {
             };
         }
 
-        if buffer.push(batch).map_err(EmitterPublishFailure::caller)? {
+        if buffer
+            .push(context, batch)
+            .map_err(EmitterPublishFailure::caller)?
+        {
             self.flush_buffer(sink, context, control, codec, buffer)
                 .await
                 .map_err(EmitterPublishFailure::buffer)
@@ -2338,7 +2470,7 @@ impl SinkEmitter {
         buffer: &mut EmitterBatchBuffer,
         force: bool,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        if !buffer.should_flush(force) {
+        if !buffer.should_flush(context, force)? {
             return Ok(None);
         }
         self.check_fault_injection(context, control)?;
@@ -2351,7 +2483,7 @@ impl SinkEmitter {
         while let Some(batch) = pending.next() {
             tokio::task::consume_budget().await;
             match emitter
-                .publish_batch(batch.batch, batch.execution_now)
+                .publish_batch(context, batch.batch, batch.execution_now)
                 .await
             {
                 Ok(published) => {
@@ -2360,7 +2492,7 @@ impl SinkEmitter {
                 Err(error) => {
                     for batch in pending {
                         tokio::task::consume_budget().await;
-                        buffer.push(batch)?;
+                        buffer.push(context, batch)?;
                     }
                     return Err(Report::new(EmitterRuntimeError::PublishBatch)
                         .attach_printable(iceberg_error_message(&error)));
@@ -3302,21 +3434,18 @@ impl EmitterTask {
         let task_stop_signal = stop_signal.clone();
 
         let task = tokio::spawn(async move {
-            let input_collection_clock = if input_collect_policy.is_some() {
-                match runtime.bind_domain_clock(&task_domain) {
-                    Ok(clock) => Some(clock),
-                    Err(error) => {
-                        runtime.events().report_error(format!(
-                            "emitter '{}' in domain '{}' could not bind its input collection \
-                             clock: {error}",
-                            task_emitter.as_str(),
-                            task_domain.as_str(),
-                        ));
-                        return;
-                    }
+            // The emitter's explicit FLUSH EACH and COMMIT EACH cadences are domain logical
+            // durations, so every emitter binds the domain clock whether or not it collects input.
+            let domain_clock = match runtime.bind_domain_clock(&task_domain) {
+                Ok(clock) => clock,
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "emitter '{}' in domain '{}' could not bind its domain clock: {error}",
+                        task_emitter.as_str(),
+                        task_domain.as_str(),
+                    ));
+                    return;
                 }
-            } else {
-                None
             };
             let work_cancel_forwarder = AbortOnDropHandle::new(tokio::spawn(async move {
                 if *domain_work_cancel_rx.borrow()
@@ -3333,9 +3462,10 @@ impl EmitterTask {
                 .into_iter()
                 .map(|(relay, receiver)| {
                     let input = RelayInteractionInput::new(relay, receiver, input_collect_policy);
-                    match &input_collection_clock {
-                        Some(clock) => input.with_domain_clock(clock.clone()),
-                        None => input,
+                    if input_collect_policy.is_some() {
+                        input.with_domain_clock(domain_clock.clone())
+                    } else {
+                        input
                     }
                 })
                 .collect();
@@ -3356,6 +3486,7 @@ impl EmitterTask {
                 emitter: task_emitter.clone(),
                 error_policies: task_error_policies.clone(),
                 udfs,
+                clock: domain_clock,
             };
             let mut publish_backoff =
                 RuntimeReconnectBackoff::from_policy(task_publishing.retry_policy);
@@ -3384,12 +3515,14 @@ impl EmitterTask {
             let mut retry_schedule = EmitterRetrySchedule::default();
             if let Some(reason) = sink.missing_reason() {
                 let wait = publish_backoff.take_next_delay();
-                retry_schedule.schedule(wait, AckSet::empty(), false);
-                runtime.record_emitter_transient_error_with_backoff(
-                    &task_domain,
-                    &task_emitter,
-                    reason,
-                    wait,
+                retry_schedule.defer(
+                    &context,
+                    EmitterRetryDeferral {
+                        wait,
+                        acks: AckSet::empty(),
+                        waiting_for_stall_clear: false,
+                        reason: Some(reason),
+                    },
                 );
             } else {
                 runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
@@ -3407,10 +3540,11 @@ impl EmitterTask {
             };
             loop {
                 tokio::task::consume_budget().await;
-                let wake_at = retry_schedule.deadline(sink.flush_deadline(&emitter_buffer));
+                let wake = retry_schedule
+                    .wake(sink.cadence_wake(&context.clock, &emitter_buffer));
                 let receive_input = !retry_schedule.is_active()
                     || emitter_buffer_count.load(Ordering::Acquire) == 0;
-                let work = match interaction.next_with_input(wake_at, receive_input).await {
+                let work = match interaction.next_with_input(wake, receive_input).await {
                     Ok(work) => work,
                     Err(error) => {
                         let reason = error.to_string();
@@ -3432,8 +3566,31 @@ impl EmitterTask {
                         config,
                         response,
                     }) => {
-                        emitter_buffer.reconfigure(&context, &config.flush_policy);
-                        sink.reconfigure_flush_policy(&context, &config.flush_policy);
+                        // The new cadence replaces the old one for the batches already buffered,
+                        // so a reconfiguration that cannot read the domain clock leaves them
+                        // without a deadline and is recorded as the emitter's transient error.
+                        if let Err(error) =
+                            emitter_buffer.reconfigure(&context, &config.flush_policy)
+                        {
+                            let reason = emitter_error_message(&error);
+                            runtime.record_emitter_transient_error(
+                                &task_domain,
+                                &task_emitter,
+                                reason.clone(),
+                            );
+                            context.report_flush_error(task_sink.label(), &reason);
+                        }
+                        if let Err(error) =
+                            sink.reconfigure_flush_policy(&context, &config.flush_policy)
+                        {
+                            let reason = iceberg_error_message(&error);
+                            runtime.record_emitter_transient_error(
+                                &task_domain,
+                                &task_emitter,
+                                reason.clone(),
+                            );
+                            context.report_flush_error(task_sink.label(), &reason);
+                        }
                         response
                             .send(())
                             .means_peer_left("emitter reconfiguration requester");
@@ -3528,23 +3685,25 @@ impl EmitterTask {
                                 emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
                         {
                             retry_schedule.include_acks(sink.pending_acks(&emitter_buffer));
-                            let wait = if retry_schedule.is_active() {
-                                publish_backoff.next_delay()
-                            } else {
-                                let wait = publish_backoff.take_next_delay();
-                                retry_schedule.schedule(
-                                    wait,
-                                    sink.pending_acks(&emitter_buffer),
-                                    fault_injection.emitter_should_stall(&task_emitter),
+                            if retry_schedule.is_active() {
+                                runtime.record_emitter_transient_error_with_backoff(
+                                    &task_domain,
+                                    &task_emitter,
+                                    reason.clone(),
+                                    publish_backoff.next_delay(),
                                 );
-                                wait
-                            };
-                            runtime.record_emitter_transient_error_with_backoff(
-                                &task_domain,
-                                &task_emitter,
-                                reason.clone(),
-                                wait,
-                            );
+                            } else {
+                                retry_schedule.defer(
+                                    &context,
+                                    EmitterRetryDeferral {
+                                        wait: publish_backoff.take_next_delay(),
+                                        acks: sink.pending_acks(&emitter_buffer),
+                                        waiting_for_stall_clear: fault_injection
+                                            .emitter_should_stall(&task_emitter),
+                                        reason: Some(&reason),
+                                    },
+                                );
+                            }
                             context.report_flush_error(task_sink.label(), &reason);
                             completion.complete();
                             continue;
@@ -3578,19 +3737,17 @@ impl EmitterTask {
                             }
                             Err(error) if emitter_publish_error_is_retryable(&error) => {
                                 let reason = emitter_error_message(&error);
-                                let wait = emitter_retry_delay(&mut publish_backoff, &error);
-                                retry_schedule.schedule(
-                                    wait,
-                                    sink.pending_acks(&emitter_buffer),
-                                    *error.current_context() == EmitterRuntimeError::PublishStalled,
+                                retry_schedule.defer(
+                                    &context,
+                                    EmitterRetryDeferral {
+                                        wait: emitter_retry_delay(&mut publish_backoff, &error),
+                                        acks: sink.pending_acks(&emitter_buffer),
+                                        waiting_for_stall_clear: *error.current_context()
+                                            == EmitterRuntimeError::PublishStalled,
+                                        reason: Some(&reason),
+                                    },
                                 );
                                 reconnect_on_wake = sink.reconnect_after(&error);
-                                runtime.record_emitter_transient_error_with_backoff(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                    wait,
-                                );
                                 context.report_flush_error(task_sink.label(), &reason);
                             }
                             Err(error) => {
@@ -3702,17 +3859,14 @@ impl EmitterTask {
                             )
                             .await;
                             if let Some(reason) = sink.missing_reason() {
-                                let wait = publish_backoff.take_next_delay();
-                                retry_schedule.schedule(
-                                    wait,
-                                    sink.pending_acks(&emitter_buffer),
-                                    false,
-                                );
-                                runtime.record_emitter_transient_error_with_backoff(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason,
-                                    wait,
+                                retry_schedule.defer(
+                                    &context,
+                                    EmitterRetryDeferral {
+                                        wait: publish_backoff.take_next_delay(),
+                                        acks: sink.pending_acks(&emitter_buffer),
+                                        waiting_for_stall_clear: false,
+                                        reason: Some(reason),
+                                    },
                                 );
                                 reconnect_on_wake = true;
                                 continue;
@@ -3750,19 +3904,17 @@ impl EmitterTask {
                             }
                             Err(error) if emitter_publish_error_is_retryable(&error) => {
                                 let reason = emitter_error_message(&error);
-                                let wait = emitter_retry_delay(&mut publish_backoff, &error);
-                                retry_schedule.schedule(
-                                    wait,
-                                    sink.pending_acks(&emitter_buffer),
-                                    *error.current_context() == EmitterRuntimeError::PublishStalled,
+                                retry_schedule.defer(
+                                    &context,
+                                    EmitterRetryDeferral {
+                                        wait: emitter_retry_delay(&mut publish_backoff, &error),
+                                        acks: sink.pending_acks(&emitter_buffer),
+                                        waiting_for_stall_clear: *error.current_context()
+                                            == EmitterRuntimeError::PublishStalled,
+                                        reason: Some(&reason),
+                                    },
                                 );
                                 reconnect_on_wake = sink.reconnect_after(&error);
-                                runtime.record_emitter_transient_error_with_backoff(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                    wait,
-                                );
                                 context.report_flush_error(task_sink.label(), &reason);
                             }
                             Err(error) => {
@@ -3840,9 +3992,8 @@ impl EmitterTask {
                         };
 
                         if interaction.is_draining() {
-                            let wait = publish_backoff.next_delay();
                             if let Err(error) =
-                                emitter_buffer.retain_for_retry(publish_batch.clone(), wait)
+                                emitter_buffer.retain_for_drain(publish_batch.clone())
                             {
                                 let reason = emitter_error_message(&error);
                                 let operation =
@@ -3862,8 +4013,7 @@ impl EmitterTask {
                         {
                             let unavailable =
                                 emitter_unavailable_reason(&sink, &fault_injection, &task_emitter);
-                            if let Err(error) = emitter_buffer
-                                .retain_for_retry(publish_batch.clone(), Duration::ZERO)
+                            if let Err(error) = emitter_buffer.push(&context, publish_batch.clone())
                             {
                                 let reason = emitter_error_message(&error);
                                 let operation =
@@ -3875,19 +4025,17 @@ impl EmitterTask {
                             }
                             retry_schedule.include_acks(publish_batch.merged_acks());
                             if !retry_schedule.is_active() {
-                                let wait = publish_backoff.take_next_delay();
-                                retry_schedule.schedule(
-                                    wait,
-                                    sink.pending_acks(&emitter_buffer),
-                                    fault_injection.emitter_should_stall(&task_emitter),
+                                retry_schedule.defer(
+                                    &context,
+                                    EmitterRetryDeferral {
+                                        wait: publish_backoff.take_next_delay(),
+                                        acks: sink.pending_acks(&emitter_buffer),
+                                        waiting_for_stall_clear: fault_injection
+                                            .emitter_should_stall(&task_emitter),
+                                        reason: unavailable.as_deref(),
+                                    },
                                 );
                                 if let Some(reason) = unavailable.as_deref() {
-                                    runtime.record_emitter_transient_error_with_backoff(
-                                        &task_domain,
-                                        &task_emitter,
-                                        reason,
-                                        wait,
-                                    );
                                     context.report_publish_error(task_sink.label(), reason);
                                 }
                             }
@@ -3934,8 +4082,8 @@ impl EmitterTask {
                                 let wait = emitter_retry_delay(&mut publish_backoff, &error);
                                 if let EmitterPublishBatchOwner::Caller = batch_owner
                                     && let Some(batch) = pending_batch.take()
-                                    && let Err(retain_error) = emitter_buffer
-                                        .retain_for_retry(batch.clone(), Duration::ZERO)
+                                    && let Err(retain_error) =
+                                        emitter_buffer.push(&context, batch.clone())
                                 {
                                     retry_schedule.clear();
                                     let reason = emitter_error_message(&retain_error);
@@ -3953,19 +4101,18 @@ impl EmitterTask {
                                 {
                                     pending_batch.take();
                                 }
-                                retry_schedule.schedule(
-                                    wait,
-                                    sink.pending_acks(&emitter_buffer),
-                                    *error.current_context() == EmitterRuntimeError::PublishStalled,
+                                let reason = emitter_error_message(&error);
+                                retry_schedule.defer(
+                                    &context,
+                                    EmitterRetryDeferral {
+                                        wait,
+                                        acks: sink.pending_acks(&emitter_buffer),
+                                        waiting_for_stall_clear: *error.current_context()
+                                            == EmitterRuntimeError::PublishStalled,
+                                        reason: Some(&reason),
+                                    },
                                 );
                                 reconnect_on_wake = sink.reconnect_after(&error);
-                                let reason = emitter_error_message(&error);
-                                runtime.record_emitter_transient_error_with_backoff(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                    wait,
-                                );
                                 context.report_publish_error(task_sink.label(), &reason);
                             }
                             Err(failure) => {
@@ -4839,9 +4986,11 @@ mod tests {
     }
 
     fn sink_context() -> EmitterSinkContext {
+        let domain = DomainName::parse("emitter_tests").expect("valid domain");
         EmitterSinkContext {
             runtime: Runtime::default(),
-            domain: DomainName::parse("emitter_tests").expect("valid domain"),
+            clock: test_domain_clock(&domain),
+            domain,
             emitter: EmitterName::parse("output").expect("valid emitter name"),
             error_policies: ErrorPolicies::handled_by_log(),
             udfs: None,
@@ -4902,10 +5051,10 @@ mod tests {
     fn batch_buffer_rejects_input_without_an_initialized_flush_policy() {
         let mut buffer = EmitterBatchBuffer::default();
         let error = buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch(),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &sink_context(),
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
             .expect_err("an unconfigured buffer must reject input");
 
         assert_eq!(
@@ -4963,12 +5112,18 @@ mod tests {
             .checked_add(second.estimated_bytes())
             .assured("the two test batches are far smaller than the u64 byte range");
 
-        assert!(!buffer.push(first).expect("first batch must buffer"));
+        let context = sink_context();
+        assert!(!buffer.push(&context, first).expect("first batch must buffer"));
         assert_eq!(buffer.pending_messages, 1);
-        let first_deadline = buffer.deadline().expect("first push must set a deadline");
-        assert!(!buffer.push(second).expect("second batch must buffer"));
+        assert!(buffer.deadline().is_some(), "the first push arms the cadence");
+        assert!(!buffer.push(&context, second).expect("second batch must buffer"));
 
-        assert_eq!(buffer.deadline(), Some(first_deadline));
+        assert!(
+            !buffer
+                .is_due(&context)
+                .expect("the fixture clock stays installed"),
+            "a second push does not bring the cadence forward"
+        );
         assert_eq!(reported_messages.load(Ordering::Acquire), 3);
         assert_eq!(buffer.pending_messages, 3);
         let report = buffer
@@ -4981,7 +5136,8 @@ mod tests {
     }
 
     #[test]
-    fn batch_buffer_honors_size_boundary_and_retry_deadline() {
+    fn batch_buffer_honors_its_size_boundary_and_logical_cadence() {
+        let context = sink_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
@@ -4990,40 +5146,69 @@ mod tests {
 
         assert!(
             buffer
-                .push(EmitterPublishBatch::from_batch(
-                    input_batch(),
-                    Timestamp::from_unix_nanos(100),
-                ))
+                .push(
+                    &context,
+                    EmitterPublishBatch::from_batch(
+                        input_batch(),
+                        Timestamp::from_unix_nanos(100),
+                    )
+                )
                 .expect("batch must buffer")
         );
-        let original = buffer.deadline().expect("push must set a deadline");
-        buffer.defer_retry(Duration::from_secs(120));
-        let deferred = buffer.deadline().expect("retry must retain a deadline");
-        assert!(deferred > original);
+        assert!(matches!(
+            buffer.deadline(),
+            Some(BranchBufferDeadline::Logical(_))
+        ));
+        assert!(
+            !buffer
+                .is_due(&context)
+                .expect("the fixture clock stays installed")
+        );
 
-        buffer.flush_at = Some(Instant::now());
-        assert!(buffer.is_due());
-        buffer.flush_at = Some(Instant::now() + Duration::from_secs(60));
-        assert!(!buffer.is_due());
+        let mut immediate = EmitterBatchBuffer::default();
+        immediate.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        immediate
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
+            .expect("batch must buffer");
+        assert!(matches!(
+            immediate.deadline(),
+            Some(BranchBufferDeadline::Physical(_))
+        ));
     }
 
     #[test]
     fn forced_retry_ignores_the_ordinary_buffer_deadline() {
+        let context = sink_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
             max_batch_size: u64::MAX,
         });
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch(),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
             .expect("retry batch must buffer");
-        assert!(!buffer.is_due());
+        assert!(
+            !buffer
+                .is_due(&context)
+                .expect("the fixture clock stays installed")
+        );
 
-        assert!(buffer.should_flush(true));
-        assert!(!buffer.should_flush(false));
+        assert!(
+            buffer
+                .should_flush(&context, true)
+                .expect("a forced flush needs no clock read")
+        );
+        assert!(
+            !buffer
+                .should_flush(&context, false)
+                .expect("the fixture clock stays installed")
+        );
     }
 
     #[tokio::test]
@@ -5052,10 +5237,10 @@ mod tests {
             max_batch_size: u64::MAX,
         });
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch(),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
             .expect("retry batch must buffer");
 
         assert!(
@@ -5120,15 +5305,20 @@ mod tests {
         );
         assert!(buffer.flush_policy.is_some());
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch(),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
             .expect("configured buffer must accept input");
         assert_eq!(buffer.pending_messages, 1);
-        buffer.reconfigure(&context, &FlushPolicy::Immediate);
+        buffer
+            .reconfigure(&context, &FlushPolicy::Immediate)
+            .expect("the fixture clock stays installed");
         assert_eq!(buffer.flush_policy, Some(RuntimeFlushPolicy::Immediate));
-        assert!(buffer.deadline().is_some());
+        assert!(
+            matches!(buffer.deadline(), Some(BranchBufferDeadline::Physical(_))),
+            "a reconfigured Immediate cadence re-arms the retained batches physically"
+        );
 
         let drained = buffer.drain_pending();
         assert_eq!(drained.len(), 1);
@@ -5139,10 +5329,10 @@ mod tests {
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
 
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch(),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &sink_context(),
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
             .expect("reconfigured buffer must accept input");
         assert_eq!(buffer.pending_messages, 1);
         buffer.clear();
@@ -5159,19 +5349,26 @@ mod tests {
     async fn batch_buffer_ack_helpers_merge_and_complete_pending_batches() {
         let (first_acks, first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
+        let context = sink_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch_with(1, 0, first_acks),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(
+                    input_batch_with(1, 0, first_acks),
+                    Timestamp::from_unix_nanos(100),
+                ),
+            )
             .expect("first batch must buffer");
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch_with(2, 0, second_acks),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(
+                    input_batch_with(2, 0, second_acks),
+                    Timestamp::from_unix_nanos(100),
+                ),
+            )
             .expect("second batch must buffer");
 
         assert!(!buffer.pending_acks().is_empty());
@@ -5192,7 +5389,7 @@ mod tests {
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
 
         buffer
-            .retain_for_retry(batch.clone(), Duration::from_secs(1))
+            .push(&sink_context(), batch.clone())
             .expect("retry buffer must retain the batch");
         root.ack_success();
         assert!(
@@ -5211,18 +5408,62 @@ mod tests {
     #[test]
     fn retry_schedule_preserves_its_deadline_until_a_retry_attempt() {
         let mut retry = EmitterRetrySchedule::default();
-        retry.schedule(Duration::from_secs(10), AckSet::empty(), false);
+        retry
+            .schedule(Duration::from_secs(10), AckSet::empty(), false)
+            .expect("the fixture backoff fits the monotonic clock range");
         let retry_at = retry.retry_at.expect("retry must have a deadline");
 
-        assert_eq!(retry.deadline(Some(Instant::now())), Some(retry_at));
-        assert_eq!(retry.deadline(Some(Instant::now())), Some(retry_at));
+        assert!(!retry.retry_is_due());
+        assert!(!retry.retry_is_due());
         assert_eq!(retry.retry_at, Some(retry_at));
+    }
+
+    #[test]
+    fn an_active_retry_replaces_the_ordinary_cadence_wake() {
+        let context = sink_context();
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: u64::MAX,
+        });
+        buffer
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
+            .expect("batch must buffer");
+        let cadence = buffer.deadline().expect("the push arms the logical cadence");
+        let mut retry = EmitterRetrySchedule::default();
+
+        let idle = retry.wake(RuntimeWake::never().with_buffer(&context.clock, cadence.clone()));
+        assert!(
+            idle.is_reached()
+                .expect("the fixture clock stays installed")
+                == false
+        );
+
+        retry
+            .schedule(Duration::ZERO, AckSet::empty(), false)
+            .expect("the fixture backoff fits the monotonic clock range");
+        let deferred = retry.wake(RuntimeWake::never().with_buffer(&context.clock, cadence));
+        assert!(
+            deferred
+                .is_reached()
+                .expect("a monotonic retry deadline needs no clock read"),
+            "an active retry replaces the cadence wake with its own due deadline"
+        );
+        assert!(
+            buffer.deadline().is_some(),
+            "the cadence the retry replaced stays armed underneath it"
+        );
     }
 
     #[test]
     fn retry_schedule_releases_a_stall_as_soon_as_the_fault_clears() {
         let mut retry = EmitterRetrySchedule::default();
-        retry.schedule(Duration::from_secs(30), AckSet::empty(), true);
+        retry
+            .schedule(Duration::from_secs(30), AckSet::empty(), true)
+            .expect("the fixture backoff fits the monotonic clock range");
 
         assert!(!retry.release_if_stall_cleared(true));
         assert!(retry.is_active());
@@ -5235,9 +5476,15 @@ mod tests {
         let (existing, mut existing_completion) = AckSet::root();
         let (force_drained, mut force_completion) = AckSet::root();
         let mut retry = EmitterRetrySchedule::default();
-        retry.schedule(Duration::from_secs(30), existing, false);
+        retry
+            .schedule(Duration::from_secs(30), existing, false)
+            .expect("the fixture backoff fits the monotonic clock range");
         retry.include_acks(force_drained);
-        retry.ack_alive_at = Some(Instant::now());
+        retry.ack_alive_at = Some(
+            PhysicalDeadlineCapability::new()
+                .after(Duration::ZERO)
+                .expect("an immediate keepalive fits the monotonic clock range"),
+        );
 
         assert!(!retry.retry_is_due());
 
@@ -5257,20 +5504,27 @@ mod tests {
         let (second_acks, second_completion) = AckSet::root();
         let reported_messages = Arc::new(AtomicUsize::new(0));
         let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
+        let context = sink_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer.buffered_messages = buffered_messages.clone();
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch_with(1, 0, first_acks),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(
+                    input_batch_with(1, 0, first_acks),
+                    Timestamp::from_unix_nanos(100),
+                ),
+            )
             .expect("first batch must buffer");
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch_with(2, 0, second_acks),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(
+                    input_batch_with(2, 0, second_acks),
+                    Timestamp::from_unix_nanos(100),
+                ),
+            )
             .expect("second batch must buffer");
 
         drop(buffer);
@@ -5309,10 +5563,10 @@ mod tests {
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch(),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &sink_context(),
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
             .expect("batch must buffer");
 
         let error = match sink
@@ -5460,17 +5714,24 @@ mod tests {
             interval: Duration::from_secs(60),
             max_batch_size: u64::MAX,
         });
+        let context = sink_context();
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch_with(1, 0, AckSet::empty()),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(
+                    input_batch_with(1, 0, AckSet::empty()),
+                    Timestamp::from_unix_nanos(100),
+                ),
+            )
             .expect("older batch must buffer");
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch_with(2, 0, AckSet::empty()),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(
+                    input_batch_with(2, 0, AckSet::empty()),
+                    Timestamp::from_unix_nanos(100),
+                ),
+            )
             .expect("current clone must buffer");
         let mut current = Some(EmitterPublishBatch::from_batch(
             input_batch_with(2, 0, AckSet::empty()),
@@ -5497,10 +5758,13 @@ mod tests {
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer
-            .push(EmitterPublishBatch::from_batch(
-                input_batch_with(1, 0, AckSet::empty()),
-                Timestamp::from_unix_nanos(100),
-            ))
+            .push(
+                &sink_context(),
+                EmitterPublishBatch::from_batch(
+                    input_batch_with(1, 0, AckSet::empty()),
+                    Timestamp::from_unix_nanos(100),
+                ),
+            )
             .expect("older batch must buffer");
         let mut current = Some(EmitterPublishBatch::from_batch(
             input_batch_with(2, 0, AckSet::empty()),

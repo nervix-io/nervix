@@ -2,7 +2,8 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Branch-local collected batches and the typed deadline of a buffered branch.
+//! - **Owns.** Branch-local collected batches, the typed deadline of a buffered branch, and the
+//!   wake a relay consumer asks for while it holds deadlines in more than one clock coordinate.
 //! - **Depends on.** Bound domain clocks, physical deadline capabilities and relay batches.
 //! - **Must not know.** Graph planning, connector retries, source-group idle collection or sinks.
 
@@ -60,6 +61,8 @@ impl RuntimeFlushPolicy {
 pub(super) enum BranchBufferTimingError {
     #[error("the physical FLUSH IMMEDIATE deadline is outside the monotonic clock range")]
     ImmediateDeadline,
+    #[error("a monotonic wake deadline is outside the monotonic clock range")]
+    WakeDeadline,
     #[error("the domain clock could not reach a branch-buffer deadline")]
     LogicalDeadline,
 }
@@ -74,6 +77,129 @@ pub(super) type BranchBufferTimingResult<T> = Result<T, Report<BranchBufferTimin
 pub(super) enum BranchBufferDeadline {
     Logical(LogicalDeadline),
     Physical(PhysicalDeadline),
+}
+
+/// A logical deadline together with the bound clock generation that resolves it.
+#[derive(Debug, Clone)]
+pub(super) struct BoundLogicalDeadline {
+    clock: DomainClock,
+    due: LogicalDeadline,
+}
+
+/// The deadlines one relay consumer waits for outside its relay inputs.
+///
+/// A consumer can hold deadlines in more than one clock coordinate at the same time: an emitter
+/// paces its flush on domain logical time while its retry and acknowledgement keepalive stay on
+/// the monotonic clock. The coordinates never compose into a single instant, so the consumer wakes
+/// for whichever deadline arrives first. Deadlines within one coordinate do compose, by taking the
+/// earliest; a wake belongs to one consumer and therefore to one domain, so comparing two logical
+/// deadlines compares two instants of the same domain clock.
+#[derive(Debug, Default, Clone)]
+pub(super) struct RuntimeWake {
+    logical: Option<BoundLogicalDeadline>,
+    physical: Option<PhysicalDeadline>,
+}
+
+impl RuntimeWake {
+    /// The wake of a consumer that has no deadline of its own and waits only for input.
+    pub(super) const fn never() -> Self {
+        Self {
+            logical: None,
+            physical: None,
+        }
+    }
+
+    /// The wake of a consumer whose only deadline is a monotonic maintenance timeout.
+    pub(super) fn after(timeout: Duration) -> BranchBufferTimingResult<Self> {
+        let deadline = PhysicalDeadlineCapability::new()
+            .after(timeout)
+            .change_context(BranchBufferTimingError::WakeDeadline)?;
+        Ok(Self::never().with_physical(deadline))
+    }
+
+    pub(super) fn with_physical(mut self, deadline: PhysicalDeadline) -> Self {
+        self.physical = Some(match self.physical {
+            Some(held) => held.min(deadline),
+            None => deadline,
+        });
+        self
+    }
+
+    /// Adds the deadline of a buffer the consumer holds, resolved by the consumer's bound clock.
+    pub(super) fn with_buffer(self, clock: &DomainClock, deadline: BranchBufferDeadline) -> Self {
+        match deadline {
+            BranchBufferDeadline::Logical(due) => self.with_logical(clock, due),
+            BranchBufferDeadline::Physical(deadline) => self.with_physical(deadline),
+        }
+    }
+
+    fn with_logical(mut self, clock: &DomainClock, due: LogicalDeadline) -> Self {
+        let replaces = match &self.logical {
+            Some(held) => due.due_at() < held.due.due_at(),
+            None => true,
+        };
+        if replaces {
+            self.logical = Some(BoundLogicalDeadline {
+                clock: clock.clone(),
+                due,
+            });
+        }
+        self
+    }
+
+    /// Reports whether any deadline in the set has already arrived.
+    pub(super) fn is_reached(&self) -> BranchBufferTimingResult<bool> {
+        if let Some(logical) = &self.logical
+            && logical.is_reached()?
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .physical
+            .is_some_and(|deadline| PhysicalDeadlineCapability::new().is_reached(deadline)))
+    }
+
+    /// Waits for the first deadline in the set, or forever when the set is empty.
+    pub(super) async fn wait(&self) -> BranchBufferTimingResult<()> {
+        match (&self.logical, self.physical) {
+            (None, None) => {
+                pending::<()>().await;
+                Ok(())
+            }
+            (Some(logical), None) => logical.wait().await,
+            (None, Some(physical)) => {
+                PhysicalDeadlineCapability::new().wait_until(physical).await;
+                Ok(())
+            }
+            (Some(logical), Some(physical)) => {
+                tokio::select! {
+                    result = logical.wait() => result,
+                    () = PhysicalDeadlineCapability::new().wait_until(physical) => Ok(()),
+                }
+            }
+        }
+    }
+}
+
+impl BoundLogicalDeadline {
+    fn is_reached(&self) -> BranchBufferTimingResult<bool> {
+        let snapshot = self
+            .clock
+            .snapshot()
+            .change_context(BranchBufferTimingError::LogicalDeadline)?;
+        self.clock
+            .deadline_reached(&self.due, &snapshot)
+            .change_context(BranchBufferTimingError::LogicalDeadline)
+    }
+
+    async fn wait(&self) -> BranchBufferTimingResult<()> {
+        let cancellation = CancellationToken::new();
+        self.clock
+            .wait_until(self.due.clone(), &cancellation)
+            .await
+            .change_context(BranchBufferTimingError::LogicalDeadline)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Clone)]

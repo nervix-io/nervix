@@ -312,12 +312,27 @@ pub(super) async fn run_processor_node_runtime(
             continue;
         }
 
-        let wake_at = if ownership_frozen {
-            Some(Instant::now() + OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
+        let maintenance_timeout = if ownership_frozen {
+            OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
         } else {
-            Some(next_expiration_scan.min(next_lru_snapshot))
+            next_expiration_scan
+                .min(next_lru_snapshot)
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO)
         };
-        let work = match interaction.next(wake_at).await {
+        let wake = match RuntimeWake::after(maintenance_timeout) {
+            Ok(wake) => wake,
+            Err(error) => {
+                runtime_handle.events().report_error(format!(
+                    "processor '{}' in domain '{}' could not schedule its next maintenance scan: \
+                     {error}",
+                    processor.as_str(),
+                    domain.as_str(),
+                ));
+                break;
+            }
+        };
+        let work = match interaction.next(wake).await {
             Ok(work) => work,
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(

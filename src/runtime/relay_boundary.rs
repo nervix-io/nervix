@@ -1822,8 +1822,22 @@ impl Runtime {
                                 .unwrap_or(Duration::ZERO)
                         })
                     };
-                let wake_at = expiration_sleep.map(|sleep| Instant::now() + sleep);
-                let work = match interaction.next(wake_at).await {
+                let wake = match expiration_sleep {
+                    Some(sleep) => match RuntimeWake::after(sleep) {
+                        Ok(wake) => wake,
+                        Err(error) => {
+                            warn!(
+                                domain = domain.as_str(),
+                                relay = relay.as_str(),
+                                error = %error,
+                                "materialized relay state task could not schedule its next scan"
+                            );
+                            break 'state_task;
+                        }
+                    },
+                    None => RuntimeWake::never(),
+                };
+                let work = match interaction.next(wake).await {
                     Ok(work) => work,
                     Err(error) => {
                         if let Some(acks) = error.acks() {

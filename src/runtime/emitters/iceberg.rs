@@ -56,11 +56,14 @@ pub(in crate::runtime) struct IcebergEmitter {
     pending_batches: Vec<IcebergPendingBatch>,
     pending_rows: u64,
     pending_bytes: u64,
-    flush_at: Option<Instant>,
+    /// Releases mapped batches to local Arrow IPC on the emitter's explicit `FLUSH EACH` cadence,
+    /// or on the monotonic minimum of `FLUSH IMMEDIATE`.
+    flush_cadence: BranchBufferTimer,
     staged_batches: Vec<IcebergStagedBatch>,
     staged_rows: u64,
     staged_bytes: u64,
-    commit_at: Option<Instant>,
+    /// Publishes staged batches to the table on the emitter's explicit `COMMIT EACH` cadence.
+    commit_cadence: BranchBufferTimer,
     rejected_records: VecDeque<IcebergRejectedRecord>,
     buffered_messages: Arc<EmitterBufferedMessages>,
 }
@@ -187,6 +190,8 @@ pub(in crate::runtime::emitters) enum IcebergEmitterError {
     ReadStagedIpc,
     #[error("failed to commit Iceberg staged batches")]
     Commit,
+    #[error("could not resolve an Iceberg flush or commit cadence against the domain clock")]
+    CadenceTiming,
 }
 
 impl IcebergEmitterError {
@@ -204,7 +209,8 @@ impl IcebergEmitterError {
             | Self::BuildSchema
             | Self::InvalidLocation
             | Self::InitializeCatalog
-            | Self::InitializeTable => false,
+            | Self::InitializeTable
+            | Self::CadenceTiming => false,
         }
     }
 }
@@ -438,11 +444,11 @@ impl IcebergEmitter {
             pending_batches: Vec::new(),
             pending_rows: 0,
             pending_bytes: 0,
-            flush_at: None,
+            flush_cadence: BranchBufferTimer::default(),
             staged_batches: Vec::new(),
             staged_rows: 0,
             staged_bytes: 0,
-            commit_at: None,
+            commit_cadence: BranchBufferTimer::default(),
             rejected_records: VecDeque::new(),
             buffered_messages,
         })
@@ -640,28 +646,50 @@ impl IcebergEmitter {
         Ok(url.scheme().to_string())
     }
 
-    pub(in crate::runtime) fn flush_deadline(&self) -> Option<Instant> {
-        match (self.flush_at, self.commit_at) {
-            (Some(flush_at), Some(commit_at)) => Some(flush_at.min(commit_at)),
-            (Some(flush_at), None) => Some(flush_at),
-            (None, Some(commit_at)) => Some(commit_at),
-            (None, None) => None,
+    /// Adds this sink's own flush and commit cadences to the emitter's wake.
+    pub(in crate::runtime) fn cadence_wake(&self, clock: &DomainClock, wake: RuntimeWake) -> RuntimeWake {
+        let wake = match self.flush_cadence.deadline() {
+            Some(deadline) => wake.with_buffer(clock, deadline),
+            None => wake,
+        };
+        match self.commit_cadence.deadline() {
+            Some(deadline) => wake.with_buffer(clock, deadline),
+            None => wake,
         }
     }
 
-    pub(in crate::runtime) fn reconfigure_flush_policy(&mut self, policy: RuntimeFlushPolicy) {
+    pub(in crate::runtime) fn reconfigure_flush_policy(
+        &mut self,
+        context: &EmitterSinkContext,
+        policy: RuntimeFlushPolicy,
+    ) -> IcebergEmitterResult<()> {
         self.flush_policy = policy;
-        self.flush_at = (!self.pending_batches.is_empty()).then(|| {
-            let interval = match self.flush_policy {
-                RuntimeFlushPolicy::Each { interval, .. } => interval,
-                RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
-            };
-            Instant::now() + interval
-        });
+        self.flush_cadence.clear();
+        if self.pending_batches.is_empty() {
+            return Ok(());
+        }
+        self.arm_flush_cadence(context)
+    }
+
+    fn arm_flush_cadence(&mut self, context: &EmitterSinkContext) -> IcebergEmitterResult<()> {
+        let snapshot = Self::execution_snapshot(context)?;
+        self.flush_cadence
+            .arm_flush(self.flush_policy, &context.clock, &snapshot)
+            .change_context(IcebergEmitterError::CadenceTiming)
+    }
+
+    fn execution_snapshot(
+        context: &EmitterSinkContext,
+    ) -> IcebergEmitterResult<DomainExecutionSnapshot> {
+        context
+            .clock
+            .snapshot()
+            .change_context(IcebergEmitterError::CadenceTiming)
     }
 
     pub(in crate::runtime) async fn publish_batch(
         &mut self,
+        context: &EmitterSinkContext,
         batch: RelayRecordBatch,
         execution_now: Timestamp,
     ) -> IcebergEmitterResult<Option<PublishReport>> {
@@ -750,17 +778,11 @@ impl IcebergEmitter {
             .checked_add(bytes)
             .assured("both counts estimate bytes of batches this emitter already holds");
         self.update_buffered_messages();
-        if self.flush_at.is_none() {
-            let interval = match self.flush_policy {
-                RuntimeFlushPolicy::Each { interval, .. } => interval,
-                RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
-            };
-            self.flush_at = Some(Instant::now() + interval);
-        }
+        self.arm_flush_cadence(context)?;
         let should_flush = self.flush_policy.size_boundary_reached(self.pending_bytes);
         if should_flush {
             self.flush_to_disk().await?;
-            self.commit_if_due(false).await
+            self.commit_if_due(context, false).await
         } else {
             Ok(None)
         }
@@ -768,19 +790,25 @@ impl IcebergEmitter {
 
     pub(in crate::runtime) async fn flush_due(
         &mut self,
+        context: &EmitterSinkContext,
     ) -> IcebergEmitterResult<Option<PublishReport>> {
-        let now = Instant::now();
-        if self.flush_at.is_some_and(|deadline| deadline <= now) {
+        let snapshot = Self::execution_snapshot(context)?;
+        if self
+            .flush_cadence
+            .is_due(&context.clock, &snapshot)
+            .change_context(IcebergEmitterError::CadenceTiming)?
+        {
             self.flush_to_disk().await?;
         }
-        self.commit_if_due(false).await
+        self.commit_if_due(context, false).await
     }
 
     pub(in crate::runtime) async fn finish(
         &mut self,
+        context: &EmitterSinkContext,
     ) -> IcebergEmitterResult<Option<PublishReport>> {
         self.flush_to_disk().await?;
-        self.commit_if_due(true).await
+        self.commit_if_due(context, true).await
     }
 
     pub(in crate::runtime) fn pending_acks(&self) -> AckSet {
@@ -819,7 +847,7 @@ impl IcebergEmitter {
 
     async fn flush_to_disk(&mut self) -> IcebergEmitterResult<()> {
         if self.pending_rows == 0 {
-            self.flush_at = None;
+            self.flush_cadence.clear();
             return Ok(());
         }
         let acks = self.pending_acks();
@@ -864,24 +892,36 @@ impl IcebergEmitter {
         self.pending_rows = 0;
         self.pending_bytes = 0;
         self.update_buffered_messages();
-        self.flush_at = None;
-        if !self.staged_batches.is_empty() && self.commit_at.is_none() {
-            self.commit_at = Some(Instant::now() + self.commit_policy.interval);
-        }
-        self.update_buffered_messages();
+        self.flush_cadence.clear();
         Ok(())
     }
 
-    async fn commit_if_due(&mut self, force: bool) -> IcebergEmitterResult<Option<PublishReport>> {
+    /// Commits the staged batches when the emitter's explicit `COMMIT EACH` cadence or maximum
+    /// commit size is reached, and unconditionally for a drain.
+    ///
+    /// The logical cadence is armed here rather than at staging time because this is the only
+    /// caller that reads it, which keeps a forced drain independent of the domain clock.
+    async fn commit_if_due(
+        &mut self,
+        context: &EmitterSinkContext,
+        force: bool,
+    ) -> IcebergEmitterResult<Option<PublishReport>> {
         if self.staged_batches.is_empty() {
-            self.commit_at = None;
+            self.commit_cadence.clear();
             return Ok(None);
         }
-        let now = Instant::now();
-        let time_due = self.commit_at.is_some_and(|deadline| deadline <= now);
         let size_due = self.staged_bytes >= self.commit_policy.max_size;
-        if !force && !time_due && !size_due {
-            return Ok(None);
+        if !force && !size_due {
+            let snapshot = Self::execution_snapshot(context)?;
+            self.commit_cadence
+                .arm_logical(&context.clock, &snapshot, self.commit_policy.interval);
+            let time_due = self
+                .commit_cadence
+                .is_due(&context.clock, &snapshot)
+                .change_context(IcebergEmitterError::CadenceTiming)?;
+            if !time_due {
+                return Ok(None);
+            }
         }
         let acks = self.pending_acks();
         await_emitter_confirmation(&acks, self.commit_staged_batches()).await
@@ -933,7 +973,7 @@ impl IcebergEmitter {
         }
         self.staged_rows = 0;
         self.staged_bytes = 0;
-        self.commit_at = None;
+        self.commit_cadence.clear();
         self.update_buffered_messages();
         for ack in acks {
             ack.ack_success();

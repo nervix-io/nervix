@@ -238,7 +238,7 @@ use branch_aggregated_state::{
 };
 use branch_buffering::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingError, BranchBufferTimingResult,
-    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, RuntimeWake,
     wait_for_branch_buffer_deadlines,
 };
 use branch_instance_registry::BranchInstanceRegistry;
