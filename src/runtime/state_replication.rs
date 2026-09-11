@@ -21,8 +21,44 @@ pub(super) struct PreparedRuntimeStateHandoff {
     pub(super) destination_incarnation: ClusterNodeIncarnation,
     pub(super) base_schedule_fingerprint: [u8; 32],
     pub(super) target_schedule_fingerprint: [u8; 32],
-    pub(super) activation_authorized: bool,
+    pub(super) activation_authorization: OwnershipHandoffActivationAuthorization,
+    pub(super) activation: watch::Sender<OwnershipHandoffActivation>,
     pub(super) checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OwnershipHandoffActivationAuthorization {
+    AuthorizedByPreparation,
+    RecoveredAwaitingRequest,
+    RecoveredAuthorized,
+}
+
+impl OwnershipHandoffActivationAuthorization {
+    fn is_authorized(self) -> bool {
+        self != Self::RecoveredAwaitingRequest
+    }
+
+    /// Authorizes activation and reports whether the recovered schedule must be rebuilt.
+    ///
+    /// A recovered preparation continues to request a rebuild until activation removes it. This
+    /// keeps a failed or cancelled rebuild retriable without making an ordinary handoff race its
+    /// normal schedule reconciliation with a second rebuild.
+    fn authorize(&mut self) -> bool {
+        match self {
+            Self::AuthorizedByPreparation => false,
+            Self::RecoveredAwaitingRequest => {
+                *self = Self::RecoveredAuthorized;
+                true
+            }
+            Self::RecoveredAuthorized => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OwnershipHandoffActivation {
+    Prepared,
+    Activated,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,58 +233,6 @@ pub(super) async fn persist_window_processor_state_snapshot(
 }
 
 impl Runtime {
-    pub(crate) fn ownership_handoff_schedule_fingerprint(
-        schedule: &DomainSchedule,
-    ) -> OwnershipHandoffResult<[u8; 32]> {
-        #[derive(serde::Serialize)]
-        struct ScheduledNodeFingerprint<'a> {
-            identifier: &'a ModelName,
-            config: &'a Model,
-            effective_branching: &'a Option<Vec<FieldName>>,
-            effective_branching_schema: &'a Option<SchemaName>,
-            schema_fingerprint: [u8; 32],
-            kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
-            primary_node: &'a Option<ClusterNodeName>,
-            assigned_nodes: &'a [ClusterNodeName],
-        }
-
-        #[derive(serde::Serialize)]
-        struct DomainScheduleFingerprint<'a> {
-            domain: &'a DomainName,
-            nodes: Vec<ScheduledNodeFingerprint<'a>>,
-            placement_groups: &'a [nervix_models::PlacementGroupSchedule],
-        }
-
-        let nodes = schedule
-            .nodes
-            .values()
-            .map(|node| ScheduledNodeFingerprint {
-                identifier: &node.identifier,
-                config: node.config.as_ref(),
-                effective_branching: &node.effective_branching,
-                effective_branching_schema: &node.effective_branching_schema,
-                schema_fingerprint: node.schema_fingerprint,
-                kafka_partition_schedule: &node.kafka_partition_schedule,
-                primary_node: &node.primary_node,
-                assigned_nodes: &node.assigned_nodes,
-            })
-            .collect::<Vec<_>>();
-        let fingerprint = DomainScheduleFingerprint {
-            domain: &schedule.domain,
-            nodes,
-            placement_groups: &schedule.placement_groups,
-        };
-        let encoded = serde_json::to_vec(&fingerprint).map_err(|error| {
-            OwnershipHandoffError::schedule(format!(
-                "failed to encode ownership handoff schedule: {error}"
-            ))
-        })?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nervix/ownership-handoff/domain-schedule");
-        hasher.update(&encoded);
-        Ok(*hasher.finalize().as_bytes())
-    }
-
     pub(super) fn persist_branch_lru_snapshot(
         &self,
         placement: RuntimeStatePlacement,
@@ -1810,6 +1794,7 @@ impl Runtime {
                     OwnershipHandoffError::persistence(error.current_context().clone())
                 })?;
         }
+        let (activation, _) = watch::channel(OwnershipHandoffActivation::Prepared);
         self.inner.prepared_runtime_state_handoffs.insert(
             DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone()),
             PreparedRuntimeStateHandoff {
@@ -1820,7 +1805,9 @@ impl Runtime {
                 destination_incarnation,
                 base_schedule_fingerprint,
                 target_schedule_fingerprint,
-                activation_authorized: true,
+                activation_authorization:
+                    OwnershipHandoffActivationAuthorization::AuthorizedByPreparation,
+                activation,
                 checkpoints: decoded,
             },
         );
@@ -2008,7 +1995,7 @@ impl Runtime {
         if prepared.target_schedule_fingerprint != schedule_fingerprint {
             return Ok(());
         }
-        if !prepared.activation_authorized {
+        if !prepared.activation_authorization.is_authorized() {
             return Ok(());
         }
         if let Some(store) = self.inner.state_store.as_ref() {
@@ -2052,6 +2039,7 @@ impl Runtime {
         if remove {
             self.inner.prepared_runtime_state_handoffs.remove(&entity);
         }
+        let activation = prepared.activation.clone();
         self.inner.activated_runtime_state_handoffs.insert(
             entity,
             ActivatedRuntimeStateHandoff {
@@ -2064,6 +2052,7 @@ impl Runtime {
                 target_schedule_fingerprint: prepared.target_schedule_fingerprint,
             },
         );
+        activation.send_replace(OwnershipHandoffActivation::Activated);
         Ok(())
     }
 
@@ -2227,34 +2216,57 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) fn authorize_persisted_ownership_handoff_activation(
-        &self,
-        request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
-    ) -> OwnershipHandoffResult<bool> {
-        if self.verify_ownership_handoff_activation(request).is_ok() {
-            return Ok(false);
-        }
-        let transition = OwnershipHandoffTransitionRef::from(request);
-        self.verify_ownership_handoff_preparation_transition(transition)?;
-        let key = transition.entity.in_domain(transition.domain);
-        let mut prepared = self
-            .inner
-            .prepared_runtime_state_handoffs
-            .get_mut(&key)
-            .verified("the preparation was found and checked directly above");
-        prepared.activation_authorized = true;
-        Ok(true)
-    }
-
-    pub(crate) async fn rebuild_ownership_handoff_target(
+    /// Authorizes recovered state and awaits its retained activation state.
+    ///
+    /// Taking the schedule lock before subscribing makes the activation check and subscription
+    /// atomic with respect to ordinary schedule application. Every recovered activation attempt
+    /// rebuilds because an earlier attempt may have failed before it published `Activated`;
+    /// otherwise ordinary reconciliation owns schedule application and publishes `Activated`.
+    pub(crate) async fn activate_persisted_ownership_handoff(
         &self,
         local_node_id: &ClusterNodeName,
-        domain: &DomainName,
+        request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
         schedule: DomainSchedule,
-    ) -> Result<(), RuntimeError> {
-        let _apply = self.inner.schedule_apply_lock.lock().await;
-        self.rebuild_domain_from_schedule(local_node_id, domain, Some(schedule), true)
+    ) -> OwnershipHandoffResult<()> {
+        let mut activation = {
+            let _apply = self.inner.schedule_apply_lock.lock().await;
+            if self.verify_ownership_handoff_activation(request).is_ok() {
+                return Ok(());
+            }
+            let transition = OwnershipHandoffTransitionRef::from(request);
+            self.verify_ownership_handoff_preparation_transition(transition)?;
+            let key = transition.entity.in_domain(transition.domain);
+            let mut prepared = self
+                .inner
+                .prepared_runtime_state_handoffs
+                .get_mut(&key)
+                .verified("the preparation was found and checked directly above");
+            let activation = prepared.activation.subscribe();
+            let requires_reapply = prepared.activation_authorization.authorize();
+            drop(prepared);
+            if requires_reapply {
+                self.rebuild_domain_from_schedule(
+                    local_node_id,
+                    &request.domain,
+                    Some(schedule),
+                    true,
+                )
+                .await
+                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
+            }
+            activation
+        };
+        activation
+            .wait_for(|state| *state == OwnershipHandoffActivation::Activated)
             .await
+            .map_err(|_| {
+                OwnershipHandoffError::participant(format!(
+                    "prepared state for {} '{}' was discarded before activation",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str()
+                ))
+            })?;
+        self.verify_ownership_handoff_activation(request)
     }
 
     fn remove_runtime_state_for_entity(
@@ -2958,6 +2970,7 @@ impl Runtime {
 }
 
 mod lifecycle;
+mod ownership_handoff_fingerprint;
 mod tasks;
 
 #[cfg(test)]

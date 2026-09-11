@@ -481,11 +481,14 @@ complete row sidecar for rows you emit, add dropped rows to `Acked`, and add
 rejected rows to `Nacked` with a reason.
 
 Build with TinyGo's non-WASI `wasm-unknown` target; standard Go only produces
-`js/wasm` and `wasip1/wasm` modules:
+`js/wasm` and `wasip1/wasm` modules. TinyGo compiles against the standard library
+of the Go toolchain that `go` selects, so select the toolchain pinned in the
+guest's `go.mod` explicitly; automatic selection keeps a newer host Go that
+TinyGo may not support:
 
 ```bash
 cd examples/wasm-processors/go-guest
-tinygo build \
+GOTOOLCHAIN="$(sed -n 's/^toolchain //p' go.mod)" tinygo build \
   -target=wasm-unknown \
   -scheduler=none \
   -opt=z \

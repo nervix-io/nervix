@@ -16,17 +16,24 @@ async fn progress_work_cannot_consume_liveness_streams() {
         node_b,
         ..
     } = connected_transports().await;
-    let started = StdArc::new(AtomicUsize::new(0));
+    let observation_deadline = Instant::now()
+        .checked_add(LIVENESS_QUOTA_EVENT_FAILSAFE)
+        .assured("the fixed liveness quota test failsafe fits in Tokio's instant range");
+    let (progress_started, mut progress_started_rx) = watch::channel(0_usize);
     let (release, release_rx) = watch::channel(false);
     transport_b
         .register_handler::<BlockingProgressRequest, _, _>({
-            let started = StdArc::clone(&started);
             let release_rx = release_rx.clone();
+            let progress_started = progress_started.clone();
             move |_context, _request| {
-                let started = StdArc::clone(&started);
                 let mut release_rx = release_rx.clone();
+                let progress_started = progress_started.clone();
                 async move {
-                    started.fetch_add(1, Ordering::AcqRel);
+                    progress_started.send_modify(|started| {
+                        *started = started
+                            .checked_add(1)
+                            .assured("the test starts only one bounded set of progress requests");
+                    });
                     release_rx
                         .wait_for(|released| *released)
                         .await
@@ -36,10 +43,17 @@ async fn progress_work_cannot_consume_liveness_streams() {
             }
         })
         .assured("the fresh test transport has no progress handler with this name");
+    let (liveness_entered, mut liveness_entered_rx) = watch::channel(false);
     transport_b
-        .register_handler::<LivenessRequest, _, _>(
-            |_context, _request| async move { LivenessResponse },
-        )
+        .register_handler::<LivenessRequest, _, _>({
+            move |_context, _request| {
+                let liveness_entered = liveness_entered.clone();
+                async move {
+                    liveness_entered.send_replace(true);
+                    LivenessResponse
+                }
+            }
+        })
         .assured("the fresh test transport has no liveness handler with this name");
 
     let mut blocked = Vec::new();
@@ -50,25 +64,32 @@ async fn progress_work_cannot_consume_liveness_streams() {
             requester.request(&target, BlockingProgressRequest).await
         }));
     }
-    timeout(Duration::from_secs(2), async {
-        loop {
-            tokio::task::consume_budget().await;
-            if started.load(Ordering::Acquire) == connection::MANAGEMENT_PROGRESS_STREAMS {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .assured("the test requests start before their two-second request deadlines");
-
-    let liveness = timeout(
-        Duration::from_millis(250),
-        transport_a.request(&node_b, LivenessRequest),
+    timeout_at(
+        observation_deadline,
+        progress_started_rx.wait_for(|started| *started == connection::MANAGEMENT_PROGRESS_STREAMS),
     )
-    .await;
+    .await
+    .assured("every reserved progress stream enters its handler within the test failsafe")
+    .assured("the registered progress handler retains its watch sender");
+
+    let requester = transport_a.clone();
+    let target = node_b.clone();
+    let liveness = tokio::spawn(async move { requester.request(&target, LivenessRequest).await });
+    timeout_at(
+        observation_deadline,
+        liveness_entered_rx.wait_for(|entered| *entered),
+    )
+    .await
+    .assured(
+        "the liveness handler enters while every progress handler remains blocked within the test \
+         failsafe",
+    )
+    .assured("the registered liveness handler retains its watch sender");
 
     release.send_replace(true);
+    let liveness = liveness
+        .await
+        .assured("the liveness request task contains no panic path");
     for request in blocked {
         let response = request
             .await
@@ -85,14 +106,17 @@ async fn progress_work_cannot_consume_liveness_streams() {
         liveness.is_ok(),
         "liveness must retain a physical management stream: {liveness:?}"
     );
-    let liveness =
-        liveness.verified("the liveness timeout result was checked by the assertion above");
-    assert!(
-        liveness.is_ok(),
-        "liveness request should succeed: {liveness:?}"
-    );
     assert_eq!(
         liveness.verified("the liveness response was checked by the assertion above"),
         LivenessResponse
+    );
+}
+
+#[test]
+fn subscription_interest_visibility_uses_shared_request_capacity() {
+    assert_eq!(
+        <SubscriptionInterestVisibilityRequest as InterconnectRequest>::SUBQUOTA,
+        RequestSubquota::Shared,
+        "a request that can remain open for gossip convergence must not reserve liveness capacity",
     );
 }

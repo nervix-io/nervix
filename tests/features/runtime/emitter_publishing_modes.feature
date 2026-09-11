@@ -640,8 +640,7 @@ Feature: Emitter publishing modes
 
   @emitter_set_mode_drain_timeout_rollback
   Scenario Outline: A timed-out SET MODE drain retains the old emitter and its buffered record
-    Given entity gate deadline is configured as "250ms"
-    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -681,6 +680,7 @@ Feature: Emitter publishing modes
       """
       transient error: fault injector stalled emitter publish
       """
+    Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these NSPL commands fail with "timed out draining domain"
       """
       ALTER EMITTER event_sink
