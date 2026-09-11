@@ -41,7 +41,6 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use blake3::Hasher;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -115,6 +114,7 @@ use nervix_interconnect::{
     PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest,
     RelayAdmission, RelayPayload, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
     StateSyncRequest as RemoteStateSyncRequest, StateSyncResponse as RemoteStateSyncResponse,
+    StreamHandlerError, StreamingResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     TlsConfigBundle, Transport,
@@ -137,11 +137,12 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
     OwnershipTransition, ParseAsType, PlacementGroupSchedule, PlacementName, PlacementPolicy,
     PostgresConflictAction, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, ResourceId,
-    ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledModel,
-    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
-    Timestamp, TimestampError, UniquelyKindedModel, UploadResource, UserName, VhostTlsResource,
-    expression_to_nspl, ingest_quiesce_to_nspl,
+    ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ScheduledModel, ScheduledNode,
+    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, Timestamp, TimestampError,
+    UniquelyKindedModel, UploadResource, UserName, VhostTlsResource, expression_to_nspl,
+    ingest_quiesce_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -175,15 +176,12 @@ use rustls::{
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
 use sorted_vec::SortedSet;
-use tempfile::TempPath;
 use thiserror::Error;
 use tokio::{
-    fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::{Mutex as AsyncMutex, broadcast, mpsc, watch},
     task::{JoinHandle, JoinSet},
-    time::{Duration, interval, sleep},
+    time::{Duration, interval, sleep, sleep_until},
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::ReceiverStream;
@@ -202,8 +200,7 @@ use crate::{
         PlacementRulePlan, Registry, RegistryError, RegistryMutation,
     },
     resource_interconnect::{
-        FetchResourceArchiveChunk, PublishResourceReplica,
-        ResourceArchiveChunk as InterconnectResourceArchiveChunk, ResourceInterconnectError,
+        FetchResourceArchive, PublishResourceReplica, ResourceInterconnectError,
     },
 };
 
@@ -213,6 +210,7 @@ const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const INTERCONNECT_TLS_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_CONCURRENT_RESOURCE_REPLICATIONS: usize = 4;
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
 const OBSERVABILITY_METRICS_PATH: &str = "/metrics";
@@ -741,10 +739,14 @@ use crate::{
         ServerEventLevel, SessionRequest, SessionResponse, SetActiveDomainRequest, SuggestRequest,
         SuggestResponse, Suggestion as ApiSuggestion, SuggestionKind,
         TransactionState as ApiTransactionState, TransactionStatus as ApiTransactionStatus,
-        UploadResourceRequest, UploadResourceResponse,
+        UploadResourceRequest, UploadResourceResponse, WaitForResourceReadyRequest,
+        WaitForResourceReadyResponse,
         session_service_server::{SessionService, SessionServiceServer},
     },
-    resource::{ResourceEntryContent, ResourceManifestEntry, ResourceStore},
+    resource::{
+        ResourceEntryContent, ResourceManifestEntry, ResourceStore, ResourceStoreError,
+        ResourceStoreLimits, StagedResourceArchive,
+    },
     runtime::{
         CompiledProgramWithMaterializedInterest, EntityGateLease, IngestMessageHeaders,
         IngestorDescribe as RuntimeIngestorDescribe, KafkaIngestor, OwnershipHandoffError,
@@ -2245,15 +2247,14 @@ async fn handle_web_console_request(
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());
         };
-        if service
-            .authenticate_basic_credentials(&credentials)
-            .await
-            .is_none()
-        {
+        let Some(authenticated_user) = service.authenticate_basic_credentials(&credentials).await
+        else {
             return Ok(unauthorized_basic_response());
-        }
+        };
 
-        return Ok(service.handle_web_console_resource_upload(request).await);
+        return Ok(service
+            .handle_web_console_resource_upload(request, authenticated_user)
+            .await);
     }
 
     let response = match (request.method(), request.uri().path()) {
@@ -2421,160 +2422,17 @@ fn sanitized_upload_relative_path(raw: &str) -> Option<PathBuf> {
     (!path.as_os_str().is_empty()).then_some(path)
 }
 
-async fn build_web_console_upload_archive(
-    directory: &Path,
-    identifier: ModelName,
-) -> Result<(TempPath, String), (StatusCode, String)> {
-    let archive = tempfile::NamedTempFile::new().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to create temporary upload archive".to_string(),
-        )
-    })?;
-    let archive_path = archive.into_temp_path();
-    let file = File::create(&archive_path).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to open temporary upload archive".to_string(),
-        )
-    })?;
-    write_web_console_upload_archive(directory, file)
-        .await
-        .map_err(|message| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "failed to build archive for resource '{}': {message}",
-                    identifier.as_str()
-                ),
-            )
-        })?;
-
-    let mut hasher = Hasher::new();
-    let mut file = File::open(&archive_path).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to read temporary upload archive".to_string(),
-        )
-    })?;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        tokio::task::consume_budget().await;
-        let read = file.read(&mut buffer).await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to hash temporary upload archive".to_string(),
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let hash = hasher.finalize();
-    Ok((archive_path, encode_hex(hash.as_bytes())))
-}
-
-async fn write_web_console_upload_archive(directory: &Path, writer: File) -> Result<(), String> {
-    let entries = collect_web_console_upload_entries(directory)?;
-    let mut builder = AsyncTarBuilder::new(writer);
-    builder.mode(HeaderMode::Deterministic);
-
-    for entry in entries {
-        tokio::task::consume_budget().await;
-        let mut header = Header::new_ustar();
-        header.set_mtime(0);
-        header.set_uid(0);
-        header.set_gid(0);
-        match entry {
-            WebConsoleUploadArchiveEntry::Directory { relative } => {
-                header.set_size(0);
-                header.set_mode(0o755);
-                header.set_entry_type(EntryType::Directory);
-                header.set_cksum();
-                builder
-                    .append_data(&mut header, &relative, tokio::io::empty())
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
-            WebConsoleUploadArchiveEntry::File {
-                full_path,
-                relative,
-                size,
-            } => {
-                header.set_size(size);
-                header.set_mode(0o644);
-                header.set_entry_type(EntryType::Regular);
-                header.set_cksum();
-                let file = File::open(&full_path)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                builder
-                    .append_data(&mut header, &relative, file)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-    }
-
-    let mut writer = builder
-        .into_inner()
-        .await
-        .map_err(|error| error.to_string())?;
-    writer.flush().await.map_err(|error| error.to_string())
-}
-
-enum WebConsoleUploadArchiveEntry {
-    Directory {
-        relative: PathBuf,
-    },
-    File {
-        full_path: PathBuf,
-        relative: PathBuf,
-        size: u64,
-    },
-}
-
-fn collect_web_console_upload_entries(
-    directory: &Path,
-) -> Result<Vec<WebConsoleUploadArchiveEntry>, String> {
-    let mut entries = Vec::new();
-    collect_web_console_upload_entries_recursive(directory, directory, &mut entries)?;
-    Ok(entries)
-}
-
-fn collect_web_console_upload_entries_recursive(
-    root: &Path,
-    current: &Path,
-    entries: &mut Vec<WebConsoleUploadArchiveEntry>,
-) -> Result<(), String> {
-    let mut directory_entries = std::fs::read_dir(current)
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    directory_entries.sort_by_key(|entry| entry.file_name());
-    for entry in directory_entries {
-        let path = entry.path();
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| error.to_string())?
-            .to_path_buf();
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
-        if file_type.is_dir() {
-            entries.push(WebConsoleUploadArchiveEntry::Directory { relative });
-            collect_web_console_upload_entries_recursive(root, &path, entries)?;
-        } else if file_type.is_file() {
-            let size = std::fs::metadata(&path)
-                .map_err(|error| error.to_string())?
-                .len();
-            entries.push(WebConsoleUploadArchiveEntry::File {
-                full_path: path,
-                relative,
-                size,
-            });
-        }
-    }
-    Ok(())
+fn web_console_bundle_error(error: Report<ResourceStoreError>) -> (StatusCode, String) {
+    let status = match error.current_context() {
+        ResourceStoreError::ArchiveQuotaExceeded { .. }
+        | ResourceStoreError::ExtractedQuotaExceeded { .. }
+        | ResourceStoreError::FileCountQuotaExceeded { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        ResourceStoreError::InvalidArchivePath
+        | ResourceStoreError::InvalidResourcePath
+        | ResourceStoreError::EmptyBundle => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, format!("{error:#}"))
 }
 
 async fn serve_web_console_http(
@@ -2852,6 +2710,29 @@ pub struct Args {
         help = "Directory used for local temporary files such as Iceberg emitter staging"
     )]
     pub temp_dir: PathBuf,
+    #[arg(
+        long,
+        env = "NERVIX_RESOURCE_MAX_ARCHIVE_BYTES",
+        default_value = "4GiB",
+        value_parser = parse_human_bytes,
+        help = "Maximum staged archive bytes for one resource version"
+    )]
+    pub resource_max_archive_bytes: ubyte::ByteUnit,
+    #[arg(
+        long,
+        env = "NERVIX_RESOURCE_MAX_EXTRACTED_BYTES",
+        default_value = "16GiB",
+        value_parser = parse_human_bytes,
+        help = "Maximum extracted bytes for one resource version"
+    )]
+    pub resource_max_extracted_bytes: ubyte::ByteUnit,
+    #[arg(
+        long,
+        env = "NERVIX_RESOURCE_MAX_FILE_COUNT",
+        default_value_t = 1_000_000,
+        help = "Maximum extracted files for one resource version"
+    )]
+    pub resource_max_file_count: u64,
     #[arg(
         long,
         env = "NERVIX_OTEL_ENABLED",
@@ -3482,6 +3363,12 @@ struct SessionServiceInner {
     /// Also held by every outstanding `TransactionExecutionLease`, which clears its entry on drop.
     transaction_executions: Arc<DashMap<String, (), RandomState>>,
     transaction_commit_execution: AsyncMutex<()>,
+    /// Also held by a request while it installs. Calls with one durable identity share the lock,
+    /// so only one of them can build and publish that assigned version on this leader.
+    resource_upload_executions: DashMap<ResourceUploadKey, StdArc<AsyncMutex<()>>, RandomState>,
+    /// A reconciliation request holds this lock through download, verification and promotion.
+    /// Repeated observations of the same missing version join that one installation.
+    resource_replication_executions: DashMap<ResourceId, StdArc<AsyncMutex<()>>, RandomState>,
 }
 
 struct TransactionExecutionLease {
@@ -3522,27 +3409,46 @@ impl TransactionCommitError {
 
 #[derive(Debug, Error)]
 enum ResourceUploadError {
-    #[error("failed to allocate version for resource '{identifier}'")]
-    AllocateVersion { identifier: ModelName },
-    #[error("failed to install resource '{identifier}'")]
-    InstallArchive { identifier: ModelName },
+    #[error("failed to begin upload for resource '{identifier}'")]
+    BeginUpload { identifier: ModelName },
+    #[error("failed to install resource '{}@{}'", .id.identifier.as_str(), .id.version)]
+    InstallArchive { id: ResourceId },
+    #[error("failed to publish resource '{}@{}'", .id.identifier.as_str(), .id.version)]
+    Publish { id: ResourceId },
     #[error(
-        "failed to publish resource '{}@{}'{cleanup_suffix}",
-        .id.identifier.as_str(),
-        .id.version
+        "resource upload identity '{}' already published version {} with digest {}, not {}",
+        .key.identity,
+        .version,
+        .published_checksum,
+        .received_checksum
     )]
-    PublishVersion {
-        id: ResourceId,
-        cleanup_suffix: String,
+    DigestConflict {
+        key: ResourceUploadKey,
+        version: u64,
+        published_checksum: String,
+        received_checksum: String,
     },
-    #[error("failed to publish resource replica '{}@{}'", .id.identifier.as_str(), .id.version)]
-    PublishReplica { id: ResourceId },
-    #[error(
-        "failed to replicate resource '{}@{}': {reason}",
-        .id.identifier.as_str(),
-        .id.version
-    )]
-    WaitForReplicas { id: ResourceId, reason: String },
+}
+
+impl ResourceUploadError {
+    fn assigned_version(&self) -> Option<u64> {
+        match self {
+            Self::BeginUpload { .. } => None,
+            Self::InstallArchive { id } | Self::Publish { id } => Some(id.version),
+            Self::DigestConflict { version, .. } => Some(*version),
+        }
+    }
+}
+
+struct ResourcePublication {
+    version: u64,
+    cluster_ready: bool,
+}
+
+struct ResourceReplication {
+    resource: nervix_models::ResourceVersion,
+    source_node_id: ClusterNodeName,
+    local_key: ResourceReplicaKey,
 }
 
 struct TransactionModelStepContext<'a> {
@@ -3715,11 +3621,6 @@ impl DomainClockRetirements {
             }
         }
     }
-}
-
-struct DownloadedResourceArchive {
-    path: TempPath,
-    root_checksum: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -3907,6 +3808,8 @@ pub struct Application {
     #[builder(default = PathBuf::from(crate::runtime::DEFAULT_TEMP_DIR))]
     pub temp_dir: PathBuf,
     #[builder(default)]
+    pub resource_store_limits: ResourceStoreLimits,
+    #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
     #[builder(default=CancellationToken::new())]
@@ -4085,6 +3988,11 @@ impl TryFrom<Args> for Application {
             .cluster_bootstrap_host(args.cluster_bootstrap_host)
             .db_path(PathBuf::from(args.db_path))
             .temp_dir(args.temp_dir)
+            .resource_store_limits(ResourceStoreLimits {
+                max_archive_bytes: args.resource_max_archive_bytes.as_u64(),
+                max_extracted_bytes: args.resource_max_extracted_bytes.as_u64(),
+                max_file_count: args.resource_max_file_count,
+            })
             .build())
     }
 }
@@ -4269,7 +4177,7 @@ impl SessionService for SessionServiceImpl {
         &self,
         request: Request<tonic::Streaming<UploadResourceRequest>>,
     ) -> Result<Response<UploadResourceResponse>, Status> {
-        let _authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
+        let authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             let leader_node = match leader.as_ref() {
@@ -4300,6 +4208,8 @@ impl SessionService for SessionServiceImpl {
                     None => String::new(),
                 },
                 leader_grpc_uri,
+                published: false,
+                cluster_ready: false,
             }));
         }
 
@@ -4316,6 +4226,8 @@ impl SessionService for SessionServiceImpl {
         };
         let identifier = ModelName::parse(&start.name)
             .map_err(|_| Status::invalid_argument("upload resource name is invalid"))?;
+        let upload_identity = ResourceUploadIdentity::parse(start.upload_identity)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let domain = match parse_request_domain(&start.domain) {
             Ok(domain) => domain,
             Err(RequestDomainError::Missing) => {
@@ -4338,16 +4250,30 @@ impl SessionService for SessionServiceImpl {
                 kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
+                published: false,
+                cluster_ready: false,
             }));
         }
+        if start.total_bytes == 0 {
+            return Err(Status::invalid_argument(
+                "upload resource must declare its archive size",
+            ));
+        }
+        self.inner
+            .resource_store
+            .validate_archive_bytes(start.total_bytes)
+            .map_err(|error| Status::resource_exhausted(error.to_string()))?;
 
-        let temp_archive = tempfile::NamedTempFile::new()
-            .map_err(|_| Status::internal("failed to create temporary upload archive"))?;
-        let temp_path = temp_archive.into_temp_path();
-        let mut file = File::create(&temp_path)
+        let mut archive = self
+            .inner
+            .resource_store
+            .create_archive_stager()
             .await
-            .map_err(|_| Status::internal("failed to open temporary upload archive"))?;
-        let mut hasher = Hasher::new();
+            .map_err(|error| {
+                Status::internal(format!(
+                    "failed to create temporary upload archive: {error}"
+                ))
+            })?;
         let mut total_received = 0u64;
         while let Some(message) = inbound.message().await? {
             tokio::task::consume_budget().await;
@@ -4356,20 +4282,35 @@ impl SessionService for SessionServiceImpl {
                     "unexpected upload resource control event",
                 ));
             };
-            hasher.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .map_err(|_| Status::internal("failed to write upload resource chunk"))?;
-            total_received = total_received
+            let next_total = total_received
                 .checked_add(chunk.len().arch_into())
                 .ok_or_else(|| Status::invalid_argument("upload resource archive is too large"))?;
+            if next_total > start.total_bytes {
+                return Err(Status::invalid_argument(format!(
+                    "upload size exceeds declared size {}",
+                    start.total_bytes
+                )));
+            }
+            self.inner
+                .resource_store
+                .validate_archive_bytes(next_total)
+                .map_err(|error| Status::resource_exhausted(error.to_string()))?;
+            let chunk = self
+                .inner
+                .resource_store
+                .admit_staging_bytes(&chunk)
+                .await
+                .map_err(|error| Status::resource_exhausted(error.to_string()))?;
+            archive.write_chunk(chunk).await.map_err(|error| {
+                Status::internal(format!("failed to write upload resource chunk: {error}"))
+            })?;
+            total_received = next_total;
         }
-        file.flush()
-            .await
-            .map_err(|_| Status::internal("failed to flush upload resource archive"))?;
-        drop(file);
+        let archive = archive.finish().await.map_err(|error| {
+            Status::internal(format!("failed to flush upload resource archive: {error}"))
+        })?;
 
-        if start.total_bytes != 0 && start.total_bytes != total_received {
+        if start.total_bytes != total_received || archive.archive_bytes() != total_received {
             return Ok(Response::new(UploadResourceResponse {
                 success: false,
                 message: format!(
@@ -4381,27 +4322,41 @@ impl SessionService for SessionServiceImpl {
                 kind: i32::from(CommandResultKind::Error),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
+                published: false,
+                cluster_ready: false,
             }));
         }
 
-        let root_checksum = {
-            let hash = hasher.finalize();
-            encode_hex(hash.as_bytes())
-        };
+        let upload_key = ResourceUploadKey::new(
+            authenticated_user,
+            domain,
+            ResourceName::from(&identifier),
+            upload_identity,
+        );
         match self
-            .install_uploaded_resource_archive(&domain, identifier, &temp_path, root_checksum)
+            .install_uploaded_resource_archive(
+                upload_key,
+                archive.path(),
+                archive.root_checksum().to_string(),
+            )
             .await
         {
-            Ok(version) => Ok(Response::new(UploadResourceResponse {
+            Ok(publication) => Ok(Response::new(UploadResourceResponse {
                 success: true,
-                message: format!("uploaded resource version {version}"),
-                version,
+                message: format!("published resource version {}", publication.version),
+                version: publication.version,
                 diagnostics: Vec::new(),
                 kind: i32::from(CommandResultKind::Ok),
                 leader: String::new(),
                 leader_grpc_uri: String::new(),
+                published: true,
+                cluster_ready: publication.cluster_ready,
             })),
             Err(error) => {
+                let assigned_version = match error.downcast_ref::<ResourceUploadError>() {
+                    Some(error) => error.assigned_version().unwrap_or(0),
+                    None => 0,
+                };
                 let message = format!("{error:#}");
                 let result = match error.downcast_ref::<ConsensusError>() {
                     Some(error) => self.consensus_error_response(error, message).await,
@@ -4410,14 +4365,61 @@ impl SessionService for SessionServiceImpl {
                 Ok(Response::new(UploadResourceResponse {
                     success: false,
                     message: result.message,
-                    version: 0,
+                    version: assigned_version,
                     diagnostics: result.diagnostics,
                     kind: result.kind,
                     leader: result.leader,
                     leader_grpc_uri: result.leader_grpc_uri,
+                    published: false,
+                    cluster_ready: false,
                 }))
             }
         }
+    }
+
+    async fn wait_for_resource_ready(
+        &self,
+        request: Request<WaitForResourceReadyRequest>,
+    ) -> Result<Response<WaitForResourceReadyResponse>, Status> {
+        let _authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
+        let request = request.into_inner();
+        let identifier = ResourceName::parse(&request.name)
+            .map_err(|_| Status::invalid_argument("resource name is invalid"))?;
+        let domain = parse_request_domain(&request.domain)
+            .map_err(|_| Status::invalid_argument("resource domain is invalid"))?;
+        let id = ResourceId::new(domain, identifier, request.version);
+        let resources = self.inner.consensus.current_resources().await;
+        if resources.version(&id).is_none() {
+            return Err(Status::not_found(format!(
+                "resource '{}@{}' is not published",
+                id.identifier.as_str(),
+                id.version
+            )));
+        }
+        let timeout = Duration::from_millis(request.timeout_millis);
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| Status::invalid_argument("resource readiness timeout is too large"))?;
+        let cluster_ready = self.wait_for_resource_cluster_ready(&id, deadline).await;
+        let message = if cluster_ready {
+            format!(
+                "resource '{}@{}' is ready on every live node",
+                id.identifier.as_str(),
+                id.version
+            )
+        } else {
+            format!(
+                "resource '{}@{}' is published but not ready on every live node before the \
+                 deadline",
+                id.identifier.as_str(),
+                id.version
+            )
+        };
+        Ok(Response::new(WaitForResourceReadyResponse {
+            version: id.version,
+            cluster_ready,
+            message,
+        }))
     }
 }
 
@@ -4974,25 +4976,30 @@ impl SessionServiceImpl {
     async fn reconcile_resources_once(&self) {
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let resources = self.inner.consensus.current_resources().await;
-        let live_nodes = self.inner.cluster.gossip_state().await.live_nodes;
+        let gossip = self.inner.cluster.gossip_state().await;
+        let live_node_ids = gossip
+            .live_identities()
+            .into_iter()
+            .map(|identity| identity.node_id().clone())
+            .collect::<BTreeSet<_>>();
 
         // Replicas indexed by the resource version they hold and then by the node holding it. The
         // loop below asks about one resource on one node at a time, so both questions resolve by
         // key instead of scanning every replica for every resource and every live node.
         let mut replicas_by_resource: HashMap<
             ResourceId,
-            HashMap<&ClusterNodeName, &ResourceNodeStatus>,
+            BTreeMap<ClusterNodeName, ResourceNodeStatus>,
         > = HashMap::default();
         for replica in resources.replicas.iter() {
             replicas_by_resource
                 .entry(replica.key.version_key().resource_id())
                 .or_default()
-                .insert(&replica.key.node_id, replica);
+                .insert(replica.key.node_id.clone(), replica.clone());
         }
 
+        let mut missing = Vec::new();
         for resource in resources.versions.iter().cloned() {
             tokio::task::consume_budget().await;
-
             let local_key = ResourceReplicaKey::new(
                 resource.id.domain.clone(),
                 resource.id.identifier.clone(),
@@ -5012,114 +5019,149 @@ impl SessionServiceImpl {
             if holds_current_resource(&local_node_id) {
                 continue;
             }
-
-            let Some(source_node) = live_nodes.iter().find(|node| {
-                node.node_id != local_node_id && holds_current_resource(&node.node_id)
+            let Some(source_node_id) = resource_replicas.and_then(|replicas| {
+                replicas.iter().find_map(|(node_id, replica)| {
+                    (node_id != &local_node_id
+                        && live_node_ids.contains(node_id)
+                        && replica.state == ResourceNodeState::Ready
+                        && replica.root_checksum.as_deref()
+                            == Some(resource.root_checksum.as_str()))
+                    .then(|| node_id.clone())
+                })
             }) else {
                 continue;
             };
+            missing.push(ResourceReplication {
+                resource,
+                source_node_id,
+                local_key,
+            });
+        }
 
-            let failed_replica =
-                |root_checksum: Option<String>, error: String| ResourceNodeStatus {
-                    key: local_key.clone(),
-                    state: ResourceNodeState::Failed,
-                    root_checksum,
-                    last_verified_at: None,
-                    source_node_id: Some(source_node.node_id.clone()),
-                    error: Some(error),
-                };
-
-            let archive = match fetch_resource_archive(
-                &self.inner.interconnect,
-                &source_node.node_id,
-                &resource.id,
+        stream::iter(missing)
+            .for_each_concurrent(
+                MAX_CONCURRENT_RESOURCE_REPLICATIONS,
+                |replication| async move {
+                    self.replicate_resource(replication).await;
+                },
             )
+            .await;
+    }
+
+    async fn replicate_resource(&self, replication: ResourceReplication) {
+        let ResourceReplication {
+            resource,
+            source_node_id,
+            local_key,
+        } = replication;
+        let execution = self
+            .inner
+            .resource_replication_executions
+            .entry(resource.id.clone())
+            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+            .clone();
+        let _execution_guard = execution.lock().await;
+        let current = self.inner.consensus.current_resources().await;
+        if current.replicas.iter().any(|replica| {
+            replica.key == local_key
+                && replica.state == ResourceNodeState::Ready
+                && replica.root_checksum.as_deref() == Some(resource.root_checksum.as_str())
+        }) {
+            return;
+        }
+        let failed_replica = |root_checksum: Option<String>, error: String| ResourceNodeStatus {
+            key: local_key.clone(),
+            state: ResourceNodeState::Failed,
+            root_checksum,
+            last_verified_at: None,
+            source_node_id: Some(source_node_id.clone()),
+            error: Some(error),
+        };
+
+        if let Err(error) = self
+            .publish_resource_replica(ResourceNodeStatus {
+                key: local_key.clone(),
+                state: ResourceNodeState::Pending,
+                root_checksum: None,
+                last_verified_at: None,
+                source_node_id: Some(source_node_id.clone()),
+                error: None,
+            })
             .await
-            {
-                Ok(archive) => archive,
-                Err(error) => {
-                    if let Err(publish_error) = self
-                        .publish_resource_replica(failed_replica(None, error))
-                        .await
-                    {
-                        self.broadcast_error(publish_error);
-                    }
-                    continue;
-                }
-            };
+        {
+            self.broadcast_error(error);
+            return;
+        }
 
-            if archive.root_checksum != resource.root_checksum {
-                if let Err(error) = self
-                    .publish_resource_replica(failed_replica(
-                        Some(archive.root_checksum.clone()),
-                        format!(
-                            "resource checksum mismatch: expected {}, got {}",
-                            resource.root_checksum, archive.root_checksum
-                        ),
-                    ))
+        let archive = match fetch_resource_archive(
+            &self.inner.interconnect,
+            &self.inner.resource_store,
+            &source_node_id,
+            &resource,
+        )
+        .await
+        {
+            Ok(archive) => archive,
+            Err(error) => {
+                if let Err(publish_error) = self
+                    .publish_resource_replica(failed_replica(None, error))
                     .await
                 {
-                    self.broadcast_error(error);
+                    self.broadcast_error(publish_error);
                 }
-                continue;
+                return;
             }
+        };
 
-            let manifest = match self
-                .inner
-                .resource_store
-                .install_from_archive_path(
-                    resource.id.clone(),
-                    &archive.path,
-                    archive.root_checksum.clone(),
-                    resource.created_by_node.clone(),
-                    resource.created_at,
-                )
-                .await
-            {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    if let Err(publish_error) = self
-                        .publish_resource_replica(failed_replica(None, error.to_string()))
-                        .await
-                    {
-                        self.broadcast_error(publish_error);
-                    }
-                    continue;
-                }
-            };
-
-            if manifest.resource.root_checksum != resource.root_checksum {
-                let actual_checksum = manifest.resource.root_checksum.clone();
-                if let Err(error) = self
-                    .publish_resource_replica(failed_replica(
-                        Some(actual_checksum.clone()),
-                        format!(
-                            "resource checksum mismatch: expected {}, got {}",
-                            resource.root_checksum, actual_checksum
-                        ),
-                    ))
-                    .await
-                {
-                    self.broadcast_error(error);
-                }
-                continue;
-            }
-
+        if archive.root_checksum() != resource.root_checksum {
             if let Err(error) = self
-                .publish_resource_replica(ResourceNodeStatus {
-                    key: local_key,
-                    state: ResourceNodeState::Ready,
-                    root_checksum: Some(resource.root_checksum.clone()),
-                    last_verified_at: Some(current_timestamp()),
-                    source_node_id: Some(source_node.node_id.clone()),
-                    error: None,
-                })
+                .publish_resource_replica(failed_replica(
+                    Some(archive.root_checksum().to_string()),
+                    format!(
+                        "resource checksum mismatch: expected {}, got {}",
+                        resource.root_checksum,
+                        archive.root_checksum()
+                    ),
+                ))
                 .await
             {
                 self.broadcast_error(error);
-            } else if let Err(error) = self.refresh_http_tls_server_config().await {
-                self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
             }
+            return;
+        }
+
+        let manifest = match self
+            .inner
+            .resource_store
+            .install_replica_from_archive_path(resource.clone(), archive.path())
+            .await
+        {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                if let Err(publish_error) = self
+                    .publish_resource_replica(failed_replica(None, error.to_string()))
+                    .await
+                {
+                    self.broadcast_error(publish_error);
+                }
+                return;
+            }
+        };
+
+        if let Err(error) = self
+            .publish_resource_replica(ResourceNodeStatus {
+                key: local_key,
+                state: ResourceNodeState::Ready,
+                root_checksum: Some(manifest.resource.root_checksum),
+                last_verified_at: Some(current_timestamp()),
+                source_node_id: Some(source_node_id),
+                error: None,
+            })
+            .await
+        {
+            self.broadcast_error(error);
+        } else if let Err(error) = self.refresh_http_tls_server_config().await {
+            self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
     }
 
@@ -11464,6 +11506,7 @@ impl SessionServiceImpl {
     async fn handle_web_console_resource_upload(
         &self,
         request: HyperRequest<HyperIncoming>,
+        authenticated_user: UserName,
     ) -> HyperResponse<Full<Bytes>> {
         let Some(resource_name) = web_console_query_param(request.uri().query(), "resource") else {
             return web_console_upload_text_response(
@@ -11492,6 +11535,23 @@ impl SessionServiceImpl {
                 return web_console_upload_text_response(
                     StatusCode::BAD_REQUEST,
                     "invalid domain name",
+                );
+            }
+        };
+        let Some(upload_identity) =
+            web_console_query_param(request.uri().query(), "upload_identity")
+        else {
+            return web_console_upload_text_response(
+                StatusCode::BAD_REQUEST,
+                "missing upload_identity query parameter",
+            );
+        };
+        let upload_identity = match ResourceUploadIdentity::parse(upload_identity.trim()) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return web_console_upload_text_response(
+                    StatusCode::BAD_REQUEST,
+                    error.to_string(),
                 );
             }
         };
@@ -11530,21 +11590,20 @@ impl SessionServiceImpl {
         };
 
         match self
-            .stage_web_console_resource_upload(request, boundary, ModelName::from(&identifier))
+            .stage_web_console_resource_upload(request, boundary)
             .await
         {
-            Ok((archive_path, root_checksum)) => match self
+            Ok(archive) => match self
                 .install_uploaded_resource_archive(
-                    &domain,
-                    ModelName::from(&identifier),
-                    &archive_path,
-                    root_checksum,
+                    ResourceUploadKey::new(authenticated_user, domain, identifier, upload_identity),
+                    archive.path(),
+                    archive.root_checksum().to_string(),
                 )
                 .await
             {
-                Ok(version) => web_console_upload_text_response(
+                Ok(publication) => web_console_upload_text_response(
                     StatusCode::OK,
-                    format!("uploaded resource version {version}"),
+                    format!("published resource version {}", publication.version),
                 ),
                 Err(error) => {
                     let status = if let Some(ConsensusError::LeadershipLost { .. }) =
@@ -11565,82 +11624,72 @@ impl SessionServiceImpl {
         &self,
         request: HyperRequest<HyperIncoming>,
         boundary: String,
-        identifier: ModelName,
-    ) -> Result<(TempPath, String), (StatusCode, String)> {
-        let upload_dir = tempfile::tempdir().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create temporary upload directory".to_string(),
-            )
-        })?;
+    ) -> Result<StagedResourceArchive, (StatusCode, String)> {
+        let mut staging = self
+            .inner
+            .resource_store
+            .create_bundle_stager()
+            .await
+            .map_err(web_console_bundle_error)?;
         let stream = request.into_body().into_data_stream().map(|result| {
             result.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
         });
         let mut multipart = multer::Multipart::new(stream, boundary);
-        let mut file_count = 0_u64;
-        while let Some(mut field) = multipart.next_field().await.map_err(|error| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("failed to read multipart field: {error}"),
-            )
-        })? {
-            tokio::task::consume_budget().await;
-            if field.name() != Some("file") {
-                continue;
-            }
-            let Some(file_name) = field.file_name().and_then(sanitized_upload_relative_path) else {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "upload contains an invalid file path".to_string(),
-                ));
-            };
-            let destination = upload_dir.path().join(file_name);
-            if let Some(parent) = destination.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "failed to create temporary upload subdirectory".to_string(),
-                    )
-                })?;
-            }
-            let mut file = File::create(&destination).await.map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to create temporary uploaded file".to_string(),
-                )
-            })?;
-            while let Some(chunk) = field.chunk().await.map_err(|error| {
+        let staging_result: Result<(), (StatusCode, String)> = async {
+            while let Some(mut field) = multipart.next_field().await.map_err(|error| {
                 (
                     StatusCode::BAD_REQUEST,
-                    format!("failed to read uploaded file chunk: {error}"),
+                    format!("failed to read multipart field: {error}"),
                 )
             })? {
                 tokio::task::consume_budget().await;
-                file.write_all(&chunk).await.map_err(|_| {
+                if field.name() != Some("file") {
+                    continue;
+                }
+                let Some(file_name) = field.file_name().and_then(sanitized_upload_relative_path)
+                else {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "upload contains an invalid file path".to_string(),
+                    ));
+                };
+                staging
+                    .create_file(&file_name)
+                    .await
+                    .map_err(web_console_bundle_error)?;
+                while let Some(chunk) = field.chunk().await.map_err(|error| {
                     (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "failed to write temporary uploaded file".to_string(),
+                        StatusCode::BAD_REQUEST,
+                        format!("failed to read uploaded file chunk: {error}"),
                     )
-                })?;
+                })? {
+                    tokio::task::consume_budget().await;
+                    let chunk = self
+                        .inner
+                        .resource_store
+                        .admit_staging_bytes(&chunk)
+                        .await
+                        .map_err(web_console_bundle_error)?;
+                    staging
+                        .write_chunk(chunk)
+                        .await
+                        .map_err(web_console_bundle_error)?;
+                }
             }
-            file.flush().await.map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to flush temporary uploaded file".to_string(),
-                )
-            })?;
-            file_count = file_count
-                .checked_add(1)
-                .assured("the files counted here were each written to the local filesystem");
+            Ok(())
         }
-        if file_count == 0 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "upload contains no files".to_string(),
-            ));
+        .await;
+        if let Err((status, message)) = staging_result {
+            return match staging.abort().await {
+                Ok(()) => Err((status, message)),
+                Err(cleanup_error) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{message}; failed to clean resource upload: {cleanup_error:#}"),
+                )),
+            };
         }
 
-        build_web_console_upload_archive(upload_dir.path(), identifier).await
+        staging.finish().await.map_err(web_console_bundle_error)
     }
 
     async fn process_web_console_request(
@@ -12062,21 +12111,46 @@ impl SessionServiceImpl {
 
     async fn install_uploaded_resource_archive(
         &self,
-        domain: &DomainName,
-        identifier: ModelName,
+        key: ResourceUploadKey,
         archive_path: &Path,
         root_checksum: String,
-    ) -> Result<u64, Report<ResourceUploadError>> {
+    ) -> Result<ResourcePublication, Report<ResourceUploadError>> {
+        let execution = self
+            .inner
+            .resource_upload_executions
+            .entry(key.clone())
+            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+            .clone();
+        let _execution_guard = execution.lock().await;
+        let identifier = ModelName::from(&key.identifier);
         let created_at = current_timestamp();
-        let version = self
+        let upload = self
             .inner
             .consensus
-            .allocate_resource_version(domain, &ResourceName::from(&identifier))
+            .begin_resource_upload(key.clone())
             .await
-            .change_context(ResourceUploadError::AllocateVersion {
+            .change_context(ResourceUploadError::BeginUpload {
                 identifier: identifier.clone(),
             })?;
-        let id = ResourceId::new(domain.clone(), ResourceName::from(&identifier), version);
+        if let ResourceUploadState::Published {
+            root_checksum: published_checksum,
+        } = upload.state
+        {
+            if published_checksum != root_checksum {
+                return Err(Report::new(ResourceUploadError::DigestConflict {
+                    key,
+                    version: upload.version,
+                    published_checksum,
+                    received_checksum: root_checksum,
+                }));
+            }
+            let id = ResourceId::new(key.domain, key.identifier, upload.version);
+            return Ok(ResourcePublication {
+                version: upload.version,
+                cluster_ready: self.resource_cluster_ready(&id).await,
+            });
+        }
+        let id = ResourceId::new(key.domain.clone(), key.identifier.clone(), upload.version);
         let manifest = self
             .inner
             .resource_store
@@ -12088,59 +12162,26 @@ impl SessionServiceImpl {
                 created_at,
             )
             .await
-            .change_context(ResourceUploadError::InstallArchive { identifier })?;
-
-        if let Err(error) = self
-            .inner
-            .consensus
-            .put_resource_version(manifest.resource.clone())
-            .await
-        {
-            let cleanup_suffix = match self
-                .inner
-                .resource_store
-                .remove_version(&manifest.resource.id)
-            {
-                Ok(()) => String::new(),
-                Err(cleanup_error) => {
-                    format!("; local cleanup also failed: {cleanup_error}")
-                }
-            };
-            return Err(
-                Report::new(error).change_context(ResourceUploadError::PublishVersion {
-                    id: manifest.resource.id,
-                    cleanup_suffix,
-                }),
-            );
-        }
-
+            .change_context(ResourceUploadError::InstallArchive { id: id.clone() })?;
+        let replica = ResourceNodeStatus {
+            key: ResourceReplicaKey::new(
+                manifest.resource.id.domain.clone(),
+                manifest.resource.id.identifier.clone(),
+                manifest.resource.id.version,
+                self.inner.consensus.local_node_id().clone(),
+            ),
+            state: ResourceNodeState::Ready,
+            root_checksum: Some(manifest.resource.root_checksum.clone()),
+            last_verified_at: Some(created_at),
+            source_node_id: Some(self.inner.consensus.local_node_id().clone()),
+            error: None,
+        };
         self.inner
             .consensus
-            .put_resource_replica(ResourceNodeStatus {
-                key: ResourceReplicaKey::new(
-                    manifest.resource.id.domain.clone(),
-                    manifest.resource.id.identifier.clone(),
-                    manifest.resource.id.version,
-                    self.inner.consensus.local_node_id().clone(),
-                ),
-                state: ResourceNodeState::Ready,
-                root_checksum: Some(manifest.resource.root_checksum.clone()),
-                last_verified_at: Some(created_at),
-                source_node_id: Some(self.inner.consensus.local_node_id().clone()),
-                error: None,
-            })
+            .publish_resource_upload(key, manifest.resource.clone(), replica)
             .await
-            .change_context(ResourceUploadError::PublishReplica {
+            .change_context(ResourceUploadError::Publish {
                 id: manifest.resource.id.clone(),
-            })?;
-
-        self.wait_for_resource_cluster_ready(&manifest.resource.id)
-            .await
-            .map_err(|reason| {
-                Report::new(ResourceUploadError::WaitForReplicas {
-                    id: manifest.resource.id.clone(),
-                    reason,
-                })
             })?;
         self.inner
             .runtime
@@ -12148,7 +12189,10 @@ impl SessionServiceImpl {
         if let Err(error) = self.refresh_http_tls_server_config().await {
             self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
         }
-        Ok(manifest.resource.id.version)
+        Ok(ResourcePublication {
+            version: manifest.resource.id.version,
+            cluster_ready: self.resource_cluster_ready(&manifest.resource.id).await,
+        })
     }
 
     async fn resolve_domain_start(
@@ -12497,11 +12541,12 @@ impl SessionServiceImpl {
                 lines.push("- none".to_string());
             } else {
                 for resource in &versions {
+                    tokio::task::consume_budget().await;
                     lines.push(SessionServiceImpl::format_resource_version_summary(
                         resource,
                     ));
                     lines.push("  entries:".to_string());
-                    lines.extend(self.resource_version_entry_lines(resource));
+                    lines.extend(self.resource_version_entry_lines(resource).await);
                 }
             }
             return command_ok(lines.join("\n"));
@@ -12512,12 +12557,7 @@ impl SessionServiceImpl {
             .verified("the branch above returned for the absent case");
         let id = ResourceId::new(domain.clone(), describe.identifier.clone(), version);
         let resources = self.inner.consensus.current_resources().await;
-        let Some(resource) = resources
-            .versions
-            .iter()
-            .find(|resource| resource.id == id)
-            .cloned()
-        else {
+        let Some(resource) = resources.version(&id).cloned() else {
             return command_error(format!(
                 "resource '{}@{}' does not exist",
                 describe.identifier.as_str(),
@@ -12533,9 +12573,9 @@ impl SessionServiceImpl {
             .collect::<Vec<_>>();
         let gossip = self.inner.cluster.gossip_state().await;
         let live_node_ids = gossip
-            .live_nodes
-            .iter()
-            .map(|node| node.node_id.clone())
+            .live_identities()
+            .into_iter()
+            .map(|identity| identity.node_id().clone())
             .collect::<BTreeSet<_>>();
         let mut live_node_ids = live_node_ids;
         if live_node_ids.is_empty() {
@@ -12578,7 +12618,7 @@ impl SessionServiceImpl {
             ),
             "entries:".to_string(),
         ];
-        lines.extend(self.resource_version_entry_lines(&resource));
+        lines.extend(self.resource_version_entry_lines(&resource).await);
         lines.extend([
             format!(
                 "alive_nodes: {}",
@@ -12663,11 +12703,11 @@ impl SessionServiceImpl {
         )
     }
 
-    fn resource_version_entry_lines(
+    async fn resource_version_entry_lines(
         &self,
         resource: &nervix_models::ResourceVersion,
     ) -> Vec<String> {
-        match self.inner.resource_store.read_manifest(&resource.id) {
+        match self.inner.resource_store.read_manifest(&resource.id).await {
             Ok(manifest) if manifest.entries.is_empty() => vec!["  - none".to_string()],
             Ok(manifest) => manifest
                 .entries
@@ -12689,40 +12729,52 @@ impl SessionServiceImpl {
         )
     }
 
-    async fn wait_for_resource_cluster_ready(&self, id: &ResourceId) -> Result<(), String> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    async fn resource_cluster_ready(&self, id: &ResourceId) -> bool {
+        let resources = self.inner.consensus.current_resources().await;
+        let replicas = resources
+            .replicas
+            .iter()
+            .filter(|replica| replica.key.version_key().resource_id() == *id)
+            .collect::<Vec<_>>();
+        let gossip = self.inner.cluster.gossip_state().await;
+        let live_node_ids = gossip
+            .live_identities()
+            .into_iter()
+            .map(|identity| identity.node_id().clone())
+            .collect::<BTreeSet<_>>();
+        !live_node_ids.is_empty()
+            && live_node_ids.iter().all(|node_id| {
+                replicas.iter().any(|replica| {
+                    replica.key.node_id == *node_id && replica.state == ResourceNodeState::Ready
+                })
+            })
+    }
+
+    async fn wait_for_resource_cluster_ready(
+        &self,
+        id: &ResourceId,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        if self.resource_cluster_ready(id).await {
+            return true;
+        }
         loop {
             tokio::task::consume_budget().await;
-            let resources = self.inner.consensus.current_resources().await;
-            let replicas = resources
-                .replicas
-                .iter()
-                .filter(|replica| replica.key.version_key().resource_id() == *id)
-                .collect::<Vec<_>>();
-            let gossip = self.inner.cluster.gossip_state().await;
-            let live_node_ids = gossip
-                .live_nodes
-                .iter()
-                .map(|node| &node.node_id)
-                .collect::<BTreeSet<_>>();
-            let all_ready = !live_node_ids.is_empty()
-                && live_node_ids.iter().all(|node_id| {
-                    replicas.iter().any(|replica| {
-                        replica.key.node_id == **node_id
-                            && replica.state == ResourceNodeState::Ready
-                    })
-                });
-            if all_ready {
-                return Ok(());
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return false;
             }
+            let next_poll = match now.checked_add(Duration::from_millis(100)) {
+                Some(next_poll) => next_poll.min(deadline),
+                None => deadline,
+            };
+            sleep_until(next_poll).await;
             if tokio::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out waiting for resource '{}@{}' to finish replicating",
-                    id.identifier.as_str(),
-                    id.version
-                ));
+                return false;
             }
-            sleep(Duration::from_millis(100)).await;
+            if self.resource_cluster_ready(id).await {
+                return true;
+            }
         }
     }
 
@@ -16962,55 +17014,77 @@ fn transaction_statement_label(statement: &Statement) -> &'static str {
 
 async fn fetch_resource_archive(
     interconnect: &Transport,
+    resource_store: &ResourceStore,
     source_node: &ClusterNodeName,
-    id: &ResourceId,
-) -> Result<DownloadedResourceArchive, String> {
-    let temp_archive = tempfile::NamedTempFile::new()
-        .map_err(|error| format!("failed to create temporary resource archive: {error}"))?;
-    let temp_path = temp_archive.into_temp_path();
-    let mut file = File::create(&temp_path)
+    resource: &nervix_models::ResourceVersion,
+) -> Result<StagedResourceArchive, String> {
+    resource_store
+        .validate_archive_bytes(resource.archive_bytes)
+        .map_err(|error| error.to_string())?;
+    let mut archive = interconnect
+        .request_stream(
+            source_node,
+            FetchResourceArchive {
+                id: resource.id.clone(),
+            },
+        )
         .await
-        .map_err(|error| format!("failed to open temporary resource archive: {error}"))?;
-    let mut hasher = Hasher::new();
-    let mut offset = 0_u64;
-    loop {
+        .map_err(|error| format!("resource fetch request failed: {error}"))?;
+    if archive.content_length() != resource.archive_bytes {
+        return Err(format!(
+            "resource archive size mismatch: expected {}, source declared {}",
+            resource.archive_bytes,
+            archive.content_length()
+        ));
+    }
+    let mut staged = resource_store
+        .create_archive_stager()
+        .await
+        .map_err(|error| format!("failed to create temporary resource archive: {error}"))?;
+    let mut received = 0_u64;
+    while let Some(chunk) = archive
+        .next_chunk()
+        .await
+        .map_err(|error| format!("resource fetch failed: {error}"))?
+    {
         tokio::task::consume_budget().await;
-        let chunk = interconnect
-            .request(
-                source_node,
-                FetchResourceArchiveChunk {
-                    id: id.clone(),
-                    offset,
-                },
-            )
-            .await
-            .map_err(|error| format!("resource fetch request failed: {error}"))?
-            .map_err(|error| format!("resource fetch failed: {error}"))?;
-        if chunk.bytes.is_empty() && !chunk.eof {
-            return Err("resource fetch made no progress".to_string());
-        }
-        hasher.update(&chunk.bytes);
-        file.write_all(&chunk.bytes)
-            .await
-            .map_err(|error| format!("failed to write temporary resource archive: {error}"))?;
-        let chunk_bytes = u64::try_from(chunk.bytes.len())
+        let chunk_bytes = u64::try_from(chunk.len())
             .map_err(|error| format!("resource chunk length is invalid: {error}"))?;
-        offset = offset
+        let next_received = received
             .checked_add(chunk_bytes)
             .ok_or_else(|| "resource archive offset overflowed".to_string())?;
-        if chunk.eof {
-            break;
+        if next_received > resource.archive_bytes {
+            return Err(format!(
+                "resource archive size exceeds published size {}",
+                resource.archive_bytes
+            ));
         }
+        resource_store
+            .validate_archive_bytes(next_received)
+            .map_err(|error| error.to_string())?;
+        staged
+            .write_chunk(chunk)
+            .await
+            .map_err(|error| format!("failed to write temporary resource archive: {error}"))?;
+        received = next_received;
     }
-    file.flush()
+    if received != resource.archive_bytes {
+        return Err(format!(
+            "resource archive size mismatch: expected {}, received {received}",
+            resource.archive_bytes
+        ));
+    }
+    let staged = staged
+        .finish()
         .await
         .map_err(|error| format!("failed to flush temporary resource archive: {error}"))?;
-    drop(file);
-    let hash = hasher.finalize();
-    Ok(DownloadedResourceArchive {
-        path: temp_path,
-        root_checksum: encode_hex(hash.as_bytes()),
-    })
+    if staged.archive_bytes() != received {
+        return Err(format!(
+            "resource archive staging size mismatch: received {received}, wrote {}",
+            staged.archive_bytes()
+        ));
+    }
+    Ok(staged)
 }
 
 fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult {
@@ -17533,7 +17607,7 @@ async fn load_grpc_tls_server_config() -> Result<ServerTlsConfig, Report<AppErro
 }
 
 /// Resolves a model's resource reference to the concrete version it binds to. Resources are
-/// domain-owned, so a name only resolves against versions uploaded into the referencing domain.
+/// domain-owned, so a name only resolves against versions published in the referencing domain.
 fn resolve_resource_id(
     resources: &nervix_models::ResourceVersionStatus,
     domain: &DomainName,
@@ -17542,7 +17616,7 @@ fn resolve_resource_id(
 ) -> Result<ResourceId, String> {
     if let Some(version) = requested_version {
         let id = ResourceId::new(domain.clone(), identifier.clone(), version);
-        if resources.versions.iter().any(|resource| resource.id == id) {
+        if resources.version(&id).is_some() {
             return Ok(id);
         }
         return Err(format!(
@@ -17553,15 +17627,9 @@ fn resolve_resource_id(
         ));
     }
 
-    let latest = resources
-        .versions
-        .iter()
-        .filter(|resource| resource.id.domain == *domain && resource.id.identifier == *identifier)
-        .map(|resource| resource.id.version)
-        .max();
-    let Some(version) = latest else {
+    let Some(version) = resources.latest_version(domain, identifier) else {
         return Err(format!(
-            "resource '{}' has no uploaded versions in domain '{}'",
+            "resource '{}' has no published versions in domain '{}'",
             identifier.as_str(),
             domain.as_str()
         ));
@@ -17728,6 +17796,7 @@ fn parse_trace_sample_ratio(input: &str) -> Result<f64, String> {
     }
 }
 
+#[cfg(test)]
 fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -18465,6 +18534,7 @@ impl Application {
             })?;
         let db_path = self.db_path.clone();
         let temp_dir = self.temp_dir.clone();
+        let resource_store_limits = self.resource_store_limits;
         let shutdown = self.shutdown.clone();
         let fault_injection = self.fault_injection.clone();
         let grpc_tls_server_config = if grpc_mode.is_tls() {
@@ -18560,6 +18630,9 @@ impl Application {
             bootstrap = cluster_bootstrap_host.as_deref().unwrap_or(""),
             db_path = db_path.display().to_string(),
             temp_dir = temp_dir.display().to_string(),
+            resource_max_archive_bytes = resource_store_limits.max_archive_bytes,
+            resource_max_extracted_bytes = resource_store_limits.max_extracted_bytes,
+            resource_max_file_count = resource_store_limits.max_file_count,
             "starting nervix server"
         );
 
@@ -18590,11 +18663,19 @@ impl Application {
             Report::new(AppError::OpenRuntimeState)
         })?;
         let resource_store = Arc::new(
-            ResourceStore::open(db_path.join("resources"), runtime.executor().clone()).map_err(|err| {
+            ResourceStore::open_with_limits(
+                db_path.join("resources"),
+                runtime.executor().clone(),
+                resource_store_limits,
+            ).map_err(|err| {
                 error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
                 Report::new(AppError::OpenResourceStore)
             })?,
         );
+        resource_store.cleanup_abandoned_staging().await.map_err(|err| {
+            error!(db_path = db_path.display().to_string(), error = %err, "failed to clean resource staging paths");
+            Report::new(AppError::OpenResourceStore)
+        })?;
         let mut startup = ApplicationStartup {
             db,
             resource_store,
@@ -19287,23 +19368,33 @@ impl Application {
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
                 transaction_commit_execution: AsyncMutex::new(()),
+                resource_upload_executions: DashMap::with_hasher(RandomState::new()),
+                resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
         };
         let resource_archive_service = service.clone();
         interconnect
-            .register_handler::<FetchResourceArchiveChunk, _, _>(move |_context, request| {
+            .register_stream_handler::<FetchResourceArchive, _, _>(move |_context, request| {
                 let service = resource_archive_service.clone();
                 async move {
-                    service
+                    let reader = service
                         .inner
                         .resource_store
-                        .read_archive_chunk(&request.id, request.offset)
+                        .open_archive(&request.id)
                         .await
-                        .map(|chunk| InterconnectResourceArchiveChunk {
-                            bytes: chunk.bytes,
-                            eof: chunk.eof,
-                        })
-                        .map_err(ResourceInterconnectError::archive_read)
+                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                    let archive_bytes = reader.archive_bytes();
+                    let chunks = stream::unfold(Some(reader), |reader| async move {
+                        let mut reader = reader?;
+                        match reader.next_chunk().await {
+                            Ok(Some(chunk)) => Some((Ok(chunk), Some(reader))),
+                            Ok(None) => None,
+                            Err(error) => {
+                                Some((Err(StreamHandlerError::new(error.to_string())), None))
+                            }
+                        }
+                    });
+                    Ok(StreamingResponse::new(archive_bytes, chunks))
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
@@ -20630,6 +20721,26 @@ mod tests {
     }
 
     #[test]
+    fn args_parse_resource_store_limits() {
+        let args = test_args(&[
+            "--resource-max-archive-bytes",
+            "8MiB",
+            "--resource-max-extracted-bytes",
+            "32MiB",
+            "--resource-max-file-count",
+            "2048",
+        ]);
+        let app = Application::try_from(args).expect("args should parse");
+
+        assert_eq!(app.resource_store_limits.max_archive_bytes, 8 * 1024 * 1024);
+        assert_eq!(
+            app.resource_store_limits.max_extracted_bytes,
+            32 * 1024 * 1024
+        );
+        assert_eq!(app.resource_store_limits.max_file_count, 2048);
+    }
+
+    #[test]
     fn args_parse_web_console_listen_addr() {
         let args = test_args(&[
             "--web-console-listen-addr",
@@ -20716,6 +20827,8 @@ mod tests {
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 transaction_executions: Arc::new(DashMap::with_hasher(RandomState::new())),
                 transaction_commit_execution: AsyncMutex::new(()),
+                resource_upload_executions: DashMap::with_hasher(RandomState::new()),
+                resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
         }
     }
@@ -22040,6 +22153,7 @@ mod tests {
                     manifest_checksum: "a".to_string(),
                     file_count: 1,
                     total_bytes: 1,
+                    archive_bytes: 2048,
                     created_at: Timestamp::from_unix_nanos(1),
                     created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
                 },
@@ -22049,6 +22163,7 @@ mod tests {
                     manifest_checksum: "b".to_string(),
                     file_count: 1,
                     total_bytes: 1,
+                    archive_bytes: 2048,
                     created_at: Timestamp::from_unix_nanos(1),
                     created_by_node: ClusterNodeName::parse("node-1").expect("valid name"),
                 },
@@ -23989,30 +24104,63 @@ mod tests {
             .create_resource_catalog(&resource_domain, &named("fraud_model"))
             .await
             .expect("resource catalog should persist");
+        let upload_v1 = ResourceUploadKey::new(
+            UserName::parse("admin").expect("valid user name"),
+            resource_domain.clone(),
+            named("fraud_model"),
+            ResourceUploadIdentity::parse("describe-v1").expect("valid upload identity"),
+        );
         proposer
-            .put_resource_version(manifest_v1.resource.clone())
+            .begin_resource_upload(upload_v1.clone())
+            .await
+            .expect("resource upload should begin");
+        let replica_v1 = nervix_models::ResourceNodeStatus {
+            key: nervix_models::ResourceReplicaKey::new(
+                resource_domain.clone(),
+                named("fraud_model"),
+                1,
+                expected_leader.clone(),
+            ),
+            state: nervix_models::ResourceNodeState::Ready,
+            root_checksum: Some(manifest_v1.resource.root_checksum.clone()),
+            last_verified_at: Some(Timestamp::from_unix_nanos(78)),
+            source_node_id: Some(expected_leader.clone()),
+            error: None,
+        };
+        proposer
+            .publish_resource_upload(upload_v1, manifest_v1.resource.clone(), replica_v1)
             .await
             .expect("resource version should persist");
+        let upload_v2 = ResourceUploadKey::new(
+            UserName::parse("admin").expect("valid user name"),
+            resource_domain.clone(),
+            named("fraud_model"),
+            ResourceUploadIdentity::parse("describe-v2").expect("valid upload identity"),
+        );
         proposer
-            .put_resource_version(manifest_v2.resource.clone())
+            .begin_resource_upload(upload_v2.clone())
+            .await
+            .expect("resource upload should begin");
+        proposer
+            .publish_resource_upload(
+                upload_v2,
+                manifest_v2.resource.clone(),
+                nervix_models::ResourceNodeStatus {
+                    key: nervix_models::ResourceReplicaKey::new(
+                        resource_domain.clone(),
+                        named("fraud_model"),
+                        2,
+                        expected_leader.clone(),
+                    ),
+                    state: nervix_models::ResourceNodeState::Ready,
+                    root_checksum: Some(manifest_v2.resource.root_checksum.clone()),
+                    last_verified_at: Some(Timestamp::from_unix_nanos(80)),
+                    source_node_id: Some(expected_leader.clone()),
+                    error: None,
+                },
+            )
             .await
             .expect("resource version should persist");
-        proposer
-            .put_resource_replica(nervix_models::ResourceNodeStatus {
-                key: nervix_models::ResourceReplicaKey::new(
-                    resource_domain.clone(),
-                    named("fraud_model"),
-                    1,
-                    expected_leader.clone(),
-                ),
-                state: nervix_models::ResourceNodeState::Ready,
-                root_checksum: Some(manifest_v1.resource.root_checksum.clone()),
-                last_verified_at: Some(Timestamp::from_unix_nanos(78)),
-                source_node_id: Some(expected_leader.clone()),
-                error: None,
-            })
-            .await
-            .expect("resource replica should persist");
         proposer
             .put_domain(DomainState {
                 id: DomainName::parse("default").expect("valid domain"),

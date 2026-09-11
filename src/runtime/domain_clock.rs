@@ -630,6 +630,13 @@ pub(super) fn wall_duration_until_logical_target(
 }
 
 impl Runtime {
+    pub(crate) fn domain_execution_snapshot(
+        &self,
+        domain: &DomainName,
+    ) -> DomainClockAccessResult<DomainExecutionSnapshot> {
+        self.bind_domain_clock(domain)?.snapshot()
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) fn take_domain_clock_initial_elapsed(
         &self,
@@ -638,13 +645,6 @@ impl Runtime {
         self.inner
             .fault_injection
             .take_domain_clock_initial_elapsed(domain)
-    }
-
-    pub(crate) fn domain_execution_snapshot(
-        &self,
-        domain: &DomainName,
-    ) -> DomainClockAccessResult<DomainExecutionSnapshot> {
-        self.bind_domain_clock(domain)?.snapshot()
     }
 
     #[cfg(feature = "testing")]
