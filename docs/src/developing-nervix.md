@@ -185,6 +185,27 @@ For test runs:
 just test
 ```
 
+## Distributable Binaries
+
+`just package-binaries` builds `nervix-server`, `nervix-cli`, and `nervix-nspl-format` in release
+mode for the host platform, checks that each one starts, and writes a single
+`nervix-<version>-<target-triple>.tar.gz` with its `.sha256` into `target/binaries`. Pass a
+destination directory to write the archive somewhere else:
+
+```bash
+just package-binaries /tmp/nervix-binaries
+```
+
+The recipe needs `cargo-auditable` on `PATH` so the archived binaries carry the dependency list that
+`cargo audit bin` reads. It does not bundle ONNX Runtime; the ONNX inferencer loads the library named
+by `ORT_DYLIB_PATH` at runtime.
+
+CI runs the same recipe for macOS arm64, which has no container image, alongside the container image
+builds. That job is requested per pull request by applying the `binaries` label and publishes the
+archive as a workflow artifact. The published images keep their own build in `Dockerfile.debian`,
+which additionally applies fat LTO and `cargo-sonic` CPU multiversioning for the one CPU baseline it
+targets per architecture.
+
 ## Building The Documentation
 
 `just book <version>` renders this book, and `just book-pdf <version>` additionally produces
