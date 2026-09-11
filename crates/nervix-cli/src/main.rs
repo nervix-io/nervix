@@ -656,10 +656,8 @@ async fn execute_upload_and_print(
 ) -> Result<(), StackReport<ClientError>> {
     let uploaded = Arc::new(AtomicU64::new(0));
     let finished = Arc::new(AtomicBool::new(false));
-    let waiting_for_replication = Arc::new(AtomicBool::new(false));
     let progress_uploaded = Arc::clone(&uploaded);
     let progress_finished = Arc::clone(&finished);
-    let progress_waiting = Arc::clone(&waiting_for_replication);
     let progress_identifier = identifier.clone();
     let progress_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
@@ -671,17 +669,11 @@ async fn execute_upload_and_print(
             if progress_finished.load(Ordering::Relaxed) {
                 break;
             }
-            let phase = if progress_waiting.load(Ordering::Relaxed) {
-                "waiting for cluster replication"
-            } else {
-                "streaming archive"
-            };
             render_progress_line(format!(
-                "{} upload resource '{}' {} ({})",
+                "{} upload resource '{}' {} (streaming archive)",
                 frames[frame_index % frames.len()],
                 progress_identifier,
                 human_bytes(bytes),
-                phase,
             ));
             frame_index += 1;
         }
@@ -690,15 +682,12 @@ async fn execute_upload_and_print(
     let outcome = client
         .upload_resource_from_directory(&identifier, &directory, {
             let uploaded = Arc::clone(&uploaded);
-            let waiting_for_replication = Arc::clone(&waiting_for_replication);
             move |bytes| {
                 uploaded.fetch_add(bytes, Ordering::Relaxed);
-                waiting_for_replication.store(false, Ordering::Relaxed);
             }
         })
         .await;
 
-    waiting_for_replication.store(true, Ordering::Relaxed);
     finished.store(true, Ordering::Relaxed);
     // The task only renders the progress line, and `finished` has already told it to stop. Losing
     // its join tells the operator nothing the upload outcome below does not already say.
@@ -710,7 +699,7 @@ async fn execute_upload_and_print(
     let result = outcome.map_err(|err| StackReport::new(ClientError::from(err)))?;
     if result.success {
         emit_terminal_line(format!(
-            "upload resource '{}' finished: {} sent, replication complete",
+            "upload resource '{}' finished: {} sent, publication committed",
             identifier,
             human_bytes(total_uploaded),
         ));

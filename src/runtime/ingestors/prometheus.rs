@@ -1,5 +1,6 @@
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::super::*;
@@ -69,8 +70,9 @@ impl PrometheusIngestor {
                 reason,
             }
         })?;
-        let logical_interval =
-            humantime::parse_duration(&every).map_err(|source| RuntimeError::StartIngestor {
+        let cadence = runtime
+            .bind_domain_cadence(domain, &every, DomainCadenceStart::AfterInterval)
+            .map_err(|source| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
                 reason: source.to_string(),
@@ -100,9 +102,8 @@ impl PrometheusIngestor {
         let task_quiesce = quiesce.clone();
         let task = tokio::spawn(async move {
             let _client_mounts = task_client_mounts;
-            let logical_interval_nanos =
-                u64::try_from(logical_interval.as_nanos()).unwrap_or(u64::MAX);
-            let mut next_logical_query = None::<Timestamp>;
+            let mut cadence = cadence;
+            let cadence_cancellation = CancellationToken::new();
 
             info!(
                 domain = task_domain.as_str(),
@@ -177,114 +178,36 @@ impl PrometheusIngestor {
                     }
                     continue;
                 }
-                let mut query_time = current_timestamp();
-                let paced_state =
-                    task_runtime
-                        .inner
-                        .domains
-                        .get(&task_domain)
-                        .map(|domain_state| {
-                            (domain_state.config.pace, domain_state.clock.paced_mapping())
-                        });
-                let sleep_duration = if let Some((DomainPace::Paced, clock)) = paced_state {
-                    let Some(clock) = clock else {
-                        next_logical_query = None;
-                        tokio::select! {
-                            changed = shutdown_rx.changed() => {
-                                if changed.is_err() || *shutdown_rx.borrow() {
-                                    break;
-                                }
-                            }
-                            _ = sleep(Duration::from_millis(50)) => {}
-                        }
-                        continue;
-                    };
-                    let current_logical =
-                        match current_domain_logical_time(&clock, current_timestamp()) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                task_events.report_error(format!(
-                                    "failed to resolve prometheus domain clock for ingestor '{}' \
-                                     in domain '{}': {}",
-                                    task_ingestor.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                ));
-                                tokio::select! {
-                                    changed = shutdown_rx.changed() => {
-                                        if changed.is_err() || *shutdown_rx.borrow() {
-                                            break;
-                                        }
-                                    }
-                                    _ = sleep(Duration::from_millis(100)) => {}
-                                }
-                                continue;
-                            }
-                        };
-                    let next_logical = next_logical_query.unwrap_or(current_logical);
-                    query_time = current_logical;
-                    if current_logical >= next_logical {
-                        let next = match current_logical
-                            .checked_add(Duration::from_nanos(logical_interval_nanos))
-                        {
-                            Ok(next) => next,
-                            Err(error) => {
-                                task_events.report_error(format!(
-                                    "prometheus cadence for ingestor '{}' in domain '{}' leaves \
-                                     the signed Unix-nanosecond range: {}",
-                                    task_ingestor.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                ));
-                                break;
-                            }
-                        };
-                        next_logical_query = Some(next);
-                        Duration::ZERO
-                    } else {
-                        match wall_duration_until_logical_target(
-                            &clock,
-                            current_logical,
-                            next_logical,
-                        ) {
-                            Ok(duration) => duration,
-                            Err(error) => {
-                                task_events.report_error(format!(
-                                    "failed to resolve prometheus cadence for ingestor '{}' in \
-                                     domain '{}': {}",
-                                    task_ingestor.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                ));
-                                Duration::from_millis(100)
-                            }
-                        }
-                    }
-                } else {
-                    next_logical_query = None;
-                    logical_interval
-                };
-
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             break;
                         }
                     }
-                    _ = sleep(sleep_duration) => {
+                    occurrence = cadence.next(&cadence_cancellation) => {
+                        let occurrence = match occurrence {
+                            Ok(occurrence) => occurrence,
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "prometheus ingestor '{}' in domain '{}' could not advance \
+                                     its cadence: {error}",
+                                    task_ingestor.as_str(),
+                                    task_domain.as_str(),
+                                ));
+                                break;
+                            }
+                        };
                         if task_quiesce.should_skip_poll() {
                             continue;
                         }
-                        let query_time = if let Some(domain_state) = task_runtime.inner.domains.get(&task_domain) {
-                            if let DomainPace::Paced = domain_state.config.pace {
-                                Some(query_time)
-                            } else {
-                                Some(current_timestamp())
-                            }
-                        } else {
-                            Some(current_timestamp())
-                        };
-                        match Self::query_vector(&http_client, &addr, &query, query_time).await {
+                        match Self::query_vector(
+                            &http_client,
+                            &addr,
+                            &query,
+                            Some(occurrence.due_at()),
+                        )
+                        .await
+                        {
                             Ok(samples) => {
                                 task_runtime
                                     .clear_ingestor_transient_error(&task_domain, &task_ingestor);
@@ -370,6 +293,7 @@ impl PrometheusIngestor {
                             }
                         }
                     }
+                    _ = task_quiesce.wait_for_change() => {}
                 }
             }
 

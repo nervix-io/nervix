@@ -1,9 +1,10 @@
+use tokio_util::sync::CancellationToken;
+
 use super::*;
 
 pub(super) struct GeneratorTaskSpec {
     pub(super) generator: CreateGenerator,
     pub(super) source_relay: RelayName,
-    pub(super) source_schema: Arc<CompiledSchema>,
     pub(super) source_branching: Vec<FieldName>,
     pub(super) context_projection: GeneratorContextProjection,
     pub(super) routes: Vec<GeneratorTaskRouteSpec>,
@@ -26,7 +27,6 @@ impl GeneratorTaskSpec {
         Self {
             generator,
             source_relay,
-            source_schema,
             source_branching,
             context_projection,
             routes,
@@ -198,14 +198,38 @@ impl GeneratorRouteInputProjection {
 
 #[derive(Default)]
 pub(super) struct GeneratorBranchTaskState {
-    pub(super) next_generation: Option<Timestamp>,
     pub(super) routes: Vec<GeneratorRouteBranchTaskState>,
 }
 
 #[derive(Default)]
 pub(super) struct GeneratorRouteBranchTaskState {
-    pub(super) next_flush: Option<Timestamp>,
+    pub(super) flush_timer: BranchBufferTimer,
     pub(super) pending: Vec<RelayMessage>,
+    pending_bytes: u64,
+}
+
+impl GeneratorRouteBranchTaskState {
+    fn enqueue(
+        &mut self,
+        message: RelayMessage,
+        policy: RuntimeFlushPolicy,
+        clock: &DomainClock,
+        snapshot: &DomainExecutionSnapshot,
+    ) -> BranchBufferTimingResult<bool> {
+        self.flush_timer.arm_flush(policy, clock, snapshot)?;
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(message.record.batch().estimated_bytes())
+            .assured("the count estimates generated rows this route already holds in memory");
+        self.pending.push(message);
+        Ok(policy.size_boundary_reached(self.pending_bytes))
+    }
+
+    fn take_pending(&mut self) -> Vec<RelayMessage> {
+        self.pending_bytes = 0;
+        self.flush_timer.clear();
+        std::mem::take(&mut self.pending)
+    }
 }
 
 pub(super) enum GeneratorProgramOutcome {
@@ -334,6 +358,47 @@ impl Runtime {
             .clone()
     }
 
+    async fn flush_generator_route_buffers(
+        &self,
+        domain: &DomainName,
+        generator: &GeneratorName,
+        routes: &[(GeneratorTaskRouteSpec, RuntimeFlushPolicy)],
+        task_events: &RuntimeEvents,
+        branch_states: &mut HashMap<Option<BranchKey>, GeneratorBranchTaskState>,
+    ) {
+        for (route_index, (route, _)) in routes.iter().enumerate() {
+            tokio::task::consume_budget().await;
+            let mut pending_groups = Vec::new();
+            for (branch_key, state) in &mut *branch_states {
+                let pending = state
+                    .routes
+                    .get_mut(route_index)
+                    .verified("every generator branch has one buffer for every compiled route")
+                    .take_pending();
+                if !pending.is_empty() {
+                    pending_groups.push((branch_key.clone(), pending));
+                }
+            }
+            if pending_groups.is_empty() {
+                continue;
+            }
+            flush_generator_groups(
+                GeneratorFlushContext {
+                    runtime: self,
+                    domain,
+                    generator,
+                    output_relay: &route.output.relay,
+                    output_schema: &route.output_schema,
+                    output_registry: &route.output_registry,
+                    output_services: &route.output_services,
+                    task_events,
+                },
+                &mut pending_groups,
+            )
+            .await;
+        }
+    }
+
     pub(in crate::runtime) fn spawn_generator_task(
         &self,
         domain: &DomainName,
@@ -343,18 +408,20 @@ impl Runtime {
         let GeneratorTaskSpec {
             generator,
             source_relay,
-            source_schema,
             source_branching,
             context_projection,
             routes,
         } = spec;
-        let interval = Self::parse_runtime_node_duration_setting(
-            domain,
-            "generator",
-            &generator.name,
-            "each",
-            &generator.each,
-        )?;
+        let cadence = self
+            .bind_domain_cadence(domain, &generator.each, DomainCadenceStart::Immediate)
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "generator '{}' could not bind its cadence: {error}",
+                    generator.name.as_str(),
+                ),
+            })?;
+        let domain_clock = cadence.clock().clone();
         let routes = routes
             .into_iter()
             .map(|route| {
@@ -401,58 +468,31 @@ impl Runtime {
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
-        let domain_clock =
-            self.bind_domain_clock(domain)
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "generator '{}' could not bind its domain clock: {error}",
-                        generator.name.as_str(),
-                    ),
-                })?;
         let runtime = self.clone();
         let task_events = self.inner.events.clone();
 
         Ok(tokio::spawn(async move {
             let mut activity = DomainActivityGuard::new(generator_activity);
             let mut quiesce_activity = Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
-            let mut next_state_refresh = None::<Timestamp>;
+            let mut cadence = cadence;
+            let cadence_cancellation = CancellationToken::new();
+            let mut pending_occurrence = None::<DomainCadenceOccurrence>;
             let mut branch_states =
                 HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
             loop {
                 tokio::task::consume_budget().await;
                 if source_gate.is_closed() {
-                    for (route_index, (route, _)) in routes.iter().enumerate() {
-                        tokio::task::consume_budget().await;
-                        let mut pending_groups = Vec::new();
-                        for (branch_key, state) in &mut branch_states {
-                            let route_state = &mut state.routes[route_index];
-                            route_state.next_flush = None;
-                            if !route_state.pending.is_empty() {
-                                pending_groups.push((
-                                    branch_key.clone(),
-                                    std::mem::take(&mut route_state.pending),
-                                ));
-                            }
-                        }
-                        if !pending_groups.is_empty() {
-                            flush_generator_groups(
-                                GeneratorFlushContext {
-                                    runtime: &runtime,
-                                    domain: &task_domain,
-                                    generator: &task_generator,
-                                    output_relay: &route.output.relay,
-                                    output_schema: &route.output_schema,
-                                    output_registry: &route.output_registry,
-                                    output_services: &route.output_services,
-                                    task_events: &task_events,
-                                },
-                                &mut pending_groups,
-                            )
-                            .await;
-                        }
-                    }
+                    pending_occurrence = None;
+                    runtime
+                        .flush_generator_route_buffers(
+                            &task_domain,
+                            &task_generator,
+                            &routes,
+                            &task_events,
+                            &mut branch_states,
+                        )
+                        .await;
                     quiesce_activity.take();
                     activity.set_active(false);
                     tokio::select! {
@@ -477,36 +517,16 @@ impl Runtime {
                         matches!(state.status, nervix_models::DomainStatus::Paused)
                     })
                 {
-                    for (route_index, (route, _)) in routes.iter().enumerate() {
-                        tokio::task::consume_budget().await;
-                        let mut pending_groups = Vec::new();
-                        for (branch_key, state) in &mut branch_states {
-                            let route_state = &mut state.routes[route_index];
-                            route_state.next_flush = None;
-                            if !route_state.pending.is_empty() {
-                                pending_groups.push((
-                                    branch_key.clone(),
-                                    std::mem::take(&mut route_state.pending),
-                                ));
-                            }
-                        }
-                        if !pending_groups.is_empty() {
-                            flush_generator_groups(
-                                GeneratorFlushContext {
-                                    runtime: &runtime,
-                                    domain: &task_domain,
-                                    generator: &task_generator,
-                                    output_relay: &route.output.relay,
-                                    output_schema: &route.output_schema,
-                                    output_registry: &route.output_registry,
-                                    output_services: &route.output_services,
-                                    task_events: &task_events,
-                                },
-                                &mut pending_groups,
-                            )
-                            .await;
-                        }
-                    }
+                    pending_occurrence = None;
+                    runtime
+                        .flush_generator_route_buffers(
+                            &task_domain,
+                            &task_generator,
+                            &routes,
+                            &task_events,
+                            &mut branch_states,
+                        )
+                        .await;
                     activity.set_active(false);
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
@@ -524,32 +544,15 @@ impl Runtime {
                     continue;
                 }
                 activity.set_active(true);
-                let execution_now = match domain_clock.snapshot() {
-                    Ok(snapshot) => snapshot.now(),
-                    Err(error) => {
-                        task_events.report_error(format!(
-                            "generator '{}' in domain '{}' lost its clock: {error}",
-                            task_generator.as_str(),
-                            task_domain.as_str(),
-                        ));
-                        break;
-                    }
-                };
-
-                if next_state_refresh.is_none() {
-                    next_state_refresh = Some(execution_now);
-                }
-                let should_refresh_state =
-                    next_state_refresh.is_some_and(|next| execution_now >= next);
                 let mut did_scheduled_work = false;
 
-                if should_refresh_state {
-                    advance_scheduled_timestamp(&mut next_state_refresh, interval, execution_now);
+                if let Some(occurrence) = pending_occurrence.take() {
                     did_scheduled_work = true;
+                    let due_at = occurrence.due_at();
 
                     let mut state_load_failed = false;
                     let state = match runtime
-                        .materialized_stream_state_from_owner(&task_domain, &source_relay)
+                        .materialized_records_from_owner(&task_domain, &source_relay)
                         .await
                     {
                         Ok(state) => state,
@@ -567,66 +570,58 @@ impl Runtime {
                         }
                     };
 
-                    let mut source_state_by_branch = HashMap::<
-                        Option<BranchKey>,
-                        Vec<nervix_models::RemoteRuntimeRecord>,
-                    >::default();
+                    // Records arrive with the concrete branch they were materialized in, so
+                    // the generator groups by that typed identity instead of rediscovering it
+                    // from the columns.
+                    let mut source_state_by_branch =
+                        HashMap::<Option<BranchKey>, Vec<RuntimeRow>>::default();
                     if !state_load_failed {
-                        let mut latest_state =
-                            HashMap::<String, nervix_models::RemoteRuntimeRecord>::default();
-                        for (key, record) in state {
-                            let replace = latest_state.get(&key).is_none_or(|existing| {
-                                let existing = &existing.metadata;
-                                let candidate = &record.metadata;
-                                candidate.ingested_at_high_watermark
-                                    > existing.ingested_at_high_watermark
-                                    || (candidate.ingested_at_high_watermark
-                                        == existing.ingested_at_high_watermark
-                                        && candidate.ingested_at_low_watermark
-                                            > existing.ingested_at_low_watermark)
+                        let mut latest_state = HashMap::<Option<BranchKey>, RuntimeRow>::default();
+                        for record in state {
+                            let replace = latest_state.get(&record.branch).is_none_or(|existing| {
+                                record.row.metadata().is_newer_than(existing.metadata())
                             });
                             if replace {
-                                latest_state.insert(key, record);
+                                latest_state.insert(record.branch, record.row);
                             }
                         }
-                        for record in latest_state.into_values() {
+                        for (branch_key, row) in latest_state {
                             let branch_key = if source_branching.is_empty() {
                                 None
                             } else {
-                                match BranchKey::from_remote_record(
-                                    &record,
-                                    source_branching.iter(),
-                                ) {
-                                    Ok(Some(key)) => Some(key),
-                                    Ok(None) => {
-                                        task_events.report_error(format!(
-                                            "generator '{}' source relay '{}' record is missing \
-                                             concrete branch fields",
-                                            task_generator.as_str(),
-                                            source_relay.as_str(),
-                                        ));
-                                        continue;
-                                    }
-                                    Err(error) => {
-                                        task_events.report_error(format!(
-                                            "generator '{}' source relay '{}' has invalid \
-                                             concrete branch fields: {}",
-                                            task_generator.as_str(),
-                                            source_relay.as_str(),
-                                            error,
-                                        ));
-                                        continue;
-                                    }
-                                }
+                                branch_key
                             };
                             source_state_by_branch
                                 .entry(branch_key)
                                 .or_default()
-                                .push(record);
+                                .push(row);
                         }
                     }
 
                     if !state_load_failed {
+                        if source_gate.is_closed()
+                            || runtime
+                                .inner
+                                .domains
+                                .get(&task_domain)
+                                .is_some_and(|state| {
+                                    matches!(state.status, nervix_models::DomainStatus::Paused)
+                                })
+                        {
+                            continue;
+                        }
+                        let execution_now = match domain_clock.snapshot() {
+                            Ok(snapshot) => snapshot.now(),
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "generator '{}' in domain '{}' could not obtain its fresh \
+                                     execution time for the occurrence due at '{due_at}': {error}",
+                                    task_generator.as_str(),
+                                    task_domain.as_str(),
+                                ));
+                                break;
+                            }
+                        };
                         let active_branch_keys = source_state_by_branch
                             .keys()
                             .cloned()
@@ -638,61 +633,18 @@ impl Runtime {
                             let branch_state = branch_states
                                 .entry(branch_key.clone())
                                 .or_insert_with(|| GeneratorBranchTaskState {
-                                    next_generation: None,
                                     routes: routes
                                         .iter()
                                         .map(|_| GeneratorRouteBranchTaskState::default())
                                         .collect(),
                                 });
-                            if branch_state.next_generation.is_none() {
-                                branch_state.next_generation = Some(execution_now);
-                            }
-                            for (route_state, (_, flush_policy)) in
-                                branch_state.routes.iter_mut().zip(&routes)
-                            {
-                                if route_state.next_flush.is_none()
-                                    && let RuntimeFlushPolicy::Each {
-                                        interval: flush_each,
-                                        ..
-                                    } = flush_policy
-                                {
-                                    route_state.next_flush =
-                                        Some(checked_add_duration_to_timestamp(
-                                            execution_now,
-                                            *flush_each,
-                                        ));
-                                }
-                            }
-                            if !branch_state
-                                .next_generation
-                                .is_some_and(|next| execution_now >= next)
-                            {
-                                continue;
-                            }
-                            advance_scheduled_timestamp(
-                                &mut branch_state.next_generation,
-                                interval,
-                                execution_now,
-                            );
 
                             for source_record in records {
                                 tokio::task::consume_budget().await;
-                                let (source_batch, source_metadata) =
-                                    match source_schema.runtime_batch_from_remote(source_record) {
-                                        Ok(decoded) => decoded,
-                                        Err(error) => {
-                                            task_events.report_error(format!(
-                                                "failed to decode generator '{}' source relay \
-                                                 '{}' state in domain '{}': {}",
-                                                task_generator.as_str(),
-                                                source_relay.as_str(),
-                                                task_domain.as_str(),
-                                                error
-                                            ));
-                                            continue;
-                                        }
-                                    };
-                                let source_batch = Arc::new(source_batch);
+                                let source_metadata = source_record.metadata().clone();
+                                // Projection, not reconstruction: the row already shares its
+                                // carrier columns and this narrows them to the one row.
+                                let source_batch = Arc::new(source_record.one_row_batch());
                                 let context = match context_projection
                                     .project(source_batch.as_ref(), &branch_key)
                                 {
@@ -741,18 +693,67 @@ impl Runtime {
                                         Ok(GeneratorProgramOutcome::Output(record)) => {
                                             let (acks, _completion) =
                                                 runtime.tracked_ack_root(&task_domain);
+                                            let failure_acks = acks.clone();
                                             let route_state = &mut branch_state.routes[route_index];
-                                            route_state.pending.push(RelayMessage {
-                                                key: branch_key.clone(),
-                                                record,
-                                                acks,
-                                            });
-                                            if route_state.next_flush.is_none() {
-                                                route_state.next_flush =
-                                                    Some(checked_add_duration_to_timestamp(
-                                                        execution_now,
-                                                        flush_policy.interval(),
-                                                    ));
+                                            let flush_snapshot = match domain_clock.snapshot() {
+                                                Ok(snapshot) => snapshot,
+                                                Err(error) => {
+                                                    let reason = format!(
+                                                        "generator '{}' in domain '{}' could not \
+                                                         read the clock while buffering route \
+                                                         '{}': {error}",
+                                                        task_generator.as_str(),
+                                                        task_domain.as_str(),
+                                                        route.output.relay.as_str(),
+                                                    );
+                                                    task_events.report_error(reason.clone());
+                                                    acks.no_ack(reason);
+                                                    continue;
+                                                }
+                                            };
+                                            let should_flush = match route_state.enqueue(
+                                                RelayMessage {
+                                                    key: branch_key.clone(),
+                                                    record,
+                                                    acks,
+                                                },
+                                                *flush_policy,
+                                                &domain_clock,
+                                                &flush_snapshot,
+                                            ) {
+                                                Ok(should_flush) => should_flush,
+                                                Err(error) => {
+                                                    let reason = format!(
+                                                        "generator '{}' in domain '{}' could not \
+                                                         start route '{}' flush deadline: {error}",
+                                                        task_generator.as_str(),
+                                                        task_domain.as_str(),
+                                                        route.output.relay.as_str(),
+                                                    );
+                                                    task_events.report_error(reason.clone());
+                                                    failure_acks.no_ack(reason);
+                                                    continue;
+                                                }
+                                            };
+                                            if should_flush {
+                                                let mut pending_group = vec![(
+                                                    branch_key.clone(),
+                                                    route_state.take_pending(),
+                                                )];
+                                                flush_generator_groups(
+                                                    GeneratorFlushContext {
+                                                        runtime: &runtime,
+                                                        domain: &task_domain,
+                                                        generator: &task_generator,
+                                                        output_relay: &route.output.relay,
+                                                        output_schema: &route.output_schema,
+                                                        output_registry: &route.output_registry,
+                                                        output_services: &route.output_services,
+                                                        task_events: &task_events,
+                                                    },
+                                                    &mut pending_group,
+                                                )
+                                                .await;
                                             }
                                         }
                                         Ok(GeneratorProgramOutcome::MessageError {
@@ -838,34 +839,43 @@ impl Runtime {
                 }
 
                 let mut flushed_any_branch = false;
+                let flush_snapshot = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        task_events.report_error(format!(
+                            "generator '{}' in domain '{}' could not inspect route flush \
+                             deadlines: {error}",
+                            task_generator.as_str(),
+                            task_domain.as_str(),
+                        ));
+                        break;
+                    }
+                };
                 for (branch_key, branch_state) in &mut branch_states {
                     tokio::task::consume_budget().await;
-                    for ((route, flush_policy), route_state) in
-                        routes.iter().zip(&mut branch_state.routes)
-                    {
-                        if !route_state
-                            .next_flush
-                            .is_some_and(|next| execution_now >= next)
+                    for ((route, _), route_state) in routes.iter().zip(&mut branch_state.routes) {
+                        let due = match route_state
+                            .flush_timer
+                            .is_due(&domain_clock, &flush_snapshot)
                         {
+                            Ok(due) => due,
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "generator '{}' in domain '{}' could not inspect route '{}' \
+                                     flush deadline: {error}",
+                                    task_generator.as_str(),
+                                    task_domain.as_str(),
+                                    route.output.relay.as_str(),
+                                ));
+                                false
+                            }
+                        };
+                        if !due {
                             continue;
                         }
-                        match flush_policy {
-                            RuntimeFlushPolicy::Each { interval, .. } => {
-                                advance_scheduled_timestamp(
-                                    &mut route_state.next_flush,
-                                    *interval,
-                                    execution_now,
-                                );
-                            }
-                            RuntimeFlushPolicy::Immediate => {
-                                route_state.next_flush = None;
-                            }
-                        }
-                        if !route_state.pending.is_empty() {
-                            let mut pending_group = vec![(
-                                branch_key.clone(),
-                                std::mem::take(&mut route_state.pending),
-                            )];
+                        let pending = route_state.take_pending();
+                        if !pending.is_empty() {
+                            let mut pending_group = vec![(branch_key.clone(), pending)];
                             flush_generator_groups(
                                 GeneratorFlushContext {
                                     runtime: &runtime,
@@ -890,34 +900,12 @@ impl Runtime {
                     continue;
                 }
 
-                let next_deadline =
-                    next_state_refresh
-                        .into_iter()
-                        .chain(
-                            branch_states
-                                .values()
-                                .filter_map(|state| state.next_generation),
-                        )
-                        .chain(branch_states.values().flat_map(|state| {
-                            state.routes.iter().filter_map(|route| route.next_flush)
-                        }))
-                        .min();
-                let sleep_duration = if let Some(next) = next_deadline {
-                    match domain_clock.physical_duration_until(execution_now, next) {
-                        Ok(duration) => duration,
-                        Err(error) => {
-                            task_events.report_error(format!(
-                                "generator '{}' in domain '{}' could not schedule its logical \
-                                 deadline: {error}",
-                                task_generator.as_str(),
-                                task_domain.as_str(),
-                            ));
-                            break;
-                        }
-                    }
-                } else {
-                    interval
-                };
+                let buffer_deadlines = branch_states
+                    .values()
+                    .flat_map(|state| &state.routes)
+                    .filter_map(|route| route.flush_timer.deadline())
+                    .collect::<Vec<_>>();
+                let has_buffer_deadlines = !buffer_deadlines.is_empty();
 
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
@@ -925,10 +913,50 @@ impl Runtime {
                             break;
                         }
                     }
-                    _ = sleep(sleep_duration) => {}
+                    occurrence = cadence.next(&cadence_cancellation) => {
+                        match occurrence {
+                            Ok(occurrence) => pending_occurrence = Some(occurrence),
+                            Err(error) => {
+                                task_events.report_error(format!(
+                                    "generator '{}' in domain '{}' could not advance its \
+                                     cadence: {error}",
+                                    task_generator.as_str(),
+                                    task_domain.as_str(),
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    result = wait_for_branch_buffer_deadlines(&domain_clock, buffer_deadlines),
+                        if has_buffer_deadlines =>
+                    {
+                        if let Err(error) = result {
+                            task_events.report_error(format!(
+                                "generator '{}' in domain '{}' could not wait for a route flush \
+                                 deadline: {error}",
+                                task_generator.as_str(),
+                                task_domain.as_str(),
+                            ));
+                            break;
+                        }
+                    }
+                    changed = domain_status_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
                     _ = source_gate.wait_closed() => {}
                 }
             }
+            runtime
+                .flush_generator_route_buffers(
+                    &task_domain,
+                    &task_generator,
+                    &routes,
+                    &task_events,
+                    &mut branch_states,
+                )
+                .await;
         }))
     }
 }
@@ -946,6 +974,36 @@ mod tests {
 
     use super::*;
     use crate::runtime_schema::RuntimeValue;
+
+    #[test]
+    fn generator_route_honors_each_size_boundary() {
+        let clock = test_domain_clock(&domain("generator_flush_size"));
+        let snapshot = clock
+            .snapshot()
+            .assured("the fixture installs a running unpaced clock");
+        let mut state = GeneratorRouteBranchTaskState::default();
+        let should_flush = state
+            .enqueue(
+                RelayMessage {
+                    key: None,
+                    record: test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]),
+                    acks: AckSet::empty(),
+                },
+                RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(60),
+                    max_batch_size: 1,
+                },
+                &clock,
+                &snapshot,
+            )
+            .assured("the fixture clock and logical deadline belong to the same generation");
+
+        assert!(should_flush);
+        assert_eq!(state.take_pending().len(), 1);
+        assert!(state.pending.is_empty());
+        assert!(state.flush_timer.deadline().is_none());
+    }
+
     #[tokio::test]
     async fn generator_set_program_projects_columnar_state_and_branch_context() {
         let source_schema = test_schema(&[

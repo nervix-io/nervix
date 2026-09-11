@@ -126,25 +126,60 @@ impl Runtime {
         let snapshot_interval = self.inner.state_snapshot_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let executor = self.inner.executor.clone();
         Some(tokio::spawn(async move {
             let flush_latest_snapshot =
-                |state: &MaterializedRelayStatePersistence, store: &RuntimeStateStore| {
+                async |state: &MaterializedRelayStatePersistence,
+                       store: &Arc<RuntimeStateStore>| {
                     if !state.take_dirty() {
                         return Ok(None);
                     }
-                    let result = (|| {
-                        let snapshot = state.read().latest_snapshot()?;
-                        if snapshot.lsm <= state.last_persisted_lsm() {
-                            return Ok(None);
-                        }
-                        store.persist_latest_snapshot(
-                            state.read().placement(),
-                            snapshot.lsm,
-                            &snapshot.payload,
-                        )?;
-                        state.record_persisted(snapshot.lsm);
-                        Ok::<Option<u64>, RuntimePersistenceError>(Some(snapshot.lsm))
-                    })();
+                    let last_persisted = state.last_persisted_lsm();
+                    let result = async {
+                        let sealed = state
+                            .read()
+                            .seal_after(&executor, Some(last_persisted))
+                            .await;
+                        let sealed = match sealed {
+                            Ok(Some(sealed)) => sealed,
+                            Ok(None) => return Ok(None),
+                            Err(error) => {
+                                return Err(RuntimePersistenceError::EncodeState(
+                                    error.to_string(),
+                                ));
+                            }
+                        };
+                        let revision = sealed.descriptor.revision;
+                        let placement = state.read().placement().clone();
+                        let store = store.clone();
+                        // Publishing a generation is filesystem work with a durability barrier, so it
+                        // runs on the storage workers rather than on the async worker this task holds.
+                        let reservation = executor
+                            .reserve(nervix_execution::MemoryClass::Bulk, 1)
+                            .await
+                            .map_err(|error| {
+                                RuntimePersistenceError::EncodeState(error.to_string())
+                            })?;
+                        executor
+                            .run_storage(
+                                nervix_execution::StorageClass::Filesystem,
+                                reservation,
+                                move |_charge, _cancellation| {
+                                    store.publish_sealed_snapshot(
+                                        &placement,
+                                        revision,
+                                        sealed.bytes.as_ref(),
+                                    )
+                                },
+                            )
+                            .await
+                            .map_err(|error| {
+                                RuntimePersistenceError::EncodeState(error.to_string())
+                            })??;
+                        state.record_persisted(revision);
+                        Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
+                    }
+                    .await;
                     if result.is_err() {
                         state.restore_dirty();
                     }
@@ -155,7 +190,7 @@ impl Runtime {
                 tokio::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            match flush_latest_snapshot(&state, &store) {
+                            match flush_latest_snapshot(&state, &store).await {
                                 Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
                                     state.read().placement(), lsm,
                                 ),
@@ -166,7 +201,7 @@ impl Runtime {
                         }
                     }
                     _ = sleep(snapshot_interval) => {
-                        match flush_latest_snapshot(&state, &store) {
+                        match flush_latest_snapshot(&state, &store).await {
                             Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
                                 state.read().placement(), lsm,
                             ),
@@ -537,20 +572,15 @@ impl Runtime {
                 initial_sync_pending = false;
                 let after_lsm = state.read().current_lsm();
                 match runtime
-                    .request_state_sync_with_timeout(
+                    .install_materialized_snapshot_from(
                         &primary_node,
-                        state.read().placement(),
+                        state.read(),
+                        &state,
                         Some(after_lsm),
-                        poll_interval,
                     )
                     .await
                 {
-                    Ok(Some(snapshot)) => {
-                        if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
-                        {
-                            warn!(error = %error, "failed to apply replicated materialized relay snapshot");
-                            break;
-                        }
+                    Ok(Some(revision)) => {
                         runtime.inner.materialized_state_changed.notify_waiters();
                         let dispatcher = runtime.inner.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
@@ -566,7 +596,7 @@ impl Runtime {
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
                                                 placement: state.read().placement().to_remote(),
-                                                lsm: snapshot.lsm,
+                                                lsm: revision,
                                             },
                                         ),
                                     ),

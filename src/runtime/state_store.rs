@@ -99,6 +99,12 @@ impl StateAssignmentBinding {
             capability,
         })
     }
+
+    /// The ownership fence this binding acts under. A capture records it so a snapshot sealed
+    /// under a superseded assignment is refused instead of installed.
+    pub(crate) fn fence(self) -> u64 {
+        self.generation
+    }
 }
 
 #[derive(Debug)]
@@ -160,8 +166,19 @@ impl StateAssignmentAuthority {
     }
 
     pub(crate) fn serialize<T>(&self, action: impl FnOnce() -> T) -> T {
-        let _assignment = self.assignment.lock();
-        action()
+        self.serialize_with(|_| action())
+    }
+
+    /// Run `action` under the barrier with the assignment in force while it runs.
+    ///
+    /// A capture that must record which assignment it observed reads the fence in the same
+    /// critical section as the contents, so the two cannot describe different moments.
+    pub(crate) fn serialize_with<T>(&self, action: impl FnOnce(StateAssignmentBinding) -> T) -> T {
+        let assignment = self.assignment.lock();
+        action(StateAssignmentBinding {
+            generation: assignment.generation,
+            capability: assignment.local_capability,
+        })
     }
 
     pub(crate) fn authorize<T>(
@@ -881,7 +898,37 @@ impl RuntimeStateStore {
         Ok(())
     }
 
+    /// Publish one sealed snapshot generation and make it durable before returning.
+    ///
+    /// The container and the manifest that names it are one stored value, so a reader either finds
+    /// the whole generation or the one before it. Returning only after the durability barrier is
+    /// what makes that true across a restart: a generation this call reported as published is on
+    /// disk, and one it did not is not referenced by anything.
+    pub fn publish_sealed_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        revision: u64,
+        payload: &[u8],
+    ) -> Result<(), RuntimePersistenceError> {
+        self.write_latest_snapshot(placement, revision, payload)?;
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(|_| RuntimePersistenceError::WriteValue)
+    }
+
     pub fn persist_latest_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lsm: u64,
+        payload: &[u8],
+    ) -> Result<(), RuntimePersistenceError> {
+        self.write_latest_snapshot(placement, lsm, payload)?;
+        self.db
+            .persist(PersistMode::Buffer)
+            .map_err(|_| RuntimePersistenceError::WriteValue)
+    }
+
+    fn write_latest_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
         lsm: u64,
@@ -900,9 +947,6 @@ impl RuntimeStateStore {
             .map_err(|_| RuntimePersistenceError::WriteValue)?;
         self.lsm_index
             .insert(placement.as_lsm_index_key(lsm), placement_key)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::Buffer)
             .map_err(|_| RuntimePersistenceError::WriteValue)?;
         Ok(())
     }
@@ -1289,8 +1333,8 @@ mod tests {
             schema_fingerprint: [7; 32],
             branch_key: None,
         };
-        let payload = crate::runtime::encode_materialized_stream_snapshot_entries(&[])
-            .expect("empty materialized state should encode");
+        let payload = crate::runtime::empty_sealed_container(placement.schema_fingerprint)
+            .expect("an empty materialized generation should seal");
         let prepared = PersistedRuntimeStateEntry {
             lsm: 5,
             schema_fingerprint: placement.schema_fingerprint,

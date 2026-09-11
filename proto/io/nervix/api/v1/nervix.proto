@@ -5,6 +5,7 @@ package io.nervix.api.v1;
 service SessionService {
   rpc Session(stream SessionRequest) returns (stream SessionResponse);
   rpc UploadResource(stream UploadResourceRequest) returns (UploadResourceResponse);
+  rpc WaitForResourceReady(WaitForResourceReadyRequest) returns (WaitForResourceReadyResponse);
 }
 
 message CommandRequest {
@@ -144,6 +145,7 @@ message UploadResourceStart {
   string name = 1;
   uint64 total_bytes = 2;
   string domain = 3;
+  string upload_identity = 4;
 }
 
 message UploadResourceRequest {
@@ -161,6 +163,21 @@ message UploadResourceResponse {
   CommandResultKind kind = 5;
   string leader = 6;
   string leader_grpc_uri = 7;
+  bool published = 8;
+  bool cluster_ready = 9;
+}
+
+message WaitForResourceReadyRequest {
+  string name = 1;
+  uint64 version = 2;
+  string domain = 3;
+  uint64 timeout_millis = 4;
+}
+
+message WaitForResourceReadyResponse {
+  uint64 version = 1;
+  bool cluster_ready = 2;
+  string message = 3;
 }
 
 message SessionRequest {

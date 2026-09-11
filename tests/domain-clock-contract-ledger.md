@@ -133,6 +133,9 @@ just test-scenarios --input tests/features/runtime/domain_ingestion_time.feature
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_bound_clock
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
 just test-scenarios --input tests/features/runtime/domain_execution_time.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/domain_buffer_timing.feature --tags @domain_buffer_timing
+just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_cadence
+just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_cadence
 just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/inferencer.feature --tags @domain_execution_time
 just test-scenarios --input tests/features/runtime/sqs_emission.feature --tags @domain_execution_time
@@ -150,7 +153,9 @@ logical-origin scenario and adds `domain_ingestion_time.feature` for admission, 
 duration-window coverage. The untagged
 `Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
 task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and focused tagged
-coverage in the listed runtime feature files for F6 and F7.
+coverage in the listed runtime feature files for F6 and F7. Task 07 adds
+`domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes. Task 09
+adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work.
 
 Physical controls are
 `tests::connection_lifetime::send_queue_admission_is_deadline_bound`,
@@ -271,5 +276,39 @@ Recorded on 10 September 2026 against the task 06 worktree, including the merged
 | `nervix-server` library suite | Pass; 793 tests passed after merging the current consensus and startup paths. |
 | `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. The relay-boundary tests moved to their focused module, and bare-error signature debt fell from 844 to 843. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 07 validation record
+
+Recorded on 10 September 2026 against the task 07 worktree, including the merged task 06 fixes:
+
+| Probe | Result |
+| --- | --- |
+| Public paced branch-buffering reproducer before product changes | Expected red; fast logical `FLUSH EACH` and `COLLECT FOR` missed their physical observation windows, slow logical `COLLECT FOR` emitted too early, and physical `FLUSH IMMEDIATE` followed slow domain time. |
+| `Domain-paced branch buffering` | Pass; all six one- and three-node scenarios and all 48 steps covered fast logical collection and flush deadlines, slow physical immediate flushes, separate concrete-branch deadlines, payload fields, and acknowledgement completion. |
+| Reingestor branch-buffering regressions | Pass; staggered branches retained independent deadlines and acknowledgement ownership, forced and shutdown drains completed, and per-route byte bounds flushed independently. |
+| Generator flush regressions | Pass; route buffers honored `EACH` byte boundaries and drained on source gating, domain pause, and task exit. |
+| `nervix-server` library suite | Pass; 801 tests passed with no ignored tests. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell from 497 to 496. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 09 validation record
+
+Recorded on 10 September 2026 against the task 09 worktree:
+
+| Probe | Result |
+| --- | --- |
+| Public paced HTTP reproducer before product changes | Expected red in both one- and three-node examples; only the immediate request arrived instead of three requests over the accelerated logical cadence. |
+| Domain cadence public scenarios | Pass; all six one- and three-node scenarios and all 48 steps covered immediate HTTP polling, delayed Prometheus polling, exact anchored due timestamps, slow-response coalescing, fresh returned-data execution time, and clock-generation restart across slow and fast rates. |
+| Stateful generator cadence | Pass; all three topology and replication examples and all 21 steps observed three shared occurrences across two interleaved branches while preserving branch fields. |
+| Existing Prometheus ingestion coverage | Pass; all eight scenarios and all 62 steps covered unpaced polling, source-failure recovery, paced query time, one- and three-node execution, and replicated runtime state. |
+| Cadence arithmetic unit coverage | Pass; four tests covered newest-due coalescing, direct full-range advancement, a typed terminal-boundary error, and generation revalidation after wake. |
+| Focused generator unit coverage | Pass; three tests covered logical flush size, columnar state and branch projection, and branch validation. |
+| `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.

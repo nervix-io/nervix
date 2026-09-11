@@ -651,8 +651,13 @@ impl IcebergEmitter {
 
     pub(in crate::runtime) fn reconfigure_flush_policy(&mut self, policy: RuntimeFlushPolicy) {
         self.flush_policy = policy;
-        self.flush_at = (!self.pending_batches.is_empty())
-            .then(|| Instant::now() + self.flush_policy.interval());
+        self.flush_at = (!self.pending_batches.is_empty()).then(|| {
+            let interval = match self.flush_policy {
+                RuntimeFlushPolicy::Each { interval, .. } => interval,
+                RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
+            };
+            Instant::now() + interval
+        });
     }
 
     pub(in crate::runtime) async fn publish_batch(
@@ -746,7 +751,11 @@ impl IcebergEmitter {
             .assured("both counts estimate bytes of batches this emitter already holds");
         self.update_buffered_messages();
         if self.flush_at.is_none() {
-            self.flush_at = Some(Instant::now() + self.flush_policy.interval());
+            let interval = match self.flush_policy {
+                RuntimeFlushPolicy::Each { interval, .. } => interval,
+                RuntimeFlushPolicy::Immediate => RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT,
+            };
+            self.flush_at = Some(Instant::now() + interval);
         }
         let should_flush = self.flush_policy.size_boundary_reached(self.pending_bytes);
         if should_flush {

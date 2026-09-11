@@ -370,7 +370,7 @@ impl Runtime {
                 flush_policy,
                 message_error_policy: output.message_error_policy.clone(),
                 pending: Vec::new(),
-                next_flush: None,
+                flush_timer: BranchBufferTimer::default(),
                 compiled_program,
                 compiled_branch_program,
             });
@@ -437,7 +437,7 @@ impl Runtime {
             .map(|value| *value)
         else {
             return Err(format!(
-                "resource '{}' has no uploaded versions for lookup '{}' in domain '{}'",
+                "resource '{}' has no published versions for lookup '{}' in domain '{}'",
                 lookup.resource.as_str(),
                 lookup.name.as_str(),
                 domain.as_str()

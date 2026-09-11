@@ -6573,6 +6573,7 @@ dependencies = [
  "arch-into",
  "async-tar",
  "base64 0.22.1",
+ "error-stack",
  "meticulous",
  "nervix-models",
  "nervix-nspl",
@@ -6581,12 +6582,14 @@ dependencies = [
  "prost 0.13.5",
  "rustls",
  "strum 0.26.3",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
  "triomphe",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -6915,6 +6918,7 @@ dependencies = [
  "sqlx",
  "storekey",
  "strum 0.26.3",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tikv-jemalloc-ctl",

@@ -57,6 +57,10 @@ Branch eviction (the branch TTL) stops the task and drops its state. In an unpac
 cadence follows wall clock time; paced domains tick on the domain clock
 ([Domains And Time](domains-and-time.md)).
 
+The first generator occurrence is immediate when the generator starts. Later occurrences stay on
+the original `EACH` schedule. Slow work coalesces missed ticks into one generation at the newest
+due occurrence, then continues at the first future boundary without a catch-up burst.
+
 ## Watch It Tick
 
 ```bash

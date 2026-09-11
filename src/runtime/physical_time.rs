@@ -50,6 +50,10 @@ impl PhysicalDeadlineCapability {
     pub async fn wait_until(self, deadline: PhysicalDeadline) {
         sleep_until(deadline.0).await;
     }
+
+    pub(super) fn is_reached(self, deadline: PhysicalDeadline) -> bool {
+        Instant::now() >= deadline.0
+    }
 }
 
 /// Actual UTC enters the data plane only through the physical-time owner and is returned in the

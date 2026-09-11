@@ -7,10 +7,12 @@
 
 use std::{borrow::Borrow, collections::BTreeMap, io};
 
+use error_stack::Report;
 use imbl::{OrdMap, ordmap::DiffItem};
 use nervix_models::{
-    ClusterSchedule, DomainName, DomainSchedule, ResourceId, ResourceName, ResourceNodeStatus,
-    ResourceReplicaKey, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
+    ClusterSchedule, DomainName, DomainSchedule, ResourceId, ResourceName, ResourceNodeState,
+    ResourceNodeStatus, ResourceReplicaKey, ResourceUpload, ResourceUploadKey, ResourceUploadState,
+    ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use triomphe::Arc;
@@ -202,6 +204,49 @@ pub(crate) struct ResourceRecords {
     pub(crate) counters: Records<ResourceCatalogKey, u64>,
     pub(crate) versions: Records<ResourceId, ResourceVersion>,
     pub(crate) replicas: Records<ResourceReplicaKey, ResourceNodeStatus>,
+    pub(crate) uploads: Records<ResourceUploadKey, ResourceUpload>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResourceMutationError {
+    #[error("resource '{}' does not exist in domain '{}'", .identifier.as_str(), .domain.as_str())]
+    MissingCatalog {
+        domain: DomainName,
+        identifier: ResourceName,
+    },
+    #[error("resource '{}' in domain '{}' has exhausted its version sequence", .identifier.as_str(), .domain.as_str())]
+    VersionSequenceExhausted {
+        domain: DomainName,
+        identifier: ResourceName,
+    },
+    #[error("resource upload identity '{}' has no assigned version", .0.identity)]
+    MissingUpload(ResourceUploadKey),
+    #[error(
+        "resource upload identity '{}' is assigned version {}, not {}",
+        .key.identity,
+        .assigned_version,
+        .received_version
+    )]
+    VersionMismatch {
+        key: ResourceUploadKey,
+        assigned_version: u64,
+        received_version: u64,
+    },
+    #[error("resource upload replica does not describe a ready copy of the published version")]
+    ReplicaMismatch,
+    #[error(
+        "resource upload identity '{}' already published version {} with digest {}, not {}",
+        .key.identity,
+        .version,
+        .published_checksum,
+        .received_checksum
+    )]
+    DigestConflict {
+        key: Box<ResourceUploadKey>,
+        version: u64,
+        published_checksum: String,
+        received_checksum: String,
+    },
 }
 
 impl ResourceRecords {
@@ -217,17 +262,91 @@ impl ResourceRecords {
         }
     }
 
-    pub(crate) fn advance_version(&mut self, domain: &DomainName, identifier: &ResourceName) {
-        use meticulous::OptionExt as _;
-        let key = ResourceCatalogKey::new(domain, identifier);
-        let next = self
-            .counters
-            .get(&key)
-            .copied()
-            .unwrap_or(1)
-            .checked_add(1)
-            .assured("a resource cannot be replaced 2^64 times in the lifetime of a cluster");
-        self.counters.insert(key, next);
+    pub(crate) fn begin_upload(
+        &mut self,
+        key: &ResourceUploadKey,
+    ) -> Result<(), Report<ResourceMutationError>> {
+        if self.uploads.contains_key(key) {
+            return Ok(());
+        }
+        let catalog_key = ResourceCatalogKey::new(&key.domain, &key.identifier);
+        let Some(version) = self.counters.get(&catalog_key).copied() else {
+            return Err(Report::new(ResourceMutationError::MissingCatalog {
+                domain: key.domain.clone(),
+                identifier: key.identifier.clone(),
+            }));
+        };
+        let next = version.checked_add(1).ok_or_else(|| {
+            Report::new(ResourceMutationError::VersionSequenceExhausted {
+                domain: key.domain.clone(),
+                identifier: key.identifier.clone(),
+            })
+        })?;
+        self.counters.insert(catalog_key, next);
+        self.uploads.insert(
+            key.clone(),
+            ResourceUpload {
+                key: key.clone(),
+                version,
+                state: ResourceUploadState::Receiving,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn publish_upload(
+        &mut self,
+        key: &ResourceUploadKey,
+        resource: &ResourceVersion,
+        replica: &ResourceNodeStatus,
+    ) -> Result<(), Report<ResourceMutationError>> {
+        let Some(upload) = self.uploads.get(key).cloned() else {
+            return Err(Report::new(ResourceMutationError::MissingUpload(
+                key.clone(),
+            )));
+        };
+        if resource.id.domain != key.domain
+            || resource.id.identifier != key.identifier
+            || resource.id.version != upload.version
+        {
+            return Err(Report::new(ResourceMutationError::VersionMismatch {
+                key: key.clone(),
+                assigned_version: upload.version,
+                received_version: resource.id.version,
+            }));
+        }
+        if replica.key.version_key().resource_id() != resource.id
+            || replica.state != ResourceNodeState::Ready
+            || replica.root_checksum.as_deref() != Some(resource.root_checksum.as_str())
+        {
+            return Err(Report::new(ResourceMutationError::ReplicaMismatch));
+        }
+
+        if let ResourceUploadState::Published { root_checksum } = &upload.state {
+            if root_checksum == &resource.root_checksum {
+                return Ok(());
+            }
+            return Err(Report::new(ResourceMutationError::DigestConflict {
+                key: Box::new(key.clone()),
+                version: upload.version,
+                published_checksum: root_checksum.clone(),
+                received_checksum: resource.root_checksum.clone(),
+            }));
+        }
+
+        self.versions.insert(resource.id.clone(), resource.clone());
+        self.replicas.insert(replica.key.clone(), replica.clone());
+        self.uploads.insert(
+            key.clone(),
+            ResourceUpload {
+                key: key.clone(),
+                version: upload.version,
+                state: ResourceUploadState::Published {
+                    root_checksum: resource.root_checksum.clone(),
+                },
+            },
+        );
+        Ok(())
     }
 }
 
@@ -245,6 +364,7 @@ impl From<&ResourceRecords> for ResourceVersionStatus {
                 .collect(),
             versions: resources.versions.values().cloned().collect(),
             replicas: resources.replicas.values().cloned().collect(),
+            uploads: resources.uploads.values().cloned().collect(),
         }
     }
 }

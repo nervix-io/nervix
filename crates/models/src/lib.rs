@@ -69,8 +69,9 @@ pub use remote::{
     RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
 pub use resource::{
-    ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceVersion,
-    ResourceVersionCounter, ResourceVersionKey, ResourceVersionStatus,
+    ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUpload,
+    ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey, ResourceUploadState,
+    ResourceVersion, ResourceVersionCounter, ResourceVersionKey, ResourceVersionStatus,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,

@@ -417,6 +417,23 @@ impl Runtime {
             } else {
                 None
             };
+            if let Some(relay) = materialized_relay.as_ref()
+                && let Some(schema) = materialized_schema.as_ref()
+            {
+                let state_placement = self.state_placement(
+                    domain,
+                    RuntimeStateKind::MaterializedRelay,
+                    ModelKind::Relay,
+                    relay,
+                    None,
+                );
+                self.prepare_materialized_stream_restore(&state_placement, schema)
+                    .await
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
+            }
             if executes_locally
                 && !was_local
                 && let Some(relay) = materialized_relay.as_ref()
@@ -435,10 +452,25 @@ impl Runtime {
                     .get(&state_placement)
                     .map(|state| state.clone());
                 if let Some(local_replica) = local_replica {
-                    let after_lsm =
-                        ReplicatedMaterializedRelayState::read(&local_replica).current_lsm();
-                    let snapshot = self
-                        .request_state_sync(previous_owner, &state_placement, after_lsm)
+                    let read = ReplicatedMaterializedRelayState::read(&local_replica);
+                    let after_lsm = read.current_lsm();
+                    let installer =
+                        ReplicatedMaterializedRelayState::current_installer(&local_replica)
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "materialized relay '{}' is no longer a replica while \
+                                     refreshing its ownership handoff snapshot",
+                                    relay.as_str()
+                                ),
+                            })?;
+                    let installed = self
+                        .install_materialized_snapshot_from(
+                            previous_owner,
+                            &read,
+                            &installer,
+                            Some(after_lsm),
+                        )
                         .await
                         .map_err(|reason| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -448,27 +480,7 @@ impl Runtime {
                                 relay.as_str()
                             ),
                         })?;
-                    if let Some(snapshot) = snapshot {
-                        let installer =
-                            ReplicatedMaterializedRelayState::current_installer(&local_replica)
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "materialized relay '{}' is no longer a replica while \
-                                         refreshing its ownership handoff snapshot",
-                                        relay.as_str()
-                                    ),
-                                })?;
-                        installer
-                            .install_snapshot(snapshot.lsm, &snapshot.payload)
-                            .map_err(|error| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "failed to install ownership handoff snapshot for \
-                                     materialized relay '{}': {error}",
-                                    relay.as_str()
-                                ),
-                            })?;
+                    if installed.is_some() {
                         self.inner.materialized_state_changed.notify_waiters();
                     }
                 }

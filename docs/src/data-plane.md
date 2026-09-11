@@ -21,6 +21,8 @@ Nervix has three separate persistence boundaries:
 
 - Execution graph configuration is control-plane state. NSPL models, domain lifecycle, and schedules are persisted with strong consistency guarantees before runtime nodes execute them.
 - Execution node state is runtime state. Selected state such as domain offsets, deduplicator history, materialized relay entries, window accumulators, metric summaries, and WASM guest state is persisted through periodic snapshot/replication mechanisms.
+  A materialized relay's snapshot is columnar: it carries the relay's records as Arrow sections under the relay's exact schema, with each record's concrete branch key, watermarks, and the state revision, ownership assignment, and branch lifecycle it was captured at described beside them. Every snapshot is one committed revision. Updates and deletions continue while it is written out, and a snapshot taken before a branch was evicted never restores that branch.
+  A snapshot larger than the transfer budget crosses the bulk pool in bounded chunks and lands on the receiving node's staging disk, where its length and digest are checked before anything reads it. A cancelled, truncated, or corrupted transfer leaves the state it would have replaced untouched.
 - Message streaming is the hot path. In-flight records, relay batches, processor handoff, outbound emitter attempts, ACK guards, ACK tokens, and ACK maps stay in memory and are never persisted as runtime state.
 
 Every relay has one scheduled owner. Producers on other cluster nodes use one fixed dispatch slot

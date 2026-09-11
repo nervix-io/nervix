@@ -67,7 +67,7 @@ use nervix_models::{
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup,
     CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainClockAuthority,
-    DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState, EmitSink,
+    DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitSink,
     EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
     ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
     IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
@@ -162,6 +162,7 @@ use crate::{
 };
 
 mod branch_aggregated_state;
+mod branch_buffering;
 mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
@@ -194,6 +195,7 @@ mod kafka_offset_state;
 mod lookup_hash_map;
 mod lsm_sequence;
 mod materialized_read;
+mod materialized_snapshot;
 mod materialized_state;
 mod message_error;
 mod message_error_delivery;
@@ -221,11 +223,18 @@ mod reorderer;
 mod resources;
 mod runtime_lifecycle;
 mod schedule_apply;
+mod snapshot_staging;
+
 mod schedule_delta;
 mod scheduled_node;
 mod service_url;
 mod shared_clients;
 mod state_replication;
+mod state_snapshot_exchange;
+mod state_snapshot_transfer;
+pub(crate) use state_snapshot_transfer::{
+    DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot,
+};
 mod state_store;
 mod syslog;
 #[cfg(test)]
@@ -234,6 +243,11 @@ mod test_fixtures;
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
     decode_branch_aggregated_snapshot, encode_branch_aggregated_snapshot,
+};
+use branch_buffering::{
+    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingError, BranchBufferTimingResult,
+    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    wait_for_branch_buffer_deadlines,
 };
 use branch_instance_registry::BranchInstanceRegistry;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
@@ -250,12 +264,17 @@ use kafka_offset_state::{
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, KafkaTopicPartition,
     ReplicatedKafkaOffsetState,
 };
+use materialized_snapshot::{
+    MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
+    empty_sealed_container, inspect_sealed_container,
+};
+pub use materialized_state::MaterializedRecordReport;
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
-    MaterializedRelayStateRead, ReplicatedMaterializedRelayState,
-    decode_materialized_stream_snapshot, encode_materialized_stream_snapshot_entries,
+    ReplicatedMaterializedRelayState,
 };
+use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
 /// operations are absent from each capability.
@@ -305,9 +324,8 @@ use processors::{
     RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
     RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
     RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
-    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, RuntimeInputCollector,
-    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
-    WindowFlushContext,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
+    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -326,7 +344,6 @@ pub(crate) use relay_channel::{
 };
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
-    RuntimeInputCollectPolicy,
 };
 pub(crate) type RelaySubscriptionRecvError = async_broadcast::RecvError;
 use std::str::FromStr;
@@ -335,10 +352,9 @@ pub(crate) use branch_key::BranchKey;
 use branch_key::branch_key_display;
 use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, IngestorRouteRuntime,
-    MaterializedBatchWaitContext, PendingMaterializedBatch, RuntimeFlushPolicy,
-    branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
-    output_error_policies, persist_branch_instance_lru_snapshot,
-    wall_duration_until_domain_deadline,
+    MaterializedBatchWaitContext, PendingMaterializedBatch, branch_lru_placement,
+    flush_branch_junction, internal_processor_error_policies, output_error_policies,
+    persist_branch_instance_lru_snapshot, wall_duration_until_domain_deadline,
 };
 pub(crate) use client_config::{ClientResourceMounts, ResolvedClientConfig};
 use client_config::{
@@ -352,9 +368,9 @@ use correlator::{
     handle_correlator_timeout_action,
 };
 use domain_clock::{
-    DomainClock, DomainClockAccessResult, DomainClockLifecycle, advance_scheduled_timestamp,
-    checked_add_duration_to_timestamp, current_domain_logical_time, current_timestamp,
-    wall_duration_until_logical_target,
+    DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
+    DomainClockLifecycle, DomainExecutionSnapshot, LogicalDeadline,
+    checked_add_duration_to_timestamp, current_timestamp,
 };
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
@@ -443,8 +459,8 @@ pub(in crate::runtime) use processor_branch_task::{
 use processor_output::{
     PendingProcessorOutputBatch, PendingProcessorOutputMessageError, ProcessorMaterializedState,
     ProcessorOutputBatchScope, ProcessorOutputDispatchContext, ProcessorOutputFilterSource,
-    dispatch_processor_output, dispatch_processor_outputs, flush_due_processor_outputs,
-    pending_output_batches_by_key, processor_output_input_sensitivity,
+    dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
+    flush_due_processor_outputs, pending_output_batches_by_key, processor_output_input_sensitivity,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, wasm_guest_call_schemas,
@@ -804,6 +820,11 @@ struct RuntimeInner {
         DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>,
     replicated_materialized_stream_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>,
+    /// Sealed materialized snapshots that have been opened and are waiting for the state they
+    /// belong to to be built. Opening one is bulk work, so it happens on a path that can wait and
+    /// the synchronous construction consumes the result.
+    restored_materialized_stream_states:
+        DashMap<RuntimeStatePlacement, RestoredMaterializedSnapshot, RandomState>,
     relay_state_epochs: DashMap<DomainName, Arc<AtomicU64>, RandomState>,
     materialized_state_changed: Notify,
     replicated_window_processor_states:
@@ -815,6 +836,8 @@ struct RuntimeInner {
     wasm_runtime: WasmRuntime,
     branch_instance_expiration_scan_interval: Duration,
     state_store: Option<Arc<RuntimeStateStore>>,
+    /// The bounded disk incoming sealed snapshots land on before they are verified and opened.
+    snapshot_staging: SnapshotStaging,
     state_snapshot_interval: Duration,
     state_replication_poll_interval: Duration,
     domain_drain_timeout: Duration,

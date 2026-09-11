@@ -644,6 +644,219 @@ async fn then_clock_source_recorder_records_requests(
     }
 }
 
+fn decimal_seconds_to_unix_nanos(value: &str) -> i128 {
+    let value = value.trim();
+    let (negative, magnitude) = if let Some(magnitude) = value.strip_prefix('-') {
+        (true, magnitude)
+    } else {
+        (false, value)
+    };
+    let (seconds, fraction) = if let Some((seconds, fraction)) = magnitude.split_once('.') {
+        (seconds, fraction)
+    } else {
+        (magnitude, "")
+    };
+    if seconds.is_empty()
+        || fraction.len() > 9
+        || !fraction.bytes().all(|digit| digit.is_ascii_digit())
+    {
+        panic!("'{value}' is not a decimal Unix timestamp");
+    }
+    let seconds = match seconds.parse::<i128>() {
+        Ok(seconds) => seconds,
+        Err(error) => panic!("invalid seconds in Unix timestamp '{value}': {error}"),
+    };
+    let mut fraction_nanos = fraction.to_string();
+    while fraction_nanos.len() < 9 {
+        fraction_nanos.push('0');
+    }
+    let fraction_nanos = match fraction_nanos.parse::<i128>() {
+        Ok(fraction_nanos) => fraction_nanos,
+        Err(error) => panic!("invalid fraction in Unix timestamp '{value}': {error}"),
+    };
+    let Some(seconds) = seconds.checked_mul(1_000_000_000) else {
+        panic!("Unix timestamp '{value}' is outside the test representation");
+    };
+    let Some(magnitude) = seconds.checked_add(fraction_nanos) else {
+        panic!("Unix timestamp '{value}' is outside the test representation");
+    };
+    if negative {
+        let Some(magnitude) = magnitude.checked_neg() else {
+            panic!("Unix timestamp '{value}' is outside the test representation");
+        };
+        magnitude
+    } else {
+        magnitude
+    }
+}
+
+#[then(
+    expr = "within {string} clock source recorder {string} and relay subscription observe {int} \
+            fresh executions on {string} due cadence separated by at least {string}"
+)]
+async fn then_clock_source_and_subscription_observe_fresh_cadence(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+    expected_count: usize,
+    cadence: String,
+    minimum_gap: String,
+) {
+    struct RecordedDue {
+        rendered: String,
+        unix_nanos: i128,
+    }
+
+    let duration = match humantime::parse_duration(&duration) {
+        Ok(duration) => duration,
+        Err(error) => panic!("step duration must be valid: {error}"),
+    };
+    let cadence = match humantime::parse_duration(&cadence) {
+        Ok(cadence) => cadence,
+        Err(error) => panic!("cadence duration must be valid: {error}"),
+    };
+    let minimum_gap = match humantime::parse_duration(&minimum_gap) {
+        Ok(minimum_gap) => minimum_gap,
+        Err(error) => panic!("minimum gap duration must be valid: {error}"),
+    };
+    let cadence_nanos = match i128::try_from(cadence.as_nanos()) {
+        Ok(cadence_nanos) => cadence_nanos,
+        Err(error) => panic!("cadence does not fit the test representation: {error}"),
+    };
+    let minimum_gap_nanos = match i128::try_from(minimum_gap.as_nanos()) {
+        Ok(minimum_gap_nanos) => minimum_gap_nanos,
+        Err(error) => panic!("minimum gap does not fit the test representation: {error}"),
+    };
+    let name = expand_placeholders(world, &name);
+    let deadline = Instant::now()
+        .checked_add(duration)
+        .assured("scenario durations fit Tokio's monotonic instant range");
+
+    let observations = loop {
+        tokio::task::consume_budget().await;
+        let observations = match world.dependencies.clock_source_observations(&name).await {
+            Ok(observations) => observations,
+            Err(error) => panic!("failed to read clock source recorder '{name}': {error}"),
+        };
+        let Some(requests) = observations
+            .get("requests")
+            .and_then(serde_json::Value::as_array)
+        else {
+            panic!("clock source recorder '{name}' returned no request list: {observations}");
+        };
+        // Polling continues while this observer request is in flight, so a loaded suite can pass
+        // the target count before the response arrives. The first expected occurrences remain the
+        // exact sample validated below.
+        if requests.len() >= expected_count {
+            break observations;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clock source recorder '{name}' expected {expected_count} requests, observed {}: \
+             {observations}",
+            requests.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let requests = observations["requests"]
+        .as_array()
+        .assured("the recorder response was validated before leaving the wait loop");
+    let mut recorded_due = Vec::with_capacity(expected_count);
+    for (index, request) in requests.iter().take(expected_count).enumerate() {
+        let Some(query) = request.get("query") else {
+            panic!("recorded request {index} has no Prometheus query: {request}");
+        };
+        let Some(time) = query.get("time") else {
+            panic!("recorded request {index} has no Prometheus time query: {request}");
+        };
+        let Some(rendered) = time.as_str() else {
+            panic!("recorded request {index} has a non-string Prometheus time query: {request}");
+        };
+        let unix_nanos = decimal_seconds_to_unix_nanos(rendered);
+        recorded_due.push(RecordedDue {
+            rendered: rendered.to_string(),
+            unix_nanos,
+        });
+    }
+    for pair in recorded_due.windows(2) {
+        let gap = pair[1]
+            .unix_nanos
+            .checked_sub(pair[0].unix_nanos)
+            .assured("ordered signed timestamps have a representable difference in i128");
+        assert!(
+            gap >= minimum_gap_nanos,
+            "expected due timestamps at least {minimum_gap:?} apart, got {} then {}",
+            pair[0].rendered,
+            pair[1].rendered,
+        );
+        assert_eq!(
+            gap % cadence_nanos,
+            0,
+            "due timestamps must remain on the {cadence:?} anchored cadence: {} then {}",
+            pair[0].rendered,
+            pair[1].rendered,
+        );
+    }
+
+    let session = world
+        .active_session
+        .as_mut()
+        .assured("an active session with subscription must exist");
+    let mut observed_payloads = Vec::with_capacity(expected_count);
+    for (index, due) in recorded_due.iter().enumerate() {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after receiving {index} of {expected_count} subscription payloads: \
+             {observed_payloads:?}"
+        );
+        let remaining = deadline
+            .checked_duration_since(now)
+            .verified("the deadline comparison above established remaining scenario time");
+        let event = match session.try_next_subscription(remaining).await {
+            Ok(Some(event)) => event,
+            Ok(None) => panic!(
+                "timed out after receiving {index} of {expected_count} subscription payloads: \
+                 {observed_payloads:?}"
+            ),
+            Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
+        };
+        let payload = event.payload;
+        let parsed = match serde_json::from_str::<serde_json::Value>(&payload) {
+            Ok(parsed) => parsed,
+            Err(error) => panic!("subscription payload is not valid JSON: {error}"),
+        };
+        let Some(output_due) = parsed.get("due").and_then(serde_json::Value::as_str) else {
+            panic!("subscription payload has no due timestamp: {payload}");
+        };
+        assert_eq!(
+            output_due, due.rendered,
+            "subscription output did not preserve request {index}'s due timestamp"
+        );
+        let Some(executed_at) = parsed
+            .get("executed_at")
+            .and_then(serde_json::Value::as_str)
+        else {
+            panic!("subscription payload has no execution timestamp: {payload}");
+        };
+        let executed_at = match chrono::DateTime::parse_from_rfc3339(executed_at) {
+            Ok(executed_at) => executed_at,
+            Err(error) => panic!("invalid execution timestamp '{executed_at}': {error}"),
+        };
+        let executed_at = executed_at
+            .timestamp_nanos_opt()
+            .assured("the scenario's historical execution timestamp fits signed nanoseconds");
+        assert!(
+            i128::from(executed_at) > due.unix_nanos,
+            "execution timestamp must be sampled after slow request {index} completed: {payload}"
+        );
+        world.last_subscription_payload = Some(payload.clone());
+        observed_payloads.push(payload);
+    }
+}
+
 #[given("Iceberg dependencies are running")]
 async fn given_iceberg_dependencies_are_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -2366,6 +2579,47 @@ async fn given_node_has_resource_directory_containing(
         std::fs::create_dir_all(parent).expect("fixture parent directory should be created");
         std::fs::write(destination, contents).expect("fixture file should be written");
     }
+
+    world
+        .placeholders
+        .insert(placeholder, resource_dir.display().to_string());
+}
+
+#[given(expr = "node {string} has resource directory {string} with file {string} of {int} MiB")]
+async fn given_node_has_large_resource_file(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+    relative_path: String,
+    mebibytes: usize,
+) {
+    let base_dir = world
+        .cluster()
+        .node_base_dir(&node_id)
+        .expect("node base dir should exist");
+    let resource_dir = base_dir.join("fixtures").join(&placeholder);
+    if resource_dir.exists() {
+        std::fs::remove_dir_all(&resource_dir).expect("fixture directory should be removed");
+    }
+    let destination = resource_dir.join(relative_path);
+    let parent = destination
+        .parent()
+        .expect("fixture file must have a parent directory");
+    std::fs::create_dir_all(parent).expect("fixture parent directory should be created");
+    let total_bytes = mebibytes
+        .checked_mul(1024 * 1024)
+        .expect("fixture size must fit the target pointer width");
+    let mut file =
+        std::fs::File::create(&destination).expect("large fixture file should be created");
+    let chunk = vec![0x5a_u8; 64 * 1024];
+    let full_chunks = total_bytes / chunk.len();
+    let remainder = total_bytes % chunk.len();
+    for _ in 0..full_chunks {
+        file.write_all(&chunk)
+            .expect("large fixture chunk should be written");
+    }
+    file.write_all(&chunk[..remainder])
+        .expect("large fixture remainder should be written");
 
     world
         .placeholders
@@ -5046,6 +5300,105 @@ async fn when_named_client_selects_domain(world: &mut ScenarioWorld, name: Strin
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     client.set_domain(domain).await;
+}
+
+#[when(expr = "client {string} uploads resource {string} from {string} with identity {string}")]
+async fn when_named_client_uploads_resource_with_identity(
+    world: &mut ScenarioWorld,
+    name: String,
+    resource: String,
+    directory: String,
+    identity: String,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let directory = PathBuf::from(expand_placeholders(world, &directory));
+    let identity = expand_placeholders(world, &identity);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
+        .expect("scenario upload identity must be valid");
+    let outcome = client
+        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
+    assert!(
+        outcome.success,
+        "client '{name}' resource upload must succeed: {}",
+        outcome.message
+    );
+    world.last_command_output = Some(outcome.message);
+}
+
+#[when(
+    expr = "client {string} upload of resource {string} from {string} with identity {string} \
+            fails with {string}"
+)]
+async fn when_named_client_resource_upload_fails_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    resource: String,
+    directory: String,
+    identity: String,
+    expected: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let directory = PathBuf::from(expand_placeholders(world, &directory));
+    let identity = expand_placeholders(world, &identity);
+    let expected = expand_placeholders(world, &expected);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
+        .expect("scenario upload identity must be valid");
+    let outcome = client
+        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
+    assert!(!outcome.success, "resource upload unexpectedly succeeded");
+    assert!(
+        outcome.message.contains(&expected),
+        "resource upload error did not contain '{expected}': {}",
+        outcome.message
+    );
+    world.last_command_error = Some(outcome.message.clone());
+    world.last_command_output = Some(outcome.message);
+}
+
+#[when(expr = "client {string} waits {string} for resource {string} version {int} readiness")]
+async fn when_named_client_waits_for_resource_readiness(
+    world: &mut ScenarioWorld,
+    name: String,
+    duration: String,
+    resource: String,
+    version: u64,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let name = expand_placeholders(world, &name);
+    let resource = expand_placeholders(world, &resource);
+    let duration = humantime::parse_duration(&duration).expect("readiness duration must be valid");
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let readiness = client
+        .wait_for_resource_ready(&resource, version, duration)
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' resource readiness wait failed: {error}"));
+    world.last_command_output = Some(format!(
+        "version: {}\ncluster_ready: {}\nmessage: {}",
+        readiness.version, readiness.cluster_ready, readiness.message
+    ));
 }
 
 #[then(expr = "client {string} active domain is {string}")]
@@ -12773,6 +13126,141 @@ async fn then_relay_subscription_payloads_share_field(
 }
 
 #[then(
+    expr = "within {string} {int} generator occurrences preserve branches {string} in field \
+            {string} with shared timestamp field {string}"
+)]
+async fn then_generator_occurrences_preserve_branches(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected_occurrences: usize,
+    branches: String,
+    branch_field: String,
+    timestamp_field: String,
+) {
+    let duration = match humantime::parse_duration(&duration) {
+        Ok(duration) => duration,
+        Err(error) => panic!("step duration must be valid: {error}"),
+    };
+    let branches = expand_placeholders(world, &branches);
+    let expected_branches = branches
+        .split(',')
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    assert!(
+        expected_branches.len() >= 2,
+        "generator cadence step requires at least two distinct branches"
+    );
+    let branch_field = expand_placeholders(world, &branch_field);
+    let timestamp_field = expand_placeholders(world, &timestamp_field);
+    let session = world
+        .active_session
+        .as_mut()
+        .assured("an active session with subscription must exist");
+    let deadline = Instant::now()
+        .checked_add(duration)
+        .assured("scenario durations fit Tokio's monotonic instant range");
+    let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
+    let mut latest_timestamp = None;
+    let mut observed = Vec::new();
+
+    loop {
+        tokio::task::consume_budget().await;
+        let complete_occurrences = branches_by_timestamp
+            .values()
+            .filter(|branches| *branches == &expected_branches)
+            .count();
+        if complete_occurrences >= expected_occurrences {
+            assert_eq!(
+                complete_occurrences, expected_occurrences,
+                "generator produced more complete occurrences than the assertion consumed"
+            );
+            return;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after observing {complete_occurrences} of {expected_occurrences} complete \
+             generator occurrences for branches {expected_branches:?}: {observed:?}"
+        );
+        let remaining = deadline
+            .checked_duration_since(now)
+            .verified("the deadline comparison above established remaining scenario time");
+        let event = match session.try_next_subscription(remaining).await {
+            Ok(Some(event)) => event,
+            Ok(None) => panic!(
+                "timed out after observing {complete_occurrences} of {expected_occurrences} \
+                 complete generator occurrences for branches {expected_branches:?}: {observed:?}"
+            ),
+            Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
+        };
+        let payload = event.payload;
+        let (key, payload_json) = if let Some((key, payload_json)) = payload.split_once(" payload=")
+        {
+            (key.strip_prefix("key="), payload_json)
+        } else {
+            (None, payload.as_str())
+        };
+        let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
+            Ok(parsed) => parsed,
+            Err(error) => panic!("subscription payload is not valid JSON: {error}"),
+        };
+        let Some(branch) = parsed.get(&branch_field) else {
+            panic!("subscription payload has no field '{branch_field}': {payload}");
+        };
+        let Some(branch) = branch.as_str() else {
+            panic!("subscription payload field '{branch_field}' is not a string: {payload}");
+        };
+        assert!(
+            expected_branches.contains(branch),
+            "generator produced unexpected branch '{branch}': {payload}"
+        );
+        if let Some(key) = key {
+            let key = match serde_json::from_str::<serde_json::Value>(key) {
+                Ok(key) => key,
+                Err(error) => panic!("subscription key is not valid JSON: {error}"),
+            };
+            assert_eq!(
+                key.get(&branch_field),
+                parsed.get(&branch_field),
+                "generator output did not preserve branch field '{branch_field}': {payload}"
+            );
+        }
+        let Some(timestamp) = parsed.get(&timestamp_field) else {
+            panic!("subscription payload has no field '{timestamp_field}': {payload}");
+        };
+        let Some(timestamp) = timestamp.as_str() else {
+            panic!("subscription payload field '{timestamp_field}' is not a string: {payload}");
+        };
+        let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
+            Ok(timestamp) => timestamp,
+            Err(error) => {
+                panic!("subscription payload field '{timestamp_field}' is not RFC 3339: {error}")
+            }
+        };
+        let timestamp = timestamp
+            .timestamp_nanos_opt()
+            .assured("generator scenario timestamps fit signed Unix nanoseconds");
+        if !branches_by_timestamp.contains_key(&timestamp) {
+            if let Some(latest_timestamp) = latest_timestamp.as_ref() {
+                assert!(
+                    &timestamp > latest_timestamp,
+                    "generator occurrence timestamps arrived out of order: {observed:?}, {payload}"
+                );
+            }
+            latest_timestamp = Some(timestamp);
+        }
+        branches_by_timestamp
+            .entry(timestamp)
+            .or_default()
+            .insert(branch.to_string());
+        world.last_subscription_payload = Some(payload.clone());
+        observed.push(payload);
+    }
+}
+
+#[then(
     expr = "within {string} generated routes {string} value {int} and {string} value {int} share \
             field {string}"
 )]
@@ -13072,6 +13560,15 @@ async fn then_subscription_timestamp_field_is_saved(
         panic!("subscription payload field '{field}' is not an RFC 3339 timestamp: {value}");
     }
     world.placeholders.insert(placeholder, value.to_string());
+}
+
+#[given(expr = "a repeated text placeholder {string} of {int} bytes is prepared")]
+async fn given_repeated_text_placeholder(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+    bytes: usize,
+) {
+    world.placeholders.insert(placeholder, "a".repeat(bytes));
 }
 
 #[then(expr = "timestamp placeholder {string} is not before timestamp placeholder {string}")]
