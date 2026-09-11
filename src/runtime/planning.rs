@@ -573,18 +573,16 @@ fn materialize_nodes(
 ) -> Result<Vec<RelayProcessorTemplate>, String> {
     let mut out = Vec::new();
     for node in nodes {
+        let mut input_collect_policies = HashMap::with_capacity(node.input_collect_policies.len());
+        for (relay, policy) in &node.input_collect_policies {
+            let parsed = parse_input_collect_policy(node.kind.as_str(), &node.processor, policy)?;
+            input_collect_policies.insert(relay.clone(), parsed);
+        }
         out.push(RelayProcessorTemplate {
             kind: node.kind,
             processor: node.processor.clone(),
             input_relays: node.input_relays.clone(),
-            input_collect_policies: node
-                .input_collect_policies
-                .iter()
-                .map(|(relay, policy)| {
-                    parse_input_collect_policy(node.kind.as_str(), &node.processor, policy)
-                        .map(|policy| (relay.clone(), policy))
-                })
-                .collect::<Result<HashMap<_, _>, _>>()?,
+            input_collect_policies,
             error_policies: node.error_policies.clone(),
             from_where: node.from_where.clone(),
             filter_where: node.filter_where.clone(),
@@ -617,59 +615,72 @@ fn materialize_nodes(
                             node.processor.as_str()
                         ));
                     }
-                    let route_aggregates = output_routes
-                        .outputs()
-                        .map(|output| {
-                            lower_window_assignments(&output.construction)
-                                .map(|aggregate| aggregate.inner)
-                                .map_err(|reason| {
-                                    format!(
-                                        "window processor '{}' output '{}' construction is \
-                                         invalid: {}",
-                                        node.processor.as_str(),
-                                        output.relay.as_str(),
-                                        reason
-                                    )
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
+                    // Lower each written route's construction into its own aggregate program.
+                    // Written route order is the order every later step counts in.
+                    let mut route_aggregates = Vec::with_capacity(output_routes.routes.len());
+                    for output in output_routes.outputs() {
+                        let lowered = lower_window_assignments(&output.construction).map_err(
+                            |reason| {
+                                format!(
+                                    "window processor '{}' output '{}' construction is invalid: \
+                                     {}",
+                                    node.processor.as_str(),
+                                    output.relay.as_str(),
+                                    reason
+                                )
+                            },
+                        )?;
+                        route_aggregates.push(lowered.inner);
+                    }
+
+                    // Compile the routes in that same order. Each route's demands land in the
+                    // shared accumulator plan after the demands of every route written before it,
+                    // so a route's offset is the number of demands those routes already claimed.
+                    let mut compiled_aggregates = Vec::with_capacity(route_aggregates.len());
                     let mut demand_offset = 0;
-                    let compiled_aggregates = output_routes
-                        .outputs()
-                        .zip(&route_aggregates)
-                        .map(|(output, aggregate)| {
-                            let compiled = CompiledWindowAggregateProgram::compile(
-                                aggregate,
-                                &node.input_relays,
-                                &output.relay,
-                                relay_schemas,
-                                udfs,
-                            )?
-                            .with_demand_offset(demand_offset);
-                            demand_offset += aggregate.demands().len();
-                            Ok(compiled)
-                        })
-                        .collect::<Result<Vec<_>, String>>()?;
+                    for (output, route_aggregate) in output_routes.outputs().zip(&route_aggregates)
+                    {
+                        let compiled = CompiledWindowAggregateProgram::compile(
+                            route_aggregate,
+                            &node.input_relays,
+                            &output.relay,
+                            relay_schemas,
+                            udfs,
+                        )?;
+                        compiled_aggregates.push(compiled.with_demand_offset(demand_offset));
+                        demand_offset += route_aggregate.demands().len();
+                    }
+
+                    // The shared accumulator plan the branch-local window state is built from.
                     let aggregate =
                         WindowAggregateProgram::combine_route_programs(&route_aggregates);
+
+                    // Compilation is done, so the compiled programs now own the assignments and
+                    // the materialized routes keep only their relay, flush, and error contracts.
                     let mut materialized_outputs = materialize_outputs(output_routes)?;
                     for output in &mut materialized_outputs.routes {
                         output.construction.assignments.clear();
                     }
+
+                    let width_messages = width.messages.map(|messages| messages.arch_into());
+                    let step_messages = step.messages.map(|messages| messages.arch_into());
+                    let width_duration = parse_optional_window_duration(
+                        &node.processor,
+                        "width",
+                        width.duration.as_deref(),
+                    )?;
+                    let step_duration = parse_optional_window_duration(
+                        &node.processor,
+                        "step",
+                        step.duration.as_deref(),
+                    )?;
+
                     RelayProcessorOperationTemplate::WindowProcessor {
                         output_routes: materialized_outputs,
-                        width_messages: width.messages.map(|messages| messages.arch_into()),
-                        step_messages: step.messages.map(|messages| messages.arch_into()),
-                        width_duration: parse_optional_window_duration(
-                            &node.processor,
-                            "width",
-                            width.duration.as_deref(),
-                        )?,
-                        step_duration: parse_optional_window_duration(
-                            &node.processor,
-                            "step",
-                            step.duration.as_deref(),
-                        )?,
+                        width_messages,
+                        step_messages,
+                        width_duration,
+                        step_duration,
                         aggregate,
                         compiled_aggregates,
                     }
@@ -2049,5 +2060,157 @@ mod tests {
             specs.entrypoints[0].root_relay,
             named("tenant_notifications")
         );
+    }
+
+    #[test]
+    fn window_route_demands_are_offset_by_the_routes_written_before_them() {
+        let input_relay = named::<RelayName>("metrics");
+        let totals_relay = named::<RelayName>("metric_totals");
+        let extremes_relay = named::<RelayName>("metric_extremes");
+        let metric_schema = Arc::new(compile_schema(&CreateSchema {
+            name: named("metric"),
+            fields: vec![
+                SchemaField {
+                    name: named("tenant"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("latency"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        }));
+        let totals_schema = Arc::new(compile_schema(&CreateSchema {
+            name: named("metric_total"),
+            fields: vec![
+                SchemaField {
+                    name: named("tenant"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("sample_count"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("first_latency"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("total_latency"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        }));
+        let extremes_schema = Arc::new(compile_schema(&CreateSchema {
+            name: named("metric_extreme"),
+            fields: vec![
+                SchemaField {
+                    name: named("tenant"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("max_latency"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("min_latency"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        }));
+        let totals_set = "SET tenant = FIRST(input.tenant), sample_count = \
+                          COUNT(input.latency), first_latency = FIRST(input.latency), \
+                          total_latency = SUM(input.latency)";
+        let extremes_set = "SET tenant = LAST(input.tenant), max_latency = MAX(input.latency), \
+                            min_latency = MIN(input.latency)";
+        let node = BranchedProcessorSpec {
+            kind: ModelKind::WindowProcessor,
+            processor: named("route_scoped_latency"),
+            input_relays: vec![input_relay.clone()],
+            input_collect_policies: HashMap::default(),
+            mode: AckMode::Attached,
+            error_policies: ErrorPolicies::handled_by_log(),
+            from_where: HashMap::default(),
+            filter_where: None,
+            materialized_state: Vec::new(),
+            operation: BranchedProcessorOperationSpec::WindowProcessor {
+                output_routes: BranchedProcessorOutputsSpec {
+                    routes: vec![
+                        BranchedProcessorOutputSpec {
+                            relay: totals_relay.clone(),
+                            construction: construction(totals_set),
+                            flush_policy: Some(FlushPolicy::Immediate),
+                            message_error_policy: MessageErrorPolicy::Log,
+                        },
+                        BranchedProcessorOutputSpec {
+                            relay: extremes_relay.clone(),
+                            construction: construction(extremes_set),
+                            flush_policy: Some(FlushPolicy::Immediate),
+                            message_error_policy: MessageErrorPolicy::Log,
+                        },
+                    ],
+                },
+                width: WindowBound::of_messages(3),
+                step: WindowBound::of_messages(3),
+            },
+        };
+        let mut relay_schemas = HashMap::default();
+        relay_schemas.insert(input_relay, metric_schema);
+        relay_schemas.insert(totals_relay.clone(), totals_schema);
+        relay_schemas.insert(extremes_relay.clone(), extremes_schema);
+
+        let mut templates = materialize_nodes(&[node], &relay_schemas, None)
+            .expect("two-route window processor must materialize");
+
+        let template = templates.pop().expect("one template per spec");
+        let RelayProcessorOperationTemplate::WindowProcessor {
+            output_routes,
+            aggregate,
+            compiled_aggregates,
+            ..
+        } = &template.operation
+        else {
+            panic!("expected a window processor template");
+        };
+
+        // The routes keep their written order, and each compiled program stays aligned with the
+        // route it was compiled for.
+        let route_relays: Vec<_> = output_routes
+            .routes
+            .iter()
+            .map(|route| route.output_relay.clone())
+            .collect();
+        assert_eq!(route_relays, vec![totals_relay, extremes_relay]);
+        assert_eq!(compiled_aggregates.len(), 2);
+
+        // `FIRST(input.tenant)`, `COUNT(input.latency)`, `FIRST(input.latency)` and
+        // `SUM(input.latency)` need four separate structures; `MAX` and `MIN` over the same input
+        // deduplicate into one, so the second route claims two.
+        assert_eq!(compiled_aggregates[0].demand_offset, 0);
+        assert_eq!(compiled_aggregates[1].demand_offset, 4);
+        assert_eq!(aggregate.demands().len(), 6);
+
+        // The compiled programs own the assignments once compilation has run.
+        for route in &output_routes.routes {
+            assert!(route.construction.assignments.is_empty());
+        }
     }
 }
