@@ -162,6 +162,13 @@ pub struct OperationLimits {
     pub management_event_bytes: ByteUnit,
     /// The application body a bulk transfer submits at a time.
     pub bulk_chunk_bytes: ByteUnit,
+    /// The complete encoded header of one sealed runtime snapshot.
+    pub snapshot_header_bytes: ByteUnit,
+    /// The data one Arrow section of a sealed runtime snapshot decodes into. A snapshot larger
+    /// than this is carried as more sections, never as one larger section.
+    pub snapshot_section_bytes: ByteUnit,
+    /// The data one non-Arrow record of a sealed runtime snapshot decodes into.
+    pub snapshot_record_bytes: ByteUnit,
     /// How deeply a decoder may nest before it refuses the input.
     pub decoder_depth: NonZeroU32,
 }
@@ -175,6 +182,9 @@ impl Default for OperationLimits {
             command_bytes: ByteUnit::Mebibyte(1),
             management_event_bytes: ByteUnit::Kibibyte(64),
             bulk_chunk_bytes: ByteUnit::Kibibyte(64),
+            snapshot_header_bytes: ByteUnit::Kibibyte(64),
+            snapshot_section_bytes: ByteUnit::Mebibyte(8),
+            snapshot_record_bytes: ByteUnit::Mebibyte(1),
             decoder_depth: NonZeroU32::new(64).unwrap_or(NonZeroU32::MIN),
         }
     }
@@ -189,6 +199,17 @@ impl OperationLimits {
             .as_u64()
             .checked_add(self.relay_decoded_bytes.as_u64())?
             .checked_add(self.relay_scratch_bytes.as_u64())
+    }
+
+    /// Everything one sealed-snapshot section may hold at once: the encoded section and the
+    /// columns it decodes into, which overlap while the conversion runs. The bulk budget backs
+    /// one such section beside the chunk a transfer is submitting at the same time.
+    pub fn snapshot_section_operation_bytes(&self) -> Option<u64> {
+        self.snapshot_section_bytes
+            .as_u64()
+            .checked_mul(2)?
+            .checked_add(self.snapshot_header_bytes.as_u64())?
+            .checked_add(self.bulk_chunk_bytes.as_u64())
     }
 }
 
@@ -235,6 +256,8 @@ pub enum ExecutionConfigError {
     EmptyBudget { class: &'static str },
     #[error("the configured relay operation limits do not add up to an addressable size")]
     UnaddressableRelayOperation,
+    #[error("the configured snapshot section limits do not add up to an addressable size")]
+    UnaddressableSnapshotSection,
 }
 
 impl ExecutionConfig {
@@ -255,6 +278,13 @@ impl ExecutionConfig {
                     ExecutionConfigError::UnaddressableRelayOperation,
                 ));
             }
+        };
+        // A bulk transfer holds one sealed section and the chunk it is moving at the same time, so
+        // the bulk budget is validated against that pair rather than against the chunk alone.
+        let Some(bulk_required) = self.limits.snapshot_section_operation_bytes() else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableSnapshotSection,
+            ));
         };
         Ok(ValidatedConfig {
             workers: self.workers,
@@ -280,8 +310,8 @@ impl ExecutionConfig {
                 bulk: permits(
                     MemoryClass::Bulk.as_str(),
                     self.budgets.bulk,
-                    "bulk body chunk",
-                    self.limits.bulk_chunk_bytes.as_u64(),
+                    "sealed snapshot section beside one body chunk",
+                    bulk_required,
                 )?,
             },
             limits: self.limits,

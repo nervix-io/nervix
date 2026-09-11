@@ -464,18 +464,14 @@ impl CompiledSchema {
         builder.finish()
     }
 
+    /// Rebuild one row from the scalar-field form window-processor state is still persisted in.
+    ///
+    /// Materialized relay snapshots no longer travel this way; they carry Arrow columns. Window
+    /// entries have not been converted yet, so this conversion remains for them alone.
     pub(crate) fn runtime_row_from_remote(
         &self,
         record: RemoteRuntimeRecord,
     ) -> Result<RuntimeRow, String> {
-        let (batch, metadata) = self.runtime_batch_from_remote(record)?;
-        batch.runtime_row(0, metadata)
-    }
-
-    pub(crate) fn runtime_batch_from_remote(
-        &self,
-        record: RemoteRuntimeRecord,
-    ) -> Result<(RuntimeRecordBatch, RuntimeRecordMetadata), String> {
         let metadata = RuntimeRecordMetadata::from_remote(record.metadata);
         let mut seen = HashSet::default();
         for field in &record.fields {
@@ -506,7 +502,7 @@ impl CompiledSchema {
             builder.append(value.as_ref())?;
         }
         builder.finish_row()?;
-        builder.finish().map(|batch| (batch, metadata))
+        builder.finish()?.runtime_row(0, metadata)
     }
 
     fn validate_arrow_batch(&self, batch: &RuntimeRecordBatch) -> Result<(), String> {
@@ -1217,47 +1213,13 @@ impl RuntimeRow {
         self.batch.value_at(self.row, column_index)
     }
 
-    pub(crate) fn from_remote(
-        schema: StdArc<ArrowSchema>,
-        record: RemoteRuntimeRecord,
-    ) -> Result<Self, String> {
-        let metadata = RuntimeRecordMetadata::from_remote(record.metadata);
-        let mut seen = HashSet::default();
-        for field in &record.fields {
-            if !seen.insert(field.name.as_str()) {
-                return Err(format!(
-                    "persisted runtime record contains duplicate field '{}'",
-                    field.name
-                ));
-            }
-            if schema.index_of(&field.name).is_err() {
-                return Err(format!(
-                    "persisted runtime record contains unknown field '{}'",
-                    field.name
-                ));
-            }
-        }
-        let mut builder = RuntimeRecordBatchBuilder::from_arrow_schema(schema, 1)?;
-        let expected_fields = builder.fields.clone();
-        for expected in &expected_fields {
-            let value = record
-                .fields
-                .iter()
-                .find(|field| field.name == expected.name)
-                .map(|field| RuntimeValue::from_remote(field.value.clone()));
-            builder.append(value.as_ref())?;
-        }
-        builder.finish_row()?;
-        builder.finish()?.runtime_row(0, metadata)
-    }
-
     pub(crate) fn one_row_batch(&self) -> RuntimeRecordBatch {
         RuntimeRecordBatch {
             batch: self.batch.batch.slice(self.row, 1),
         }
     }
 
-    #[cfg(test)]
+    /// This row's columns rendered as one JSON object, for reports that show a record to a user.
     pub(crate) fn to_json_string(&self) -> Result<String, String> {
         self.to_json_string_masking(&nervix_vm::SchemaSensitivity::default())
     }
@@ -1269,6 +1231,8 @@ impl RuntimeRow {
         self.batch.row_to_json_string_masking(self.row, sensitivity)
     }
 
+    /// Render this row in the scalar-field form window-processor state is still persisted in.
+    /// See [`CompiledSchema::runtime_row_from_remote`] for why it remains.
     pub(crate) fn to_remote(&self) -> Result<RemoteRuntimeRecord, String> {
         let mut fields = Vec::with_capacity(self.batch.schema_ref().fields().len());
         for (column_index, field) in self.batch.schema_ref().fields().iter().enumerate() {
@@ -1286,52 +1250,7 @@ impl RuntimeRow {
     }
 }
 
-pub(crate) fn remote_runtime_record_to_json_string(record: &RemoteRuntimeRecord) -> String {
-    let mut fields = record.fields.iter().collect::<Vec<_>>();
-    fields.sort_by(|left, right| left.name.cmp(&right.name));
-    JsonValue::Object(
-        fields
-            .into_iter()
-            .map(|field| {
-                (
-                    field.name.clone(),
-                    RuntimeValue::from_remote(field.value.clone()).to_json_value(),
-                )
-            })
-            .collect(),
-    )
-    .to_string()
-}
-
 impl RuntimeRecordBatchBuilder {
-    fn from_arrow_schema(schema: StdArc<ArrowSchema>, capacity: usize) -> Result<Self, String> {
-        let fields = schema
-            .fields()
-            .iter()
-            .map(|field| {
-                Ok(CompiledSchemaField {
-                    name: field.name().clone(),
-                    ty: parse_as_type_from_arrow(field.data_type())
-                        .map_err(|error| error.to_string())?,
-                    optional: field.is_nullable(),
-                    sensitive: false,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let builders = fields
-            .iter()
-            .map(|field| make_builder(&arrow_data_type(&field.ty), capacity))
-            .collect();
-        Ok(Self {
-            schema,
-            fields,
-            builders,
-            keep: Vec::with_capacity(capacity),
-            abandoned: 0,
-            next_column: 0,
-        })
-    }
-
     fn next_field_index(&self) -> Result<usize, String> {
         let index = self.next_column;
         self.fields.get(index).ok_or_else(|| {
@@ -5823,36 +5742,6 @@ mod tests {
             ]])
             .expect_err("must reject");
         assert!(err.contains("latency"));
-    }
-
-    #[test]
-    fn persisted_runtime_record_restores_directly_into_an_arrow_row() {
-        let record = record().with_ingested_at_watermarks(Timestamp::from_unix_nanos(1_234_567));
-        assert_eq!(
-            record.to_json_string().expect("Arrow row should serialize"),
-            r#"{"active":true,"created_at":"2025-01-02T03:04:05+00:00","latency":12.5,"tenant":"acme","user_id":42}"#
-        );
-
-        let remote = record.to_remote().expect("Arrow row should persist");
-        let roundtrip = compile_schema(&schema())
-            .runtime_row_from_remote(remote)
-            .expect("persisted row should restore into Arrow");
-        assert_eq!(
-            row_value(&roundtrip, "tenant"),
-            Some(RuntimeValue::String("acme".to_string()))
-        );
-        assert_eq!(
-            row_value(&roundtrip, "user_id"),
-            Some(RuntimeValue::U32(42))
-        );
-        assert_eq!(
-            roundtrip.metadata().ingested_at_low_watermark(),
-            Timestamp::from_unix_nanos(1_234_567)
-        );
-        assert_eq!(
-            roundtrip.metadata().ingested_at_high_watermark(),
-            Timestamp::from_unix_nanos(1_234_567)
-        );
     }
 
     #[test]

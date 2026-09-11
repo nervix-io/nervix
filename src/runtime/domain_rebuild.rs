@@ -559,6 +559,21 @@ impl Runtime {
                 }
                 _ => None,
             };
+            if let Some(schema) = materialized_schema.as_ref() {
+                let state_placement = self.state_placement(
+                    domain,
+                    RuntimeStateKind::MaterializedRelay,
+                    ModelKind::Relay,
+                    RelayName::from(&node.identifier),
+                    None,
+                );
+                self.prepare_materialized_stream_restore(&state_placement, schema)
+                    .await
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
+            }
             let placement = self.build_scheduled_node_placement(
                 domain,
                 &shutdown_tx,

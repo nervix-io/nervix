@@ -75,8 +75,9 @@ bulk is connected before a peer is reported ready, with capacity reserved in bot
 keeps gossip, heartbeats, elections, administrative operations, and the first remote batch and its
 acknowledgement from waiting behind another traffic class. Gossip exchanges, Raft records,
 resource chunks, and other non-Arrow messages use bounded, validated rkyv records. Relay payloads
-remain Arrow IPC end to end. Resource archives and Raft snapshots cross the bulk pool as bounded
-chunks rather than one whole in-memory wire message.
+remain Arrow IPC end to end. Resource archives, runtime state snapshots, and Raft snapshots cross
+the bulk pool as bounded chunks rather than one whole in-memory wire message, so a transfer larger
+than a node's transfer-memory budget moves without either side holding it whole.
 
 Connection setup, request progress, and whole-request deadlines are bounded. Failed pool slots
 reconnect with exponential backoff. When membership removes a peer or changes its advertised
