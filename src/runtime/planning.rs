@@ -619,17 +619,15 @@ fn materialize_nodes(
                     // Written route order is the order every later step counts in.
                     let mut route_aggregates = Vec::with_capacity(output_routes.routes.len());
                     for output in output_routes.outputs() {
-                        let lowered = lower_window_assignments(&output.construction).map_err(
-                            |reason| {
+                        let lowered =
+                            lower_window_assignments(&output.construction).map_err(|reason| {
                                 format!(
-                                    "window processor '{}' output '{}' construction is invalid: \
-                                     {}",
+                                    "window processor '{}' output '{}' construction is invalid: {}",
                                     node.processor.as_str(),
                                     output.relay.as_str(),
                                     reason
                                 )
-                            },
-                        )?;
+                            })?;
                         route_aggregates.push(lowered.inner);
                     }
 
@@ -2136,9 +2134,8 @@ mod tests {
                 },
             ],
         }));
-        let totals_set = "SET tenant = FIRST(input.tenant), sample_count = \
-                          COUNT(input.latency), first_latency = FIRST(input.latency), \
-                          total_latency = SUM(input.latency)";
+        let totals_set = "SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), \
+                          first_latency = FIRST(input.latency), total_latency = SUM(input.latency)";
         let extremes_set = "SET tenant = LAST(input.tenant), max_latency = MAX(input.latency), \
                             min_latency = MIN(input.latency)";
         let node = BranchedProcessorSpec {
