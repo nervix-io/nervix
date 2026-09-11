@@ -67,15 +67,15 @@ use nervix_models::{
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientZeroMq, CreateCodec, CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup,
     CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, DomainClockAuthority,
-    DomainClockState, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule,
-    DomainState, EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
-    ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainSchedule, DomainState, EmitSink,
+    EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
+    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
+    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
     OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
@@ -347,13 +347,14 @@ use client_config::{
 };
 use correlator::{
     CorrelatorMatchedBatch, CorrelatorOutputCompileContext, CorrelatorOutputContext,
-    CorrelatorSide, compile_correlator_where_program, correlate_incoming_message,
-    enqueue_correlator_output, evaluate_correlator_output_batch, handle_correlator_timeout_action,
+    CorrelatorSide, CorrelatorTimeoutContext, compile_correlator_where_program,
+    correlate_incoming_message, enqueue_correlator_output, evaluate_correlator_output_batch,
+    handle_correlator_timeout_action,
 };
 use domain_clock::{
-    DomainClock, DomainClockAccessResult, DomainClockLifecycle, RuntimeWasmDomainClock,
-    advance_scheduled_timestamp, checked_add_duration_to_timestamp, current_domain_logical_time,
-    current_timestamp, wall_duration_until_logical_target, wall_duration_until_timestamp,
+    DomainClock, DomainClockAccessResult, DomainClockLifecycle, advance_scheduled_timestamp,
+    checked_add_duration_to_timestamp, current_domain_logical_time, current_timestamp,
+    wall_duration_until_logical_target,
 };
 pub(crate) use domain_execution::LookupRuntime;
 use domain_execution::{
@@ -419,9 +420,9 @@ use lookup_hash_map::{
 };
 use message_error::{
     MessageErrorCompileSchemas, MessageErrorFailure, MessageErrorHandling,
-    SingleRecordFilterMapOutcome, captured_partial_output, invalid_output_fields,
-    operation_for_filter_label, planned_structured_message_error, structured_message_error,
-    vm_partial_output_row_to_runtime_batch,
+    MessageErrorSourceContext, SingleRecordFilterMapOutcome, captured_partial_output,
+    invalid_output_fields, operation_for_filter_label, planned_structured_message_error,
+    structured_message_error, vm_partial_output_row_to_runtime_batch,
 };
 use nervix_models::{
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DeduplicatorName,
@@ -487,15 +488,15 @@ use test_fixtures::{
     OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, batch_value,
     branch_model, branched_by, compile_window_aggregate_for_test, concrete_branch_key,
     construction, domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
-    junction_branch_template, key_label, named, nonzero_capacity, paced_domain_state,
-    processor_branched_by, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
-    test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
-    test_optional_schema, test_relay_boundary_services, test_schema, u32_branch_key,
-    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
-    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
-    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
-    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
-    window_inputs, window_outputs, with_inherit_all,
+    install_unpaced_test_domain, junction_branch_template, key_label, named, nonzero_capacity,
+    paced_domain_state, processor_branched_by, quiesce_test_batch, row_value, scheduled_model,
+    string_branch_key, test_domain_clock, test_domain_clock_authority,
+    test_ingestor_quiesce_control, test_optional_schema, test_relay_boundary_services, test_schema,
+    u32_branch_key, unpaced_domain_state, validate_wasm_test_output_groups,
+    validate_wasm_test_outputs, vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm,
+    wasm_generated_pool, wasm_guest_column, wasm_guest_stream, wasm_input_acks,
+    wasm_input_for_records, wasm_input_for_values, wasm_test_generated_output, wasm_test_output,
+    window_aggregate, window_inputs, window_outputs, with_inherit_all,
 };
 use tls::RustlsClientConfigSource;
 pub(crate) use vm_compile::{
@@ -547,7 +548,15 @@ use window_state::{
 #[cfg(test)]
 const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
-const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default deadline for draining one runtime branch during a domain or node transition.
+pub const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Includes the grace a branch task receives after its configured drain deadline.
+pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
+    // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks to
+    // wait for as long as the process runs, and no grace can extend that further.
+    domain_drain_timeout.saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+}
 
 /// How many runtime events the bus holds for a receiver that has fallen behind. A receiver that
 /// exceeds it is told how many it missed rather than being left to believe it saw everything.
@@ -628,6 +637,15 @@ pub enum RuntimeError {
     RuntimeRevisionReadiness {
         revision: u64,
         pending_nodes: Vec<ClusterNodeName>,
+    },
+    #[error(
+        "cannot represent a runtime revision readiness deadline from node-unavailability timeout \
+         {node_unavailability_timeout:?} and readiness propagation bound \
+         {readiness_propagation_bound:?}"
+    )]
+    RuntimeRevisionReadinessDeadlineOverflow {
+        node_unavailability_timeout: Duration,
+        readiness_propagation_bound: Duration,
     },
     #[error("failed to decode remote relay '{relay}' in domain '{domain}': {reason}")]
     DecodeRemoteRelay {
@@ -754,6 +772,10 @@ struct RuntimeInner {
     /// Also held by the attached `RemoteDispatcher`, which must allocate correlation ids from the
     /// same registry the runtime resolves incoming acknowledgements against.
     remote_dispatch: Arc<RemoteDispatchRegistry>,
+    /// Cancels remote acknowledgement watchers once this runtime has drained its domain tasks.
+    remote_ack_watcher_shutdown: CancellationToken,
+    /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
+    remote_ack_watcher_tasks: TaskTracker,
     state_checkpoint_notifications: DashMap<RuntimeStatePlacement, Arc<Notify>, RandomState>,
     pending_state_replica_syncs:
         DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,

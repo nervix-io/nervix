@@ -76,20 +76,23 @@ Feature: Relay deduplication
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # Each message contains two required I64 values and accounts for 16B. The 32B boundary makes
+    # each pair share one execution timestamp. Observing no second output for the same <max_time>
+    # configured below puts the next pair at or beyond expiration; equality is expired.
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
-        transaction_id STRING,
+        transaction_id I64,
         amount I64
       );
-        CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
-        transaction_id string,
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        transaction_id integer,
         amount integer
       );
         CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id I64 );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
@@ -102,12 +105,12 @@ Feature: Relay deduplication
         INHERIT ALL
         BRANCHED BY by_source_txns
         SET transaction_id = message.transaction_id
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FLUSH EACH 1h MAX BATCH SIZE 32B
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns FROM ss1
         DEDUPLICATE ON input.transaction_id
-        MAX TIME 300ms
+        MAX TIME <max_time>
         BRANCHED BY by_source_txns
         TO ss2
         INHERIT ALL
@@ -118,31 +121,35 @@ Feature: Relay deduplication
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-expire"
       """
-      {"transaction_id":"txn-1","amount":10}
+      {"transaction_id":1,"amount":10}
       """
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-expire"
       """
-      {"transaction_id":"txn-1","amount":10}
+      {"transaction_id":1,"amount":10}
       """
     Then within "5s" the relay subscription receives payloads
       """
-      "transaction_id":"txn-1"
+      "transaction_id":1
       """
-    And the relay subscription does not receive a payload within "500ms"
+    And the relay subscription does not receive a payload within "<max_time>"
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-expire"
       """
-      {"transaction_id":"txn-1","amount":10}
+      {"transaction_id":1,"amount":10}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-expire"
+      """
+      {"transaction_id":1,"amount":10}
       """
     Then within "5s" the relay subscription receives a payload
       """
-      "transaction_id":"txn-1"
+      "transaction_id":1
       """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | max_time |
+      | 1            | 0             | 300ms    |
+      | 3            | 0             | 300ms    |
+      | 3            | 1             | 300ms    |
 
   Scenario Outline: Deduplicator evaluates DEDUPLICATE ON function calls through the VM
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

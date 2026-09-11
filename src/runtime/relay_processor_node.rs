@@ -1,5 +1,10 @@
 use super::*;
 
+struct ProcessorInputExpressionContext<'a> {
+    materialized_state: &'a HashMap<String, RuntimeValue>,
+    execution_now: Timestamp,
+}
+
 impl RelayProcessorNode {
     pub(super) fn source_filter_scope(&self, incoming_relay: &RelayName) -> RuntimeFilterScope {
         match &self.operation {
@@ -33,10 +38,16 @@ impl RelayProcessorNode {
         &self,
         branch: &BranchRuntime,
         branch_key: &Option<BranchKey>,
+        execution_now: Timestamp,
     ) -> Result<MaterializedDependencyResolution, String> {
         branch
             .runtime
-            .resolve_materialized_dependencies(&branch.domain, branch_key, &self.materialized_state)
+            .resolve_materialized_dependencies(
+                &branch.domain,
+                branch_key,
+                &self.materialized_state,
+                execution_now,
+            )
             .await
     }
 
@@ -177,6 +188,7 @@ impl RelayProcessorNode {
         incoming_relay: &RelayName,
         batch: RelayRecordBatch,
         materialized_state: &HashMap<String, RuntimeValue>,
+        execution_now: Timestamp,
     ) -> Option<RelayRecordBatch> {
         let batch = self
             .filter_input_batch_with_kind(
@@ -185,7 +197,10 @@ impl RelayProcessorNode {
                 incoming_relay,
                 batch,
                 ProcessorInputFilterKind::FromWhere,
-                materialized_state,
+                ProcessorInputExpressionContext {
+                    materialized_state,
+                    execution_now,
+                },
             )
             .await?;
         self.filter_input_batch_with_kind(
@@ -194,7 +209,10 @@ impl RelayProcessorNode {
             incoming_relay,
             batch,
             ProcessorInputFilterKind::FilterWhere,
-            materialized_state,
+            ProcessorInputExpressionContext {
+                materialized_state,
+                execution_now,
+            },
         )
         .await
     }
@@ -238,11 +256,24 @@ impl RelayProcessorNode {
         batch: RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let now = branch
-                .runtime
-                .current_stream_expiration_time(&branch.domain)
-                .ok()
-                .unwrap_or_else(current_timestamp);
+            let now = match branch.runtime.domain_execution_snapshot(&branch.domain) {
+                Ok(snapshot) => snapshot.now(),
+                Err(error) => {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        self.kind,
+                        &self.processor,
+                        &self.error_policies,
+                        batch.acks.iter(),
+                        format!(
+                            "{} '{}' could not read domain execution time: {error}",
+                            self.kind.as_str(),
+                            self.processor.as_str(),
+                        ),
+                    );
+                    return;
+                }
+            };
             let Some(collector) = self.input_collectors.get_mut(incoming_relay) else {
                 self.execute(graph, branch, incoming_relay, batch).await;
                 return;
@@ -319,15 +350,19 @@ impl RelayProcessorNode {
         }
     }
 
-    pub(super) async fn filter_input_batch_with_kind(
+    async fn filter_input_batch_with_kind(
         &mut self,
         graph: &SharedActiveGraph,
         branch: &mut BranchRuntime,
         incoming_relay: &RelayName,
         batch: RelayRecordBatch,
         kind: ProcessorInputFilterKind,
-        materialized_state: &HashMap<String, RuntimeValue>,
+        context: ProcessorInputExpressionContext<'_>,
     ) -> Option<RelayRecordBatch> {
+        let ProcessorInputExpressionContext {
+            materialized_state,
+            execution_now,
+        } = context;
         let Some(filter_where) = (match kind {
             ProcessorInputFilterKind::FromWhere => self.from_where.get(incoming_relay),
             ProcessorInputFilterKind::FilterWhere => self.filter_where.as_ref(),
@@ -448,11 +483,7 @@ impl RelayProcessorNode {
             kind.label(),
             &program,
             batch,
-            branch
-                .runtime
-                .current_stream_expiration_time(&branch.domain)
-                .ok()
-                .unwrap_or_else(current_timestamp),
+            execution_now,
             materialized_state,
         )
         .await
@@ -494,8 +525,28 @@ impl RelayProcessorNode {
             let current = graph.load_full();
             let current = current.as_ref().map(StdArc::clone);
             self.refresh(&branch.runtime, &branch.domain, current);
+            let execution_snapshot = match branch.runtime.domain_execution_snapshot(&branch.domain)
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        self.kind,
+                        &self.processor,
+                        &self.error_policies,
+                        batch.acks.iter(),
+                        format!(
+                            "{} '{}' could not read domain execution time: {error}",
+                            self.kind.as_str(),
+                            self.processor.as_str(),
+                        ),
+                    );
+                    return;
+                }
+            };
+            let execution_now = execution_snapshot.now();
             let materialized_values = match self
-                .resolve_materialized_dependencies(branch, &batch.key)
+                .resolve_materialized_dependencies(branch, &batch.key, execution_now)
                 .await
             {
                 Ok(MaterializedDependencyResolution::Ready(values)) => values,
@@ -527,7 +578,14 @@ impl RelayProcessorNode {
                 }
             };
             let Some(batch) = self
-                .filter_input_batch(graph, branch, incoming_relay, batch, &materialized_values)
+                .filter_input_batch(
+                    graph,
+                    branch,
+                    incoming_relay,
+                    batch,
+                    &materialized_values,
+                    execution_now,
+                )
                 .await
             else {
                 return;
@@ -543,12 +601,6 @@ impl RelayProcessorNode {
                     let input_arrow_schema = batch.arrow_schema();
                     let key_input_batch = batch.batch.clone();
                     let key_input_keys = batch.keys.clone();
-                    let execution_now = branch
-                        .runtime
-                        .current_stream_expiration_time(&branch.domain)
-                        .ok()
-                        .unwrap_or_else(current_timestamp);
-
                     if compiled_key_program.is_none() {
                         let udfs = branch.runtime.udf_executor(&branch.domain);
                         match compile_deduplicator_key_program(
@@ -706,6 +758,7 @@ impl RelayProcessorNode {
                             materialized_state: ProcessorMaterializedState::Admitted(
                                 &materialized_values,
                             ),
+                            execution_now,
                         },
                         output_routes,
                         forwarded,
@@ -753,7 +806,6 @@ impl RelayProcessorNode {
                     let Some(first_message) = messages.first() else {
                         return;
                     };
-                    let execution_now = message_timestamp(first_message);
                     let row_count = messages.len();
                     let mut aggregate_inputs_by_row = (0..row_count)
                         .map(|_| Ok(Vec::new()))
@@ -817,9 +869,12 @@ impl RelayProcessorNode {
                                 branch
                                     .runtime
                                     .handle_message_error(
-                                        &branch.domain,
-                                        self.kind,
-                                        &self.processor,
+                                        MessageErrorSourceContext {
+                                            domain: &branch.domain,
+                                            node_kind: self.kind,
+                                            node: &self.processor,
+                                            execution_now,
+                                        },
                                         &self.error_policies,
                                         message,
                                         MessageErrorFailure::publish(
@@ -842,9 +897,12 @@ impl RelayProcessorNode {
                             branch
                                 .runtime
                                 .handle_message_error(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
+                                    MessageErrorSourceContext {
+                                        domain: &branch.domain,
+                                        node_kind: self.kind,
+                                        node: &self.processor,
+                                        execution_now,
+                                    },
                                     &self.error_policies,
                                     message,
                                     MessageErrorFailure::publish(
@@ -885,6 +943,7 @@ impl RelayProcessorNode {
                                 branch,
                                 output_routes,
                                 materialized_state: &self.materialized_state,
+                                execution_now,
                             },
                             state,
                             aggregate,
@@ -953,11 +1012,6 @@ impl RelayProcessorNode {
                     let Some(program) = compiled_program.as_ref() else {
                         return;
                     };
-                    let execution_now = branch
-                        .runtime
-                        .current_stream_expiration_time(&branch.domain)
-                        .ok()
-                        .unwrap_or_else(current_timestamp);
                     let lookup_columns = HashMap::default();
                     let vm_batch = match project_vm_input_batch(
                         &program.program.input_schema,
@@ -1094,6 +1148,7 @@ impl RelayProcessorNode {
                                 output_routes,
                                 input_relays: &self.input_relays,
                                 materialized_state: &self.materialized_state,
+                                execution_now,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -1132,11 +1187,6 @@ impl RelayProcessorNode {
                         );
                         return;
                     };
-                    let execution_now = branch
-                        .runtime
-                        .current_stream_expiration_time(&branch.domain)
-                        .ok()
-                        .unwrap_or_else(current_timestamp);
                     if compiled_where_program.is_none() {
                         let Some(left_relay) = left_relays.first() else {
                             branch.runtime.handle_internal_processor_error_for_acks(
@@ -1569,6 +1619,7 @@ impl RelayProcessorNode {
                                             partial_output: error.partial_output,
                                             materialized_state: error.materialized_state,
                                             ingest_metadata: None,
+                                            execution_now,
                                         })
                                         .await;
                                 }
@@ -1601,6 +1652,7 @@ impl RelayProcessorNode {
                             input_relays: &self.input_relays,
                             output_routes,
                             materialized_values: &materialized_values,
+                            execution_now,
                         },
                         batch,
                     )
@@ -1631,20 +1683,17 @@ impl RelayProcessorNode {
                         );
                         return;
                     }
-                    let now = branch
-                        .runtime
-                        .current_stream_expiration_time(&branch.domain)
-                        .ok()
-                        .unwrap_or_else(current_timestamp);
                     let route_batches = batch.into_attached_fanout(output_routes.routes.len());
                     let mut due_outputs = Vec::new();
                     for (output_index, route_batch) in route_batches.into_iter().enumerate() {
                         let output_buffer = &mut output_buffers[output_index];
                         output_buffer.push(route_batch);
                         let output = &mut output_routes.routes[output_index];
-                        match output.schedule_input_flush(now, output_buffer.estimated_bytes()) {
+                        match output
+                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes())
+                        {
                             Some(true) => {
-                                output.force_flush_at(now);
+                                output.force_flush_at(execution_now);
                                 due_outputs.push(output_index);
                             }
                             Some(false) => {}
@@ -1686,6 +1735,7 @@ impl RelayProcessorNode {
                                 input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
+                                execution_now,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -1721,6 +1771,7 @@ impl RelayProcessorNode {
                             file,
                             limits: *limits,
                             replicated_state,
+                            execution_now,
                         },
                         compiled,
                         instance,
@@ -1755,6 +1806,7 @@ impl RelayProcessorNode {
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
                         &self.materialized_state,
                     ),
+                    execution_now: now,
                 },
                 self.operation.output_routes_mut(),
                 now,
@@ -1783,6 +1835,7 @@ impl RelayProcessorNode {
                             branch,
                             output_routes,
                             materialized_state: &self.materialized_state,
+                            execution_now: now,
                         },
                         state,
                         aggregate,
@@ -1851,6 +1904,7 @@ impl RelayProcessorNode {
                                 output_routes,
                                 input_relays: &self.input_relays,
                                 materialized_state: &self.materialized_state,
+                                execution_now: now,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -1895,11 +1949,14 @@ impl RelayProcessorNode {
                     };
                     for (action, message) in timed_out {
                         handle_correlator_timeout_action(
-                            graph,
-                            branch,
-                            self.kind,
-                            &self.processor,
-                            &self.error_policies,
+                            CorrelatorTimeoutContext {
+                                graph,
+                                branch,
+                                node_kind: self.kind,
+                                processor: &self.processor,
+                                error_policies: &self.error_policies,
+                                execution_now: now,
+                            },
                             &action,
                             message,
                         )
@@ -1945,6 +2002,7 @@ impl RelayProcessorNode {
                                 input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
+                                execution_now: now,
                             },
                             &mut output_buffers[output_index],
                             output_index,
@@ -1991,12 +2049,16 @@ impl RelayProcessorNode {
                             .verified(
                                 "the let-else above returned unless this branch holds an instance",
                             )
-                            .on_timeout(timeout.handle)
+                            .on_timeout_in_context(
+                                timeout.handle,
+                                nervix_wasm::WasmExecutionContext::new(now),
+                            )
                             .await;
                         let outputs = match timeout_result {
                             Ok(outputs) => outputs,
                             Err(error) => {
-                                let resource_limit_exceeded = error.is_resource_limit_exceeded();
+                                let resource_limit_exceeded =
+                                    error.current_context().is_resource_limit_exceeded();
                                 let reason = format!(
                                     "wasm processor '{}' failed timeout callback: {}",
                                     self.processor.as_str(),
@@ -2030,6 +2092,7 @@ impl RelayProcessorNode {
                                 output_schemas: &schemas.outputs,
                                 key: &output_key,
                                 dispatch_error: "failed to forward timeout output",
+                                execution_now: now,
                             },
                             outputs,
                             ack_map,
@@ -2045,6 +2108,7 @@ impl RelayProcessorNode {
                         &self.processor,
                         replicated_state,
                         instance,
+                        now,
                     )
                     .await
                     {
@@ -2072,6 +2136,7 @@ impl RelayProcessorNode {
         &'a mut self,
         graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
+        execution_now: Timestamp,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let RelayProcessorOperationNode::WasmProcessor {
@@ -2101,12 +2166,13 @@ impl RelayProcessorNode {
             let flush_result = instance
                 .as_mut()
                 .verified("the let-else above returned unless this branch holds an instance")
-                .flush()
+                .flush_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
                 .await;
             let outputs = match flush_result {
                 Ok(outputs) => outputs,
                 Err(error) => {
-                    let resource_limit_exceeded = error.is_resource_limit_exceeded();
+                    let resource_limit_exceeded =
+                        error.current_context().is_resource_limit_exceeded();
                     let reason = format!(
                         "wasm processor '{}' failed quiesce flush: {}",
                         self.processor.as_str(),
@@ -2144,6 +2210,7 @@ impl RelayProcessorNode {
                     output_schemas: &schemas.outputs,
                     key: &output_key,
                     dispatch_error: "failed to forward quiesce flush output",
+                    execution_now,
                 },
                 outputs,
                 ack_map,
@@ -2189,6 +2256,7 @@ impl RelayProcessorNode {
     pub(super) async fn checkpoint_live_state(
         &mut self,
         branch: &mut BranchRuntime,
+        execution_now: Timestamp,
     ) -> OwnershipHandoffResult<()> {
         match &mut self.operation {
             RelayProcessorOperationNode::WindowProcessor {
@@ -2215,6 +2283,7 @@ impl RelayProcessorNode {
                     &self.processor,
                     replicated_state,
                     instance,
+                    execution_now,
                 )
                 .await
             }

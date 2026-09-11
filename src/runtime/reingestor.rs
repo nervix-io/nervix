@@ -17,6 +17,7 @@ pub(super) struct ReingestorDispatchContext<'a> {
     pub(super) mode: AckMode,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    pub(super) execution_now: Timestamp,
 }
 
 #[derive(Clone, Copy)]
@@ -342,6 +343,7 @@ impl Runtime {
                     key: batch.keys[input_row].clone(),
                     record,
                     error: program.structured_side_error(
+                        scope.execution_now,
                         format!(
                             "reingestor '{}' FILTER-MAP side error {}: {} at {}",
                             reingestor.as_str(),
@@ -478,6 +480,7 @@ impl Runtime {
             reingestor,
             error_policies,
             branched_senders,
+            execution_now,
             ..
         } = context;
         if batch.message_count() == 0 {
@@ -519,10 +522,7 @@ impl Runtime {
         let mut scope = ProcessorOutputBatchScope {
             state_snapshot: relay_state_snapshot_from_side_inputs(materialized_values),
             side_inputs: materialized_values.clone(),
-            execution_now: self
-                .current_stream_expiration_time(domain)
-                .ok()
-                .unwrap_or_else(current_timestamp),
+            execution_now,
             output_schemas,
             shared: SharedBatchColumns::default(),
         };
@@ -643,6 +643,7 @@ impl Runtime {
                 partial_output: error.partial_output,
                 materialized_state: error.materialized_state,
                 ingest_metadata: None,
+                execution_now: scope.execution_now,
             })
             .await;
         }
@@ -803,6 +804,7 @@ impl Runtime {
             from_relay,
             from_where,
             error_policies,
+            execution_now,
             ..
         } = context;
         let Some(from_where) = from_where else {
@@ -903,10 +905,6 @@ impl Runtime {
         let Some(program) = compiled_from_where.clone() else {
             return Some(batch);
         };
-        let execution_now = self
-            .current_stream_expiration_time(domain)
-            .ok()
-            .unwrap_or_else(current_timestamp);
         let plan = match plan_filter_map_messages(
             "reingestor",
             reingestor,
@@ -1023,6 +1021,17 @@ impl Runtime {
         let force_flush = self.force_flush_participant(domain, quiesce_counters.clone());
 
         Ok(tokio::spawn(async move {
+            let domain_clock = match runtime.bind_domain_clock(&task_domain) {
+                Ok(clock) => clock,
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "reingestor '{}' in domain '{}' could not bind its clock: {error}",
+                        task_reingestor.as_str(),
+                        task_domain.as_str(),
+                    ));
+                    return;
+                }
+            };
             let mut output_quiesce_gauge =
                 ReingestorOutputQuiesceGauge::new(quiesce_counters.clone());
             let interaction_input =
@@ -1040,16 +1049,23 @@ impl Runtime {
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
-                let execution_now = runtime
-                    .current_stream_expiration_time(&task_domain)
-                    .ok()
-                    .unwrap_or_else(current_timestamp);
+                let scheduling_now = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot.now(),
+                    Err(error) => {
+                        runtime.events().report_error(format!(
+                            "reingestor '{}' in domain '{}' lost its clock: {error}",
+                            task_reingestor.as_str(),
+                            task_domain.as_str(),
+                        ));
+                        break;
+                    }
+                };
                 let wake_at = match task_output_routes.next_flush() {
                     Some(deadline) => {
                         let duration = match wall_duration_until_domain_deadline(
                             &runtime,
                             &task_domain,
-                            execution_now,
+                            scheduling_now,
                             deadline,
                         ) {
                             Ok(duration) => duration,
@@ -1085,6 +1101,17 @@ impl Runtime {
                     }
                 };
                 let (event, mut work) = work.into_parts();
+                let execution_now = match domain_clock.snapshot() {
+                    Ok(snapshot) => snapshot.now(),
+                    Err(error) => {
+                        runtime.events().report_error(format!(
+                            "reingestor '{}' in domain '{}' lost its clock: {error}",
+                            task_reingestor.as_str(),
+                            task_domain.as_str(),
+                        ));
+                        break;
+                    }
+                };
                 match event {
                     RelayInteractionEvent::Stopped(reason) => {
                         runtime
@@ -1097,6 +1124,7 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    execution_now,
                                 },
                                 &mut task_output_routes,
                                 ReingestorOutputFlush::All,
@@ -1112,10 +1140,6 @@ impl Runtime {
                         break;
                     }
                     RelayInteractionEvent::Wake => {
-                        let now = runtime
-                            .current_stream_expiration_time(&task_domain)
-                            .ok()
-                            .unwrap_or_else(current_timestamp);
                         runtime
                             .flush_reingestor_outputs(
                                 ReingestorDispatchContext {
@@ -1126,9 +1150,10 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    execution_now,
                                 },
                                 &mut task_output_routes,
-                                ReingestorOutputFlush::Due(now),
+                                ReingestorOutputFlush::Due(execution_now),
                                 &mut output_quiesce_gauge,
                             )
                             .await;
@@ -1144,6 +1169,7 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    execution_now,
                                 },
                                 &mut task_output_routes,
                                 ReingestorOutputFlush::All,
@@ -1229,7 +1255,7 @@ impl Runtime {
                                 continue;
                             }
                         };
-                        let (batch, materialized_values) = batch;
+                        let (batch, materialized_values, execution_now) = batch;
                         runtime
                             .dispatch_reingestor_outputs(
                                 ReingestorDispatchContext {
@@ -1240,6 +1266,7 @@ impl Runtime {
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
+                                    execution_now,
                                 },
                                 &mut compiled_from_where,
                                 &mut task_output_routes,
@@ -1283,6 +1310,7 @@ mod tests {
     async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filters() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let root_relay = named("tenant_orders");
         let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(
             TWO_ITEM_TEST_CHANNEL_CAPACITY,
@@ -1440,6 +1468,7 @@ mod tests {
     async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let root_relay = named("tenant_orders");
         let services = Arc::new(RelayBoundaryServices::new(
             RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1)),
@@ -1538,6 +1567,7 @@ mod tests {
     async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         let runtime = Runtime::default();
         let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
         let relay = named("tenant_orders");
         let output_registry = RelayRegistry::new();
         let output_services = test_relay_boundary_services();

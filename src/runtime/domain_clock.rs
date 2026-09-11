@@ -17,7 +17,7 @@ use nervix_models::{
     DomainAdmissionWindow, DomainClockAuthority, DomainClockError, DomainClockPeriod,
     DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
 };
-use nervix_wasm::{DomainClock as WasmDomainClock, WasmExecutionContext};
+use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -587,38 +587,6 @@ impl LogicalDeadlineReached {
     }
 }
 
-pub(super) struct RuntimeWasmDomainClock {
-    clock: DomainClock,
-    last_snapshot: parking_lot::Mutex<Timestamp>,
-}
-
-impl RuntimeWasmDomainClock {
-    pub(super) fn new(clock: DomainClock) -> DomainClockAccessResult<Self> {
-        let last_snapshot = clock.snapshot()?.now();
-        Ok(Self {
-            clock,
-            last_snapshot: parking_lot::Mutex::new(last_snapshot),
-        })
-    }
-}
-
-impl WasmDomainClock for RuntimeWasmDomainClock {
-    fn now(&self) -> Timestamp {
-        match self.clock.snapshot() {
-            Ok(snapshot) => {
-                *self.last_snapshot.lock() = snapshot.now();
-                snapshot.now()
-            }
-            Err(_clock_error) => {
-                // This infallible engine adapter cannot cross into a different time coordinate.
-                // Its owning domain task observes the same lifecycle invalidation and is rebuilt;
-                // until then the last validated value keeps guest reads nondecreasing.
-                *self.last_snapshot.lock()
-            }
-        }
-    }
-}
-
 pub(super) fn checked_add_duration_to_timestamp(base: Timestamp, duration: Duration) -> Timestamp {
     // Saturation is the meaning here: a schedule further out than the nanosecond range is already
     // further out than any timestamp this clock will reach.
@@ -642,10 +610,6 @@ pub(super) fn advance_scheduled_timestamp(
     *next = Some(scheduled);
 }
 
-pub(super) fn wall_duration_until_timestamp(current: Timestamp, target: Timestamp) -> Duration {
-    target.duration_since(current).unwrap_or(Duration::ZERO)
-}
-
 pub(super) fn current_timestamp() -> Timestamp {
     actual_utc_now()
 }
@@ -666,6 +630,23 @@ pub(super) fn wall_duration_until_logical_target(
 }
 
 impl Runtime {
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_domain_clock_initial_elapsed(
+        &self,
+        domain: &DomainName,
+    ) -> Option<Duration> {
+        self.inner
+            .fault_injection
+            .take_domain_clock_initial_elapsed(domain)
+    }
+
+    pub(crate) fn domain_execution_snapshot(
+        &self,
+        domain: &DomainName,
+    ) -> DomainClockAccessResult<DomainExecutionSnapshot> {
+        self.bind_domain_clock(domain)?.snapshot()
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) async fn pause_domain_clock_progress_if_armed(
         &self,

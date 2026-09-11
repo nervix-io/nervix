@@ -215,6 +215,7 @@ impl ClickHouseEmitter {
         values: &[ClickHouseValueMapping],
         batch: &RelayRecordBatch,
         pending_chunks: &[Vec<usize>],
+        execution_now: Timestamp,
     ) -> PerRecordPublishOutcome {
         let mut outcome = PerRecordPublishOutcome::empty();
         if pending_chunks.is_empty() {
@@ -227,8 +228,7 @@ impl ClickHouseEmitter {
             );
             return outcome;
         };
-        let lines = match Self::batch_json_lines(program, values, batch, current_timestamp()).await
-        {
+        let lines = match Self::batch_json_lines(program, values, batch, execution_now).await {
             Ok(lines) => lines,
             Err(error) => {
                 outcome.fail(error);

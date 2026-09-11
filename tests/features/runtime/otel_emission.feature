@@ -1,11 +1,12 @@
 Feature: OTEL emission
+  @domain_execution_time
   Scenario Outline: OTEL log and trace emitters export typed relay records over OTLP gRPC
     Given OpenTelemetry Collector is running
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     When these NSPL commands are executed
       """
@@ -42,6 +43,7 @@ Feature: OTEL emission
       CREATE INGESTOR audit_source
       FROM ENDPOINT audit_ingress MODE NO_ACK SEQUENTIAL
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING audit_event_codec
+      TIMESTAMP NOW
       TO audit_events
       INHERIT ALL
       UNBRANCHED
@@ -62,7 +64,10 @@ Feature: OTEL emission
         'time' = input.event_ts,
         'severity_text' = input.level,
         'severity_number' = input.level_num,
-        'body' = input.message,
+        'body' = CASE
+          WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.message
+          ELSE 'physical-time'
+        END,
         'trace_id' = input.trace_id,
         'span_id' = input.span_id
       }
@@ -85,7 +90,10 @@ Feature: OTEL emission
       VALUES {
         'trace_id' = input.trace_id,
         'span_id' = input.span_id,
-        'name' = 'otel-trace-{{test_id}}',
+        'name' = CASE
+          WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN 'otel-trace-{{test_id}}'
+          ELSE 'physical-time-trace'
+        END,
         'kind' = 'INTERNAL',
         'start_time' = input.event_ts,
         'end_time' = input.event_ts,
@@ -104,7 +112,7 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      START;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And OTEL client for emitter "audit_to_otel" enters unavailable fault mode
     And http payload is posted to host "otel-{{test_id}}.example.com" path "/audit"

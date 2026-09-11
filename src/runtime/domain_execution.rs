@@ -101,6 +101,23 @@ pub(super) struct RuntimeDomainState {
 }
 
 impl Runtime {
+    pub(crate) fn subscribe_domain_state(&self) -> watch::Receiver<u64> {
+        self.inner.domain_status_changed.subscribe()
+    }
+
+    pub(crate) fn has_domain_clock_authority(
+        &self,
+        domain: &DomainName,
+        generation: u64,
+        authority: &DomainClockAuthority,
+    ) -> bool {
+        self.inner.domains.get(domain).is_some_and(|state| {
+            !matches!(state.status, nervix_models::DomainStatus::Stopped)
+                && state.start_version == generation
+                && state.clock_authority == *authority
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
         let authority = DomainClockAuthority::assigned(

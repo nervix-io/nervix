@@ -284,15 +284,6 @@ macro_rules! impl_register_bank {
 
 with_typed_registers!(impl_register_bank);
 
-pub async fn execute_program(
-    program: &triomphe::Arc<CompiledProgram>,
-    batch: &TypedBatch,
-) -> Result<TypedBatch, RuntimeError> {
-    execute_program_in_context(program, batch, &ExecutionContext::default())
-        .await
-        .map(|result| result.batch)
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionResult {
     pub batch: TypedBatch,
@@ -407,10 +398,10 @@ pub struct ExecutionContext {
     pub injector: Option<triomphe::Arc<Box<dyn FunctionInjector>>>,
 }
 
-impl Default for ExecutionContext {
-    fn default() -> Self {
+impl ExecutionContext {
+    pub const fn new(now: Timestamp) -> Self {
         Self {
-            now: Timestamp::now(),
+            now,
             injector: None,
         }
     }
@@ -422,13 +413,6 @@ pub async fn execute_program_in_context(
     context: &ExecutionContext,
 ) -> Result<ExecutionResult, RuntimeError> {
     execute_program_with_selection_in_context(program, batch, context).await
-}
-
-pub async fn execute_program_with_selection(
-    program: &triomphe::Arc<CompiledProgram>,
-    batch: &TypedBatch,
-) -> Result<ExecutionResult, RuntimeError> {
-    execute_program_with_selection_in_context(program, batch, &ExecutionContext::default()).await
 }
 
 pub async fn execute_program_with_selection_in_context(
@@ -472,8 +456,8 @@ fn execute_program_sync(
     program: &CompiledProgram,
     batch: &TypedBatch,
 ) -> Result<TypedBatch, RuntimeError> {
-    execute_program_in_context_sync(program, batch, &ExecutionContext::default())
-        .map(|result| result.batch)
+    let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
+    execute_program_in_context_sync(program, batch, &context).map(|result| result.batch)
 }
 
 #[cfg(test)]
@@ -490,7 +474,8 @@ fn execute_program_with_selection_sync(
     program: &CompiledProgram,
     batch: &TypedBatch,
 ) -> Result<ExecutionResult, RuntimeError> {
-    execute_program_with_selection_in_context_sync(program, batch, &ExecutionContext::default())
+    let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
+    execute_program_with_selection_in_context_sync(program, batch, &context)
 }
 
 fn execute_program_with_selection_in_context_sync(

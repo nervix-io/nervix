@@ -40,9 +40,10 @@ use openraft::{
     BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
     Vote,
     error::{ClientWriteError, RPCError, RaftError, StreamingError},
+    metrics::RaftServerMetrics,
     network::{RPCOption, RaftNetworkV2},
     type_config::{
-        alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf},
+        alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf, WatchReceiverOf},
         async_runtime::watch::WatchReceiver,
     },
 };
@@ -808,6 +809,21 @@ pub struct Observer {
     inner: Arc<ConsensusState>,
 }
 
+/// Retained Raft leadership and membership observation.
+pub struct RaftTopologyWatcher {
+    state: WatchReceiverOf<TypeConfig, RaftServerMetrics<TypeConfig>>,
+}
+
+impl RaftTopologyWatcher {
+    /// Wait for a server-state change, returning `false` after the Raft core has stopped.
+    pub async fn changed(&mut self) -> bool {
+        match self.state.changed().await {
+            Ok(()) => true,
+            Err(_) => false,
+        }
+    }
+}
+
 /// Proposes replicated commands and includes read-only observation.
 ///
 /// This capability authorizes proposal attempts. Leadership may change after an earlier
@@ -1288,6 +1304,13 @@ impl Observer {
 
     pub fn subscribe_transactions(&self) -> watch::Receiver<u64> {
         self.inner.store.inner.transaction_tx.subscribe()
+    }
+
+    /// Observe retained leadership and membership changes without exposing OpenRaft to callers.
+    pub fn subscribe_topology(&self) -> RaftTopologyWatcher {
+        RaftTopologyWatcher {
+            state: self.inner.raft.server_metrics(),
+        }
     }
 
     pub async fn current_schedule(&self) -> ClusterSchedule {

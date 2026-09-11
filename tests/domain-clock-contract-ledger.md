@@ -90,6 +90,8 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Logical collection/flush and physical minima | `Paced branch collection and flush follow logical time while Immediate and source idle remain physical`, task 07 | Two interleaved branches on one and three nodes, preserving fields |
 | Logical emitter cadence and physical retry/ACK | `Emitter cadence follows logical time while retry and ACK deadlines remain physical`, task 08 | One- and three-node random schedules with controlled sink failure |
 | Fresh branch activity and logical retention | `Activity sampled after an awaited record keeps each logical branch alive`, task 10 | Two interleaved branches on one and three nodes, preserving fields |
+| One snapshot across expression contexts | `Every expression context observes its domain execution time`, task 06 | One- and three-node random schedules through ingestion, a junction, and a subscription, extended by focused generator, inferencer, SQS, database, Iceberg, Sentry, and OTEL scenarios |
+| Failure, guest, generated metadata, and telemetry clock classes | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes`, task 06 | One- and three-node random schedules with historical domain time, error routing, WASM lifecycle callbacks, tokenless output, and external telemetry fixtures |
 
 ## Reusable fixtures
 
@@ -130,13 +132,25 @@ just test-scenarios --input tests/features/runtime/domain_clock_contract.feature
 just test-scenarios --input tests/features/runtime/domain_ingestion_time.feature
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_bound_clock
 just test-scenarios --input tests/features/runtime/domain_clock_contract.feature --tags @domain_clock_authority
+just test-scenarios --input tests/features/runtime/domain_execution_time.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/generator.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/inferencer.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/sqs_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/postgres_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/mysql_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/clickhouse_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/mongodb_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/iceberg_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/sentry_emission.feature --tags @domain_execution_time
+just test-scenarios --input tests/features/runtime/otel_emission.feature --tags @domain_execution_time
 ```
 
 The delayed-progress scenario is part of the ordinary suite after task 02. Task 05 enables the
 logical-origin scenario and adds `domain_ingestion_time.feature` for admission, delivery and
 duration-window coverage. The untagged
 `Out-of-range paced starts and projections return typed timestamp diagnostics` scenario records
-task 02's F10 public coverage.
+task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and focused tagged
+coverage in the listed runtime feature files for F6 and F7.
 
 Physical controls are
 `tests::connection_lifetime::send_queue_admission_is_deadline_bound`,
@@ -242,5 +256,20 @@ Recorded on 9 September 2026 against the task 05 worktree:
 | `just book 0.1.0-dev` | Pass; executable documentation, console screenshots, and the HTML, LLM, and Markdown book renderers completed. |
 | `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and executable NSPL documentation. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell by two. |
+
+No complete Cucumber-suite or final qualification result is claimed by this record.
+
+## Task 06 validation record
+
+Recorded on 10 September 2026 against the task 06 worktree, including the merged `origin/main`:
+
+| Probe | Result |
+| --- | --- |
+| `Domain execution time` | Pass; all six one- and three-node scenarios and all 64 steps bound ingestion, processor, subscription, generated-error, WASM, generated-metadata, and window expressions to historical domain execution time. |
+| Focused generator, inferencer, emitter, and telemetry scenarios | Pass; 24 scenarios and 272 steps covered generator and inferencer mappings, SQS groups, PostgreSQL, MySQL, ClickHouse, MongoDB, Iceberg, Sentry, and OTEL clock classes. |
+| `nervix-vm` unit suite | Pass; 102 tests covered explicit execution contexts with no context-free runtime execution entry point. |
+| `nervix-server` library suite | Pass; 793 tests passed after merging the current consensus and startup paths. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. The relay-boundary tests moved to their focused module, and bare-error signature debt fell from 844 to 843. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.

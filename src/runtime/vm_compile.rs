@@ -105,6 +105,7 @@ impl CompiledProgramWithMaterializedInterest {
 
     pub(super) fn structured_side_error(
         &self,
+        execution_now: Timestamp,
         reason: String,
         span: VmSpan,
         fallback_operation: MessageErrorOperation,
@@ -115,6 +116,7 @@ impl CompiledProgramWithMaterializedInterest {
             None => fallback_operation,
         };
         structured_message_error(
+            execution_now,
             MessageErrorCode::Evaluation,
             reason,
             operation,
@@ -1574,6 +1576,7 @@ pub(crate) fn compile_key_projection_program(
 pub(super) async fn evaluate_constant_expression_vm(
     expression: &nervix_models::Expression,
     udfs: Option<&UdfExecutor>,
+    execution_now: Timestamp,
 ) -> Result<RuntimeValue, String> {
     const OUTPUT_NAMESPACE: &str = "constant";
     const OUTPUT_FIELD: &str = "value";
@@ -1650,7 +1653,7 @@ pub(super) async fn evaluate_constant_expression_vm(
         &compiled,
         &input,
         &VmExecutionContext {
-            now: current_timestamp(),
+            now: execution_now,
             injector: None,
         },
     )

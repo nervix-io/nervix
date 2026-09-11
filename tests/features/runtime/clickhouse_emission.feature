@@ -1,4 +1,5 @@
 Feature: ClickHouse emission
+  @domain_execution_time
   Scenario Outline: ClickHouse emitter inserts mapped rows from a relay
     Given MQTT is running
     And ClickHouse is running
@@ -6,7 +7,7 @@ Feature: ClickHouse emission
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And ClickHouse table "notifications_out_{{test_id}}" exists
     When these NSPL commands are executed
@@ -34,6 +35,7 @@ Feature: ClickHouse emission
         CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         ON QUIESCE DROP DECODE USING notification_codec
+        TIMESTAMP NOW
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications
@@ -48,11 +50,11 @@ Feature: ClickHouse emission
           'user' = 'default',
           'password' = 'nervix'
         };
-        CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client INSERT TO TABLE notifications_out_{{test_id}} VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = LOWER(input.action) } WITH MAX BATCH 500 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client INSERT TO TABLE notifications_out_{{test_id}} VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } WITH MAX BATCH 500 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        START;
+        START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And emitter "to_ch" enters stall mode
     And MQTT message is published to topic "notifications_in_{{test_id}}"

@@ -194,7 +194,7 @@ Feature: Ingestor metrics
       | 1            |
       | 3            |
 
-  Scenario Outline: DESCRIBE INGESTOR reports flush-sized batches for rapid <branch_strategy> <source_kind> input
+  Scenario Outline: DESCRIBE INGESTOR reports a size-triggered batch for rapid <branch_strategy> <source_kind> input
     Given Redis is running
     And MQTT is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -203,6 +203,8 @@ Feature: Ingestor metrics
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    # Ten required I64 values occupy 80B, so the size boundary closes this batch after the tenth
+    # message without depending on how quickly the broker delivers the burst.
     When these NSPL commands are executed
       """
       CREATE SCHEMA notification (
@@ -236,7 +238,7 @@ Feature: Ingestor metrics
         TO notifications
         INHERIT ALL
         <output_branching>
-        FLUSH EACH 1s MAX BATCH SIZE 1MiB
+        FLUSH EACH 1h MAX BATCH SIZE 80B
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -266,6 +268,20 @@ Feature: Ingestor metrics
       p90_15m<=10
       p99_15m>=9
       p99_15m<=10
+      """
+    And node "node-1" observability metric "nervix_messages_per_batch_count" with labels eventually equals 1
+      """
+      target_kind="INGESTOR"
+      target="ingestor_metrics_source"
+      direction="sent"
+      relay="notifications"
+      """
+    And node "node-1" observability metric "nervix_messages_per_batch_sum" with labels eventually equals 10
+      """
+      target_kind="INGESTOR"
+      target="ingestor_metrics_source"
+      direction="sent"
+      relay="notifications"
       """
 
     Examples:

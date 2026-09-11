@@ -140,53 +140,118 @@ struct ClientConnection {
     closed: CancellationToken,
 }
 
-#[derive(Clone)]
-struct StreamSlotQuotas {
-    class: PoolClass,
+/// Tokio's owned permits retain a `std::sync::Arc` to their one semaphore after the connection
+/// quota bundle is no longer borrowed. The surrounding `triomphe::Arc` keeps cloning the complete
+/// management bundle to one reference-count operation.
+struct ManagementStreamSlotQuotas {
     shared: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
+    progress: StdArc<Semaphore>,
     admission: StdArc<Semaphore>,
     cancellation: StdArc<Semaphore>,
     terminal: StdArc<Semaphore>,
 }
 
-const MANAGEMENT_SHARED_STREAMS: usize = 40;
+#[derive(Clone)]
+enum StreamSlotQuotas {
+    Management(Arc<ManagementStreamSlotQuotas>),
+    Shared {
+        class: PoolClass,
+        slots: StdArc<Semaphore>,
+    },
+}
+
+const MANAGEMENT_TOTAL_STREAMS: usize = PoolClass::Management.stream_slots_per_connection();
 const MANAGEMENT_DISCOVERY_STREAMS: usize = 4;
 const MANAGEMENT_LIVENESS_STREAMS: usize = 8;
+pub(super) const MANAGEMENT_PROGRESS_STREAMS: usize = MANAGEMENT_LIVENESS_STREAMS;
 const MANAGEMENT_ADMISSION_STREAMS: usize = 4;
 const MANAGEMENT_CANCELLATION_STREAMS: usize = 4;
 const MANAGEMENT_TERMINAL_STREAMS: usize = 4;
+const MANAGEMENT_RESERVED_STREAMS: usize = MANAGEMENT_DISCOVERY_STREAMS
+    + MANAGEMENT_LIVENESS_STREAMS
+    + MANAGEMENT_PROGRESS_STREAMS
+    + MANAGEMENT_ADMISSION_STREAMS
+    + MANAGEMENT_CANCELLATION_STREAMS
+    + MANAGEMENT_TERMINAL_STREAMS;
+const _: () = assert!(
+    MANAGEMENT_RESERVED_STREAMS < MANAGEMENT_TOTAL_STREAMS,
+    "reserved management stream quotas must leave shared capacity",
+);
+pub(super) const MANAGEMENT_SHARED_STREAMS: usize =
+    MANAGEMENT_TOTAL_STREAMS - MANAGEMENT_RESERVED_STREAMS;
+const _: () = assert!(
+    MANAGEMENT_SHARED_STREAMS + MANAGEMENT_RESERVED_STREAMS == MANAGEMENT_TOTAL_STREAMS,
+    "management stream subquotas must exactly partition the HTTP/2 stream capacity",
+);
+const _: () = assert!(
+    MANAGEMENT_DISCOVERY_STREAMS > 0
+        && MANAGEMENT_LIVENESS_STREAMS > 0
+        && MANAGEMENT_PROGRESS_STREAMS > 0
+        && MANAGEMENT_ADMISSION_STREAMS > 0
+        && MANAGEMENT_CANCELLATION_STREAMS > 0
+        && MANAGEMENT_TERMINAL_STREAMS > 0,
+    "every reserved management stream class must have capacity",
+);
 
 impl StreamSlotQuotas {
     fn new(class: PoolClass) -> Self {
         if class == PoolClass::Management {
-            return Self {
-                class,
+            return Self::Management(Arc::new(ManagementStreamSlotQuotas {
                 shared: StdArc::new(Semaphore::new(MANAGEMENT_SHARED_STREAMS)),
                 discovery: StdArc::new(Semaphore::new(MANAGEMENT_DISCOVERY_STREAMS)),
                 liveness: StdArc::new(Semaphore::new(MANAGEMENT_LIVENESS_STREAMS)),
+                progress: StdArc::new(Semaphore::new(MANAGEMENT_PROGRESS_STREAMS)),
                 admission: StdArc::new(Semaphore::new(MANAGEMENT_ADMISSION_STREAMS)),
                 cancellation: StdArc::new(Semaphore::new(MANAGEMENT_CANCELLATION_STREAMS)),
                 terminal: StdArc::new(Semaphore::new(MANAGEMENT_TERMINAL_STREAMS)),
-            };
+            }));
         }
-        Self {
+        Self::Shared {
             class,
-            shared: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
-            discovery: StdArc::new(Semaphore::new(0)),
-            liveness: StdArc::new(Semaphore::new(0)),
-            admission: StdArc::new(Semaphore::new(0)),
-            cancellation: StdArc::new(Semaphore::new(0)),
-            terminal: StdArc::new(Semaphore::new(0)),
+            slots: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
         }
     }
 
+    fn for_subquota(&self, subquota: RequestSubquota) -> Option<&StdArc<Semaphore>> {
+        match self {
+            Self::Management(quotas) => Some(quotas.for_subquota(subquota)),
+            Self::Shared { slots, .. } => {
+                if let RequestSubquota::Shared = subquota {
+                    Some(slots)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    async fn drain(&self) {
+        match self {
+            Self::Management(quotas) => quotas.drain().await,
+            Self::Shared { class, slots } => {
+                let permits: u32 = class
+                    .stream_slots_per_connection()
+                    .try_into()
+                    .assured("stream slot counts are much smaller than u32::MAX");
+                let permit = StdArc::clone(slots)
+                    .acquire_many_owned(permits)
+                    .await
+                    .assured("interconnect stream-slot semaphores are never closed");
+                drop(permit);
+            }
+        }
+    }
+}
+
+impl ManagementStreamSlotQuotas {
     fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
         match subquota {
             RequestSubquota::Shared => &self.shared,
             RequestSubquota::Discovery => &self.discovery,
             RequestSubquota::Liveness => &self.liveness,
+            RequestSubquota::Progress => &self.progress,
             RequestSubquota::Admission => &self.admission,
             RequestSubquota::Cancellation => &self.cancellation,
             RequestSubquota::Terminal => &self.terminal,
@@ -194,23 +259,11 @@ impl StreamSlotQuotas {
     }
 
     async fn drain(&self) {
-        if self.class != PoolClass::Management {
-            let permits: u32 = self
-                .class
-                .stream_slots_per_connection()
-                .try_into()
-                .assured("stream slot counts are much smaller than u32::MAX");
-            let permit = StdArc::clone(&self.shared)
-                .acquire_many_owned(permits)
-                .await
-                .assured("interconnect stream-slot semaphores are never closed");
-            drop(permit);
-            return;
-        }
         let quotas = [
             (RequestSubquota::Shared, MANAGEMENT_SHARED_STREAMS),
             (RequestSubquota::Discovery, MANAGEMENT_DISCOVERY_STREAMS),
             (RequestSubquota::Liveness, MANAGEMENT_LIVENESS_STREAMS),
+            (RequestSubquota::Progress, MANAGEMENT_PROGRESS_STREAMS),
             (RequestSubquota::Admission, MANAGEMENT_ADMISSION_STREAMS),
             (
                 RequestSubquota::Cancellation,
@@ -1262,46 +1315,49 @@ impl TransportState {
             if self.admission_closed.is_cancelled() {
                 return Err(TransportError::ShuttingDown);
             }
-            let target = if let Some(target) = self.targets.get(node_id) {
-                target.value().clone()
-            } else {
-                return Err(TransportError::MissingTarget(node_id.clone()));
-            };
-            self.ensure_class_slots(node_id, &target, class);
+            if let Some(target) = self
+                .targets
+                .get(node_id)
+                .map(|target| target.value().clone())
+            {
+                self.ensure_class_slots(node_id, &target, class);
 
-            let count = class.connections_per_peer();
-            let start = self
-                .next_connection
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.checked_add(1).unwrap_or_default())
-                })
-                .assured("the round-robin cursor update always returns a value")
-                % count;
-            for offset in 0..count {
-                let index = (start + offset) % count;
-                let key = ConnectionSlotKey {
-                    node_id: node_id.clone(),
-                    target: target.clone(),
-                    class,
-                    slot: index,
-                };
-                let Some(connection) = self.connections.get(&key).map(|item| item.clone()) else {
-                    continue;
-                };
-                let permit = match StdArc::clone(connection.stream_slots.for_subquota(subquota))
-                    .try_acquire_owned()
-                {
-                    Ok(permit) => permit,
-                    Err(_) => continue,
-                };
-                if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
-                    continue;
+                let count = class.connections_per_peer();
+                let start = self
+                    .next_connection
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                        Some(current.checked_add(1).unwrap_or_default())
+                    })
+                    .assured("the round-robin cursor update always returns a value")
+                    % count;
+                for offset in 0..count {
+                    let index = (start + offset) % count;
+                    let key = ConnectionSlotKey {
+                        node_id: node_id.clone(),
+                        target: target.clone(),
+                        class,
+                        slot: index,
+                    };
+                    let Some(connection) = self.connections.get(&key).map(|item| item.clone())
+                    else {
+                        continue;
+                    };
+                    let stream_slots = connection.stream_slots.for_subquota(subquota).assured(
+                        "reserved stream subquotas are only assigned to management requests",
+                    );
+                    let permit = match StdArc::clone(stream_slots).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => continue,
+                    };
+                    if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
+                        continue;
+                    }
+                    return Ok(StreamLease {
+                        connection,
+                        slot: Some(permit),
+                        state: self.clone(),
+                    });
                 }
-                return Ok(StreamLease {
-                    connection,
-                    slot: Some(permit),
-                    state: self.clone(),
-                });
             }
 
             tokio::select! {
@@ -1352,7 +1408,7 @@ impl TransportState {
             let subquota = match &envelope {
                 Envelope::Ack(ack) => {
                     if ack.outcome == RemoteAckOutcome::Alive {
-                        RequestSubquota::Liveness
+                        RequestSubquota::Progress
                     } else {
                         RequestSubquota::Terminal
                     }

@@ -173,6 +173,7 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
 async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
+    install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("customer_id", ParseAsType::String)]);
     let registry = RelayRegistry::new();
@@ -239,6 +240,7 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
 async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
+    install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = RelayRegistry::new();
@@ -290,6 +292,7 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
 async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receivers() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
+    install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = RelayRegistry::new();
@@ -351,6 +354,7 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
 async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
+    install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let registry = RelayRegistry::new();
@@ -690,6 +694,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
 async fn relay_owner_enforces_branch_capacity_across_batches() {
     let runtime = Runtime::default();
     let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
     let relay = named("orders");
     let registry = RelayRegistry::new();
     let services = test_relay_boundary_services();
@@ -757,6 +762,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     )
     .expect("runtime should build");
     let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
     let relay = named("orders");
     let key = string_branch_key("tenant", "acme");
     let registry = RelayRegistry::new();
@@ -862,6 +868,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
 async fn relay_state_shutdown_drains_every_ready_batch() {
     let runtime = Runtime::default();
     let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
     let relay = named::<RelayName>("materialized_orders");
     let schema = test_schema(&[("value", ParseAsType::I64)]);
     let mut assignment = runtime
