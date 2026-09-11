@@ -6,25 +6,19 @@
 //! - **Depends on.** The vocabulary timestamp and Tokio's monotonic timer.
 //! - **Must not know.** Domains, logical clock mappings, execution graphs or connector policy.
 
-#[cfg(any(test, feature = "testing"))]
 use std::time::Duration;
 
-#[cfg(any(test, feature = "testing"))]
 use error_stack::Report;
 use nervix_models::Timestamp;
-#[cfg(any(test, feature = "testing"))]
 use thiserror::Error;
-#[cfg(any(test, feature = "testing"))]
 use tokio::time::{Instant, sleep_until};
 
-#[cfg(any(test, feature = "testing"))]
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalDeadlineError {
     #[error("physical deadline exceeds the monotonic clock range")]
     OutOfRange,
 }
 
-#[cfg(any(test, feature = "testing"))]
 pub type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
 
 /// A deadline in the process-local monotonic time coordinate.
@@ -32,18 +26,15 @@ pub type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
 /// Its instant is private so logical-clock policy cannot construct or inspect it as a domain
 /// timestamp. The policy that owns an operational timeout obtains one through
 /// [`PhysicalDeadlineCapability`].
-#[cfg(any(test, feature = "testing"))]
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalDeadline(Instant);
 
 /// The capability used by operational timeout, retry and cancellation policy.
-#[cfg(any(test, feature = "testing"))]
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalDeadlineCapability {
     _private: (),
 }
 
-#[cfg(any(test, feature = "testing"))]
 impl PhysicalDeadlineCapability {
     pub(super) const fn new() -> Self {
         Self { _private: () }
