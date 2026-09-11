@@ -17,13 +17,16 @@ use nervix_models::{
     DomainAdmissionWindow, DomainClockAuthority, DomainClockPeriod, DomainClockProgress,
     DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
 };
+#[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
-use super::{ObservedDomainTick, Runtime, VmExecutionContext};
+#[cfg(test)]
+use super::VmExecutionContext;
+use super::{ObservedDomainTick, Runtime};
 use crate::runtime::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -565,6 +568,7 @@ pub struct DomainExecutionSnapshot {
 }
 
 impl DomainExecutionSnapshot {
+    #[cfg(test)]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
@@ -573,6 +577,7 @@ impl DomainExecutionSnapshot {
         self.now
     }
 
+    #[cfg(test)]
     pub fn vm_context(&self) -> VmExecutionContext {
         VmExecutionContext {
             now: self.now,
@@ -580,6 +585,7 @@ impl DomainExecutionSnapshot {
         }
     }
 
+    #[cfg(test)]
     pub const fn wasm_context(&self) -> WasmExecutionContext {
         WasmExecutionContext::new(self.now)
     }
@@ -598,6 +604,7 @@ pub struct LogicalDeadlineReached {
     snapshot: DomainExecutionSnapshot,
 }
 
+#[cfg(test)]
 impl LogicalDeadlineReached {
     pub const fn due_at(&self) -> Timestamp {
         self.due_at
