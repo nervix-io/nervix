@@ -1512,7 +1512,7 @@ impl Runtime {
 mod tests {
     use std::sync::Arc as StdArc;
 
-    use ahash::{HashMap, HashSet};
+    use ahash::HashMap;
     use arc_swap::ArcSwapOption;
     use nervix_models::{
         AckMode, CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, ErrorPolicies,
@@ -1875,7 +1875,6 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
-                materialized_streams: HashSet::default(),
                 processors: HashMap::default(),
             },
             Duration::from_secs(30),
@@ -1985,7 +1984,6 @@ mod tests {
                         )]
                         .into_iter()
                         .collect(),
-                        materialized_streams: HashSet::default(),
                         processors: HashMap::default(),
                     },
                     ack_boundary,

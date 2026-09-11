@@ -1152,7 +1152,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use ahash::{HashMap, HashSet};
+    use ahash::HashMap;
     use arc_swap::ArcSwapOption;
     use nervix_models::{
         CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
@@ -1201,7 +1201,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            materialized_streams: HashSet::default(),
             processors: [(
                 named("dedup_users"),
                 RelayProcessorTemplate {
